@@ -1,0 +1,166 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma hyperion >=0.0;
+
+/**
+ * @title QuantaSwap HTLC
+ * @notice Hashed timelock contract for cross-chain atomic swaps between
+ *         Ethereum and QRL v2. The same hypc-compiled artifact is deployed
+ *         on both chains (both are EVM-compatible), so the two legs run
+ *         byte-identical bytecode linked by one shared sha256 hashlock.
+ *
+ * @dev Design invariants (see docs/ARCHITECTURE.md):
+ *   - No owner, no pause, no upgrade path. What is deployed is final.
+ *   - claim() is permissionless with the payout target fixed at lock time.
+ *     This enables sponsored claims: a relayer can submit the claim for a
+ *     recipient who has no gas on this chain, and funds can only reach the
+ *     recipient chosen by the locker.
+ *   - claim() closes at `timeout`, refund() opens at `timeout`. The windows
+ *     never overlap, so timelock reasoning stays simple.
+ *   - A hashlock is single-use per contract instance, forever. Records are
+ *     never deleted, so a secret whose preimage became public can never
+ *     gate funds on this contract again.
+ *   - sha256 (not keccak256) so non-EVM counterparties (BTC-family HTLCs)
+ *     stay possible later.
+ *
+ * Fee-on-transfer and rebasing tokens are NOT supported; the launch asset
+ * on the Ethereum leg is WETH, and the QRL leg uses the native coin.
+ */
+interface IERC20 {
+    function transfer(address to, uint256 value) external returns (bool);
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+}
+
+contract HTLC {
+    enum Status {
+        None,
+        Open,
+        Claimed,
+        Refunded
+    }
+
+    struct Swap {
+        address initiator; // funded this leg, refund target
+        address recipient; // fixed claim payout target
+        address token; // ERC-20 address, or the zero address for the native coin
+        uint256 amount;
+        uint256 timeout; // unix time: claim() before it, refund() from it
+        Status status;
+        bytes32 preimage; // stored on claim for cross-chain observers
+    }
+
+    mapping(bytes32 => Swap) private _swaps;
+
+    uint256 private _entered = 1;
+
+    event Locked(
+        bytes32 indexed hashlock,
+        address indexed initiator,
+        address indexed recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    );
+    event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller);
+    event Refunded(bytes32 indexed hashlock);
+
+    error HashlockAlreadyUsed();
+    error InvalidParams();
+    error SwapNotOpen();
+    error WrongPreimage();
+    error TimeoutNotReached();
+    error TimeoutPassed();
+    error TransferFailed();
+    error Reentrancy();
+
+    modifier nonReentrant() {
+        if (_entered != 1) revert Reentrancy();
+        _entered = 2;
+        _;
+        _entered = 1;
+    }
+
+    /// @notice Lock native coin under `hashlock` for `recipient`.
+    function lockNative(bytes32 hashlock, address recipient, uint256 timeout) external payable nonReentrant {
+        _lock(hashlock, recipient, address(0), msg.value, timeout);
+    }
+
+    /// @notice Lock `amount` of ERC-20 `token` under `hashlock` for `recipient`.
+    /// @dev Requires prior approval for exactly `amount`.
+    function lockToken(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    ) external nonReentrant {
+        if (token == address(0) || token.code.length == 0) revert InvalidParams();
+        _lock(hashlock, recipient, token, amount, timeout);
+        _transferCall(token, abi.encodeWithSelector(IERC20.transferFrom.selector, msg.sender, address(this), amount));
+    }
+
+    /// @notice Pay out to the swap's recipient by revealing the preimage.
+    ///         Callable by anyone before `timeout` (sponsored claims).
+    function claim(bytes32 hashlock, bytes32 preimage) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (block.timestamp >= s.timeout) revert TimeoutPassed();
+        if (sha256(abi.encodePacked(preimage)) != hashlock) revert WrongPreimage();
+
+        s.status = Status.Claimed;
+        s.preimage = preimage;
+        emit Claimed(hashlock, preimage, msg.sender);
+
+        _payout(s.token, s.recipient, s.amount);
+    }
+
+    /// @notice Return the locked funds to the initiator once `timeout` passed.
+    ///         Callable by anyone; payout target is fixed to the initiator.
+    function refund(bytes32 hashlock) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (block.timestamp < s.timeout) revert TimeoutNotReached();
+
+        s.status = Status.Refunded;
+        emit Refunded(hashlock);
+
+        _payout(s.token, s.initiator, s.amount);
+    }
+
+    function getSwap(bytes32 hashlock) external view returns (Swap memory) {
+        return _swaps[hashlock];
+    }
+
+    function _lock(bytes32 hashlock, address recipient, address token, uint256 amount, uint256 timeout) private {
+        if (_swaps[hashlock].status != Status.None) revert HashlockAlreadyUsed();
+        if (hashlock == bytes32(0) || recipient == address(0) || amount == 0) revert InvalidParams();
+        if (timeout <= block.timestamp) revert InvalidParams();
+
+        _swaps[hashlock] = Swap({
+            initiator: msg.sender,
+            recipient: recipient,
+            token: token,
+            amount: amount,
+            timeout: timeout,
+            status: Status.Open,
+            preimage: bytes32(0)
+        });
+
+        emit Locked(hashlock, msg.sender, recipient, token, amount, timeout);
+    }
+
+    function _payout(address token, address to, uint256 amount) private {
+        if (token == address(0)) {
+            (bool ok, ) = to.call{value: amount}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            _transferCall(token, abi.encodeWithSelector(IERC20.transfer.selector, to, amount));
+        }
+    }
+
+    /// @dev Dependency-free safe ERC-20 call: tolerates no-return tokens,
+    ///      rejects a returned `false`.
+    function _transferCall(address token, bytes memory data) private {
+        (bool ok, bytes memory ret) = token.call(data);
+        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+}

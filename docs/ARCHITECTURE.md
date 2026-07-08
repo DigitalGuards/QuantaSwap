@@ -8,14 +8,14 @@ Swap WETH (Ethereum) and native QRL (QRL v2 / Zond, EVM-compatible) with atomic 
 
 Constraints that shape the design:
 
-- **QRL v2 is testnet-only** (chain ID 1337). Real-value swaps require QRL v2 mainnet; until then everything targets Sepolia + QRL v2 testnet. Legacy QRL mainnet has no smart contracts, so it cannot host an HTLC leg.
-- **Both chains are EVM.** The QRL leg compiles with Hyperion (`hypc`); sources are kept as Solidity canon with `.hyp` mirrors, QuantaPool-style, so Foundry remains the test harness.
+- **QRL v2 testnet (chain ID 1337) fully supports contracts** (staking is the only feature not enabled there, and this project does not need it), so both HTLC legs are deployable and usable today against Sepolia + QRL v2 testnet. Real-value swaps additionally need QRL v2 mainnet, since legacy QRL mainnet has no smart contracts and cannot host an HTLC leg.
+- **Both chains are EVM-compatible.** Contract sources are Hyperion-only (`.hyp`, compiled with the native `hypc`); the exact same artifact deploys to both legs, so the two chains run byte-identical bytecode. The canonical test gate runs that artifact on a throwaway anvil (`npm test`); there is no Solidity mirror and no Foundry suite.
 - **QRL-side signing is post-quantum** (ML-DSA-87 via MyQRLWallet). The swap primitive itself is hash-based (sha256 preimage), which holds up post-quantum. The Ethereum leg inherits Ethereum's ECDSA assumptions; that risk belongs to the WETH holder, not to the protocol.
 - **Zero-maintenance floor.** Protocol mode must remain usable if every QuantaSwap operator and server disappears: contracts only, order discovery degradable to out-of-band.
 
 ## 2. The HTLC core
 
-One contract per chain, same interface. Solidity canon in `contracts/solidity/`, Hyperion mirror in `contracts/hyperion/`.
+One source, `contracts/hyperion/HTLC.hyp`, compiled once with `hypc` and deployed to both chains. Live testnet addresses: `docs/DEPLOYMENTS.md`.
 
 ### Swap record
 
@@ -104,7 +104,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 
 - **Domain**: quantaswap.io, Cloudflare zone active (DigitalGuards account). Origin CA cert pattern per workspace CLAUDE.md 7b when a host is chosen; likely co-located with QuantaPool on the consolidated box.
 - **Testnets**: Sepolia (11155111) + QRL v2 testnet (1337). QRL RPC: `https://qrlwallet.com/api/qrl-rpc/testnet` proxy, direct node `http://REDACTED:8545` as fallback. `qrl_*` namespace, Q-prefix addresses.
-- **Toolchain**: Foundry (`forge build/test`) for canon; `hypc` (see QuantaPool CLAUDE.md for build instructions) for the Hyperion mirrors.
+- **Toolchain**: native `hypc` binary (build instructions in QuantaPool's CLAUDE.md) via `npm run compile`; anvil-based integration tests via `npm test`; deploys via `npm run deploy:qrl` / `npm run deploy:eth`; live smokes via `scripts/smoke-{qrl,eth}.js`.
 
 ## 9. Open questions
 
