@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { ETH_LEG, QRL_LEG } from "../config";
-import { getBlockNumber, shortAddr } from "../lib/htlc";
+import { ETH_LEG, QRL_LEG } from "@/config";
+import { getBlockNumber, shortAddr } from "@/lib/htlc";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 
 export function NetworkPanel() {
   const [heights, setHeights] = useState<{ eth?: number; qrl?: number }>({});
@@ -16,13 +17,14 @@ export function NetworkPanel() {
   }, []);
 
   const cell = (leg: typeof QRL_LEG | typeof ETH_LEG, height: number | undefined, addressUrl: string) => (
-    <div className="net-cell">
-      <div className="title">
-        {leg.name} · block {height ?? "…"}
+    <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
+      <div className="flex justify-between">
+        <span className="text-muted-foreground">{leg.name}</span>
+        <span className="text-xs text-muted-foreground">block {height ?? "…"}</span>
       </div>
-      <div className="val mono">
+      <div className="font-mono text-xs">
         HTLC{" "}
-        <a href={addressUrl} target="_blank" rel="noreferrer">
+        <a href={addressUrl} target="_blank" rel="noreferrer" className="text-blue-accent hover:underline">
           {shortAddr(leg.htlc)}
         </a>
       </div>
@@ -30,16 +32,20 @@ export function NetworkPanel() {
   );
 
   return (
-    <div className="card">
-      <h2>Live contracts</h2>
-      <div className="net-grid">
-        {cell(QRL_LEG, heights.qrl, `https://zondscan.com/address/${QRL_LEG.htlc}`)}
-        {cell(ETH_LEG, heights.eth, `https://sepolia.etherscan.io/address/${ETH_LEG.htlc}`)}
-      </div>
-      <p className="muted" style={{ marginBottom: 0, marginTop: 12 }}>
-        One Hyperion source, byte-identical bytecode on both chains. No owner, no pause, no upgrade
-        path: claims and refunds are enforced by the contracts alone.
-      </p>
-    </div>
+    <Card>
+      <CardHeader className="pb-4">
+        <CardTitle className="text-xl">Live contracts</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2">
+          {cell(QRL_LEG, heights.qrl, `https://zondscan.com/address/${QRL_LEG.htlc}`)}
+          {cell(ETH_LEG, heights.eth, `https://sepolia.etherscan.io/address/${ETH_LEG.htlc}`)}
+        </div>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          One Hyperion source, byte-identical bytecode on both chains. No owner, no pause, no
+          upgrade path: claims and refunds are enforced by the contracts alone.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
