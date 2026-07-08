@@ -4,6 +4,7 @@ import { Logo } from "@/components/Logo";
 import { Button } from "@/components/UI/Button";
 import { shortAddr } from "@/lib/htlc";
 import { cn } from "@/utils/cn";
+import { QRL_LEG, ETH_LEG } from "@/config";
 import type { QrlStatus } from "@/hooks/useQrlWallet";
 
 const navItems = [
@@ -14,21 +15,35 @@ const navItems = [
 interface WalletSlotProps {
   label: string;
   account: string | null;
+  /** Explorer address base URL; the account is appended for the deep link. */
+  explorerBase: string;
+  explorerName: string;
   pending?: boolean;
   onConnect: () => void;
   onDisconnect?: (() => void) | undefined;
 }
 
-function WalletSlot({ label, account, pending, onConnect, onDisconnect }: WalletSlotProps) {
+function WalletSlot({
+  label,
+  account,
+  explorerBase,
+  explorerName,
+  pending,
+  onConnect,
+  onDisconnect,
+}: WalletSlotProps) {
   if (account) {
     return (
       <div className="flex items-center gap-2">
-        <span
-          className="rounded-md border border-border bg-muted/40 px-3 py-1.5 font-mono text-xs text-secondary"
-          title={account}
+        <a
+          href={`${explorerBase}${account}`}
+          target="_blank"
+          rel="noreferrer"
+          title={`View address on ${explorerName}`}
+          className="rounded-md border border-border bg-muted/40 px-3 py-1.5 font-mono text-xs text-secondary hover:border-secondary/60"
         >
           {shortAddr(account)}
-        </span>
+        </a>
         {onDisconnect ? (
           <Button variant="ghost" size="sm" onClick={onDisconnect} aria-label={`Disconnect ${label}`}>
             <LogOut className="h-4 w-4" />
@@ -90,12 +105,16 @@ export function Header(props: Props) {
           <WalletSlot
             label="ETH wallet"
             account={props.ethAccount}
+            explorerBase={ETH_LEG.explorerAddress}
+            explorerName="Etherscan"
             onConnect={props.onConnectEth}
             onDisconnect={props.ethAccount ? props.onDisconnectEth : undefined}
           />
           <WalletSlot
             label="QRL wallet"
             account={props.qrlAccount}
+            explorerBase={QRL_LEG.explorerAddress}
+            explorerName="Zondscan"
             pending={props.qrlStatus === "pairing"}
             onConnect={props.onConnectQrl}
             onDisconnect={props.qrlAccount ? props.onDisconnectQrl : undefined}

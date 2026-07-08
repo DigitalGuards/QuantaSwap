@@ -6,6 +6,7 @@ export const QRL_LEG = {
   htlc: "Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee",
   rpc: "/rpc/qrl",
   explorerTx: "https://zondscan.com/tx/",
+  explorerAddress: "https://zondscan.com/address/",
 };
 
 export const ETH_LEG = {
@@ -16,6 +17,7 @@ export const ETH_LEG = {
   htlc: "0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c",
   rpc: "/rpc/sepolia",
   explorerTx: "https://sepolia.etherscan.io/tx/",
+  explorerAddress: "https://sepolia.etherscan.io/address/",
 };
 
 export type LegKey = "qrl" | "eth";
