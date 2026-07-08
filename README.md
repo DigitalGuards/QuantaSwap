@@ -42,26 +42,27 @@ Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ```
 contracts/
-  solidity/    Canonical Solidity sources + Foundry tests (Ethereum leg)
-  hyperion/    .hyp mirrors compiled with hypc (QRL v2 leg)
-frontend/      React + Vite swap UI (swap card, order book, market panel)
-solver/        Solver service for solver mode (Phala TEE target)
-docs/          Architecture, deployment, threat notes
+  hyperion/    HTLC source (.hyp, compiled with hypc, deployed to BOTH chains)
+  test/        Test-only mock tokens
+scripts/       compile, anvil test suite, deploy + live smoke tooling
+frontend/      React + Vite swap UI (swap card, order book, market panel), planned
+solver/        Solver service for solver mode (Phala TEE target), planned
+docs/          Architecture, deployments
 ```
 
-Conventions mirror [QuantaPool](https://github.com/DigitalGuards/QuantaPool): Foundry is the canonical test harness, Hyperion sources are line-mirrors of the Solidity, frontend gates are `lint` (zero warnings) + `build`.
+Contracts are Hyperion-only; [QuantaPool](https://github.com/DigitalGuards/QuantaPool) is the reference for live Hyperion contracts on this stack. Both legs run byte-identical hypc bytecode (both chains are EVM-compatible), and the compiled artifact itself is exercised on a throwaway anvil as the canonical test gate (`npm test`). Frontend gates will mirror QuantaPool: `lint` (zero warnings) + `build`.
 
 ## Status
 
-Design phase (July 2026). Testnet-first: Sepolia + QRL v2 testnet (chain ID 1337). Production launch is gated on QRL v2 mainnet.
+Phase 1 complete (July 2026): the HTLC is deployed and live smoke-tested on both testnets, Sepolia + QRL v2 testnet (chain ID 1337). Addresses: [docs/DEPLOYMENTS.md](docs/DEPLOYMENTS.md). Real-value launch waits on QRL v2 mainnet.
 
-| Phase | Scope |
-|---|---|
-| 0 | Repo bootstrap, architecture (this) |
-| 1 | HTLC contracts on both chains, Foundry suite, testnet deploys |
-| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration |
-| 3 | Solver service + Phala TEE attestation, single-sided UX |
-| 4 | Audit pass, mainnet readiness (blocked on QRL v2 mainnet) |
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Repo bootstrap, architecture | done |
+| 1 | HTLC on both chains, local test gate, testnet deploys + smokes | done |
+| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration | next |
+| 3 | Solver service + Phala TEE attestation, single-sided UX | planned |
+| 4 | Audit pass, mainnet readiness (waits on QRL v2 mainnet) | planned |
 
 ## Provenance
 

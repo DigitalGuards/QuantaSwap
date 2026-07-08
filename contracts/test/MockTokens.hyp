@@ -1,0 +1,79 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma hyperion >=0.0;
+
+// Test-only tokens exercising the three ERC-20 return conventions the HTLC
+// must handle. Never deploy these outside local test runs.
+
+contract MockERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 value) external {
+        balanceOf[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(balanceOf[from] >= value, "balance");
+        require(allowance[from][msg.sender] >= value, "allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+}
+
+// USDT-style: state changes but no return value at all.
+contract NoReturnToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 value) external {
+        balanceOf[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external {
+        allowance[msg.sender][spender] = value;
+    }
+
+    function transfer(address to, uint256 value) external {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external {
+        require(balanceOf[from] >= value, "balance");
+        require(allowance[from][msg.sender] >= value, "allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+    }
+}
+
+// Always returns false without reverting; also doubles as a non-payable
+// recipient for native payout failure tests (no receive function).
+contract FalseToken {
+    function approve(address, uint256) external pure returns (bool) {
+        return true;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function transferFrom(address, address, uint256) external pure returns (bool) {
+        return false;
+    }
+}

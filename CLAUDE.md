@@ -12,12 +12,14 @@ Domain quantaswap.io (Cloudflare zone active, nothing deployed yet). Will be pub
 
 - QRL v2 testnet: chain ID `1337`, `qrl_*` RPC namespace, Q-prefix addresses. Proxy `https://qrlwallet.com/api/qrl-rpc/testnet`, direct node `http://78.47.166.153:8545`.
 - Ethereum testnet: Sepolia (`11155111`).
-- Production is gated on QRL v2 mainnet (does not exist yet).
+- QRL v2 testnet fully supports contracts (staking is the only gap, irrelevant here); real-value production waits on QRL v2 mainnet.
 
-## Conventions (mirror QuantaPool)
+## Conventions
 
-- Solidity sources in `contracts/solidity/` are canon; `contracts/hyperion/*.hyp` are line-mirrors compiled with `hypc` (build instructions in QuantaPool's CLAUDE.md).
-- Foundry (`forge test`) is the canonical test harness.
+- Contracts are **Hyperion-only** (user mandate, 2026-07-08): `contracts/hyperion/*.hyp` compiled with the native `hypc` (build instructions in QuantaPool's CLAUDE.md). NO Solidity mirrors, NO Foundry; the same artifact deploys to both chains (both are EVM-compatible, byte-identical bytecode).
+- Canonical test gate: `npm test` (compiles with hypc, runs the artifact on a throwaway anvil). `npm run compile` writes `build/hyperion/*.json` (gitignored).
+- Live testnet addresses + smoke commands: `docs/DEPLOYMENTS.md`.
+- Deploy/live-smoke env in gitignored `.env` (`.env.example` documents the shape). The QRL hexseed and Sepolia key never enter tracked files.
 - Frontend: React + Vite, hardened TS, zero-warning lint, secret generation fenced in a `crypto/` module (WebCrypto only).
 - Integration branch: `dev`. PRs for code; docs-only changes commit straight to `dev`.
 
