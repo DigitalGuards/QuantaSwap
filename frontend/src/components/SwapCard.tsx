@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { parseEther } from "ethers";
-import { ETH_LEG, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "../config";
-import type { DemoSwap } from "../lib/demoSwap";
-import { generateSecret } from "../lib/secrets";
-import { shortAddr } from "../lib/htlc";
+import { ArrowDownUp, ArrowLeftRight } from "lucide-react";
+import { ETH_LEG, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "@/config";
+import type { DemoSwap } from "@/lib/demoSwap";
+import { generateSecret } from "@/lib/secrets";
+import { shortAddr } from "@/lib/htlc";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { Button } from "@/components/UI/Button";
+import { Input } from "@/components/UI/Input";
 
 interface Props {
   ethAccount: string | null;
@@ -55,61 +59,84 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
     value: string,
     setValue: (v: string) => void
   ) => (
-    <div className="leg-box">
-      <div className="label">{kind}</div>
-      <div className="leg-row">
-        <div className="asset">
-          <div className={`glyph ${leg.key}`}>{leg.asset === "ETH" ? "Ξ" : "Q"}</div>
-          <div className="names">
-            <b>{leg.asset}</b>
-            <span>{leg.name}</span>
-          </div>
-        </div>
-        <input
-          className="amount"
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <span>{kind}</span>
+        <span>{leg.name}</span>
+      </div>
+      <div className="relative">
+        <Input
           inputMode="decimal"
           placeholder="0.0"
           value={value}
-          onChange={(e) => setValue(e.target.value.replace(/[^0-9.]/g, ""))}
+          onChange={(e) => {
+            const next = e.target.value.replace(",", ".");
+            if (next === "" || /^\d*\.?\d*$/.test(next)) setValue(next);
+          }}
+          className="h-12 pr-16 text-lg"
         />
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
+          {leg.asset}
+        </span>
       </div>
     </div>
   );
 
   return (
-    <div className="card">
-      <h2>Atomic swap</h2>
-      {legBox("From", fromLeg, fromAmount, setFromAmount)}
-      <div className="switcher">
-        <button
-          aria-label="switch direction"
-          onClick={() => {
-            setDirection((d) => (d === "eth->qrl" ? "qrl->eth" : "eth->qrl"));
-            setFromAmount(toAmount);
-            setToAmount(fromAmount);
-          }}
-        >
-          ↓
-        </button>
-      </div>
-      {legBox("To", toLeg, toAmount, setToAmount)}
-      <div className="field-note">
-        <span>
-          Receive to:{" "}
-          <span className="mono">
-            {toLeg.key === "qrl" ? (qrlAccount ? shortAddr(qrlAccount) : "connect QRL wallet") : ethAccount ? shortAddr(ethAccount) : "connect ETH wallet"}
-          </span>
-        </span>
-        <span>HTLC protocol mode</span>
-      </div>
-      <button className="btn" disabled={!ready || busy} onClick={() => void start()}>
-        {ethAccount && qrlAccount ? "Start atomic swap" : "Connect both wallets to swap"}
-      </button>
-      {error ? <div className="error">{error}</div> : null}
-      <p className="muted" style={{ marginBottom: 0, marginTop: 12 }}>
-        Protocol-mode sandbox: no order book yet, so you act as both sides of the swap and can watch
-        the HTLC handshake happen live on both chains. Rates are whatever you enter.
-      </p>
-    </div>
+    <Card className="border-l-2 border-l-secondary">
+      <CardHeader className="pb-4">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-xl">Swap</CardTitle>
+          <span className="text-xs text-muted-foreground">HTLC protocol mode</span>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {legBox("From", fromLeg, fromAmount, setFromAmount)}
+        <div className="flex justify-center">
+          <Button
+            variant="outline"
+            size="icon"
+            aria-label="switch direction"
+            onClick={() => {
+              setDirection((d) => (d === "eth->qrl" ? "qrl->eth" : "eth->qrl"));
+              setFromAmount(toAmount);
+              setToAmount(fromAmount);
+            }}
+          >
+            <ArrowDownUp className="h-4 w-4" />
+          </Button>
+        </div>
+        {legBox("To", toLeg, toAmount, setToAmount)}
+
+        <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Receive to</span>
+            <span className="font-mono text-xs">
+              {toLeg.key === "qrl"
+                ? qrlAccount
+                  ? shortAddr(qrlAccount)
+                  : "connect QRL wallet"
+                : ethAccount
+                  ? shortAddr(ethAccount)
+                  : "connect ETH wallet"}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Timelocks</span>
+            <span>2h initiator / 1h responder</span>
+          </div>
+        </div>
+
+        <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void start()}>
+          <ArrowLeftRight className="h-4 w-4" />
+          {ethAccount && qrlAccount ? "Start atomic swap" : "Connect both wallets to swap"}
+        </Button>
+        {error ? <p className="text-sm text-red-400">{error}</p> : null}
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Protocol-mode sandbox: no order book yet, so you act as both sides of the swap and can
+          watch the HTLC handshake happen live on both chains. Rates are whatever you enter.
+        </p>
+      </CardContent>
+    </Card>
   );
 }

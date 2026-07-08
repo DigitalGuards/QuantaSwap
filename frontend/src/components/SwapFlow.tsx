@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatEther } from "ethers";
 import type { BrowserProvider } from "ethers";
-import { ETH_LEG, QRL_LEG, legByKey } from "../config";
-import type { LegKey } from "../config";
+import { Check } from "lucide-react";
+import { ETH_LEG, QRL_LEG, legByKey } from "@/config";
+import type { LegKey } from "@/config";
 import {
   SwapStatus,
   buildClaimData,
@@ -10,8 +11,11 @@ import {
   buildRefundData,
   getLegState,
   type LegState,
-} from "../lib/htlc";
-import { initiatorLeg, responderLeg, type DemoSwap } from "../lib/demoSwap";
+} from "@/lib/htlc";
+import { initiatorLeg, responderLeg, type DemoSwap } from "@/lib/demoSwap";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { Button } from "@/components/UI/Button";
+import { cn } from "@/utils/cn";
 
 const ZERO32 = `0x${"0".repeat(64)}`;
 
@@ -25,11 +29,22 @@ interface Props {
 
 type LegStates = Partial<Record<LegKey, LegState>>;
 
+const pillStyles: Record<string, string> = {
+  none: "bg-muted/40 text-muted-foreground",
+  open: "bg-blue-accent/10 text-blue-accent",
+  claimed: "bg-emerald-400/10 text-emerald-400",
+  refunded: "bg-amber-400/10 text-amber-400",
+};
+
 const statusName = ["none", "open", "claimed", "refunded"] as const;
 
 function StatusPill({ state }: { state: LegState | undefined }) {
-  const name = state ? statusName[state.status] : "none";
-  return <span className={`status-pill ${name ?? "none"}`}>{state ? (statusName[state.status] ?? "none") : "…"}</span>;
+  const name = (state ? statusName[state.status] : undefined) ?? "none";
+  return (
+    <span className={cn("rounded-full px-2.5 py-0.5 text-xs font-medium", pillStyles[name])}>
+      {state ? name : "…"}
+    </span>
+  );
 }
 
 export function SwapFlow({ swap, browserProvider, ensureSepolia, qrlRequest, onDiscard }: Props) {
@@ -172,75 +187,105 @@ export function SwapFlow({ swap, browserProvider, ensureSepolia, qrlRequest, onD
   );
 
   return (
-    <div className="card">
-      <h2>
-        Swap in progress
-        <span className="status-pill none mono" style={{ marginLeft: 10 }}>
-          {swap.hashlock.slice(0, 14)}…
-        </span>
-      </h2>
-      {complete ? <div className="success-banner">Atomic swap complete on both chains</div> : null}
-      <p className="muted" style={{ marginTop: 0 }}>
-        {iCfg.name} leg <StatusPill state={iState} /> · {rCfg.name} leg <StatusPill state={rState} />
-      </p>
-
-      {steps.map((step, i) => (
-        <div key={step.title} className={`step ${step.done ? "done" : step.canRun ? "active" : ""}`}>
-          <div className="idx">{step.done ? "✓" : i + 1}</div>
-          <div className="body">
-            <h3>{step.title}</h3>
-            <p>{step.desc}</p>
-            {!step.done && (
-              <button
-                className="btn small"
-                disabled={!step.canRun || busy !== null}
-                onClick={step.action}
-              >
-                {busy === step.busyKey ? "Waiting for wallet…" : step.label}
-              </button>
-            )}
+    <Card className="border-l-2 border-l-secondary">
+      <CardHeader className="pb-4">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-xl">Swap in progress</CardTitle>
+          <span className="font-mono text-xs text-muted-foreground" title={swap.hashlock}>
+            {swap.hashlock.slice(0, 14)}…
+          </span>
+        </div>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>{iCfg.name} leg</span>
+          <StatusPill state={iState} />
+          <span>· {rCfg.name} leg</span>
+          <StatusPill state={rState} />
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {complete ? (
+          <div className="mb-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-center text-sm font-semibold text-emerald-400">
+            Atomic swap complete on both chains
           </div>
-        </div>
-      ))}
+        ) : null}
 
-      {refundables.length > 0 && !complete ? (
-        <div style={{ marginTop: 14 }}>
-          {refundables.map((leg) => (
-            <button
-              key={leg}
-              className="btn small danger"
-              style={{ marginRight: 8 }}
-              disabled={busy !== null}
-              onClick={() => refundLeg(leg)}
+        {steps.map((step, i) => (
+          <div
+            key={step.title}
+            className="flex gap-3 border-b border-border/60 py-3.5 last:border-b-0"
+          >
+            <div
+              className={cn(
+                "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
+                step.done
+                  ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-400"
+                  : step.canRun
+                    ? "border-blue-accent/60 text-blue-accent"
+                    : "border-border text-muted-foreground"
+              )}
             >
-              Refund {legByKey(leg).asset} leg
-            </button>
-          ))}
-        </div>
-      ) : null}
+              {step.done ? <Check className="h-3.5 w-3.5" /> : i + 1}
+            </div>
+            <div className="flex-1 space-y-1">
+              <h3 className="text-sm font-medium">{step.title}</h3>
+              <p className="text-xs leading-relaxed text-muted-foreground">{step.desc}</p>
+              {!step.done && (
+                <Button
+                  size="sm"
+                  className="mt-1"
+                  disabled={!step.canRun || busy !== null}
+                  onClick={step.action}
+                >
+                  {busy === step.busyKey ? "Waiting for wallet…" : step.label}
+                </Button>
+              )}
+            </div>
+          </div>
+        ))}
 
-      {error ? <div className="error">{error}</div> : null}
+        {refundables.length > 0 && !complete ? (
+          <div className="flex gap-2 pt-3">
+            {refundables.map((leg) => (
+              <Button
+                key={leg}
+                variant="destructive"
+                size="sm"
+                disabled={busy !== null}
+                onClick={() => refundLeg(leg)}
+              >
+                Refund {legByKey(leg).asset} leg
+              </Button>
+            ))}
+          </div>
+        ) : null}
 
-      <div className="field-note" style={{ marginTop: 16 }}>
-        <button className="reveal" onClick={() => setShowSecret((v) => !v)}>
-          {showSecret ? "Hide secret" : "Reveal secret (stays in this browser)"}
-        </button>
-        <button
-          className="reveal"
-          onClick={() => {
-            if (
-              complete ||
-              window.confirm(
-                "Discard this swap? If funds are still locked you will need the refund buttons later; the secret is deleted."
+        {error ? <p className="pt-2 text-sm break-words text-red-400">{error}</p> : null}
+
+        <div className="flex items-center justify-between pt-4">
+          <Button variant="link" size="sm" className="h-auto p-0" onClick={() => setShowSecret((v) => !v)}>
+            {showSecret ? "Hide secret" : "Reveal secret (stays in this browser)"}
+          </Button>
+          <Button
+            variant="link"
+            size="sm"
+            className="h-auto p-0"
+            onClick={() => {
+              if (
+                complete ||
+                window.confirm(
+                  "Discard this swap? If funds are still locked you will need the refund buttons later; the secret is deleted."
+                )
               )
-            )
-              onDiscard();
-          }}
-        >
-          {complete ? "New swap" : "Discard swap"}
-        </button>
-      </div>
-      {showSecret ? <div className="mono muted" style={{ marginTop: 6, wordBreak: "break-all" }}>{swap.preimage}</div> : null}
-    </div>
+                onDiscard();
+            }}
+          >
+            {complete ? "New swap" : "Discard swap"}
+          </Button>
+        </div>
+        {showSecret ? (
+          <p className="font-mono text-xs break-all text-muted-foreground">{swap.preimage}</p>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
