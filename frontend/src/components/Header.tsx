@@ -1,8 +1,15 @@
+import { NavLink, Link } from "react-router-dom";
 import { Wallet, LogOut } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/UI/Button";
 import { shortAddr } from "@/lib/htlc";
+import { cn } from "@/utils/cn";
 import type { QrlStatus } from "@/hooks/useQrlWallet";
+
+const navItems = [
+  { to: "/", label: "Swap" },
+  { to: "/how-it-works", label: "How it works" },
+];
 
 interface WalletSlotProps {
   label: string;
@@ -41,6 +48,7 @@ function WalletSlot({ label, account, pending, onConnect, onDisconnect }: Wallet
 interface Props {
   ethAccount: string | null;
   onConnectEth: () => void;
+  onDisconnectEth: () => void;
   qrlAccount: string | null;
   qrlStatus: QrlStatus;
   onConnectQrl: () => void;
@@ -51,12 +59,40 @@ export function Header(props: Props) {
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4">
-        <Logo />
+        <div className="flex items-center gap-6">
+          <Link to="/" aria-label="QuantaSwap home">
+            <Logo />
+          </Link>
+          <nav className="hidden items-center gap-1 md:flex">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end
+                className={({ isActive }) =>
+                  cn(
+                    "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-secondary/10 text-secondary"
+                      : "text-muted-foreground hover:text-foreground",
+                  )
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+        </div>
         <div className="flex items-center gap-3">
           <span className="hidden rounded-full border border-secondary/40 bg-secondary/10 px-2.5 py-0.5 text-xs font-medium text-secondary sm:inline">
             Testnet
           </span>
-          <WalletSlot label="ETH wallet" account={props.ethAccount} onConnect={props.onConnectEth} />
+          <WalletSlot
+            label="ETH wallet"
+            account={props.ethAccount}
+            onConnect={props.onConnectEth}
+            onDisconnect={props.ethAccount ? props.onDisconnectEth : undefined}
+          />
           <WalletSlot
             label="QRL wallet"
             account={props.qrlAccount}
@@ -66,6 +102,24 @@ export function Header(props: Props) {
           />
         </div>
       </div>
+      {/* Mobile nav */}
+      <nav className="flex items-center justify-around border-t border-border/60 py-2 md:hidden">
+        {navItems.map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end
+            className={({ isActive }) =>
+              cn(
+                "px-3 py-1 text-sm font-medium",
+                isActive ? "text-secondary" : "text-muted-foreground hover:text-foreground",
+              )
+            }
+          >
+            {item.label}
+          </NavLink>
+        ))}
+      </nav>
     </header>
   );
 }

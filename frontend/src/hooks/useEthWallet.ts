@@ -75,6 +75,15 @@ export function useEthWallet() {
     [providers, selected]
   );
 
+  const disconnect = useCallback(() => {
+    // EIP-1193 has no standard "revoke" call the app can rely on; matches
+    // QuantaPool's convention of forgetting the local selection so the UI
+    // reflects disconnected, even though the extension itself stays paired.
+    setSelected(null);
+    setAccount(null);
+    setError(null);
+  }, []);
+
   const ensureSepolia = useCallback(async (): Promise<void> => {
     if (!selected) throw new Error("Ethereum wallet not connected");
     const chainId = (await selected.provider.request({ method: "eth_chainId" })) as string;
@@ -98,6 +107,7 @@ export function useEthWallet() {
     providers,
     account,
     connect,
+    disconnect,
     ensureSepolia,
     browserProvider,
     walletName: selected?.info.name ?? null,
