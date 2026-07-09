@@ -11,6 +11,8 @@ export interface ManagedOrder {
   id: string;
   token: string;
   direction: Direction;
+  /** Price-ladder level this listing fills (0 = tightest). */
+  level: number;
   fromAmount: string;
   toAmount: string;
   /** Set (and persisted) before the hashlock is announced; never logged. */
@@ -132,6 +134,37 @@ export function decide(x: DecideInput): Decision {
   }
 
   return "wait";
+}
+
+export interface LevelQuote {
+  /** Wei the maker escrows on its from-chain. */
+  fromAmount: string;
+  /** Wei the maker expects back. */
+  toAmount: string;
+}
+
+/** One rung of the price ladder. Deeper levels quote wider prices and
+ *  bigger sizes, like a real book: level 0 asks mid + step, bids
+ *  mid - step; level n scales both by n+1. Prices are QRL per ETH in
+ *  integer milli to keep the wei math exact. */
+export function levelQuote(args: {
+  direction: Direction;
+  level: number;
+  baseEthWei: bigint;
+  midPriceMilli: bigint;
+  stepBps: bigint;
+}): LevelQuote {
+  const rung = BigInt(args.level + 1);
+  const ethWei = args.baseEthWei * rung;
+  const offsetBps = args.stepBps * rung;
+  const priceMilli =
+    args.direction === "eth->qrl"
+      ? (args.midPriceMilli * (10_000n + offsetBps)) / 10_000n // ask: above mid
+      : (args.midPriceMilli * (10_000n - offsetBps)) / 10_000n; // bid: below mid
+  const qrlWei = (ethWei * priceMilli) / 1000n;
+  return args.direction === "eth->qrl"
+    ? { fromAmount: ethWei.toString(), toAmount: qrlWei.toString() }
+    : { fromAmount: qrlWei.toString(), toAmount: ethWei.toString() };
 }
 
 export interface RefillInput {
