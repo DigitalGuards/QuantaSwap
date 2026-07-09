@@ -93,7 +93,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 ## 7. Security considerations
 
 - **Secret handling**: 32 bytes from WebCrypto CSPRNG, generated and held client-side (protocol mode) or user-side until claim (solver mode). Fenced crypto module, per workspace mandate.
-- **Reorg safety**: respond/claim only after finality-grade confirmations on the observed leg; timelock margins sized accordingly (section 2).
+- **Reorg safety**: respond/claim only after the counterparty lock is visible at confirmation depth on the observed leg; timelock margins sized accordingly (section 2). Implemented client-side: the frontend re-reads the swap struct at `head - N` (per-leg `confirmations` in `frontend/src/config.ts`, N=3 on testnet) and gates the taker's lock and the maker's secret reveal on that snapshot, fail-closed when the historical read fails. Mainnet should raise this to the `finalized` tag.
 - **Hashlock reuse**: enforced fresh per contract (section 2); clients also never reuse secrets across chains or swaps.
 - **Griefing**: lock dust limits (minimum amounts) to prevent order-book spam with unclaimable dust swaps.
 - **WETH approvals**: exact-amount approvals per swap in the UI, no unlimited allowances.
