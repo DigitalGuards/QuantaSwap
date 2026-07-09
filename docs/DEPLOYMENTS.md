@@ -25,3 +25,30 @@ Rerun the smokes any time:
 node scripts/smoke-qrl.js Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee
 node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 ```
+
+## Order book service (quantaswap.io)
+
+Runs on the `78.47.166.153` box next to the frontend webroot. Coordination only, never custody; losing it strands no funds.
+
+```bash
+# one-time setup as ops
+cd ~/quantaswap-orderbook   # clone or rsync of server/
+npm install && npm run build
+pm2 start dist/server.js --name quantaswap-orderbook
+pm2 save
+```
+
+Defaults: `PORT=8091` (binds 127.0.0.1 only), data file `server/data/orders.json` (override with `ORDERBOOK_DATA`).
+
+nginx vhost addition (same-origin, alongside the existing `/rpc/*` proxies):
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8091;
+    proxy_http_version 1.1;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
+}
+```
+
+Health check: `curl -s https://quantaswap.io/api/health` returns `{"status":"ok"}`.

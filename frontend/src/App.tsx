@@ -1,15 +1,32 @@
+import { useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
+import {
+  clearActiveSwap,
+  loadActiveSwap,
+  saveActiveSwap,
+  type ActiveSwap,
+} from "@/lib/activeSwap";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { QrModal } from "@/components/QrModal";
 import { SwapPage } from "@/pages/SwapPage";
+import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
 
 export default function App() {
   const eth = useEthWallet();
   const qrl = useQrlWallet();
+
+  // One active swap at a time, shared by the market and sandbox pages and
+  // persisted across refreshes (the preimage lives inside it).
+  const [swap, setSwapState] = useState<ActiveSwap | null>(() => loadActiveSwap());
+  const setSwap = (next: ActiveSwap | null) => {
+    if (next) saveActiveSwap(next);
+    else clearActiveSwap();
+    setSwapState(next);
+  };
 
   return (
     <BrowserRouter>
@@ -25,9 +42,13 @@ export default function App() {
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-4">
         <Routes>
-          <Route path="/" element={<SwapPage eth={eth} qrl={qrl} />} />
+          <Route path="/" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
+          <Route
+            path="/sandbox"
+            element={<SandboxPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
+          />
           <Route path="/how-it-works" element={<HowItWorksPage />} />
-          <Route path="*" element={<SwapPage eth={eth} qrl={qrl} />} />
+          <Route path="*" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
         </Routes>
       </main>
 

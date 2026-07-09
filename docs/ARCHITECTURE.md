@@ -61,9 +61,9 @@ Between locking and `T2`, the initiator holds a free option: if price moves agai
 
 ## 3. Protocol mode (Phase 1-2)
 
-Pure HTLC. Order discovery is an order book (bids/asks for QRL priced in WETH); matching produces the parameters both parties feed to their `lock` calls.
+Pure HTLC. Order discovery is an order book; matching produces the parameters both parties feed to their `lock` calls.
 
-- v1 order book is served by the frontend's backend or a static relay; it is **coordination only**, never custody. Losing it degrades the protocol to out-of-band coordination, it does not strand funds.
+- v1 order book (implemented, `server/`) is a dedicated zero-dependency node service; it is **coordination only**, never custody. It carries order parameters, the taker's addresses and the maker's hashlock announcement; clients re-verify recipients, amounts and timeouts against on-chain HTLC state before committing funds or revealing the secret, so a malicious order book can waste time but cannot redirect a swap. Losing it degrades the protocol to out-of-band coordination, it does not strand funds.
 - Both parties need gas on both chains (ETH for the Ethereum leg, QRL for the Zond leg). This is the mode's known UX cost and the reason solver mode exists.
 - Acceptance flow: taker accepts a maker order, maker (initiator) locks first, taker responds after observing the initiator's lock with adequate confirmations.
 
@@ -110,7 +110,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 
 1. Adopt/cross-audit charlie's contracts when published, or clean-room? (Decide when the code drops.)
 2. Ethereum-side asset set: WETH only at launch, or ETH + USDC?
-3. Order book transport for protocol mode: reuse the myqrlwallet-backend relay infra, a dedicated lightweight service, or fully on-chain orders?
+3. ~~Order book transport for protocol mode~~ Resolved July 2026: dedicated lightweight service (`server/`, plain node:http, JSON-file persistence, same-origin `/api` proxy). On-chain orders remain a possible zero-infra upgrade later.
 4. Phala deployment specifics: contract vs Phat Contract vs dstack-style CVM; attestation verification surface in the frontend.
 5. Solver inventory sourcing and rebalancing across chains.
 6. QRL v2 mainnet timing (external; gates Phase 4).

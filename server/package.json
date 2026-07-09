@@ -1,0 +1,17 @@
+{
+  "name": "quantaswap-orderbook",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QuantaSwap order book: coordination-only matching service for protocol-mode HTLC swaps",
+  "license": "GPL-3.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "npm run build && node smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "~5.8.3"
+  }
+}
