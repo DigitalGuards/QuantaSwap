@@ -18,6 +18,12 @@ import { Button } from "@/components/UI/Button";
 
 interface Props {
   myOrder: MyOrderRef;
+  /** The maker's connected wallet accounts. The maker's own payout
+   *  addresses are anchored to these, never to the order-book response, so
+   *  a hostile book cannot redirect the maker's incoming leg (symmetric
+   *  with the taker, whose addresses come from its wallet too). */
+  ethAccount: string | null;
+  qrlAccount: string | null;
   onMatched: (swap: ActiveSwap) => void;
   onClosed: () => void;
 }
@@ -26,7 +32,7 @@ interface Props {
  *  secret, announces the hashlock and hands over to the swap flow. The
  *  secret is persisted locally before the announcement so a mid-flight
  *  crash can never orphan locked funds. */
-export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
+export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClosed }: Props) {
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,6 +53,13 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
         if (!current.takerEthAccount || !current.takerQrlAccount) {
           throw new Error("taker addresses missing from the accepted order");
         }
+        // Anchor our own payout addresses to the connected wallet, not the
+        // book. The book is untrusted; using its value would let it feed us
+        // an attacker address that our own secret-reveal gate then verifies
+        // against, sending our incoming leg to the attacker.
+        if (!ethAccount || !qrlAccount) {
+          throw new Error("connect both wallets to start the swap");
+        }
         // Reuse a previously generated secret for this order (retry after a
         // lost announce response); generating a fresh one would desync us
         // from whatever the order book already published.
@@ -64,8 +77,8 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
             direction: current.direction,
             fromAmount: current.fromAmount,
             toAmount: current.toAmount,
-            makerEthAccount: current.makerEthAccount,
-            makerQrlAccount: current.makerQrlAccount,
+            makerEthAccount: ethAccount,
+            makerQrlAccount: qrlAccount,
             takerEthAccount: current.takerEthAccount,
             takerQrlAccount: current.takerQrlAccount,
             preimage: secret.preimage,
@@ -117,7 +130,7 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
         setBusy(false);
       }
     },
-    [myOrder.token, onMatched],
+    [myOrder.token, ethAccount, qrlAccount, onMatched],
   );
 
   useEffect(() => {
