@@ -44,6 +44,8 @@ export class PriceFeed {
       maxAgeS: number;
       /** Non-null pins the price and disables fetching entirely. */
       staticMilli: bigint | null;
+      /** Hard deadline on the price fetch. */
+      timeoutMs: number;
       log: (...args: unknown[]) => void;
     },
   ) {}
@@ -56,6 +58,7 @@ export class PriceFeed {
     try {
       const res = await fetch(this.opts.url, {
         headers: { Accept: "application/json", "User-Agent": "quantaswap-marketmaker/0.1" },
+        signal: AbortSignal.timeout(this.opts.timeoutMs),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const body = (await res.json()) as FeedShape;

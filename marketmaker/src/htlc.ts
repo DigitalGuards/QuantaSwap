@@ -33,11 +33,21 @@ export const qToHex = (addr: string): string =>
 export const sameAddr = (a: string, b: string): boolean =>
   qToHex(a).toLowerCase() === qToHex(b).toLowerCase();
 
-export async function rpc(url: string, method: string, params: unknown[]): Promise<unknown> {
+/** Bounds a single JSON-RPC request; without it a stalling endpoint hangs
+ *  the whole single-threaded tick forever. */
+const DEFAULT_RPC_TIMEOUT_MS = 20_000;
+
+export async function rpc(
+  url: string,
+  method: string,
+  params: unknown[],
+  timeoutMs = DEFAULT_RPC_TIMEOUT_MS,
+): Promise<unknown> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
   const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
@@ -50,10 +60,12 @@ export interface LegRpc {
   /** RPC namespace prefix: "eth" on Sepolia, "qrl" on QRL v2. */
   ns: LegKey;
   htlc: string;
+  /** Per-request deadline; defaults to DEFAULT_RPC_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export async function getBlockNumber(leg: LegRpc): Promise<number> {
-  return Number(BigInt((await rpc(leg.url, `${leg.ns}_blockNumber`, [])) as string));
+  return Number(BigInt((await rpc(leg.url, `${leg.ns}_blockNumber`, [], leg.timeoutMs)) as string));
 }
 
 export async function getSwapState(
@@ -62,7 +74,12 @@ export async function getSwapState(
   blockTag = "latest",
 ): Promise<LegState> {
   const data = iface.encodeFunctionData("getSwap", [hashlock]);
-  const raw = (await rpc(leg.url, `${leg.ns}_call`, [{ to: leg.htlc, data }, blockTag])) as string;
+  const raw = (await rpc(
+    leg.url,
+    `${leg.ns}_call`,
+    [{ to: leg.htlc, data }, blockTag],
+    leg.timeoutMs,
+  )) as string;
   const [swap] = iface.decodeFunctionResult("getSwap", raw) as unknown as [
     {
       initiator: string;
