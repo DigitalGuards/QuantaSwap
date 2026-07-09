@@ -11,6 +11,7 @@ import {
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
 import { QrModal } from "@/components/QrModal";
+import { WalletPickerModal } from "@/components/WalletPickerModal";
 import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
@@ -36,7 +37,7 @@ export default function App() {
         onDisconnectEth={() => eth.disconnect()}
         qrlAccount={qrl.account}
         qrlStatus={qrl.status}
-        onConnectQrl={() => void qrl.connect()}
+        onConnectQrl={qrl.connect}
         onDisconnectQrl={() => void qrl.disconnect()}
       />
 
@@ -53,6 +54,13 @@ export default function App() {
       </main>
 
       <Footer />
+
+      <WalletPickerModal
+        open={qrl.pickerOpen}
+        wallets={qrl.wallets}
+        onSelect={(uuid) => void qrl.connectWallet(uuid)}
+        onClose={qrl.closePicker}
+      />
 
       {qrl.uri ? (
         <QrModal
