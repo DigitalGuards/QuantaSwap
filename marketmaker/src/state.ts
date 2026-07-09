@@ -12,8 +12,11 @@ export class StateFile {
   constructor(private readonly file: string) {
     try {
       const parsed = JSON.parse(readFileSync(this.file, "utf8")) as ManagedOrder[];
-      // `level` arrived after the first release; old records mean rung 0.
-      for (const o of parsed) this.orders.set(o.id, { ...o, level: o.level ?? 0 });
+      // `level`/`quotedMidMilli` arrived after the first release; old
+      // records mean rung 0, quoted at an unknown (reprice-worthy) mid.
+      for (const o of parsed) {
+        this.orders.set(o.id, { ...o, level: o.level ?? 0, quotedMidMilli: o.quotedMidMilli ?? null });
+      }
     } catch {
       // first boot; start empty
     }
