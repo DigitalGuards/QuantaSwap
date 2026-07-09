@@ -15,7 +15,6 @@ export interface Config {
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
   ethOrderWei: bigint;
-  qrlOrderWei: bigint;
   /** Ladder mid price, QRL per ETH in integer milli (100000 = 100.000). */
   midPriceMilli: bigint;
   /** Ladder step in basis points per level (asks above, bids below mid). */
@@ -70,8 +69,8 @@ export function loadConfig(): Config {
     ordersPerDirection: envInt("MM_ORDERS_PER_DIRECTION", 2),
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
     ethOrderWei: envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n), // 0.02 ETH base size
-    qrlOrderWei: envWei("MM_QRL_ORDER_WEI", 2n * 10n ** 18n), // reserve sizing only
-    midPriceMilli: envWei("MM_MID_PRICE_MILLI", 100_000n), // 100 QRL/ETH
+    // Roughly the real-world cross rate (ETH ~1700 USD, QRL ~1 USD).
+    midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung
     ethReserveWei: envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n),
     qrlReserveWei: envWei("MM_QRL_RESERVE_WEI", 5n * 10n ** 18n),
