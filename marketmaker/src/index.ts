@@ -126,6 +126,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
   const decision = decide({
     bookStatus,
+    released: Boolean(view?.released),
     managed,
     iState,
     rState,

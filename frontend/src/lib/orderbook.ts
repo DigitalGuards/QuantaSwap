@@ -20,6 +20,9 @@ export interface OrderView {
   hashlock: string | null;
   initiatorTimeout: number | null;
   responderTimeout: number | null;
+  /** The taker released this take; the maker should not (further) commit
+   *  funds. Optional for books predating the flag. */
+  released?: boolean;
   createdAt: number;
   updatedAt: number;
 }
