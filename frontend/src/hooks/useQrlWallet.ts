@@ -13,6 +13,7 @@ import {
   QRL_CONNECT_PROVIDER_INFO,
   type ConnectionStatus,
 } from "@qrlwallet/connect";
+import { errorMessage } from "@/utils/errorMessage";
 
 export type QrlStatus = "disconnected" | "pairing" | "connected";
 /** Which transport is active; drives the qrl_sendTransaction param shape. */
@@ -209,7 +210,7 @@ export function useQrlWallet() {
           setAccount(list[0] ?? null);
         });
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Extension connection rejected");
+        setError(errorMessage(err));
       }
     },
     [showPairing, setTransport],
