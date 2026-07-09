@@ -9,6 +9,7 @@ import type { QrlStatus } from "@/hooks/useQrlWallet";
 
 const navItems = [
   { to: "/", label: "Swap" },
+  { to: "/sandbox", label: "Sandbox" },
   { to: "/how-it-works", label: "How it works" },
 ];
 
