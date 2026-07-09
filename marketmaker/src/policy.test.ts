@@ -51,6 +51,7 @@ const leg = (status: number, overrides: Partial<LegState> = {}): LegState => ({
 function input(overrides: Partial<DecideInput> = {}): DecideInput {
   return {
     bookStatus: "locking",
+    released: false,
     managed: managed(),
     iState: leg(SwapStatus.None),
     rState: null,
@@ -98,6 +99,33 @@ describe("locking our leg", () => {
 
   it("fails closed on an RPC gap", () => {
     assert.equal(decide(input({ iState: null })), "wait");
+  });
+});
+
+describe("taker release", () => {
+  it("aborts a released take before any funds moved (never locks into the void)", () => {
+    assert.equal(decide(input({ released: true })), "abort");
+  });
+
+  it("never re-locks a released take even after a stale lock attempt", () => {
+    const x = input({ released: true, managed: managed({ lockSentAt: NOW - 600 }) });
+    assert.equal(decide(x), "wait");
+  });
+
+  it("still refunds our locked leg at t1 after a release", () => {
+    const x = input({ released: true, iState: leg(SwapStatus.Open), nowS: T1 });
+    assert.equal(decide(x), "refund");
+  });
+
+  it("still claims a valid taker lock after a release (discard-after-lock)", () => {
+    const locked = leg(SwapStatus.Open);
+    const x = input({
+      released: true,
+      iState: leg(SwapStatus.Open),
+      rState: locked,
+      rConfirmed: locked,
+    });
+    assert.equal(decide(x), "claim");
   });
 });
 
