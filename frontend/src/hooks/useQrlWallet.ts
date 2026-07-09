@@ -158,6 +158,17 @@ export function useQrlWallet() {
     const onStatus = (s: ConnectionStatus) => setStatusDetail(String(s));
     const onDisconnect = () => {
       if (kindRef.current === "extension") return;
+      // The SDK also emits 'disconnect' when its reconnect probe gives up on
+      // a wallet that is merely backgrounded (routine on mobile: the wallet
+      // app loses its socket seconds after backgrounding). The stored
+      // session survives that and any request revives it: relay-buffered
+      // and, on mobile, deep-linked awake. Rotating to a fresh pairing here
+      // would orphan the wallet side's session and could strand an approval
+      // already in flight. Only a wallet-initiated terminate (stored
+      // session gone) falls through to re-pair.
+      if (!userDisconnectedRef.current && qrl.hasStoredSession()) {
+        return;
+      }
       setStatus("disconnected");
       setAccount(null);
       // Wallet-initiated disconnect: regenerate the QR so the user can
