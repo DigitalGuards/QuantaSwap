@@ -21,6 +21,7 @@ Domain quantaswap.io (Cloudflare zone active, nothing deployed yet). Will be pub
 - Live testnet addresses + smoke commands: `docs/DEPLOYMENTS.md`.
 - Deploy/live-smoke env in gitignored `.env` (`.env.example` documents the shape). The QRL hexseed and Sepolia key never enter tracked files.
 - Frontend: React + Vite, hardened TS, zero-warning lint, secret generation fenced in a `crypto/` module (WebCrypto only).
+- Order book: `server/`, plain node:http + hardened TS, zero runtime deps, coordination only (clients re-verify everything on-chain). Gate: `npm test` in `server/` (build + lifecycle smoke). Prod: pm2 `quantaswap-orderbook` on 127.0.0.1:8091 behind the vhost's `/api` proxy.
 - Integration branch: `dev`. PRs for code; docs-only changes commit straight to `dev`.
 
 ## Invariants (treat regressions as high priority)

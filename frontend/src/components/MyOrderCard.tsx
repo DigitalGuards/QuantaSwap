@@ -1,0 +1,194 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { formatEther } from "ethers";
+import { INITIATOR_TIMEOUT_S, RESPONDER_TIMEOUT_S, legByKey } from "@/config";
+import {
+  clearMyOrder,
+  initiatorLeg,
+  loadActiveSwap,
+  responderLeg,
+  saveActiveSwap,
+  type ActiveSwap,
+  type MyOrderRef,
+} from "@/lib/activeSwap";
+import { generateSecret } from "@/lib/secrets";
+import { announceHashlock, getOrder, OrderGoneError, type OrderView } from "@/lib/orderbook";
+import { cancelOrder } from "@/lib/orderbook";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { Button } from "@/components/UI/Button";
+
+interface Props {
+  myOrder: MyOrderRef;
+  onMatched: (swap: ActiveSwap) => void;
+  onClosed: () => void;
+}
+
+/** The maker's listed order: waits for a taker, then generates the swap
+ *  secret, announces the hashlock and hands over to the swap flow. The
+ *  secret is persisted locally before the announcement so a mid-flight
+ *  crash can never orphan locked funds. */
+export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
+  const [order, setOrder] = useState<OrderView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const matching = useRef(false);
+
+  const close = useCallback(() => {
+    clearMyOrder();
+    onClosed();
+  }, [onClosed]);
+
+  const startSwap = useCallback(
+    async (current: OrderView) => {
+      if (matching.current) return;
+      matching.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        if (!current.takerEthAccount || !current.takerQrlAccount) {
+          throw new Error("taker addresses missing from the accepted order");
+        }
+        // Reuse a previously generated secret for this order (retry after a
+        // lost announce response); generating a fresh one would desync us
+        // from whatever the order book already published.
+        const stored = loadActiveSwap();
+        let swap: ActiveSwap;
+        if (stored && stored.role === "maker" && stored.orderId === current.id && stored.hashlock) {
+          swap = stored;
+        } else {
+          const secret = await generateSecret();
+          const now = Math.floor(Date.now() / 1000);
+          swap = {
+            role: "maker",
+            orderId: current.id,
+            direction: current.direction,
+            fromAmount: current.fromAmount,
+            toAmount: current.toAmount,
+            makerEthAccount: current.makerEthAccount,
+            makerQrlAccount: current.makerQrlAccount,
+            takerEthAccount: current.takerEthAccount,
+            takerQrlAccount: current.takerQrlAccount,
+            preimage: secret.preimage,
+            hashlock: secret.hashlock,
+            initiatorTimeout: now + INITIATOR_TIMEOUT_S,
+            responderTimeout: now + RESPONDER_TIMEOUT_S,
+            createdAt: now,
+          };
+          saveActiveSwap(swap);
+        }
+        try {
+          await announceHashlock(current.id, {
+            token: myOrder.token,
+            hashlock: swap.hashlock ?? "",
+            initiatorTimeout: swap.initiatorTimeout ?? 0,
+            responderTimeout: swap.responderTimeout ?? 0,
+          });
+        } catch (err) {
+          // The announce may have applied even though we saw an error
+          // (lost response, or a 409 on retry). Converge via the book.
+          const after = await getOrder(current.id);
+          if (!(after.status === "locking" && after.hashlock === swap.hashlock)) throw err;
+        }
+        clearMyOrder();
+        onMatched(swap);
+      } catch (err) {
+        matching.current = false;
+        setError(err instanceof Error ? err.message : "Failed to start the swap");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [myOrder.token, onMatched],
+  );
+
+  useEffect(() => {
+    let stop = false;
+    const poll = async () => {
+      try {
+        const current = await getOrder(myOrder.id);
+        if (stop) return;
+        setOrder(current);
+        if (current.status === "accepted") void startSwap(current);
+        if (current.status === "cancelled") close();
+      } catch (err) {
+        if (!stop && err instanceof OrderGoneError) close();
+      }
+    };
+    void poll();
+    const t = setInterval(() => void poll(), 4000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [myOrder.id, startSwap, close]);
+
+  const cancel = () => {
+    setBusy(true);
+    setError(null);
+    cancelOrder(myOrder.id, myOrder.token)
+      .then(close)
+      .catch((err: unknown) => {
+        if (err instanceof OrderGoneError) {
+          close();
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Cancel failed");
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const fromLeg = order ? legByKey(initiatorLeg(order.direction)) : null;
+  const toLeg = order ? legByKey(responderLeg(order.direction)) : null;
+
+  return (
+    <Card className="border-l-2 border-l-blue-accent">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg">Your open order</CardTitle>
+          <span className="font-mono text-xs text-muted-foreground">{myOrder.id}</span>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {order && fromLeg && toLeg ? (
+          <p className="text-sm">
+            Give <span className="font-medium">{formatEther(BigInt(order.fromAmount))} {fromLeg.asset}</span>{" "}
+            for <span className="font-medium">{formatEther(BigInt(order.toAmount))} {toLeg.asset}</span>
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">Loading order…</p>
+        )}
+        {order?.status === "accepted" ? (
+          <p className="text-sm text-blue-accent">
+            {busy ? "Taker found: preparing the swap…" : "Taker found."}
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Listed on the order book, waiting for a taker. Keep this page open: when someone
+            accepts, you lock first.
+          </p>
+        )}
+        {error ? (
+          <div className="space-y-2">
+            <p className="text-sm text-red-400">{error}</p>
+            {order?.status === "accepted" ? (
+              <Button
+                size="sm"
+                disabled={busy}
+                onClick={() => {
+                  matching.current = false;
+                  void startSwap(order);
+                }}
+              >
+                Retry
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {order?.status !== "accepted" ? (
+          <Button variant="outline" size="sm" disabled={busy} onClick={cancel}>
+            Cancel order
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}

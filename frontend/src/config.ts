@@ -29,4 +29,14 @@ export const legByKey = (key: LegKey) => (key === "qrl" ? QRL_LEG : ETH_LEG);
 export const INITIATOR_TIMEOUT_S = 2 * 3600;
 export const RESPONDER_TIMEOUT_S = 1 * 3600;
 
+// Order book service, same-origin (nginx in prod, Vite proxy in dev).
+export const ORDERBOOK_API = "/api";
+
+// Dust guard for orders; mirrored server-side in server/src/store.ts.
+export const MIN_AMOUNT_WEI = 10n ** 15n;
+
+// A taker only locks if the maker's timeout leaves at least this much
+// claim window beyond the responder timeout.
+export const CLAIM_MARGIN_S = 30 * 60;
+
 export const GITHUB_URL = "https://github.com/DigitalGuards/QuantaSwap";
