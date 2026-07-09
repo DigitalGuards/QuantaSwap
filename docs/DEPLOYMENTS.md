@@ -26,6 +26,12 @@ node scripts/smoke-qrl.js Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee
 node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 ```
 
+## Updating a running deployment
+
+- Frontend: build `frontend/dist` locally, tar-over-ssh as **root** (ops has no sudo): extract into `/var/www/quantaswap`, then `chown -R www-data:www-data` it.
+- Order book: tar `server/{src,package.json,tsconfig.json,smoke.js}` to `ops@…:~/quantaswap-orderbook` (never touch `data/`), `npm run build`, `pm2 restart quantaswap-orderbook`, check `/api/health`.
+- Market maker: tar `marketmaker/{src,package.json,tsconfig.json}` to `~/quantaswap-marketmaker` (never touch `data/` or `.env`), `npm run build`, `pm2 restart quantaswap-marketmaker`, watch the boot lines in `pm2 logs`.
+
 ## Order book service (quantaswap.io)
 
 Runs on the `REDACTED` box next to the frontend webroot. Coordination only, never custody; losing it strands no funds.
