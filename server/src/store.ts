@@ -203,8 +203,17 @@ export class OrderStore {
     const now = nowS();
     const ipHash = sha256Hex(takerIp);
     const mine = [...this.orders.values()].filter((o) => o.acceptorIpHash === ipHash);
+    // A take counts as "in progress" while the taker can still act: the whole
+    // accepted phase, and the locking phase only until the initiator timeout.
+    // Past T1 every claim window has closed and the swap is decided on-chain
+    // (refund-only), but the coordination-only book never learns the outcome,
+    // so counting those (they linger ~24h for audit) would eat a concurrency
+    // slot for a day even after a SUCCESSFUL swap.
     const concurrent = mine.filter(
-      (o) => o.status === "accepted" || o.status === "locking",
+      (o) =>
+        o.status === "accepted" ||
+        (o.status === "locking" &&
+          (o.initiatorTimeout === null || now <= o.initiatorTimeout)),
     ).length;
     if (concurrent >= MAX_CONCURRENT_TAKES_PER_IP) {
       throw new ApiError(429, "you already have swaps in progress; finish or let them expire");
