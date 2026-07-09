@@ -19,6 +19,7 @@ import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
+import { errorMessage } from "@/utils/errorMessage";
 
 const ZERO32 = `0x${"0".repeat(64)}`;
 
@@ -170,20 +171,40 @@ export function SwapFlow({
         await tx.wait();
       } else {
         if (!qrlAccount) throw new Error("QRL wallet not connected");
-        const tx: Record<string, string> = {
+        let tx: Record<string, unknown> = {
           from: qrlAccount,
           to: QRL_LEG.htlc,
           data,
           ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
         };
         if (qrlTransport === "extension") {
-          // The extension does not estimate gas itself; send an explicit
-          // limit under both keys it may read. The relay wallet estimates,
-          // so it gets the minimal shape (an explicit limit would fight it).
-          const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
-          const gas = `0x${((BigInt(estimated) * 13n) / 10n).toString(16)}`;
-          tx["gas"] = gas;
-          tx["gasLimit"] = gas;
+          // The extension does not estimate gas; it feeds the dApp's fields
+          // straight into web3 signTransaction. Mirror the shape proven
+          // against the extension source in QuantaPool: numeric gas under
+          // both keys, decimal-string value, explicit gasPrice. The relay
+          // wallet estimates itself, so it keeps the minimal hex shape.
+          let gasLimit = 1_500_000;
+          try {
+            const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
+            gasLimit = Number((BigInt(estimated) * 130n) / 100n);
+          } catch {
+            // estimation can fail on some proxies; fall back to a safe limit
+          }
+          let gasPrice = "1000000000";
+          try {
+            gasPrice = BigInt((await qrlRpc("qrl_gasPrice", [])) as string).toString();
+          } catch {
+            // same fallback rationale
+          }
+          tx = {
+            from: qrlAccount,
+            to: QRL_LEG.htlc,
+            value: valueWei.toString(),
+            data,
+            gas: gasLimit,
+            gasLimit,
+            gasPrice,
+          };
         }
         await qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
       }
@@ -196,7 +217,7 @@ export function SwapFlow({
     setBusy(key);
     void fn()
       .then(refresh)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+      .catch((err: unknown) => setError(errorMessage(err)))
       .finally(() => setBusy(null));
   };
 
