@@ -20,7 +20,9 @@ export type QrlStatus = "disconnected" | "pairing" | "connected";
 /** Which transport is active; drives the qrl_sendTransaction param shape. */
 export type QrlTransport = "relay" | "extension";
 
-const QRL_EXTENSION_RDNS = "theqrl.org";
+// Injected QRL extensions: the upstream QRL Web3 Wallet and the MyQRLWallet
+// Extension fork (minted 2026-07-09). Both speak the same provider API.
+const QRL_EXTENSION_RDNS = new Set(["theqrl.org", "com.qrlwallet.extension"]);
 const QRL_CONNECT_RDNS = QRL_CONNECT_PROVIDER_INFO.rdns;
 
 export interface QrlProvider {
@@ -87,7 +89,7 @@ export function useQrlWallet() {
       const detail = (event as CustomEvent<Eip6963Detail>).detail;
       const info = detail?.info;
       if (!info?.uuid) return;
-      if (info.rdns !== QRL_CONNECT_RDNS && info.rdns !== QRL_EXTENSION_RDNS) return;
+      if (info.rdns !== QRL_CONNECT_RDNS && !QRL_EXTENSION_RDNS.has(info.rdns)) return;
       if (detailMapRef.current.has(info.uuid)) return;
       detailMapRef.current.set(info.uuid, detail);
       setWallets(
