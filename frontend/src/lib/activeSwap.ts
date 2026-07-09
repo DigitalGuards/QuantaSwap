@@ -12,6 +12,9 @@ export interface ActiveSwap {
   role: SwapRole;
   /** Order book id; null in the sandbox. */
   orderId: string | null;
+  /** Authorizes the taker's release (walk-away) on the order book; null
+   *  for maker/sandbox roles and for swaps stored before it existed. */
+  takerToken: string | null;
   /** Maker's perspective: the maker escrows `fromAmount` on the from-chain. */
   direction: Direction;
   /** Wei on the initiator (maker) leg, decimal string. */
@@ -60,6 +63,7 @@ function migrateLegacy(): ActiveSwap | null {
     const swap: ActiveSwap = {
       role: "sandbox",
       orderId: null,
+      takerToken: null,
       direction: old.direction,
       fromAmount: old.fromAmount,
       toAmount: old.toAmount,
@@ -84,7 +88,12 @@ function migrateLegacy(): ActiveSwap | null {
 export function loadActiveSwap(): ActiveSwap | null {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw) as ActiveSwap;
+    if (raw) {
+      const swap = JSON.parse(raw) as ActiveSwap;
+      // Swaps stored before the taker token existed.
+      swap.takerToken ??= null;
+      return swap;
+    }
     return migrateLegacy();
   } catch {
     return null;

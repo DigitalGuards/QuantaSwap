@@ -30,12 +30,22 @@ export interface Order {
   updatedAt: number;
   /** sha256 of the maker's bearer token; never serialized to clients. */
   makerTokenHash: string;
+  /** sha256 of the taker's bearer token (minted on accept, authorizes
+   *  release); never serialized to clients. */
+  takerTokenHash?: string;
   /** sha256 of the taker's IP, for per-IP take caps; never serialized. */
   acceptorIpHash?: string;
   acceptedAt?: number;
+  /** Taker walked away after the maker locked. The order stays `locking`
+   *  (chain state governs the funds) but stops counting as an in-progress
+   *  take for the taker's IP. */
+  releasedAt?: number;
 }
 
-export type PublicOrder = Omit<Order, "makerTokenHash" | "acceptorIpHash" | "acceptedAt">;
+export type PublicOrder = Omit<
+  Order,
+  "makerTokenHash" | "takerTokenHash" | "acceptorIpHash" | "acceptedAt" | "releasedAt"
+>;
 
 // Mirrored client-side; keep in sync with frontend/src/config.ts.
 const MIN_AMOUNT_WEI = 10n ** 15n; // 0.001, dust/spam guard
@@ -91,7 +101,14 @@ function requireAddress(raw: unknown, field: string, re: RegExp): string {
 }
 
 export function toPublic(order: Order): PublicOrder {
-  const { makerTokenHash: _omit, acceptorIpHash: _omit2, acceptedAt: _omit3, ...rest } = order;
+  const {
+    makerTokenHash: _omit,
+    takerTokenHash: _omit2,
+    acceptorIpHash: _omit3,
+    acceptedAt: _omit4,
+    releasedAt: _omit5,
+    ...rest
+  } = order;
   return rest;
 }
 
@@ -194,7 +211,11 @@ export class OrderStore {
     return { order: toPublic(order), makerToken };
   }
 
-  accept(id: string, body: Record<string, unknown>, takerIp: string): PublicOrder {
+  accept(
+    id: string,
+    body: Record<string, unknown>,
+    takerIp: string,
+  ): { order: PublicOrder; takerToken: string } {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
@@ -208,12 +229,14 @@ export class OrderStore {
     // Past T1 every claim window has closed and the swap is decided on-chain
     // (refund-only), but the coordination-only book never learns the outcome,
     // so counting those (they linger ~24h for audit) would eat a concurrency
-    // slot for a day even after a SUCCESSFUL swap.
+    // slot for a day even after a SUCCESSFUL swap. Released takes (the taker
+    // walked away and said so) never count.
     const concurrent = mine.filter(
       (o) =>
-        o.status === "accepted" ||
-        (o.status === "locking" &&
-          (o.initiatorTimeout === null || now <= o.initiatorTimeout)),
+        o.releasedAt === undefined &&
+        (o.status === "accepted" ||
+          (o.status === "locking" &&
+            (o.initiatorTimeout === null || now <= o.initiatorTimeout))),
     ).length;
     if (concurrent >= MAX_CONCURRENT_TAKES_PER_IP) {
       throw new ApiError(429, "you already have swaps in progress; finish or let them expire");
@@ -223,13 +246,55 @@ export class OrderStore {
       throw new ApiError(429, "daily take limit reached; leave some liquidity for others");
     }
 
+    const takerToken = randomBytes(32).toString("hex");
     order.takerEthAccount = requireAddress(body["takerEthAccount"], "takerEthAccount", ETH_ADDR_RE);
     order.takerQrlAccount = requireAddress(body["takerQrlAccount"], "takerQrlAccount", QRL_ADDR_RE);
     order.status = "accepted";
+    order.takerTokenHash = sha256Hex(takerToken);
     order.acceptorIpHash = ipHash;
     order.acceptedAt = now;
     order.updatedAt = now;
+    delete order.releasedAt;
     this.persist();
+    return { order: toPublic(order), takerToken };
+  }
+
+  /** Taker-authorized walk-away, the counterpart of the maker's cancel.
+   *  Before the maker locks (status `accepted`) the order returns to the
+   *  book untouched; after (status `locking`) the listing stays as-is,
+   *  funds are governed on-chain, but the take stops occupying one of the
+   *  taker's per-IP concurrency slots. The daily take count still stands:
+   *  a locking-phase release already cost the maker gas and a lockup. */
+  release(id: string, body: Record<string, unknown>): PublicOrder {
+    this.sweep();
+    const order = this.orders.get(id);
+    if (!order) throw new ApiError(404, "order not found");
+    const token = body["token"];
+    if (
+      order.takerTokenHash === undefined ||
+      typeof token !== "string" ||
+      sha256Hex(token) !== order.takerTokenHash
+    ) {
+      throw new ApiError(403, "invalid taker token");
+    }
+    const now = nowS();
+    if (order.status === "accepted") {
+      // Nothing announced, nothing locked: relist for the next taker.
+      order.status = "open";
+      order.takerEthAccount = null;
+      order.takerQrlAccount = null;
+      delete order.takerTokenHash;
+      delete order.acceptorIpHash;
+      delete order.acceptedAt;
+      delete order.releasedAt;
+      order.updatedAt = now;
+      this.persist();
+    } else if (order.status === "locking" && order.releasedAt === undefined) {
+      order.releasedAt = now;
+      order.updatedAt = now;
+      this.persist();
+    }
+    // cancelled (or already released): idempotent success.
     return toPublic(order);
   }
 

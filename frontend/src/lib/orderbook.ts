@@ -55,7 +55,14 @@ export const createOrder = async (body: {
 export const acceptOrder = async (
   id: string,
   body: { takerEthAccount: string; takerQrlAccount: string },
-): Promise<OrderView> => (await api<{ order: OrderView }>("POST", `/orders/${id}/accept`, body)).order;
+): Promise<{ order: OrderView; takerToken: string }> =>
+  api("POST", `/orders/${id}/accept`, body);
+
+/** Taker walk-away. Before the maker locks, the order returns to the book;
+ *  after, it only stops counting against the taker's per-IP take slots.
+ *  Purely book-keeping either way, so callers may fire and forget. */
+export const releaseOrder = async (id: string, token: string): Promise<OrderView> =>
+  (await api<{ order: OrderView }>("POST", `/orders/${id}/release`, { token })).order;
 
 export const announceHashlock = async (
   id: string,

@@ -104,6 +104,8 @@ try {
     takerQrlAccount: QRL_B,
   });
   check("order accepted", accepted.status === 200 && accepted.body.order.status === "accepted");
+  check("accept mints a taker token", typeof accepted.body.takerToken === "string");
+  check("taker token not leaked on order", accepted.body.order.takerTokenHash === undefined);
 
   const doubleAccept = await api("POST", `/orders/${id}/accept`, {
     takerEthAccount: ETH_B,
@@ -202,6 +204,69 @@ try {
   const o7 = await mk();
   const t7 = await api("POST", `/orders/${o7.id}/accept`, taker, drip);
   check("seventh take in a day capped", t7.status === 429);
+
+  console.log("taker release:");
+  const walker = { "X-Forwarded-For": "203.0.113.20" };
+  const r1 = await mk();
+  const r2 = await mk();
+  const w1 = await api("POST", `/orders/${r1.id}/accept`, taker, walker);
+  const w2 = await api("POST", `/orders/${r2.id}/accept`, taker, walker);
+  const r3 = await mk();
+  const blocked = await api("POST", `/orders/${r3.id}/accept`, taker, walker);
+  check("slots full before release", blocked.status === 429);
+
+  const badRelease = await api("POST", `/orders/${r1.id}/release`, { token: "f".repeat(64) }, walker);
+  check("release with wrong token rejected", badRelease.status === 403);
+
+  const released = await api(
+    "POST",
+    `/orders/${r1.id}/release`,
+    { token: w1.body.takerToken },
+    walker,
+  );
+  check(
+    "release before lock reopens the order",
+    released.status === 200 &&
+      released.body.order.status === "open" &&
+      released.body.order.takerEthAccount === null,
+  );
+  const relisted = await api("GET", "/orders");
+  check("released order listed again", relisted.body.orders.some((o) => o.id === r1.id));
+
+  const retake = await api("POST", `/orders/${r3.id}/accept`, taker, walker);
+  check("release frees the concurrency slot", retake.status === 200);
+
+  const staleToken = await api(
+    "POST",
+    `/orders/${r1.id}/release`,
+    { token: w1.body.takerToken },
+    walker,
+  );
+  check("released taker token is dead", staleToken.status === 403);
+
+  // Maker announces on the second take, then the taker walks away: the
+  // listing stays locking (funds are chain-governed) but stops occupying
+  // one of the taker's slots.
+  const rnow = Math.floor(Date.now() / 1000);
+  await api("POST", `/orders/${r2.id}/hashlock`, {
+    token: r2.token,
+    hashlock: `0x${"2".repeat(64)}`,
+    initiatorTimeout: rnow + 7200,
+    responderTimeout: rnow + 3600,
+  });
+  const lateRelease = await api(
+    "POST",
+    `/orders/${r2.id}/release`,
+    { token: w2.body.takerToken },
+    walker,
+  );
+  check(
+    "release after lock keeps the order locking",
+    lateRelease.status === 200 && lateRelease.body.order.status === "locking",
+  );
+  const r4 = await mk();
+  const afterLate = await api("POST", `/orders/${r4.id}/accept`, taker, walker);
+  check("late release frees the concurrency slot too", afterLate.status === 200);
 } catch (err) {
   failures += 1;
   console.error("smoke run crashed:", err);
