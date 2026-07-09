@@ -13,6 +13,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8091",
+        changeOrigin: true,
+      },
       "/rpc/qrl": {
         target: "http://REDACTED:8545",
         changeOrigin: true,

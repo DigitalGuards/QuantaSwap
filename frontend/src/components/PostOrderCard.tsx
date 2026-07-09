@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { parseEther } from "ethers";
-import { ArrowDownUp, ArrowLeftRight } from "lucide-react";
-import { ETH_LEG, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "@/config";
-import type { ActiveSwap, Direction } from "@/lib/activeSwap";
-import { generateSecret } from "@/lib/secrets";
+import { ArrowDownUp, BookPlus } from "lucide-react";
+import { ETH_LEG, MIN_AMOUNT_WEI, QRL_LEG } from "@/config";
+import type { Direction } from "@/lib/activeSwap";
+import { saveMyOrder, type MyOrderRef } from "@/lib/activeSwap";
+import { createOrder } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
@@ -12,10 +13,10 @@ import { Input } from "@/components/UI/Input";
 interface Props {
   ethAccount: string | null;
   qrlAccount: string | null;
-  onStart: (swap: ActiveSwap) => void;
+  onPosted: (ref: MyOrderRef) => void;
 }
 
-export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
+export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
   const [direction, setDirection] = useState<Direction>("eth->qrl");
   const [fromAmount, setFromAmount] = useState("");
   const [toAmount, setToAmount] = useState("");
@@ -27,43 +28,38 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
 
   const ready = Boolean(ethAccount && qrlAccount && Number(fromAmount) > 0 && Number(toAmount) > 0);
 
-  const start = async () => {
+  const post = async () => {
     if (!ethAccount || !qrlAccount) return;
     setError(null);
     setBusy(true);
     try {
-      const secret = await generateSecret();
-      const now = Math.floor(Date.now() / 1000);
-      // Sandbox: one person plays both roles, so maker and taker addresses
-      // are the same accounts on each chain.
-      onStart({
-        role: "sandbox",
-        orderId: null,
+      const fromWei = parseEther(fromAmount);
+      const toWei = parseEther(toAmount);
+      if (fromWei < MIN_AMOUNT_WEI || toWei < MIN_AMOUNT_WEI) {
+        throw new Error("Amounts must be at least 0.001");
+      }
+      const { order, makerToken } = await createOrder({
         direction,
-        preimage: secret.preimage,
-        hashlock: secret.hashlock,
-        fromAmount: parseEther(fromAmount).toString(),
-        toAmount: parseEther(toAmount).toString(),
+        fromAmount: fromWei.toString(),
+        toAmount: toWei.toString(),
         makerEthAccount: ethAccount,
         makerQrlAccount: qrlAccount,
-        takerEthAccount: ethAccount,
-        takerQrlAccount: qrlAccount,
-        initiatorTimeout: now + INITIATOR_TIMEOUT_S,
-        responderTimeout: now + RESPONDER_TIMEOUT_S,
-        createdAt: now,
       });
+      const ref: MyOrderRef = { id: order.id, token: makerToken };
+      saveMyOrder(ref);
+      onPosted(ref);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Invalid amount");
+      setError(err instanceof Error ? err.message : "Failed to post order");
     } finally {
       setBusy(false);
     }
   };
 
   const legBox = (
-    kind: "From" | "To",
+    kind: "You give" | "You want",
     leg: typeof ETH_LEG | typeof QRL_LEG,
     value: string,
-    setValue: (v: string) => void
+    setValue: (v: string) => void,
   ) => (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -92,12 +88,12 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
     <Card className="border-l-2 border-l-secondary">
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">Swap</CardTitle>
+          <CardTitle className="text-xl">Post an order</CardTitle>
           <span className="text-xs text-muted-foreground">HTLC protocol mode</span>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {legBox("From", fromLeg, fromAmount, setFromAmount)}
+        {legBox("You give", fromLeg, fromAmount, setFromAmount)}
         <div className="flex justify-center">
           <Button
             variant="outline"
@@ -112,11 +108,11 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
             <ArrowDownUp className="h-4 w-4" />
           </Button>
         </div>
-        {legBox("To", toLeg, toAmount, setToAmount)}
+        {legBox("You want", toLeg, toAmount, setToAmount)}
 
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Receive to</span>
+            <span className="text-muted-foreground">Receive {toLeg.asset} to</span>
             <span className="font-mono text-xs">
               {toLeg.key === "qrl"
                 ? qrlAccount
@@ -129,24 +125,26 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
-            <span>2h initiator / 1h responder</span>
+            <span>2h your leg / 1h taker leg</span>
           </div>
         </div>
 
-        <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void start()}>
-          <ArrowLeftRight className="h-4 w-4" />
+        <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void post()}>
+          <BookPlus className="h-4 w-4" />
           {!ethAccount || !qrlAccount
-            ? "Connect both wallets to swap"
+            ? "Connect both wallets to post"
             : !(Number(fromAmount) > 0)
               ? `Enter the ${fromLeg.asset} amount`
               : !(Number(toAmount) > 0)
                 ? `Enter the ${toLeg.asset} amount`
-                : "Start atomic swap"}
+                : busy
+                  ? "Posting…"
+                  : "Post order"}
         </Button>
         {error ? <p className="text-sm text-red-400">{error}</p> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Protocol-mode sandbox: no order book yet, so you act as both sides of the swap and can
-          watch the HTLC handshake happen live on both chains. Rates are whatever you enter.
+          Posting is free and holds no funds. When a taker accepts, you lock first and the swap
+          settles atomically through the HTLCs, or refunds after the timelocks.
         </p>
       </CardContent>
     </Card>

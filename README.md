@@ -45,7 +45,8 @@ contracts/
   hyperion/    HTLC source (.hyp, compiled with hypc, deployed to BOTH chains)
   test/        Test-only mock tokens
 scripts/       compile, anvil test suite, deploy + live smoke tooling
-frontend/      React + Vite swap UI (protocol-mode sandbox live; order book next)
+frontend/      React + Vite swap UI (order book market + both-sides sandbox)
+server/        Order book service (coordination only, never custody; zero runtime deps)
 solver/        Solver service for solver mode (Phala TEE target), planned
 docs/          Architecture, deployments
 ```
@@ -60,7 +61,7 @@ Phase 1 complete (July 2026): the HTLC is deployed and live smoke-tested on both
 |---|---|---|
 | 0 | Repo bootstrap, architecture | done |
 | 1 | HTLC on both chains, local test gate, testnet deploys + smokes | done |
-| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration | sandbox shipped; order book next |
+| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration | done: sandbox + two-party order book |
 | 3 | Solver service + Phala TEE attestation, single-sided UX | planned |
 | 4 | Audit pass, mainnet readiness (waits on QRL v2 mainnet) | planned |
 
