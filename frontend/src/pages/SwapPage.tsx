@@ -103,6 +103,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
               browserProvider={eth.browserProvider}
               ensureSepolia={eth.ensureSepolia}
               qrlRequest={qrl.request}
+              qrlTransport={qrl.kind}
               onDiscard={() => setSwap(null)}
             />
           )
