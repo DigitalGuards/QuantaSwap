@@ -179,22 +179,18 @@ export function SwapFlow({
         };
         if (qrlTransport === "extension") {
           // The extension does not estimate gas; it feeds the dApp's fields
-          // straight into web3 signTransaction. Mirror the shape proven
-          // against the extension source in QuantaPool: numeric gas under
-          // both keys, decimal-string value, explicit gasPrice. The relay
-          // wallet estimates itself, so it keeps the minimal hex shape.
+          // into @theqrl/web3 0.5 signTransaction. Its legacy (gasPrice)
+          // branch fails web3 gas validation, so request type "0x2": the
+          // extension then fills maxFee/maxPriorityFee itself, the exact
+          // shape its own internal sends use. Numeric gas under both keys,
+          // decimal-string value. The relay wallet estimates itself, so it
+          // keeps the minimal hex shape.
           let gasLimit = 1_500_000;
           try {
             const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
             gasLimit = Number((BigInt(estimated) * 130n) / 100n);
           } catch {
             // estimation can fail on some proxies; fall back to a safe limit
-          }
-          let gasPrice = "1000000000";
-          try {
-            gasPrice = BigInt((await qrlRpc("qrl_gasPrice", [])) as string).toString();
-          } catch {
-            // same fallback rationale
           }
           tx = {
             from: qrlAccount,
@@ -203,7 +199,7 @@ export function SwapFlow({
             data,
             gas: gasLimit,
             gasLimit,
-            gasPrice,
+            type: "0x2",
           };
         }
         await qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
