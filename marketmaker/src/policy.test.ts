@@ -5,7 +5,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { SwapStatus, type LegState } from "./htlc.js";
-import { decide, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
+import { decide, levelQuote, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
 
 const NOW = 1_800_000_000;
 const T1 = NOW + 7200;
@@ -20,6 +20,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     id: "abcdef0123456789",
     token: "t",
     direction: "eth->qrl",
+    level: 0,
     fromAmount: (2n * 10n ** 16n).toString(),
     toAmount: AMOUNT.toString(),
     preimage: `0x${"34".repeat(32)}`,
@@ -164,6 +165,37 @@ describe("refund and settlement", () => {
       nowS: T2 + 100,
     });
     assert.equal(decide(x), "wait");
+  });
+});
+
+describe("price ladder", () => {
+  const base = {
+    baseEthWei: 2n * 10n ** 16n, // 0.02 ETH
+    midPriceMilli: 100_000n, // 100 QRL/ETH
+    stepBps: 50n, // 0.5% per rung
+  };
+  it("asks quote above mid, scaling price and size per rung", () => {
+    const l0 = levelQuote({ ...base, direction: "eth->qrl", level: 0 });
+    // 0.02 ETH at 100.5 QRL/ETH
+    assert.equal(l0.fromAmount, (2n * 10n ** 16n).toString());
+    assert.equal(l0.toAmount, (201n * 10n ** 16n).toString());
+    const l1 = levelQuote({ ...base, direction: "eth->qrl", level: 1 });
+    // 0.04 ETH at 101 QRL/ETH
+    assert.equal(l1.fromAmount, (4n * 10n ** 16n).toString());
+    assert.equal(l1.toAmount, (404n * 10n ** 16n).toString());
+  });
+
+  it("bids quote below mid", () => {
+    const l0 = levelQuote({ ...base, direction: "qrl->eth", level: 0 });
+    // gives 1.99 QRL, wants 0.02 ETH (99.5 QRL/ETH)
+    assert.equal(l0.fromAmount, (199n * 10n ** 16n).toString());
+    assert.equal(l0.toAmount, (2n * 10n ** 16n).toString());
+  });
+
+  it("keeps a positive spread: best ask above best bid", () => {
+    const ask = levelQuote({ ...base, direction: "eth->qrl", level: 0 });
+    const bid = levelQuote({ ...base, direction: "qrl->eth", level: 0 });
+    assert.ok(BigInt(ask.toAmount) > BigInt(bid.fromAmount));
   });
 });
 
