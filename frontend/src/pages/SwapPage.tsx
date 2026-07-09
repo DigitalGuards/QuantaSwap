@@ -133,6 +133,8 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
             {myOrder ? (
               <MyOrderCard
                 myOrder={myOrder}
+                ethAccount={eth.account}
+                qrlAccount={qrl.account}
                 onMatched={(matched) => {
                   setMyOrder(null);
                   setSwap(matched);

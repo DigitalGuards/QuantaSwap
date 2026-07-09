@@ -98,13 +98,25 @@ export function decide(x: DecideInput): Decision {
   // comfortable margin before its timeout closes the claim window. A lock
   // with wrong recipient/amount is simply never claimed: we lose nothing
   // and our own leg refunds at t1.
+  //
+  // The claim window is gated on the responder lock's OWN on-chain timeout
+  // (`rConfirmed.timeout`), never the t2 we announced. The taker sets the
+  // timeout when they lock; a hostile taker can lock a valid-looking leg
+  // (right recipient, right amount) with a near-term timeout, so trusting
+  // the announced t2 would have us reveal the secret into a claim that
+  // reverts TimeoutPassed after the preimage is already public, letting the
+  // taker refund their leg and claim ours. We also refuse to reveal before
+  // our own leg is locked: there is never a reason to publish the secret
+  // while nothing of ours is on chain.
   if (
+    x.iState.status === SwapStatus.Open &&
     x.rState !== null &&
     x.rState.status === SwapStatus.Open &&
     x.rConfirmed !== null &&
     x.rConfirmed.status === SwapStatus.Open &&
     sameAddr(x.rConfirmed.recipient, x.expectedRecipient) &&
     x.rConfirmed.amount === x.expectedAmountWei &&
+    nowS < x.rConfirmed.timeout - x.claimSafetyS &&
     nowS < t2 - x.claimSafetyS &&
     retryOk(managed.claimSentAt, nowS, x.resendAfterS)
   ) {

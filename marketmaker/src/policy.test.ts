@@ -161,6 +161,26 @@ describe("claiming the taker's lock (irreversible)", () => {
     const shouted = leg(SwapStatus.Open, { recipient: `0x${MY_QRL.slice(1).toUpperCase()}` });
     assert.equal(decide(lockedInputs(shouted, shouted)), "claim");
   });
+
+  it("never claims when the responder lock's OWN timeout is too near, even if announced t2 is far", () => {
+    // A hostile taker locks a valid-looking leg (right recipient + amount)
+    // but with a near-term on-chain timeout. Trusting the announced t2
+    // (NOW+3600) would reveal the secret into a claim that reverts after
+    // the taker can refund and claim our leg. Gate on rConfirmed.timeout.
+    const shortLived = leg(SwapStatus.Open, { timeout: NOW + 300 });
+    assert.equal(decide(lockedInputs(shortLived, shortLived)), "wait");
+  });
+
+  it("still claims when the responder lock's own timeout gives a full margin", () => {
+    const roomy = leg(SwapStatus.Open, { timeout: NOW + 3600 });
+    assert.equal(decide(lockedInputs(roomy, roomy)), "claim");
+  });
+
+  it("never reveals the secret before our own leg is locked", () => {
+    const lock = leg(SwapStatus.Open);
+    const x = input({ iState: leg(SwapStatus.None), rState: lock, rConfirmed: lock });
+    assert.notEqual(decide(x), "claim");
+  });
 });
 
 describe("refund and settlement", () => {
