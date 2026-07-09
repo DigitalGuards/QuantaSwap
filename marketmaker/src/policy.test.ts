@@ -21,6 +21,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     token: "t",
     direction: "eth->qrl",
     level: 0,
+    quotedMidMilli: "100000",
     fromAmount: (2n * 10n ** 16n).toString(),
     toAmount: AMOUNT.toString(),
     preimage: `0x${"34".repeat(32)}`,
