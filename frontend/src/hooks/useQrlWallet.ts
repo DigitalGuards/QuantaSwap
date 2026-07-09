@@ -14,6 +14,7 @@ import {
   type ConnectionStatus,
 } from "@qrlwallet/connect";
 import { errorMessage } from "@/utils/errorMessage";
+import { appStoreUrl, attemptWalletRedirect } from "@/utils/deeplink";
 
 export type QrlStatus = "disconnected" | "pairing" | "connected";
 /** Which transport is active; drives the qrl_sendTransaction param shape. */
@@ -112,8 +113,14 @@ export function useQrlWallet() {
       const qrl = sdk();
       const connectionUri = fresh ? await qrl.newConnection() : await qrl.getConnectionURI();
       if (qrl.isMobile()) {
-        window.location.href = connectionUri;
-        return;
+        // Deep-link into the app; if nothing handles the protocol (app not
+        // installed, or chooser dismissed) fall back to the pairing modal
+        // with copy-code plus an install pointer instead of dead-ending.
+        const opened = await attemptWalletRedirect(connectionUri);
+        if (opened) return;
+        setError(
+          `MyQRLWallet app not detected. Install it (${appStoreUrl()}) or use the copy-code option with the wallet at qrlwallet.com.`,
+        );
       }
       setUri(connectionUri);
       setStatus("pairing");
