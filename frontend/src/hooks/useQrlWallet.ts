@@ -11,10 +11,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   QRLConnect,
   QRL_CONNECT_PROVIDER_INFO,
+  attemptWalletRedirect,
+  getAppStoreUrl,
   type ConnectionStatus,
 } from "@qrlwallet/connect";
 import { errorMessage } from "@/utils/errorMessage";
-import { appStoreUrl, attemptWalletRedirect } from "@/utils/deeplink";
+
 
 export type QrlStatus = "disconnected" | "pairing" | "connected";
 /** Which transport is active; drives the qrl_sendTransaction param shape. */
@@ -121,7 +123,7 @@ export function useQrlWallet() {
         const opened = await attemptWalletRedirect(connectionUri);
         if (opened) return;
         setError(
-          `MyQRLWallet app not detected. Install it (${appStoreUrl()}) or use the copy-code option with the wallet at qrlwallet.com.`,
+          `MyQRLWallet app not detected. Install it (${getAppStoreUrl()}) or use the copy-code option with the wallet at qrlwallet.com.`,
         );
       }
       setUri(connectionUri);
