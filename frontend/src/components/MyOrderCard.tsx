@@ -60,6 +60,7 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
           swap = {
             role: "maker",
             orderId: current.id,
+            takerToken: null,
             direction: current.direction,
             fromAmount: current.fromAmount,
             toAmount: current.toAmount,
@@ -75,8 +76,9 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
           };
           saveActiveSwap(swap);
         }
+        let announced: OrderView;
         try {
-          await announceHashlock(current.id, {
+          announced = await announceHashlock(current.id, {
             token: myOrder.token,
             hashlock: swap.hashlock ?? "",
             initiatorTimeout: swap.initiatorTimeout ?? 0,
@@ -86,7 +88,25 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
           // The announce may have applied even though we saw an error
           // (lost response, or a 409 on retry). Converge via the book.
           const after = await getOrder(current.id);
+          if (after.status === "open") {
+            // The taker released before we announced; nothing published,
+            // the listing is back on the book. Keep waiting.
+            matching.current = false;
+            return;
+          }
           if (!(after.status === "locking" && after.hashlock === swap.hashlock)) throw err;
+          announced = after;
+        }
+        // The taker pairing is only frozen once the order is locking; a
+        // release + re-accept between our poll and the announce could have
+        // swapped takers, so the announce response is the authority.
+        if (announced.takerEthAccount && announced.takerQrlAccount) {
+          swap = {
+            ...swap,
+            takerEthAccount: announced.takerEthAccount,
+            takerQrlAccount: announced.takerQrlAccount,
+          };
+          saveActiveSwap(swap);
         }
         clearMyOrder();
         onMatched(swap);

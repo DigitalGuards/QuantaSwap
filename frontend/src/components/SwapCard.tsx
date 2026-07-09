@@ -39,6 +39,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
       onStart({
         role: "sandbox",
         orderId: null,
+        takerToken: null,
         direction,
         preimage: secret.preimage,
         hashlock: secret.hashlock,

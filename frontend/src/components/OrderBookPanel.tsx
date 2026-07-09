@@ -90,10 +90,11 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     setError(null);
     setBusyId(order.id);
     acceptOrder(order.id, { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount })
-      .then((accepted) => {
+      .then(({ order: accepted, takerToken }) => {
         const swap: ActiveSwap = {
           role: "taker",
           orderId: accepted.id,
+          takerToken,
           direction: accepted.direction,
           fromAmount: accepted.fromAmount,
           toAmount: accepted.toAmount,

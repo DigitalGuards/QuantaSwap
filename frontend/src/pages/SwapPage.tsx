@@ -7,7 +7,7 @@ import {
   type ActiveSwap,
   type MyOrderRef,
 } from "@/lib/activeSwap";
-import { announceHashlock, getOrder, OrderGoneError } from "@/lib/orderbook";
+import { announceHashlock, getOrder, OrderGoneError, releaseOrder } from "@/lib/orderbook";
 import { SwapFlow } from "@/components/SwapFlow";
 import { PostOrderCard } from "@/components/PostOrderCard";
 import { MyOrderCard } from "@/components/MyOrderCard";
@@ -26,6 +26,16 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
   const [myOrder, setMyOrder] = useState<MyOrderRef | null>(() => loadMyOrder());
   const [notice, setNotice] = useState<string | null>(null);
   const reconciled = useRef(false);
+
+  // Tell the book a taker is done with its order (walk-away or discard) so
+  // the reservation stops counting against this visitor's take slots and,
+  // if the maker never locked, the listing returns to the book. Purely
+  // book-keeping: funds are always governed on-chain, so failures are fine.
+  const releaseTake = (s: ActiveSwap | null) => {
+    if (s && s.role === "taker" && s.orderId && s.takerToken) {
+      void releaseOrder(s.orderId, s.takerToken).catch(() => undefined);
+    }
+  };
 
   // Crash recovery: if a maker swap was persisted but the tab died before
   // the hashlock reached the order book, re-announce it so the taker's
@@ -96,6 +106,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                   setSwap(updated);
                 }}
                 onAbort={(reason) => {
+                  releaseTake(swap);
                   setNotice(reason);
                   setSwap(null);
                 }}
@@ -109,7 +120,10 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 ensureSepolia={eth.ensureSepolia}
                 qrlRequest={qrl.request}
                 qrlTransport={qrl.kind}
-                onDiscard={() => setSwap(null)}
+                onDiscard={() => {
+                  releaseTake(swap);
+                  setSwap(null);
+                }}
               />
             )}
             <NetworkPanel />

@@ -153,14 +153,17 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       }
       const t1 = nowS() + cfg.initiatorWindowS;
       const t2 = nowS() + cfg.responderWindowS;
-      managed.takerEthAccount = view.takerEthAccount;
-      managed.takerQrlAccount = view.takerQrlAccount;
-      await book.announceHashlock(managed.id, {
+      const announced = await book.announceHashlock(managed.id, {
         token: managed.token,
         hashlock: managed.hashlock,
         initiatorTimeout: t1,
         responderTimeout: t2,
       });
+      // Taker addresses come from the announce response, not the earlier
+      // view: the pairing is only frozen once the order is locking, and a
+      // release + re-accept in between could have swapped takers.
+      managed.takerEthAccount = announced.takerEthAccount ?? view.takerEthAccount;
+      managed.takerQrlAccount = announced.takerQrlAccount ?? view.takerQrlAccount;
       managed.initiatorTimeout = t1;
       managed.responderTimeout = t2;
       state.upsert(managed);

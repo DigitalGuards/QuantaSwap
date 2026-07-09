@@ -97,7 +97,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
-  const match = /^\/api\/orders\/([^/]+)(?:\/(accept|hashlock|cancel))?$/.exec(path);
+  const match = /^\/api\/orders\/([^/]+)(?:\/(accept|hashlock|cancel|release))?$/.exec(path);
   if (match) {
     const id = match[1] ?? "";
     const action = match[2];
@@ -108,11 +108,17 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     if (method === "POST" && action !== undefined) {
       const body = await readJsonBody(req);
+      if (action === "accept") {
+        // Returns the taker token alongside the order, like create does
+        // for the maker token.
+        sendJson(res, 200, store.accept(id, body, ip));
+        return;
+      }
       const order =
-        action === "accept"
-          ? store.accept(id, body, ip)
-          : action === "hashlock"
-            ? store.announceHashlock(id, body)
+        action === "hashlock"
+          ? store.announceHashlock(id, body)
+          : action === "release"
+            ? store.release(id, body)
             : store.cancel(id, body);
       sendJson(res, 200, { order });
       return;
