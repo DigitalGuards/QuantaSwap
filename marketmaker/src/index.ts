@@ -113,6 +113,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       );
       return view;
     }
+    // Liveness ping so the listing stays in the take-by-terms matchable
+    // set; every tick is well inside the book's presence TTL.
+    await book.heartbeat(managed.id, managed.token).catch(() => undefined);
   }
 
   const hashlock = managed.hashlock;

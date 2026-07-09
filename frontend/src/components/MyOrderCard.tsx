@@ -12,7 +12,7 @@ import {
 } from "@/lib/activeSwap";
 import { generateSecret } from "@/lib/secrets";
 import { announceHashlock, getOrder, OrderGoneError, type OrderView } from "@/lib/orderbook";
-import { cancelOrder } from "@/lib/orderbook";
+import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 
@@ -140,6 +140,16 @@ export function MyOrderCard({ myOrder, onMatched, onClosed }: Props) {
       clearInterval(t);
     };
   }, [myOrder.id, startSwap, close]);
+
+  // Maker liveness: while this card is mounted the listing stays in the
+  // takeable set; a closed tab ages out after the book's presence TTL, so
+  // takers stop reserving orders whose maker cannot respond.
+  useEffect(() => {
+    const beat = () => void heartbeatOrder(myOrder.id, myOrder.token).catch(() => undefined);
+    beat();
+    const t = setInterval(beat, 30_000);
+    return () => clearInterval(t);
+  }, [myOrder.id, myOrder.token]);
 
   const cancel = () => {
     setBusy(true);
