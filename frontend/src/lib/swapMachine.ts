@@ -118,13 +118,21 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   }
 
   // Maker-side verification of the taker's lock before revealing the
-  // secret, against the same confirmation-depth snapshot.
+  // secret, against the same confirmation-depth snapshot. The timeout is
+  // read from the taker's ACTUAL on-chain lock, not the responderTimeout we
+  // announced: a hostile taker can lock a valid-looking leg (right
+  // recipient, right amount) with a near-term timeout, so revealing on the
+  // announced window would publish the secret into a claim that expires
+  // before it mines, letting the taker refund and then claim our leg. We
+  // require the same CLAIM_MARGIN_S cushion the taker uses on our lock.
   let responderLockIssue: string | null = null;
   if (rConfirmed && rConfirmed.status === SwapStatus.Open) {
     if (!sameAddr(rConfirmed.recipient, legPlan[rLeg].recipient))
       responderLockIssue = "its recipient is not your address";
     else if (rConfirmed.amount !== legPlan[rLeg].amount)
       responderLockIssue = `it escrows ${formatEther(rConfirmed.amount)} ${rCfg.asset}, not the agreed ${formatEther(legPlan[rLeg].amount)}`;
+    else if (rConfirmed.timeout < nowS + CLAIM_MARGIN_S)
+      responderLockIssue = "its timeout leaves too little window to reveal the secret safely";
   }
 
   const revealedPreimage = rState && rState.preimage !== ZERO32 ? rState.preimage : null;
@@ -162,8 +170,14 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       leg: rLeg,
       own: mySteps[2],
       done: Boolean(rState && rState.status === SwapStatus.Claimed),
+      // Never reveal the secret before our own leg is locked (iState Open)
+      // and never without a real claim margin on the taker's on-chain
+      // timeout (folded into responderLockIssue). responderTimeout is kept
+      // only as a secondary cap.
       canRun: Boolean(
         swap.preimage &&
+          iState &&
+          iState.status === SwapStatus.Open &&
           rConfirmed &&
           rConfirmed.status === SwapStatus.Open &&
           !responderLockIssue &&

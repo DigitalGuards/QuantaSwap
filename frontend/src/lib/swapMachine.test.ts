@@ -246,6 +246,21 @@ describe("step 3: secret reveal (maker's irreversible commit)", () => {
     expect(m.steps[2].canRun).toBe(false);
   });
 
+  it("rejects a confirmed responder lock whose own timeout is too near to reveal safely", () => {
+    // A hostile taker locks a valid-looking leg with a near-term on-chain
+    // timeout; revealing on it publishes the secret into a claim that
+    // expires before it mines. Gate on the lock's own timeout + margin.
+    const shortLived = rOpen({ timeout: NOW + CLAIM_MARGIN_S - 1 });
+    const m = derive("maker", { eth: iOpen(), qrl: shortLived }, { eth: iOpen(), qrl: shortLived });
+    expect(m.steps[2].canRun).toBe(false);
+    expect(m.steps[2].issue).toBe("its timeout leaves too little window to reveal the secret safely");
+  });
+
+  it("never reveals the secret before the maker's own leg is locked", () => {
+    const m = derive("maker", { eth: none(), qrl: rOpen() }, { eth: none(), qrl: rOpen() });
+    expect(m.steps[2].canRun).toBe(false);
+  });
+
   it("matches Q-prefixed plan addresses against hex chain state, case-insensitively", () => {
     const shouted = rOpen({ recipient: `0x${MAKER_QRL.slice(1).toUpperCase()}` });
     const m = derive("maker", { eth: iOpen(), qrl: shouted }, { eth: iOpen(), qrl: shouted });
