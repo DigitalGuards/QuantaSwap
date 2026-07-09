@@ -52,3 +52,35 @@ location /api/ {
 ```
 
 Health check: `curl -s https://quantaswap.io/api/health` returns `{"status":"ok"}`.
+
+## Market maker (quantaswap.io)
+
+Always-online protocol-mode maker (`marketmaker/`) that keeps the book
+stocked so visitors always have takeable orders. Same box, next to the
+order book. It is an ordinary maker driving the public protocol: killing
+it strands no one (in-flight swaps settle via the HTLC windows; its open
+orders expire off the book).
+
+```bash
+# one-time setup as ops
+cd ~/quantaswap-marketmaker   # clone or rsync of marketmaker/
+npm install && npm run build
+cp .env.example .env          # then fill MM_ETH_PRIVATE_KEY + MM_QRL_HEXSEED (chmod 600)
+pm2 start "node --env-file=.env dist/index.js" --name quantaswap-marketmaker
+pm2 save
+```
+
+Inventory wallets (testnet, funded 2026-07-09 from the project funders):
+ETH `0x48fF8564DF1980e74667dec3A85E3b4b67844b6B`, QRL
+`Q7D4175166aA4b696Cf77c23808811ef5Ffa7C36B`. Keys live only in the box
+`.env` and the workstation copy; never in the repo.
+
+Policy defaults: 2 open orders per direction (0.02 ETH <-> 2 QRL), max 2
+swaps in flight (caps what a griefer can tie up), balance reserves keep
+gas headroom, confirmation depth 3 before claiming, refunds automatic
+after the initiator window. Per-IP take caps in the order book (2
+concurrent, 6/day) keep one visitor from clearing the book.
+
+Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
+persisted swap state (including preimages of in-flight swaps) is in
+`data/state.json`, mode 600.

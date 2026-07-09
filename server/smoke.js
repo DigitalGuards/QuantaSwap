@@ -26,10 +26,10 @@ function check(name, cond) {
   }
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, headers = {}) {
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   return { status: res.status, body: await res.json() };
@@ -154,6 +154,54 @@ try {
 
   const missing = await api("GET", "/orders/0000000000000000");
   check("unknown order 404s", missing.status === 404);
+
+  console.log("per-IP take caps:");
+  // Distinct forged IPs per role; the loopback socket is trusted for
+  // proxy headers, which is exactly how nginx fronts this in prod.
+  const makerHdr = { "X-Forwarded-For": "203.0.113.100" };
+  const taker = { takerEthAccount: ETH_B, takerQrlAccount: QRL_B };
+  const mk = async () => {
+    const r = await api(
+      "POST",
+      "/orders",
+      {
+        direction: "eth->qrl",
+        fromAmount: ONE_ETH.toString(),
+        toAmount: ONE_ETH.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+      },
+      makerHdr,
+    );
+    return { id: r.body.order.id, token: r.body.makerToken };
+  };
+
+  const greedy = { "X-Forwarded-For": "203.0.113.7" };
+  const o1 = await mk();
+  const o2 = await mk();
+  const o3 = await mk();
+  const t1 = await api("POST", `/orders/${o1.id}/accept`, taker, greedy);
+  const t2 = await api("POST", `/orders/${o2.id}/accept`, taker, greedy);
+  check("two concurrent takes allowed", t1.status === 200 && t2.status === 200);
+  const t3 = await api("POST", `/orders/${o3.id}/accept`, taker, greedy);
+  check("third concurrent take capped", t3.status === 429);
+  const other = await api("POST", `/orders/${o3.id}/accept`, taker, {
+    "X-Forwarded-For": "203.0.113.8",
+  });
+  check("other visitors can still take", other.status === 200);
+
+  const drip = { "X-Forwarded-For": "203.0.113.9" };
+  let dripOk = true;
+  for (let i = 0; i < 6; i += 1) {
+    const o = await mk();
+    const took = await api("POST", `/orders/${o.id}/accept`, taker, drip);
+    dripOk = dripOk && took.status === 200;
+    await api("POST", `/orders/${o.id}/cancel`, { token: o.token }, makerHdr);
+  }
+  check("six spaced takes allowed", dripOk);
+  const o7 = await mk();
+  const t7 = await api("POST", `/orders/${o7.id}/accept`, taker, drip);
+  check("seventh take in a day capped", t7.status === 429);
 } catch (err) {
   failures += 1;
   console.error("smoke run crashed:", err);

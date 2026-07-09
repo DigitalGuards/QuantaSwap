@@ -30,9 +30,12 @@ export interface Order {
   updatedAt: number;
   /** sha256 of the maker's bearer token; never serialized to clients. */
   makerTokenHash: string;
+  /** sha256 of the taker's IP, for per-IP take caps; never serialized. */
+  acceptorIpHash?: string;
+  acceptedAt?: number;
 }
 
-export type PublicOrder = Omit<Order, "makerTokenHash">;
+export type PublicOrder = Omit<Order, "makerTokenHash" | "acceptorIpHash" | "acceptedAt">;
 
 // Mirrored client-side; keep in sync with frontend/src/config.ts.
 const MIN_AMOUNT_WEI = 10n ** 15n; // 0.001, dust/spam guard
@@ -42,6 +45,15 @@ const OPEN_TTL_S = 48 * 3600;
 const ACCEPTED_TTL_S = 3600; // accepted but never locked: cancel
 const CANCELLED_TTL_S = 3600;
 const LOCKING_LINGER_S = 24 * 3600; // past initiator timeout
+
+// Per-IP take caps so one visitor cannot clear the book for everyone
+// else. The frontend only drives one active swap at a time, so two
+// concurrent takes is already generous; the daily cap bounds slow-drip
+// draining. Bypassable with IP rotation, like every per-IP guard here;
+// the goal is fairness for demo traffic, not sybil resistance.
+const MAX_CONCURRENT_TAKES_PER_IP = 2;
+const MAX_TAKES_PER_IP_PER_DAY = 6;
+const TAKE_WINDOW_S = 24 * 3600;
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
@@ -79,7 +91,7 @@ function requireAddress(raw: unknown, field: string, re: RegExp): string {
 }
 
 export function toPublic(order: Order): PublicOrder {
-  const { makerTokenHash: _omit, ...rest } = order;
+  const { makerTokenHash: _omit, acceptorIpHash: _omit2, acceptedAt: _omit3, ...rest } = order;
   return rest;
 }
 
@@ -182,15 +194,32 @@ export class OrderStore {
     return { order: toPublic(order), makerToken };
   }
 
-  accept(id: string, body: Record<string, unknown>): PublicOrder {
+  accept(id: string, body: Record<string, unknown>, takerIp: string): PublicOrder {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
     if (order.status !== "open") throw new ApiError(409, "order is no longer open");
+
+    const now = nowS();
+    const ipHash = sha256Hex(takerIp);
+    const mine = [...this.orders.values()].filter((o) => o.acceptorIpHash === ipHash);
+    const concurrent = mine.filter(
+      (o) => o.status === "accepted" || o.status === "locking",
+    ).length;
+    if (concurrent >= MAX_CONCURRENT_TAKES_PER_IP) {
+      throw new ApiError(429, "you already have swaps in progress; finish or let them expire");
+    }
+    const recent = mine.filter((o) => (o.acceptedAt ?? 0) > now - TAKE_WINDOW_S).length;
+    if (recent >= MAX_TAKES_PER_IP_PER_DAY) {
+      throw new ApiError(429, "daily take limit reached; leave some liquidity for others");
+    }
+
     order.takerEthAccount = requireAddress(body["takerEthAccount"], "takerEthAccount", ETH_ADDR_RE);
     order.takerQrlAccount = requireAddress(body["takerQrlAccount"], "takerQrlAccount", QRL_ADDR_RE);
     order.status = "accepted";
-    order.updatedAt = nowS();
+    order.acceptorIpHash = ipHash;
+    order.acceptedAt = now;
+    order.updatedAt = now;
     this.persist();
     return toPublic(order);
   }

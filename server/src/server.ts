@@ -110,7 +110,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       const body = await readJsonBody(req);
       const order =
         action === "accept"
-          ? store.accept(id, body)
+          ? store.accept(id, body, ip)
           : action === "hashlock"
             ? store.announceHashlock(id, body)
             : store.cancel(id, body);
