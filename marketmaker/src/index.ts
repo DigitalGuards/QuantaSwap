@@ -34,14 +34,14 @@ import {
 import { StateFile } from "./state.js";
 
 const cfg: Config = loadConfig();
-const book = new OrderBookClient(cfg.orderbookUrl);
+const book = new OrderBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
 const state = new StateFile(cfg.stateFile);
 const eth = new EthLeg(cfg);
 const qrl = new QrlLeg(cfg);
 
 const legRpc: Record<LegKey, LegRpc> = {
-  eth: { url: cfg.ethRpcUrl, ns: "eth", htlc: cfg.ethHtlc },
-  qrl: { url: cfg.qrlRpcUrl, ns: "qrl", htlc: cfg.qrlHtlc },
+  eth: { url: cfg.ethRpcUrl, ns: "eth", htlc: cfg.ethHtlc, timeoutMs: cfg.netTimeoutMs },
+  qrl: { url: cfg.qrlRpcUrl, ns: "qrl", htlc: cfg.qrlHtlc, timeoutMs: cfg.netTimeoutMs },
 };
 
 const initiatorLeg = (d: Direction): LegKey => (d === "eth->qrl" ? "eth" : "qrl");
@@ -58,6 +58,7 @@ const feed = new PriceFeed({
   refreshS: cfg.priceRefreshS,
   maxAgeS: cfg.priceMaxAgeS,
   staticMilli: cfg.priceFeed === "off" ? cfg.midPriceMilli : null,
+  timeoutMs: cfg.netTimeoutMs,
   log,
 });
 

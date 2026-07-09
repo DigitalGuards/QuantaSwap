@@ -30,13 +30,19 @@ export interface OrderView {
 export class OrderGoneError extends Error {}
 
 export class OrderBookClient {
-  constructor(private readonly base: string) {}
+  constructor(
+    private readonly base: string,
+    /** Per-call deadline. The tick calls the book FIRST every order, so a
+     *  stalling or hostile book must never be able to hang here. */
+    private readonly timeoutMs = 20_000,
+  ) {}
 
   private async api<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       method,
       headers: { "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     const payload = (await res.json().catch(() => ({}))) as { error?: string };
     if (res.status === 404) throw new OrderGoneError(payload.error ?? "order not found");

@@ -31,7 +31,7 @@ describe("needsReprice", () => {
 });
 
 describe("staleness gate", () => {
-  const opts = { url: "unused", refreshS: 300, maxAgeS: 1800, log: () => undefined };
+  const opts = { url: "unused", refreshS: 300, maxAgeS: 1800, timeoutMs: 20_000, log: () => undefined };
 
   it("static mode always quotes", () => {
     const feed = new PriceFeed({ ...opts, staticMilli: 1_700_000n });
