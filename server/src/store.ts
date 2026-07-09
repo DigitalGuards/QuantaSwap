@@ -45,7 +45,11 @@ export interface Order {
 export type PublicOrder = Omit<
   Order,
   "makerTokenHash" | "takerTokenHash" | "acceptorIpHash" | "acceptedAt" | "releasedAt"
->;
+> & {
+  /** The taker released a locking-phase order: the maker should not
+   *  (further) commit funds to it. Derived from `releasedAt`. */
+  released: boolean;
+};
 
 // Mirrored client-side; keep in sync with frontend/src/config.ts.
 const MIN_AMOUNT_WEI = 10n ** 15n; // 0.001, dust/spam guard
@@ -106,10 +110,10 @@ export function toPublic(order: Order): PublicOrder {
     takerTokenHash: _omit2,
     acceptorIpHash: _omit3,
     acceptedAt: _omit4,
-    releasedAt: _omit5,
+    releasedAt,
     ...rest
   } = order;
-  return rest;
+  return { ...rest, released: releasedAt !== undefined };
 }
 
 export class OrderStore {

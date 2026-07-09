@@ -264,6 +264,9 @@ try {
     "release after lock keeps the order locking",
     lateRelease.status === 200 && lateRelease.body.order.status === "locking",
   );
+  check("release is visible to the maker", lateRelease.body.order.released === true);
+  const freshView = await api("GET", `/orders/${r3.id}`);
+  check("unreleased order reads released=false", freshView.body.order.released === false);
   const r4 = await mk();
   const afterLate = await api("POST", `/orders/${r4.id}/accept`, taker, walker);
   check("late release frees the concurrency slot too", afterLate.status === 200);

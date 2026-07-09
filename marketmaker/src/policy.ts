@@ -44,6 +44,8 @@ export type Decision =
 
 export interface DecideInput {
   bookStatus: BookStatus;
+  /** The taker released the take (authorized walk-away on the book). */
+  released: boolean;
   managed: ManagedOrder;
   /** Latest state of our (initiator) leg; null on RPC failure. */
   iState: LegState | null;
@@ -76,6 +78,12 @@ export function decide(x: DecideInput): Decision {
   // Order vanished (cancelled, expired, book wiped) before any funds moved.
   if ((x.bookStatus === "gone" || x.bookStatus === "cancelled") && !everLocked) return "abort";
 
+  // The taker walked away (authorized release) and nothing of ours is on
+  // chain: cancel the listing instead of locking into the void. The refill
+  // loop reposts the rung. Once we locked, chain state governs as usual
+  // (refund at t1, or claim if the taker locked and then discarded).
+  if (x.released && !everLocked) return "abort";
+
   if (x.bookStatus === "open") return "wait";
   if (x.bookStatus === "accepted") return "announce";
 
@@ -104,10 +112,12 @@ export function decide(x: DecideInput): Decision {
   }
 
   // Escrow our leg after announcing, unless the responder window is
-  // already too tight for the taker to plausibly respond and us to claim.
+  // already too tight for the taker to plausibly respond and us to claim,
+  // or the taker already released (never re-lock into a walked-away swap).
   if (
     x.iState.status === SwapStatus.None &&
     x.bookStatus === "locking" &&
+    !x.released &&
     nowS < t2 - x.claimSafetyS &&
     retryOk(managed.lockSentAt, nowS, x.resendAfterS)
   ) {
