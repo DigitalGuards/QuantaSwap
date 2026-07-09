@@ -73,42 +73,49 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
         </p>
       </section>
 
-      <section className="mx-auto max-w-md space-y-4">
-        {eth.error ? <p className="text-sm text-red-400">{eth.error}</p> : null}
-        {qrl.error ? <p className="text-sm text-red-400">{qrl.error}</p> : null}
-        {notice ? (
-          <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
-            {notice}
-          </p>
+      <section className={swap ? "mx-auto max-w-md" : "mx-auto max-w-md lg:max-w-5xl"}>
+        {eth.error || qrl.error || notice ? (
+          <div className="mb-4 space-y-4">
+            {eth.error ? <p className="text-sm text-red-400">{eth.error}</p> : null}
+            {qrl.error ? <p className="text-sm text-red-400">{qrl.error}</p> : null}
+            {notice ? (
+              <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
+                {notice}
+              </p>
+            ) : null}
+          </div>
         ) : null}
 
         {swap ? (
-          swap.role === "taker" && !swap.hashlock ? (
-            <AwaitHashlock
-              swap={swap}
-              onReady={(updated) => {
-                setNotice(null);
-                setSwap(updated);
-              }}
-              onAbort={(reason) => {
-                setNotice(reason);
-                setSwap(null);
-              }}
-            />
-          ) : (
-            <SwapFlow
-              swap={swap}
-              ethAccount={eth.account}
-              qrlAccount={qrl.account}
-              browserProvider={eth.browserProvider}
-              ensureSepolia={eth.ensureSepolia}
-              qrlRequest={qrl.request}
-              qrlTransport={qrl.kind}
-              onDiscard={() => setSwap(null)}
-            />
-          )
+          <div className="space-y-4">
+            {swap.role === "taker" && !swap.hashlock ? (
+              <AwaitHashlock
+                swap={swap}
+                onReady={(updated) => {
+                  setNotice(null);
+                  setSwap(updated);
+                }}
+                onAbort={(reason) => {
+                  setNotice(reason);
+                  setSwap(null);
+                }}
+              />
+            ) : (
+              <SwapFlow
+                swap={swap}
+                ethAccount={eth.account}
+                qrlAccount={qrl.account}
+                browserProvider={eth.browserProvider}
+                ensureSepolia={eth.ensureSepolia}
+                qrlRequest={qrl.request}
+                qrlTransport={qrl.kind}
+                onDiscard={() => setSwap(null)}
+              />
+            )}
+            <NetworkPanel />
+          </div>
         ) : (
-          <>
+          <div className="space-y-4 lg:grid lg:grid-cols-2 lg:items-start lg:gap-6 lg:space-y-0">
             {myOrder ? (
               <MyOrderCard
                 myOrder={myOrder}
@@ -125,20 +132,21 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 onPosted={setMyOrder}
               />
             )}
-            <OrderBookPanel
-              ethAccount={eth.account}
-              qrlAccount={qrl.account}
-              ownOrderId={myOrder?.id ?? null}
-              takeDisabled={Boolean(myOrder)}
-              onTaken={(taken) => {
-                setNotice(null);
-                setSwap(taken);
-              }}
-            />
-          </>
+            <div className="space-y-4">
+              <OrderBookPanel
+                ethAccount={eth.account}
+                qrlAccount={qrl.account}
+                ownOrderId={myOrder?.id ?? null}
+                takeDisabled={Boolean(myOrder)}
+                onTaken={(taken) => {
+                  setNotice(null);
+                  setSwap(taken);
+                }}
+              />
+              <NetworkPanel />
+            </div>
+          </div>
         )}
-
-        <NetworkPanel />
       </section>
     </div>
   );
