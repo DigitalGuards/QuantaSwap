@@ -22,6 +22,7 @@ import {
   type LegState,
 } from "./htlc.js";
 import { OrderBookClient, OrderGoneError, type OrderView } from "./orderbook.js";
+import { COINGECKO_URL, PriceFeed, needsReprice } from "./price.js";
 import {
   decide,
   levelQuote,
@@ -51,6 +52,14 @@ const myAddress = (leg: LegKey): string => (leg === "eth" ? eth.address : qrl.ad
 const nowS = (): number => Math.floor(Date.now() / 1000);
 const short = (id: string): string => id.slice(0, 8);
 const log = (...args: unknown[]) => console.log(`[mm ${new Date().toISOString()}]`, ...args);
+
+const feed = new PriceFeed({
+  url: COINGECKO_URL,
+  refreshS: cfg.priceRefreshS,
+  maxAgeS: cfg.priceMaxAgeS,
+  staticMilli: cfg.priceFeed === "off" ? cfg.midPriceMilli : null,
+  log,
+});
 
 function newSecret(): { preimage: string; hashlock: string } {
   const raw = randomBytes(32);
@@ -86,6 +95,25 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   const iLeg = initiatorLeg(managed.direction);
   const rLeg = responderLeg(managed.direction);
   const { status: bookStatus, view } = await fetchBook(managed.id);
+
+  // Reprice a still-open listing when the mid drifted past the threshold:
+  // cancel it and let refill repost the rung at the current price. A null
+  // quotedMidMilli (pre-feed record) always reprices.
+  if (bookStatus === "open") {
+    const mid = feed.current(nowS());
+    if (
+      mid !== null &&
+      (managed.quotedMidMilli === null ||
+        needsReprice(BigInt(managed.quotedMidMilli), mid, cfg.repriceThresholdBps))
+    ) {
+      await book.cancel(managed.id, managed.token).catch(() => undefined);
+      state.delete(managed.id);
+      log(
+        `order ${short(managed.id)} repriced off the book (quoted mid ${managed.quotedMidMilli ?? "unknown"}, now ${mid})`,
+      );
+      return view;
+    }
+  }
 
   const hashlock = managed.hashlock;
   const [iState, rState, rConfirmed] = hashlock
@@ -185,6 +213,12 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
+  const mid = feed.current(nowS());
+  if (mid === null) {
+    // Never quote blind: no fresh price, no new listings. Existing swaps
+    // keep settling; the book thins out until the feed recovers.
+    return;
+  }
   const managed = state.all();
   const inflight = managed.filter((m) => {
     const v = views.get(m.id);
@@ -218,7 +252,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       direction,
       level,
       baseEthWei: cfg.ethOrderWei,
-      midPriceMilli: cfg.midPriceMilli,
+      midPriceMilli: mid,
       stepBps: cfg.levelStepBps,
     });
     const post = shouldPost({
@@ -245,6 +279,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       token: makerToken,
       direction,
       level,
+      quotedMidMilli: mid.toString(),
       fromAmount: quote.fromAmount,
       toAmount: quote.toAmount,
       preimage: null,
@@ -270,6 +305,7 @@ async function tick(): Promise<void> {
   if (running) return;
   running = true;
   try {
+    await feed.maybeRefresh(nowS());
     const views = new Map<string, OrderView | null>();
     for (const managed of state.all()) {
       try {
@@ -291,7 +327,7 @@ async function main(): Promise<void> {
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
       `target ${cfg.ordersPerDirection}/direction, max inflight ${cfg.maxInflight}, ` +
-      `base size ${cfg.ethOrderWei} wei ETH, mid ${cfg.midPriceMilli} milli-QRL/ETH`,
+      `base size ${cfg.ethOrderWei} wei ETH, price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli` : `${cfg.priceFeed} feed, reprice > ${cfg.repriceThresholdBps} bps drift`}`,
   );
   log(`managing ${state.all().length} persisted order(s)`);
   await tick();

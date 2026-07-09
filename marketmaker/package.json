@@ -8,7 +8,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test dist/policy.test.js"
+    "test": "npm run build && node --test dist/policy.test.js dist/price.test.js"
   },
   "dependencies": {
     "@theqrl/web3": "^0.4.4",
