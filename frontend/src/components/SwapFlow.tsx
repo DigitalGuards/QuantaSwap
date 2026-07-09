@@ -11,9 +11,11 @@ import {
   buildRefundData,
   getLegState,
   qToHex,
+  qrlRpc,
   type LegState,
 } from "@/lib/htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
+import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
@@ -27,6 +29,8 @@ interface Props {
   browserProvider: BrowserProvider | null;
   ensureSepolia: () => Promise<void>;
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  /** Active QRL transport; the extension needs an explicit gas limit. */
+  qrlTransport: QrlTransport | null;
   onDiscard: () => void;
 }
 
@@ -60,6 +64,7 @@ export function SwapFlow({
   browserProvider,
   ensureSepolia,
   qrlRequest,
+  qrlTransport,
   onDiscard,
 }: Props) {
   const [legs, setLegs] = useState<LegStates>({});
@@ -165,20 +170,25 @@ export function SwapFlow({
         await tx.wait();
       } else {
         if (!qrlAccount) throw new Error("QRL wallet not connected");
-        await qrlRequest({
-          method: "qrl_sendTransaction",
-          params: [
-            {
-              from: qrlAccount,
-              to: QRL_LEG.htlc,
-              data,
-              ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
-            },
-          ],
-        });
+        const tx: Record<string, string> = {
+          from: qrlAccount,
+          to: QRL_LEG.htlc,
+          data,
+          ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
+        };
+        if (qrlTransport === "extension") {
+          // The extension does not estimate gas itself; send an explicit
+          // limit under both keys it may read. The relay wallet estimates,
+          // so it gets the minimal shape (an explicit limit would fight it).
+          const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
+          const gas = `0x${((BigInt(estimated) * 13n) / 10n).toString(16)}`;
+          tx["gas"] = gas;
+          tx["gasLimit"] = gas;
+        }
+        await qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
       }
     },
-    [browserProvider, ensureSepolia, qrlRequest, qrlAccount],
+    [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
   const runAction = (key: string, fn: () => Promise<void>) => {
