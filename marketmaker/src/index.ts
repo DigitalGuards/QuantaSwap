@@ -22,7 +22,14 @@ import {
   type LegState,
 } from "./htlc.js";
 import { OrderBookClient, OrderGoneError, type OrderView } from "./orderbook.js";
-import { decide, shouldPost, type BookStatus, type Direction, type ManagedOrder } from "./policy.js";
+import {
+  decide,
+  levelQuote,
+  shouldPost,
+  type BookStatus,
+  type Direction,
+  type ManagedOrder,
+} from "./policy.js";
 import { StateFile } from "./state.js";
 
 const cfg: Config = loadConfig();
@@ -191,29 +198,45 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
 
   for (const direction of ["eth->qrl", "qrl->eth"] as const) {
     const fromLeg = initiatorLeg(direction);
-    const myOpen = managed.filter((m) => {
-      const v = views.get(m.id);
-      return m.direction === direction && v?.status === "open";
-    }).length;
+    // Refill the lowest missing rung of the price ladder (one per tick,
+    // per direction, so a taken level reappears gradually).
+    const openLevels = new Set(
+      managed
+        .filter((m) => m.direction === direction && views.get(m.id)?.status === "open")
+        .map((m) => m.level),
+    );
+    let level = -1;
+    for (let l = 0; l < cfg.ordersPerDirection; l += 1) {
+      if (!openLevels.has(l)) {
+        level = l;
+        break;
+      }
+    }
+    if (level < 0) continue;
 
+    const quote = levelQuote({
+      direction,
+      level,
+      baseEthWei: cfg.ethOrderWei,
+      midPriceMilli: cfg.midPriceMilli,
+      stepBps: cfg.levelStepBps,
+    });
     const post = shouldPost({
       direction,
-      myOpenCount: myOpen,
+      myOpenCount: openLevels.size,
       ordersPerDirection: cfg.ordersPerDirection,
       inflightCount: inflight,
       maxInflight: cfg.maxInflight,
       balanceWei: balances[fromLeg],
       reserveWei: fromLeg === "eth" ? cfg.ethReserveWei : cfg.qrlReserveWei,
-      orderWei: fromLeg === "eth" ? cfg.ethOrderWei : cfg.qrlOrderWei,
+      orderWei: BigInt(quote.fromAmount),
     });
     if (!post) continue;
 
-    const fromAmount = (fromLeg === "eth" ? cfg.ethOrderWei : cfg.qrlOrderWei).toString();
-    const toAmount = (fromLeg === "eth" ? cfg.qrlOrderWei : cfg.ethOrderWei).toString();
     const { order, makerToken } = await book.create({
       direction,
-      fromAmount,
-      toAmount,
+      fromAmount: quote.fromAmount,
+      toAmount: quote.toAmount,
       makerEthAccount: eth.address,
       makerQrlAccount: qrl.address,
     });
@@ -221,8 +244,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       id: order.id,
       token: makerToken,
       direction,
-      fromAmount,
-      toAmount,
+      level,
+      fromAmount: quote.fromAmount,
+      toAmount: quote.toAmount,
       preimage: null,
       hashlock: null,
       initiatorTimeout: null,
@@ -234,7 +258,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       refundSentAt: null,
       createdAt: nowS(),
     });
-    log(`posted ${direction} order ${short(order.id)} (${fromAmount} -> ${toAmount})`);
+    log(
+      `posted ${direction} L${level} order ${short(order.id)} (${quote.fromAmount} -> ${quote.toAmount})`,
+    );
   }
 }
 
