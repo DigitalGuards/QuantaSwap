@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import {
   ArrowLeftRight,
+  BookOpen,
   Clock,
   Fuel,
   KeyRound,
@@ -65,6 +66,25 @@ export function HowItWorksPage() {
           funds. QuantaSwap swaps coins directly between the two chains using hashed timelock
           contracts, so no operator ever holds them. Every swap either completes on both sides or
           refunds on both.
+        </p>
+      </Section>
+
+      <Section icon={BookOpen} title="Finding a counterparty: the order book" accent="blue">
+        <p>
+          Swaps start on the <Link to="/" className="text-blue-accent hover:underline">Swap page</Link>:
+          post an order naming what you give and what you want, or take one someone else posted.
+          The order book only introduces the two of you; it never holds funds, and both browsers
+          verify every amount, recipient, and timeout directly on-chain before committing
+          anything. If the order book vanished mid-swap, your coins would still settle or refund
+          through the contracts alone.
+        </p>
+        <p>
+          Curious how the handshake below actually feels, without waiting for a counterparty? The{" "}
+          <Link to="/sandbox" className="text-blue-accent hover:underline">
+            Sandbox
+          </Link>{" "}
+          lets you play both sides of a swap from one browser and watch every step land on both
+          chains.
         </p>
       </Section>
 
