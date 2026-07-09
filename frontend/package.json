@@ -11,12 +11,12 @@
   },
   "dependencies": {
     "@qrlwallet/connect": "^3.1.1",
+    "@qrlwallet/connect-ui": "^0.1.0",
     "@radix-ui/react-slot": "^1.1.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ethers": "^6.13.4",
     "lucide-react": "^0.562.0",
-    "qrcode": "^1.5.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.18.1",
@@ -25,7 +25,6 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.18",
     "@types/node": "^22.20.1",
-    "@types/qrcode": "^1.5.5",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.2",

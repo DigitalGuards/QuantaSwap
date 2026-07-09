@@ -10,7 +10,7 @@ import {
 } from "@/lib/activeSwap";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
-import { QrModal } from "@/components/QrModal";
+import { PairingModal } from "@/components/PairingModal";
 import { WalletPickerModal } from "@/components/WalletPickerModal";
 import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
@@ -63,7 +63,7 @@ export default function App() {
       />
 
       {qrl.uri ? (
-        <QrModal
+        <PairingModal
           uri={qrl.uri}
           statusDetail={qrl.statusDetail}
           onNewConnection={() => void qrl.newConnection()}
