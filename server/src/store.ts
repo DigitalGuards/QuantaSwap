@@ -49,6 +49,10 @@ export type PublicOrder = Omit<
   /** The taker released a locking-phase order: the maker should not
    *  (further) commit funds to it. Derived from `releasedAt`. */
   released: boolean;
+  /** The maker's client heartbeated recently, so a take can actually
+   *  proceed. Presence is in-memory only: a restart grants every loaded
+   *  open order one grace window to re-heartbeat. */
+  makerSeen: boolean;
 };
 
 // Mirrored client-side; keep in sync with frontend/src/config.ts.
@@ -59,6 +63,9 @@ const OPEN_TTL_S = 48 * 3600;
 const ACCEPTED_TTL_S = 3600; // accepted but never locked: cancel
 const CANCELLED_TTL_S = 3600;
 const LOCKING_LINGER_S = 24 * 3600; // past initiator timeout
+
+/** Maker counts as online for this long after a heartbeat (or create). */
+const DEFAULT_PRESENCE_TTL_S = 90;
 
 // Per-IP take caps so one visitor cannot clear the book for everyone
 // else. The frontend only drives one active swap at a time, so two
@@ -104,30 +111,50 @@ function requireAddress(raw: unknown, field: string, re: RegExp): string {
   return raw;
 }
 
-export function toPublic(order: Order): PublicOrder {
-  const {
-    makerTokenHash: _omit,
-    takerTokenHash: _omit2,
-    acceptorIpHash: _omit3,
-    acceptedAt: _omit4,
-    releasedAt,
-    ...rest
-  } = order;
-  return { ...rest, released: releasedAt !== undefined };
+function requireDirection(raw: unknown): Direction {
+  if (raw !== "eth->qrl" && raw !== "qrl->eth") {
+    throw new ApiError(400, "direction must be eth->qrl or qrl->eth");
+  }
+  return raw;
 }
 
 export class OrderStore {
   private orders = new Map<string, Order>();
+  /** Last maker heartbeat per order id. Deliberately not persisted. */
+  private seenAt = new Map<string, number>();
+  private listeners: Array<() => void> = [];
+  private readonly presenceTtlS: number;
 
-  constructor(private readonly dataFile: string) {
+  constructor(
+    private readonly dataFile: string,
+    opts: { presenceTtlS?: number } = {},
+  ) {
+    this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
     this.load();
+  }
+
+  /** Fires after every observable change (mutation persisted, or a maker
+   *  coming back online). The server uses it to push the book to
+   *  streaming clients. */
+  subscribe(fn: () => void): void {
+    this.listeners.push(fn);
+  }
+
+  private notify(): void {
+    for (const fn of this.listeners) fn();
   }
 
   private load(): void {
     try {
       const raw = readFileSync(this.dataFile, "utf8");
       const parsed = JSON.parse(raw) as Order[];
-      for (const order of parsed) this.orders.set(order.id, order);
+      const now = nowS();
+      for (const order of parsed) {
+        this.orders.set(order.id, order);
+        // Presence does not survive restarts; grant loaded listings one
+        // TTL window so a deploy does not flap the whole book offline.
+        if (order.status === "open") this.seenAt.set(order.id, now);
+      }
     } catch {
       // first boot or unreadable file; start empty
     }
@@ -138,6 +165,27 @@ export class OrderStore {
     const tmp = join(dirname(this.dataFile), `.orders.${process.pid}.tmp`);
     writeFileSync(tmp, JSON.stringify([...this.orders.values()]), "utf8");
     renameSync(tmp, this.dataFile);
+    this.notify();
+  }
+
+  private isSeen(order: Order, now: number): boolean {
+    return (this.seenAt.get(order.id) ?? 0) + this.presenceTtlS > now;
+  }
+
+  private pub(order: Order): PublicOrder {
+    const {
+      makerTokenHash: _omit,
+      takerTokenHash: _omit2,
+      acceptorIpHash: _omit3,
+      acceptedAt: _omit4,
+      releasedAt,
+      ...rest
+    } = order;
+    return {
+      ...rest,
+      released: releasedAt !== undefined,
+      makerSeen: this.isSeen(order, nowS()),
+    };
   }
 
   /** Expire stale records. Chain state is the source of truth for funds;
@@ -161,6 +209,7 @@ export class OrderStore {
           now > order.initiatorTimeout + LOCKING_LINGER_S)
       ) {
         this.orders.delete(order.id);
+        this.seenAt.delete(order.id);
         dirty = true;
       }
     }
@@ -172,14 +221,14 @@ export class OrderStore {
     return [...this.orders.values()]
       .filter((o) => o.status === "open")
       .sort((a, b) => b.createdAt - a.createdAt)
-      .map(toPublic);
+      .map((o) => this.pub(o));
   }
 
   get(id: string): PublicOrder {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
-    return toPublic(order);
+    return this.pub(order);
   }
 
   create(body: Record<string, unknown>): { order: PublicOrder; makerToken: string } {
@@ -187,10 +236,7 @@ export class OrderStore {
     const openCount = [...this.orders.values()].filter((o) => o.status === "open").length;
     if (openCount >= MAX_OPEN_ORDERS) throw new ApiError(503, "order book is full");
 
-    const direction = body["direction"];
-    if (direction !== "eth->qrl" && direction !== "qrl->eth") {
-      throw new ApiError(400, "direction must be eth->qrl or qrl->eth");
-    }
+    const direction = requireDirection(body["direction"]);
     const now = nowS();
     const makerToken = randomBytes(32).toString("hex");
     const order: Order = {
@@ -211,20 +257,19 @@ export class OrderStore {
       makerTokenHash: sha256Hex(makerToken),
     };
     this.orders.set(order.id, order);
+    this.seenAt.set(order.id, now); // creating it proves the maker is here
     this.persist();
-    return { order: toPublic(order), makerToken };
+    return { order: this.pub(order), makerToken };
   }
 
-  accept(
-    id: string,
+  /** Per-IP caps, taker validation and the open->accepted transition,
+   *  shared by take-by-id and take-by-terms. The caller has already
+   *  picked an `open` order. */
+  private commitTake(
+    order: Order,
     body: Record<string, unknown>,
     takerIp: string,
   ): { order: PublicOrder; takerToken: string } {
-    this.sweep();
-    const order = this.orders.get(id);
-    if (!order) throw new ApiError(404, "order not found");
-    if (order.status !== "open") throw new ApiError(409, "order is no longer open");
-
     const now = nowS();
     const ipHash = sha256Hex(takerIp);
     const mine = [...this.orders.values()].filter((o) => o.acceptorIpHash === ipHash);
@@ -260,7 +305,116 @@ export class OrderStore {
     order.updatedAt = now;
     delete order.releasedAt;
     this.persist();
-    return { order: toPublic(order), takerToken };
+    return { order: this.pub(order), takerToken };
+  }
+
+  accept(
+    id: string,
+    body: Record<string, unknown>,
+    takerIp: string,
+  ): { order: PublicOrder; takerToken: string } {
+    this.sweep();
+    const order = this.orders.get(id);
+    if (!order) throw new ApiError(404, "order not found");
+    if (order.status !== "open") throw new ApiError(409, "order is no longer open");
+    return this.commitTake(order, body, takerIp);
+  }
+
+  /** Take by terms instead of by id: "I pay at most `maxPay` (the order's
+   *  toAmount) to receive at least `minReceive` (the order's fromAmount)".
+   *  Atomically fills the best matching open order, so two takers racing
+   *  for the same row both fill while depth exists, and a stale click can
+   *  only ever fill at the terms the taker saw or better. Offline makers
+   *  are skipped: their orders are takeable by explicit id only. */
+  take(
+    body: Record<string, unknown>,
+    takerIp: string,
+  ): { order: PublicOrder; takerToken: string } {
+    this.sweep();
+    const direction = requireDirection(body["direction"]);
+    const maxPay = BigInt(requireAmount(body["maxPay"], "maxPay"));
+    const minReceive = BigInt(requireAmount(body["minReceive"], "minReceive"));
+
+    const now = nowS();
+    const candidates = [...this.orders.values()].filter(
+      (o) =>
+        o.status === "open" &&
+        o.direction === direction &&
+        BigInt(o.toAmount) <= maxPay &&
+        BigInt(o.fromAmount) >= minReceive &&
+        this.isSeen(o, now),
+    );
+    // Best rate for the taker first (receive/pay, exact via cross
+    // multiplication), then the larger fill, then FIFO.
+    candidates.sort((a, b) => {
+      const cross = BigInt(a.fromAmount) * BigInt(b.toAmount) - BigInt(b.fromAmount) * BigInt(a.toAmount);
+      if (cross !== 0n) return cross > 0n ? -1 : 1;
+      const size = BigInt(a.fromAmount) - BigInt(b.fromAmount);
+      if (size !== 0n) return size > 0n ? -1 : 1;
+      return a.createdAt - b.createdAt;
+    });
+    const best = candidates[0];
+    if (!best) {
+      throw new ApiError(409, "no open order matches those terms; the book may have moved");
+    }
+    return this.commitTake(best, body, takerIp);
+  }
+
+  private authorized(order: Order, body: Record<string, unknown>): void {
+    const token = body["token"];
+    if (typeof token !== "string" || sha256Hex(token) !== order.makerTokenHash) {
+      throw new ApiError(403, "invalid maker token");
+    }
+  }
+
+  /** Maker liveness ping (maker-token authed). In-memory only: no disk
+   *  write, so it is deliberately cheap to call every few seconds. */
+  heartbeat(id: string, body: Record<string, unknown>): PublicOrder {
+    const order = this.orders.get(id);
+    if (!order) throw new ApiError(404, "order not found");
+    this.authorized(order, body);
+    const now = nowS();
+    const wasSeen = this.isSeen(order, now);
+    this.seenAt.set(order.id, now);
+    if (!wasSeen) this.notify(); // maker came back online: push the book
+    return this.pub(order);
+  }
+
+  announceHashlock(id: string, body: Record<string, unknown>): PublicOrder {
+    this.sweep();
+    const order = this.orders.get(id);
+    if (!order) throw new ApiError(404, "order not found");
+    this.authorized(order, body);
+    if (order.status !== "accepted") throw new ApiError(409, "order is not awaiting a hashlock");
+
+    const hashlock = body["hashlock"];
+    if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
+      throw new ApiError(400, "hashlock must be 32 bytes of lowercase hex");
+    }
+    const initiatorTimeout = body["initiatorTimeout"];
+    const responderTimeout = body["responderTimeout"];
+    if (
+      typeof initiatorTimeout !== "number" ||
+      typeof responderTimeout !== "number" ||
+      !Number.isInteger(initiatorTimeout) ||
+      !Number.isInteger(responderTimeout)
+    ) {
+      throw new ApiError(400, "timeouts must be unix-second integers");
+    }
+    const now = nowS();
+    // Invariant from the architecture spec: the initiator's window must
+    // cover the responder's window twice over. Clients re-verify on-chain.
+    if (responderTimeout <= now + 600) throw new ApiError(400, "responder timeout is too soon");
+    if (initiatorTimeout - now < 2 * (responderTimeout - now)) {
+      throw new ApiError(400, "initiator timeout must be at least 2x the responder timeout");
+    }
+    order.hashlock = hashlock.toLowerCase();
+    order.initiatorTimeout = initiatorTimeout;
+    order.responderTimeout = responderTimeout;
+    order.status = "locking";
+    order.updatedAt = now;
+    this.persist();
+    return this.pub(order);
   }
 
   /** Taker-authorized walk-away, the counterpart of the maker's cancel.
@@ -299,51 +453,7 @@ export class OrderStore {
       this.persist();
     }
     // cancelled (or already released): idempotent success.
-    return toPublic(order);
-  }
-
-  private authorized(order: Order, body: Record<string, unknown>): void {
-    const token = body["token"];
-    if (typeof token !== "string" || sha256Hex(token) !== order.makerTokenHash) {
-      throw new ApiError(403, "invalid maker token");
-    }
-  }
-
-  announceHashlock(id: string, body: Record<string, unknown>): PublicOrder {
-    this.sweep();
-    const order = this.orders.get(id);
-    if (!order) throw new ApiError(404, "order not found");
-    this.authorized(order, body);
-    if (order.status !== "accepted") throw new ApiError(409, "order is not awaiting a hashlock");
-
-    const hashlock = body["hashlock"];
-    if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
-      throw new ApiError(400, "hashlock must be 32 bytes of lowercase hex");
-    }
-    const initiatorTimeout = body["initiatorTimeout"];
-    const responderTimeout = body["responderTimeout"];
-    if (
-      typeof initiatorTimeout !== "number" ||
-      typeof responderTimeout !== "number" ||
-      !Number.isInteger(initiatorTimeout) ||
-      !Number.isInteger(responderTimeout)
-    ) {
-      throw new ApiError(400, "timeouts must be unix-second integers");
-    }
-    const now = nowS();
-    // Invariant from the architecture spec: the initiator's window must
-    // cover the responder's window twice over. Clients re-verify on-chain.
-    if (responderTimeout <= now + 600) throw new ApiError(400, "responder timeout is too soon");
-    if (initiatorTimeout - now < 2 * (responderTimeout - now)) {
-      throw new ApiError(400, "initiator timeout must be at least 2x the responder timeout");
-    }
-    order.hashlock = hashlock.toLowerCase();
-    order.initiatorTimeout = initiatorTimeout;
-    order.responderTimeout = responderTimeout;
-    order.status = "locking";
-    order.updatedAt = now;
-    this.persist();
-    return toPublic(order);
+    return this.pub(order);
   }
 
   cancel(id: string, body: Record<string, unknown>): PublicOrder {
@@ -351,12 +461,12 @@ export class OrderStore {
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
     this.authorized(order, body);
-    if (order.status === "cancelled") return toPublic(order);
+    if (order.status === "cancelled") return this.pub(order);
     // Cancelling only removes the listing. If funds were already locked
     // on-chain, the HTLC claim/refund paths still govern them.
     order.status = "cancelled";
     order.updatedAt = nowS();
     this.persist();
-    return toPublic(order);
+    return this.pub(order);
   }
 }
