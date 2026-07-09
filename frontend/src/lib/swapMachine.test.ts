@@ -26,6 +26,7 @@ function swapFor(role: SwapRole, overrides: Partial<ActiveSwap> = {}): ActiveSwa
   return {
     role,
     orderId: role === "sandbox" ? null : "order-1",
+    takerToken: role === "taker" ? "taker-token-1" : null,
     direction: "eth->qrl",
     fromAmount: ETH_AMOUNT.toString(),
     toAmount: QRL_AMOUNT.toString(),

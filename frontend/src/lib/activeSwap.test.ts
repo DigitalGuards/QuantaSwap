@@ -30,6 +30,7 @@ function stubStorage(): void {
 const swap: ActiveSwap = {
   role: "maker",
   orderId: "order-1",
+  takerToken: null,
   direction: "eth->qrl",
   fromAmount: "1000000000000000000",
   toAmount: "5000000000000000000",
@@ -65,6 +66,12 @@ describe("active swap persistence", () => {
     saveActiveSwap(swap);
     clearActiveSwap();
     expect(loadActiveSwap()).toBeNull();
+  });
+
+  it("normalizes swaps stored before the taker token existed", () => {
+    const { takerToken: _omit, ...legacy } = swap;
+    localStorage.setItem("quantaswap.swap.v2", JSON.stringify(legacy));
+    expect(loadActiveSwap()).toEqual({ ...swap, takerToken: null });
   });
 });
 
