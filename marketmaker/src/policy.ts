@@ -13,6 +13,9 @@ export interface ManagedOrder {
   direction: Direction;
   /** Price-ladder level this listing fills (0 = tightest). */
   level: number;
+  /** Mid (milli-QRL/ETH) this listing was quoted at; null = pre-feed
+   *  record, treated as due for repricing. */
+  quotedMidMilli: string | null;
   fromAmount: string;
   toAmount: string;
   /** Set (and persisted) before the hashlock is announced; never logged. */

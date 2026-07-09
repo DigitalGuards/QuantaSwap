@@ -15,8 +15,15 @@ export interface Config {
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
   ethOrderWei: bigint;
-  /** Ladder mid price, QRL per ETH in integer milli (100000 = 100.000). */
+  /** Static mid (QRL/ETH integer milli); only used when the feed is off. */
   midPriceMilli: bigint;
+  /** "coingecko" tracks the live cross rate; "off" pins midPriceMilli. */
+  priceFeed: "coingecko" | "off";
+  priceRefreshS: number;
+  /** Stop posting when the cached price is older than this. */
+  priceMaxAgeS: number;
+  /** Cancel-and-repost open listings when the mid drifts beyond this. */
+  repriceThresholdBps: bigint;
   /** Ladder step in basis points per level (asks above, bids below mid). */
   levelStepBps: bigint;
   /** Never let a chain balance fall below this (gas + griefing headroom). */
@@ -69,8 +76,12 @@ export function loadConfig(): Config {
     ordersPerDirection: envInt("MM_ORDERS_PER_DIRECTION", 2),
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
     ethOrderWei: envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n), // 0.02 ETH base size
-    // Roughly the real-world cross rate (ETH ~1700 USD, QRL ~1 USD).
+    // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).
     midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
+    priceFeed: env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
+    priceRefreshS: envInt("MM_PRICE_REFRESH_S", 300),
+    priceMaxAgeS: envInt("MM_PRICE_MAX_AGE_S", 1800),
+    repriceThresholdBps: envWei("MM_REPRICE_THRESHOLD_BPS", 100n), // 1%
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung
     ethReserveWei: envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n),
     qrlReserveWei: envWei("MM_QRL_RESERVE_WEI", 5n * 10n ** 18n),
