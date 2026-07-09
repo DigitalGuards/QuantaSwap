@@ -21,7 +21,8 @@ Domain quantaswap.io (Cloudflare zone active, nothing deployed yet). Will be pub
 - Live testnet addresses + smoke commands: `docs/DEPLOYMENTS.md`.
 - Deploy/live-smoke env in gitignored `.env` (`.env.example` documents the shape). The QRL hexseed and Sepolia key never enter tracked files.
 - Frontend: React + Vite, hardened TS, zero-warning lint, secret generation fenced in a `crypto/` module (WebCrypto only).
-- Order book: `server/`, plain node:http + hardened TS, zero runtime deps, coordination only (clients re-verify everything on-chain). Gate: `npm test` in `server/` (build + lifecycle smoke). Prod: pm2 `quantaswap-orderbook` on 127.0.0.1:8091 behind the vhost's `/api` proxy.
+- Order book: `server/`, plain node:http + hardened TS, zero runtime deps, coordination only (clients re-verify everything on-chain). Per-IP take caps (2 concurrent, 6/day) keep one visitor from draining the book. Gate: `npm test` in `server/` (build + lifecycle smoke). Prod: pm2 `quantaswap-orderbook` on 127.0.0.1:8091 behind the vhost's `/api` proxy.
+- Market maker: `marketmaker/`, always-online protocol-mode maker (hardened TS, deps: ethers + @theqrl/web3) that keeps the book stocked and runs the maker side end-to-end (announce, lock, depth-verified claim, refund, repost). Pure decision core in `src/policy.ts`; every irreversible action goes through `decide()`. Gate: `npm test` in `marketmaker/` (build + node:test policy suite). Prod: pm2 `quantaswap-marketmaker` on the same box (recipe in docs/DEPLOYMENTS.md); keys in gitignored `.env` only.
 - Integration branch: `dev`. PRs for code; docs-only changes commit straight to `dev`.
 
 ## Invariants (treat regressions as high priority)
