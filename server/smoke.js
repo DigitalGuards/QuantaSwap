@@ -11,10 +11,13 @@ const PORT = 18000 + Math.floor(Math.random() * 2000);
 const BASE = `http://127.0.0.1:${PORT}/api`;
 const dataFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-")), "orders.json");
 
+// PRESENCE_TTL_S=1 so maker-presence expiry is testable with a short sleep.
 const child = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
-  env: { ...process.env, PORT: String(PORT), ORDERBOOK_DATA: dataFile },
+  env: { ...process.env, PORT: String(PORT), ORDERBOOK_DATA: dataFile, PRESENCE_TTL_S: "1" },
   stdio: ["ignore", "inherit", "inherit"],
 });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let failures = 0;
 function check(name, cond) {
@@ -270,6 +273,107 @@ try {
   const r4 = await mk();
   const afterLate = await api("POST", `/orders/${r4.id}/accept`, taker, walker);
   check("late release frees the concurrency slot too", afterLate.status === 200);
+
+  console.log("maker presence:");
+  const p1 = await mk();
+  const fresh = await api("GET", `/orders/${p1.id}`);
+  check("fresh order shows the maker online", fresh.body.order.makerSeen === true);
+  await sleep(1200); // one presence TTL
+  const stale = await api("GET", `/orders/${p1.id}`);
+  check("silent maker goes offline", stale.body.order.makerSeen === false);
+  const hbBad = await api("POST", `/orders/${p1.id}/heartbeat`, { token: "f".repeat(64) });
+  check("heartbeat with wrong token rejected", hbBad.status === 403);
+  const hb = await api("POST", `/orders/${p1.id}/heartbeat`, { token: p1.token });
+  check("heartbeat revives presence", hb.status === 200 && hb.body.order.makerSeen === true);
+
+  console.log("take-by-terms:");
+  // Fresh direction (qrl->eth) so leftovers from earlier sections cannot
+  // match. Taker pays toAmount (ETH), receives fromAmount (QRL).
+  const mkBid = async (fromQrlWei, toEthWei) => {
+    const r = await api(
+      "POST",
+      "/orders",
+      {
+        direction: "qrl->eth",
+        fromAmount: fromQrlWei.toString(),
+        toAmount: toEthWei.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+      },
+      makerHdr,
+    );
+    return { id: r.body.order.id, token: r.body.makerToken };
+  };
+  const terms = {
+    direction: "qrl->eth",
+    maxPay: ONE_ETH.toString(),
+    minReceive: (18n * 10n ** 17n).toString(), // at least 1.8 QRL for 1 ETH
+    ...taker,
+  };
+  const sniper = { "X-Forwarded-For": "203.0.113.30" };
+
+  const offlineBest = await mkBid(3n * 10n ** 18n, ONE_ETH); // best rate, but will be offline
+  await sleep(1200);
+  const bidA = await mkBid(2n * 10n ** 18n, ONE_ETH); // rate 2.0, online
+  const bidB = await mkBid(19n * 10n ** 17n, ONE_ETH); // rate 1.9, online
+  const takeBest = await api("POST", "/orders/take", terms, sniper);
+  check(
+    "take-by-terms fills the best online order, skipping offline makers",
+    takeBest.status === 200 &&
+      takeBest.body.order.id === bidA.id &&
+      typeof takeBest.body.takerToken === "string",
+  );
+  const takeNext = await api("POST", "/orders/take", terms, sniper);
+  check(
+    "racing second take falls through to the next rung within bounds",
+    takeNext.status === 200 && takeNext.body.order.id === bidB.id,
+  );
+  const takeEmpty = await api("POST", "/orders/take", terms, {
+    "X-Forwarded-For": "203.0.113.31",
+  });
+  check(
+    "take-by-terms with no online match is a clean conflict",
+    takeEmpty.status === 409 && !String(takeEmpty.body.error).includes("no longer open"),
+  );
+  await api("POST", `/orders/${offlineBest.id}/heartbeat`, { token: offlineBest.token });
+  const takeRevived = await api("POST", "/orders/take", terms, {
+    "X-Forwarded-For": "203.0.113.31",
+  });
+  check(
+    "a heartbeat puts the order back in the matchable set",
+    takeRevived.status === 200 && takeRevived.body.order.id === offlineBest.id,
+  );
+  const offlineById = await mkBid(2n * 10n ** 18n, ONE_ETH);
+  await sleep(1200);
+  const explicitTake = await api("POST", `/orders/${offlineById.id}/accept`, taker, {
+    "X-Forwarded-For": "203.0.113.32",
+  });
+  check("offline orders stay takeable by explicit id", explicitTake.status === 200);
+
+  console.log("book stream:");
+  const streamRes = await fetch(`${BASE}/orders/stream`);
+  check(
+    "stream connects as an event stream",
+    streamRes.status === 200 && streamRes.headers.get("content-type") === "text/event-stream",
+  );
+  const reader = streamRes.body.getReader();
+  const dec = new TextDecoder();
+  const nextChunk = () =>
+    Promise.race([
+      reader.read().then((r) => dec.decode(r.value ?? new Uint8Array())),
+      sleep(3000).then(() => {
+        throw new Error("stream timeout");
+      }),
+    ]);
+  const firstEvent = await nextChunk();
+  check("stream sends the book on connect", firstEvent.includes("event: book"));
+  const streamedOrder = await mk();
+  let streamed = "";
+  for (let i = 0; i < 5 && !streamed.includes(streamedOrder.id); i += 1) {
+    streamed += await nextChunk();
+  }
+  check("stream pushes book changes", streamed.includes(streamedOrder.id));
+  await reader.cancel().catch(() => undefined);
 } catch (err) {
   failures += 1;
   console.error("smoke run crashed:", err);

@@ -21,6 +21,8 @@ export interface OrderView {
   /** The taker released this take (walked away with an authorized
    *  release); optional for books predating the flag. */
   released?: boolean;
+  /** The maker heartbeated recently; optional for books predating it. */
+  makerSeen?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -67,5 +69,11 @@ export class OrderBookClient {
 
   async cancel(id: string, token: string): Promise<OrderView> {
     return (await this.api<{ order: OrderView }>("POST", `/orders/${id}/cancel`, { token })).order;
+  }
+
+  /** Maker liveness ping; keeps our listings in the matchable set. */
+  async heartbeat(id: string, token: string): Promise<OrderView> {
+    return (await this.api<{ order: OrderView }>("POST", `/orders/${id}/heartbeat`, { token }))
+      .order;
   }
 }

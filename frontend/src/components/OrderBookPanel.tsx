@@ -12,7 +12,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatEther } from "ethers";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
-import { acceptOrder, listOrders, type OrderView } from "@/lib/orderbook";
+import {
+  acceptOrder,
+  listOrders,
+  openBookStream,
+  takeOrder,
+  type OrderView,
+} from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { cn } from "@/utils/cn";
@@ -79,17 +85,38 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     }
   }, []);
 
+  // Live book via SSE, with the old poll demoted to a fallback that only
+  // fires while the stream is down (blocked proxy, reconnect gap).
   useEffect(() => {
     void refresh();
-    const t = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(t);
+    const stream = openBookStream(setOrders);
+    const t = setInterval(() => {
+      if (!stream.isLive()) void refresh();
+    }, 5000);
+    return () => {
+      stream.close();
+      clearInterval(t);
+    };
   }, [refresh]);
 
   const take = (order: OrderView) => {
     if (!ethAccount || !qrlAccount) return;
     setError(null);
     setBusyId(order.id);
-    acceptOrder(order.id, { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount })
+    const taker = { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount };
+    // Take by terms: if this exact row was just sniped, fill the next
+    // order at the same terms or better instead of failing. Offline-maker
+    // rows are excluded from matching, so those go by explicit id.
+    const request =
+      order.makerSeen === false
+        ? acceptOrder(order.id, taker)
+        : takeOrder({
+            direction: order.direction,
+            maxPay: order.toAmount,
+            minReceive: order.fromAmount,
+            ...taker,
+          });
+    request
       .then(({ order: accepted, takerToken }) => {
         const swap: ActiveSwap = {
           role: "taker",
@@ -148,15 +175,17 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     const depth = maxCum > 0n ? Number((row.cumEth * 1000n) / maxCum) / 10 : 0;
     const give = side === "ask" ? "QRL" : "ETH";
     const get = side === "ask" ? "ETH" : "QRL";
+    const offline = row.order.makerSeen === false;
     return (
       <button
         type="button"
         disabled={!canTake}
         onClick={() => take(row.order)}
-        title={`Take: you send ${fmtAmount(side === "ask" ? row.totalQrl : row.amountEth)} ${give}, receive ${fmtAmount(side === "ask" ? row.amountEth : row.totalQrl)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}`}
+        title={`Take: you send ${fmtAmount(side === "ask" ? row.totalQrl : row.amountEth)} ${give}, receive ${fmtAmount(side === "ask" ? row.amountEth : row.totalQrl)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
         className={cn(
           "relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right font-mono text-xs",
           canTake ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
+          offline && "opacity-40",
         )}
       >
         <span

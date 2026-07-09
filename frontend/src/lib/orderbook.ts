@@ -23,6 +23,9 @@ export interface OrderView {
   /** The taker released this take; the maker should not (further) commit
    *  funds. Optional for books predating the flag. */
   released?: boolean;
+  /** The maker's client heartbeated recently, so a take can actually
+   *  proceed. Optional for books predating it. */
+  makerSeen?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,6 +63,44 @@ export const acceptOrder = async (
   body: { takerEthAccount: string; takerQrlAccount: string },
 ): Promise<{ order: OrderView; takerToken: string }> =>
   api("POST", `/orders/${id}/accept`, body);
+
+/** Take by terms rather than by id: atomically fills the best open order
+ *  where the taker pays at most `maxPay` (the order's toAmount) and
+ *  receives at least `minReceive` (the order's fromAmount). Two takers
+ *  racing for the same row both fill while depth exists, and a stale
+ *  click can only fill at the terms the taker saw or better. */
+export const takeOrder = async (body: {
+  direction: Direction;
+  maxPay: string;
+  minReceive: string;
+  takerEthAccount: string;
+  takerQrlAccount: string;
+}): Promise<{ order: OrderView; takerToken: string }> => api("POST", "/orders/take", body);
+
+/** Maker liveness ping; keeps the listing visible as takeable. */
+export const heartbeatOrder = async (id: string, token: string): Promise<OrderView> =>
+  (await api<{ order: OrderView }>("POST", `/orders/${id}/heartbeat`, { token })).order;
+
+/** Live book subscription (SSE). The server pushes the full open list on
+ *  connect and on every change; the browser's EventSource reconnects on
+ *  its own. Callers keep a slow poll as fallback via `isLive()`. */
+export function openBookStream(onBook: (orders: OrderView[]) => void): {
+  isLive: () => boolean;
+  close: () => void;
+} {
+  const es = new EventSource(`${ORDERBOOK_API}/orders/stream`);
+  es.addEventListener("book", (event) => {
+    try {
+      onBook((JSON.parse((event as MessageEvent<string>).data) as { orders: OrderView[] }).orders);
+    } catch {
+      // malformed frame; the next push or the poll fallback recovers
+    }
+  });
+  return {
+    isLive: () => es.readyState === EventSource.OPEN,
+    close: () => es.close(),
+  };
+}
 
 /** Taker walk-away. Before the maker locks, the order returns to the book;
  *  after, it only stops counting against the taker's per-IP take slots.
