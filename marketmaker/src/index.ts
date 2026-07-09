@@ -291,7 +291,7 @@ async function main(): Promise<void> {
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
       `target ${cfg.ordersPerDirection}/direction, max inflight ${cfg.maxInflight}, ` +
-      `sizes ${cfg.ethOrderWei} wei ETH <-> ${cfg.qrlOrderWei} wei QRL`,
+      `base size ${cfg.ethOrderWei} wei ETH, mid ${cfg.midPriceMilli} milli-QRL/ETH`,
   );
   log(`managing ${state.all().length} persisted order(s)`);
   await tick();
