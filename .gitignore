@@ -10,3 +10,4 @@ coverage/
 *.log
 .DS_Store
 server/data/
+marketmaker/data/
