@@ -9,6 +9,7 @@ import {
   buildClaimData,
   buildLockNativeData,
   buildRefundData,
+  getConfirmedLegState,
   getLegState,
   qToHex,
   qrlRpc,
@@ -69,6 +70,9 @@ export function SwapFlow({
   onDiscard,
 }: Props) {
   const [legs, setLegs] = useState<LegStates>({});
+  // Snapshot at `confirmations` blocks behind the head; the gate for the
+  // two irreversible responses (taker locks, maker reveals the secret).
+  const [confirmedLegs, setConfirmedLegs] = useState<LegStates>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
@@ -91,7 +95,19 @@ export function SwapFlow({
       setNowS(Math.floor(Date.now() / 1000));
     } catch {
       // transient RPC failure; next poll retries
+      return;
     }
+    // Confirmation-depth snapshot, fail-closed per leg: a failed historical
+    // read leaves that leg unconfirmed rather than reusing a stale value,
+    // so an RPC hiccup can never enable an irreversible step.
+    const [ci, cr] = await Promise.allSettled([
+      getConfirmedLegState(iLeg, hashlock),
+      getConfirmedLegState(rLeg, hashlock),
+    ]);
+    const confirmed: LegStates = {};
+    if (ci.status === "fulfilled") confirmed[iLeg] = ci.value;
+    if (cr.status === "fulfilled") confirmed[rLeg] = cr.value;
+    setConfirmedLegs(confirmed);
   }, [iLeg, rLeg, hashlock]);
 
   useEffect(() => {
@@ -102,6 +118,14 @@ export function SwapFlow({
 
   const iState = legs[iLeg];
   const rState = legs[rLeg];
+  const iConfirmed = confirmedLegs[iLeg];
+  const rConfirmed = confirmedLegs[rLeg];
+
+  // The head sees a lock the confirmed snapshot does not yet: it exists
+  // but is still shallow enough for a reorg to rewrite. Anything acting on
+  // that lock waits until it shows up at depth.
+  const awaitingDepth = (latest: LegState | undefined, conf: LegState | undefined): boolean =>
+    Boolean(latest && latest.status === SwapStatus.Open && conf?.status !== SwapStatus.Open);
 
   // Which of the four steps this browser drives. In the sandbox one person
   // plays both roles; in a real order-book swap each side only ever signs
@@ -139,27 +163,31 @@ export function SwapFlow({
     (leg === iLeg ? initiatorTimeout : responderTimeout) ?? 0;
 
   // Taker-side verification of the maker's lock before responding with
-  // funds. The order book announced the parameters; the chain confirms them.
+  // funds. The order book announced the parameters; the chain confirms
+  // them. Checked against the confirmation-depth snapshot, not the head:
+  // a shallow lock could still be reorged into a different one.
   const initiatorLockIssue = useMemo(() => {
-    if (!iState || iState.status !== SwapStatus.Open || responderTimeout === null) return null;
-    if (!sameAddr(iState.recipient, legPlan[iLeg].recipient))
+    if (!iConfirmed || iConfirmed.status !== SwapStatus.Open || responderTimeout === null)
+      return null;
+    if (!sameAddr(iConfirmed.recipient, legPlan[iLeg].recipient))
       return "its recipient is not your address";
-    if (iState.amount !== legPlan[iLeg].amount)
-      return `it escrows ${formatEther(iState.amount)} ${iCfg.asset}, not the agreed ${formatEther(legPlan[iLeg].amount)}`;
-    if (iState.timeout < responderTimeout + CLAIM_MARGIN_S)
+    if (iConfirmed.amount !== legPlan[iLeg].amount)
+      return `it escrows ${formatEther(iConfirmed.amount)} ${iCfg.asset}, not the agreed ${formatEther(legPlan[iLeg].amount)}`;
+    if (iConfirmed.timeout < responderTimeout + CLAIM_MARGIN_S)
       return "its timeout leaves you too little claim window";
     return null;
-  }, [iState, iLeg, iCfg.asset, legPlan, responderTimeout]);
+  }, [iConfirmed, iLeg, iCfg.asset, legPlan, responderTimeout]);
 
-  // Maker-side verification of the taker's lock before revealing the secret.
+  // Maker-side verification of the taker's lock before revealing the
+  // secret, against the same confirmation-depth snapshot.
   const responderLockIssue = useMemo(() => {
-    if (!rState || rState.status !== SwapStatus.Open) return null;
-    if (!sameAddr(rState.recipient, legPlan[rLeg].recipient))
+    if (!rConfirmed || rConfirmed.status !== SwapStatus.Open) return null;
+    if (!sameAddr(rConfirmed.recipient, legPlan[rLeg].recipient))
       return "its recipient is not your address";
-    if (rState.amount !== legPlan[rLeg].amount)
-      return `it escrows ${formatEther(rState.amount)} ${rCfg.asset}, not the agreed ${formatEther(legPlan[rLeg].amount)}`;
+    if (rConfirmed.amount !== legPlan[rLeg].amount)
+      return `it escrows ${formatEther(rConfirmed.amount)} ${rCfg.asset}, not the agreed ${formatEther(legPlan[rLeg].amount)}`;
     return null;
-  }, [rState, rLeg, rCfg.asset, legPlan]);
+  }, [rConfirmed, rLeg, rCfg.asset, legPlan]);
 
   const sendOnLeg = useCallback(
     async (leg: LegKey, data: string, valueWei: bigint) => {
@@ -252,6 +280,7 @@ export function SwapFlow({
       busyKey: `lock-${iLeg}`,
       label: `Lock ${iCfg.asset}`,
       issue: null as string | null,
+      pending: null as string | null,
     },
     {
       title: `Lock ${rCfg.asset} on ${rCfg.name}`,
@@ -259,8 +288,8 @@ export function SwapFlow({
       own: mySteps[1],
       done: Boolean(rState && rState.status !== SwapStatus.None),
       canRun: Boolean(
-        iState &&
-          iState.status === SwapStatus.Open &&
+        iConfirmed &&
+          iConfirmed.status === SwapStatus.Open &&
           !initiatorLockIssue &&
           rState &&
           rState.status === SwapStatus.None &&
@@ -270,6 +299,10 @@ export function SwapFlow({
       busyKey: `lock-${rLeg}`,
       label: `Lock ${rCfg.asset}`,
       issue: mySteps[1] ? initiatorLockIssue : null,
+      pending:
+        !rState || rState.status !== SwapStatus.None || !awaitingDepth(iState, iConfirmed)
+          ? null
+          : `Initiator lock detected on ${iCfg.name}; waiting for ${iCfg.confirmations}-block confirmation depth before it is safe to respond.`,
     },
     {
       title: `Claim ${rCfg.asset} (reveals the secret)`,
@@ -278,8 +311,8 @@ export function SwapFlow({
       done: Boolean(rState && rState.status === SwapStatus.Claimed),
       canRun: Boolean(
         swap.preimage &&
-          rState &&
-          rState.status === SwapStatus.Open &&
+          rConfirmed &&
+          rConfirmed.status === SwapStatus.Open &&
           !responderLockIssue &&
           nowS < responderTimeout,
       ),
@@ -287,6 +320,10 @@ export function SwapFlow({
       busyKey: `claim-${rLeg}`,
       label: `Claim ${rCfg.asset}`,
       issue: mySteps[2] ? responderLockIssue : null,
+      pending:
+        rState?.status === SwapStatus.Claimed || !awaitingDepth(rState, rConfirmed)
+          ? null
+          : `Responder lock detected on ${rCfg.name}; waiting for ${rCfg.confirmations}-block confirmation depth before the secret is safe to reveal.`,
     },
     {
       title: `Claim ${iCfg.asset} with the revealed secret`,
@@ -300,6 +337,7 @@ export function SwapFlow({
       busyKey: `claim-${iLeg}`,
       label: `Claim ${iCfg.asset}`,
       issue: null,
+      pending: null,
     },
   ];
 
@@ -377,6 +415,9 @@ export function SwapFlow({
                 <p className="text-xs text-red-400">
                   Not safe to proceed: the counterparty lock failed verification, {step.issue}.
                 </p>
+              ) : null}
+              {!step.done && !step.issue && step.pending ? (
+                <p className="text-xs text-amber-400">{step.pending}</p>
               ) : null}
               {!step.done &&
                 (step.own ? (
