@@ -3,7 +3,7 @@
 // writes are encoded here and signed by the user's wallets.
 
 import { Interface } from "ethers";
-import { ETH_LEG, QRL_LEG, type LegKey } from "../config";
+import { ETH_LEG, QRL_LEG, legByKey, type LegKey } from "../config";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
@@ -49,12 +49,16 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
 export const qrlRpc = (method: string, params: unknown[]) => rpc(QRL_LEG.rpc, method, params);
 export const ethRpc = (method: string, params: unknown[]) => rpc(ETH_LEG.rpc, method, params);
 
-export async function getLegState(leg: LegKey, hashlock: string): Promise<LegState> {
+export async function getLegState(
+  leg: LegKey,
+  hashlock: string,
+  blockTag = "latest",
+): Promise<LegState> {
   const data = htlcInterface.encodeFunctionData("getSwap", [hashlock]);
   const call =
     leg === "qrl"
-      ? qrlRpc("qrl_call", [{ to: QRL_LEG.htlc, data }, "latest"])
-      : ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"]);
+      ? qrlRpc("qrl_call", [{ to: QRL_LEG.htlc, data }, blockTag])
+      : ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, blockTag]);
   const raw = (await call) as string;
   const [swap] = htlcInterface.decodeFunctionResult("getSwap", raw) as unknown as [
     {
@@ -75,6 +79,18 @@ export async function getLegState(leg: LegKey, hashlock: string): Promise<LegSta
     timeout: Number(swap.timeout),
     preimage: swap.preimage,
   };
+}
+
+/** The swap struct as it looked `confirmations` blocks behind the head.
+ *  A lock is only trustworthy for irreversible responses (locking the
+ *  other leg, revealing the secret) once it is visible at this depth; a
+ *  shallow reorg cannot rewrite it out from under the counterparty. The
+ *  struct is immutable once created (hashlock freshness is enforced by
+ *  the contract), so the confirmed snapshot's fields are canonical. */
+export async function getConfirmedLegState(leg: LegKey, hashlock: string): Promise<LegState> {
+  const head = await getBlockNumber(leg);
+  const depth = Math.max(0, head - legByKey(leg).confirmations);
+  return getLegState(leg, hashlock, `0x${depth.toString(16)}`);
 }
 
 export async function getBlockNumber(leg: LegKey): Promise<number> {
