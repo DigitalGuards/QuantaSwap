@@ -3,7 +3,7 @@
 // next action. No IO here so every gate is unit-testable; index.ts
 // executes the decisions.
 
-import { SwapStatus, sameAddr, type LegState } from "./htlc.js";
+import { NATIVE_TOKEN, SwapStatus, sameAddr, type LegState } from "./htlc.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 
@@ -23,6 +23,10 @@ export interface ManagedOrder {
   hashlock: string | null;
   initiatorTimeout: number | null;
   responderTimeout: number | null;
+  /** Wall time we announced the hashlock. Locking waits a short grace past
+   *  this so a taker's instant walk-away releases before funds move; null
+   *  on pre-grace records, treated as no grace. */
+  announcedAt: number | null;
   takerEthAccount: string | null;
   takerQrlAccount: string | null;
   lockSentAt: number | null;
@@ -59,6 +63,9 @@ export interface DecideInput {
   nowS: number;
   resendAfterS: number;
   claimSafetyS: number;
+  /** Seconds to wait after announcing before locking (grace for instant
+   *  taker walk-aways). */
+  lockGraceS: number;
 }
 
 const retryOk = (sentAt: number | null, nowS: number, resendAfterS: number): boolean =>
@@ -114,6 +121,7 @@ export function decide(x: DecideInput): Decision {
     x.rState.status === SwapStatus.Open &&
     x.rConfirmed !== null &&
     x.rConfirmed.status === SwapStatus.Open &&
+    sameAddr(x.rConfirmed.token, NATIVE_TOKEN) &&
     sameAddr(x.rConfirmed.recipient, x.expectedRecipient) &&
     x.rConfirmed.amount === x.expectedAmountWei &&
     nowS < x.rConfirmed.timeout - x.claimSafetyS &&
@@ -126,10 +134,13 @@ export function decide(x: DecideInput): Decision {
   // Escrow our leg after announcing, unless the responder window is
   // already too tight for the taker to plausibly respond and us to claim,
   // or the taker already released (never re-lock into a walked-away swap).
+  // A short grace past the announce lets an instant walk-away release
+  // before our funds move; a genuine taker loses only those seconds.
   if (
     x.iState.status === SwapStatus.None &&
     x.bookStatus === "locking" &&
     !x.released &&
+    nowS - (managed.announcedAt ?? 0) >= x.lockGraceS &&
     nowS < t2 - x.claimSafetyS &&
     retryOk(managed.lockSentAt, nowS, x.resendAfterS)
   ) {
@@ -155,6 +166,15 @@ export function decide(x: DecideInput): Decision {
 
   // Never locked and the responder window has closed: nothing will move.
   if (x.iState.status === SwapStatus.None && nowS >= t2 && managed.lockSentAt === null) {
+    return "abort";
+  }
+
+  // Our lock was attempted but never landed on chain (a send that threw, or
+  // an endpoint that dropped it) and t1 has passed: nothing of ours is
+  // escrowed and every window is closed, so stop tracking instead of
+  // waiting forever. A lock that somehow lands afterwards still refunds to
+  // us permissionlessly at its own timeout, no preimage needed.
+  if (x.iState.status === SwapStatus.None && nowS >= t1) {
     return "abort";
   }
 

@@ -107,7 +107,20 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       (managed.quotedMidMilli === null ||
         needsReprice(BigInt(managed.quotedMidMilli), mid, cfg.repriceThresholdBps))
     ) {
-      await book.cancel(managed.id, managed.token).catch(() => undefined);
+      try {
+        await book.cancel(managed.id, managed.token);
+      } catch (err) {
+        if (!(err instanceof OrderGoneError)) {
+          // Cancel failed: keep the managed record so next tick retries,
+          // rather than leaving a stale-priced ghost row open on the book
+          // that a taker could take and then wait on forever.
+          log(
+            `order ${short(managed.id)} reprice cancel failed, keeping to retry:`,
+            err instanceof Error ? err.message : err,
+          );
+          return view;
+        }
+      }
       state.delete(managed.id);
       log(
         `order ${short(managed.id)} repriced off the book (quoted mid ${managed.quotedMidMilli ?? "unknown"}, now ${mid})`,
@@ -140,6 +153,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     nowS: nowS(),
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
+    lockGraceS: cfg.lockGraceS,
   });
 
   switch (decision) {
@@ -171,6 +185,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       managed.takerQrlAccount = announced.takerQrlAccount ?? view.takerQrlAccount;
       managed.initiatorTimeout = t1;
       managed.responderTimeout = t2;
+      managed.announcedAt = nowS();
       state.upsert(managed);
       log(`order ${short(managed.id)} taken; hashlock announced, t2 in ${cfg.responderWindowS}s`);
       break;
@@ -179,6 +194,15 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     case "lock": {
       const recipient = iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
       if (!recipient || managed.hashlock === null || managed.initiatorTimeout === null) break;
+      // Final walk-away check against a release that landed since the tick's
+      // book read: the book is on localhost so this is cheap, and it closes
+      // most of the announce-to-lock grief window. Chain state still governs
+      // if a release still slips in after we broadcast.
+      const fresh = await fetchBook(managed.id);
+      if (fresh.status === "gone" || fresh.status === "cancelled" || fresh.view?.released) {
+        log(`order ${short(managed.id)} not locking: taker walked away before broadcast`);
+        break;
+      }
       managed.lockSentAt = nowS();
       state.upsert(managed);
       const hash = await sender(iLeg).send(
@@ -210,7 +234,19 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     case "finish":
     case "abort": {
       if (decision === "abort" && bookStatus !== "gone" && bookStatus !== "cancelled") {
-        await book.cancel(managed.id, managed.token).catch(() => undefined);
+        try {
+          await book.cancel(managed.id, managed.token);
+        } catch (err) {
+          if (!(err instanceof OrderGoneError)) {
+            // Keep the record and retry the cancel next tick instead of
+            // orphaning a live listing no maker will service.
+            log(
+              `order ${short(managed.id)} abort cancel failed, keeping to retry:`,
+              err instanceof Error ? err.message : err,
+            );
+            break;
+          }
+        }
       }
       state.delete(managed.id);
       log(`order ${short(managed.id)} ${decision === "finish" ? "settled" : "dropped"}`);
@@ -294,6 +330,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       hashlock: null,
       initiatorTimeout: null,
       responderTimeout: null,
+      announcedAt: null,
       takerEthAccount: null,
       takerQrlAccount: null,
       lockSentAt: null,
