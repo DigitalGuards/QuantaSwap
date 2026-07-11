@@ -81,11 +81,22 @@ ETH `0x48fF8564DF1980e74667dec3A85E3b4b67844b6B`, QRL
 `Q7D4175166aA4b696Cf77c23808811ef5Ffa7C36B`. Keys live only in the box
 `.env` and the workstation copy; never in the repo.
 
-Policy defaults: 2 open orders per direction (0.02 ETH <-> 2 QRL), max 2
-swaps in flight (caps what a griefer can tie up), balance reserves keep
-gas headroom, confirmation depth 3 before claiming, refunds automatic
-after the initiator window. Per-IP take caps in the order book (2
-concurrent, 6/day) keep one visitor from clearing the book.
+Policy defaults: 2 open orders per direction (0.02 ETH <-> 2 QRL), one
+listing per price rung, max 2 swaps in flight (caps what a griefer can
+tie up), balance reserves keep gas headroom, confirmation depth 3 before
+claiming, refunds automatic after the initiator window. Per-IP take caps
+in the order book (4 concurrent, 24/day) keep one visitor from clearing
+the book.
+
+The prod box runs a faster, deeper profile than the defaults (testnet
+funds, demo patience): `MM_ORDERS_PER_DIRECTION=4` with
+`MM_ORDERS_PER_LEVEL=2` (two identical listings per rung so a second
+taker can start the same trade while the first swap settles),
+`MM_MAX_INFLIGHT=8`, `MM_TICK_MS=5000`, `MM_CONFIRMATIONS=1`,
+`MM_LOCK_GRACE_S=10`. Keep listings x reads within the order book's
+per-minute read ceiling when deepening the ladder (each open listing
+costs the MM two reads per tick). The frontend's taker-side confirmation
+depth is 1 to match (frontend/src/config.ts).
 
 Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
 persisted swap state (including preimages of in-flight swaps) is in
