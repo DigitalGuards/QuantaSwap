@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { CLAIM_MARGIN_S } from "../config";
-import { SwapStatus, type LegState } from "./htlc";
+import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc";
 import type { ActiveSwap, SwapRole } from "./activeSwap";
 import { ZERO32, deriveSwapMachine, sameAddr, type LegStates } from "./swapMachine";
 
@@ -47,6 +47,7 @@ const none = (): LegState => ({
   status: SwapStatus.None,
   initiator: ZERO32.slice(0, 42),
   recipient: ZERO32.slice(0, 42),
+  token: NATIVE_TOKEN,
   amount: 0n,
   timeout: 0,
   preimage: ZERO32,
@@ -57,6 +58,7 @@ const iOpen = (overrides: Partial<LegState> = {}): LegState => ({
   status: SwapStatus.Open,
   initiator: MAKER_ETH,
   recipient: TAKER_ETH,
+  token: NATIVE_TOKEN,
   amount: ETH_AMOUNT,
   timeout: I_TIMEOUT,
   preimage: ZERO32,
@@ -68,11 +70,14 @@ const rOpen = (overrides: Partial<LegState> = {}): LegState => ({
   status: SwapStatus.Open,
   initiator: `0x${TAKER_QRL.slice(1)}`,
   recipient: `0x${MAKER_QRL.slice(1)}`,
+  token: NATIVE_TOKEN,
   amount: QRL_AMOUNT,
   timeout: R_TIMEOUT,
   preimage: ZERO32,
   ...overrides,
 });
+
+const SCAM_TOKEN = "0x1111111111111111111111111111111111111111";
 
 const claimed = (base: LegState, preimage = PREIMAGE): LegState => ({
   ...base,
@@ -169,6 +174,16 @@ describe("step 2: responder lock (taker's irreversible commit)", () => {
     expect(m.steps[1].issue).toBeNull();
   });
 
+  it("rejects a confirmed lock escrowing a token instead of native coin", () => {
+    // A lockToken() record shares the struct: right recipient/amount/timeout
+    // but pays out a worthless ERC-20 on claim. Must be rejected before the
+    // taker escrows real funds.
+    const bad = iOpen({ token: SCAM_TOKEN });
+    const m = derive("taker", { eth: bad, qrl: none() }, { eth: bad, qrl: none() });
+    expect(m.steps[1].canRun).toBe(false);
+    expect(m.steps[1].issue).toBe("it escrows a token, not native ETH");
+  });
+
   it("rejects a confirmed lock paying someone else", () => {
     const bad = iOpen({ recipient: MAKER_ETH });
     const m = derive("taker", { eth: bad, qrl: none() }, { eth: bad, qrl: none() });
@@ -225,6 +240,13 @@ describe("step 3: secret reveal (maker's irreversible commit)", () => {
   it("never enables for the taker, who has no preimage", () => {
     const m = derive("taker", bothLocked, bothLocked);
     expect(m.steps[2].canRun).toBe(false);
+  });
+
+  it("rejects a confirmed responder lock escrowing a token instead of native coin", () => {
+    const bad = rOpen({ token: SCAM_TOKEN });
+    const m = derive("maker", { eth: iOpen(), qrl: bad }, { eth: iOpen(), qrl: bad });
+    expect(m.steps[2].canRun).toBe(false);
+    expect(m.steps[2].issue).toBe("it escrows a token, not native QRL");
   });
 
   it("rejects a confirmed responder lock paying someone else", () => {

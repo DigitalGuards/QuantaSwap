@@ -85,6 +85,10 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
         <Button variant="outline" size="sm" onClick={() => onAbort(null)}>
           Walk away
         </Button>
+        <p className="text-xs text-muted-foreground">
+          Walking away returns this order to the book. If the maker locks in the same moment, it
+          still counts as one of your daily takes.
+        </p>
       </CardContent>
     </Card>
   );

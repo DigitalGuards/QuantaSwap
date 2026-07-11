@@ -4,7 +4,7 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { SwapStatus, type LegState } from "./htlc.js";
+import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc.js";
 import { decide, levelQuote, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
 
 const NOW = 1_800_000_000;
@@ -28,6 +28,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     hashlock: `0x${"12".repeat(32)}`,
     initiatorTimeout: T1,
     responderTimeout: T2,
+    announcedAt: null,
     takerEthAccount: TAKER_ETH,
     takerQrlAccount: `Q${"d".repeat(40)}`,
     lockSentAt: null,
@@ -42,11 +43,14 @@ const leg = (status: number, overrides: Partial<LegState> = {}): LegState => ({
   status: status as LegState["status"],
   initiator: TAKER_ETH,
   recipient: `0x${MY_QRL.slice(1)}`,
+  token: NATIVE_TOKEN,
   amount: AMOUNT,
   timeout: T2,
   preimage: ZERO32,
   ...overrides,
 });
+
+const SCAM_TOKEN = "0x1111111111111111111111111111111111111111";
 
 function input(overrides: Partial<DecideInput> = {}): DecideInput {
   return {
@@ -61,6 +65,7 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     nowS: NOW,
     resendAfterS: 240,
     claimSafetyS: 600,
+    lockGraceS: 0,
     ...overrides,
   };
 }
@@ -97,8 +102,25 @@ describe("locking our leg", () => {
     assert.equal(decide(input({ managed: managed({ lockSentAt: NOW - 600 }) })), "lock");
   });
 
+  it("waits out the announce grace before locking, so an instant walk-away can release", () => {
+    const justAnnounced = managed({ announcedAt: NOW - 10 });
+    assert.equal(decide(input({ managed: justAnnounced, lockGraceS: 30 })), "wait");
+    assert.equal(
+      decide(input({ managed: managed({ announcedAt: NOW - 40 }), lockGraceS: 30 })),
+      "lock",
+    );
+  });
+
   it("fails closed on an RPC gap", () => {
     assert.equal(decide(input({ iState: null })), "wait");
+  });
+
+  it("stops tracking a lock that was attempted but never landed once t1 passes", () => {
+    const zombie = managed({ lockSentAt: NOW - 6000 });
+    // Between t2 and t1 it keeps waiting in case the tx merely lags.
+    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T2 + 100 })), "wait");
+    // Past t1 nothing of ours is on chain and every window is closed: drop it.
+    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T1 + 100 })), "abort");
   });
 });
 
@@ -149,6 +171,13 @@ describe("claiming the taker's lock (irreversible)", () => {
 
   it("never claims a short-paying lock", () => {
     const bad = leg(SwapStatus.Open, { amount: AMOUNT - 1n });
+    assert.equal(decide(lockedInputs(bad, bad)), "wait");
+  });
+
+  it("never claims a lock escrowing a token instead of native coin", () => {
+    // Right recipient, right amount, but a lockToken() record: claiming it
+    // reveals the secret and pays out a worthless ERC-20.
+    const bad = leg(SwapStatus.Open, { token: SCAM_TOKEN });
     assert.equal(decide(lockedInputs(bad, bad)), "wait");
   });
 

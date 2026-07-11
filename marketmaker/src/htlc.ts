@@ -16,10 +16,17 @@ const iface = new Interface(HTLC_ABI);
 export const SwapStatus = { None: 0, Open: 1, Claimed: 2, Refunded: 3 } as const;
 export type SwapStatusValue = (typeof SwapStatus)[keyof typeof SwapStatus];
 
+/** The native-coin sentinel in the HTLC's `token` field (address(0)). */
+export const NATIVE_TOKEN = `0x${"0".repeat(40)}`;
+
 export interface LegState {
   status: SwapStatusValue;
   initiator: string;
   recipient: string;
+  /** ERC-20 escrowed, or the zero address for native coin. A lockToken()
+   *  record shares the struct and would pass recipient/amount checks while
+   *  paying a worthless token on claim, so it must be verified native. */
+  token: string;
   amount: bigint;
   timeout: number;
   preimage: string;
@@ -95,6 +102,7 @@ export async function getSwapState(
     status: Number(swap.status) as SwapStatusValue,
     initiator: swap.initiator,
     recipient: swap.recipient,
+    token: swap.token,
     amount: swap.amount,
     timeout: Number(swap.timeout),
     preimage: swap.preimage,

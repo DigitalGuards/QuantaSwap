@@ -21,6 +21,7 @@ import {
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 
 interface Props {
@@ -55,6 +56,28 @@ const fmtAmount = (wei: bigint): string => {
   return s.endsWith(".0") ? s.slice(0, -2) : s;
 };
 
+/** What taking this order costs the taker, in the taker's own terms: they
+ *  send the maker's `toAmount` and receive the maker's `fromAmount`. */
+function describeTake(order: OrderView): {
+  send: string;
+  sendAsset: string;
+  recv: string;
+  recvAsset: string;
+} {
+  const sellsEth = order.direction === "eth->qrl";
+  return {
+    send: fmtAmount(BigInt(order.toAmount)),
+    sendAsset: sellsEth ? "QRL" : "ETH",
+    recv: fmtAmount(BigInt(order.fromAmount)),
+    recvAsset: sellsEth ? "ETH" : "QRL",
+  };
+}
+
+// Server cap rejections that mean "you cannot take more right now", as
+// opposed to transient errors: surfaced as a blocking banner, not a small
+// line, so a full book does not read as takeable when it is not.
+const CAP_ERROR_RE = /take limit|swaps in progress/i;
+
 /** Price and sizes of one order, taker's perspective on the QRL/ETH pair. */
 function toRow(order: OrderView): Omit<BookRow, "cumEth"> {
   const sellsEth = order.direction === "eth->qrl";
@@ -76,6 +99,13 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
   const [orders, setOrders] = useState<OrderView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // A row clicked but not yet confirmed. Taking reserves the order and
+  // starts the maker locking, so it needs an explicit confirm, not a raw
+  // click on browse.
+  const [pending, setPending] = useState<OrderView | null>(null);
+  // Set when the server refuses further takes (per-IP caps reached); blocks
+  // the whole book until the caps free rather than 429-ing click by click.
+  const [capBlocked, setCapBlocked] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -139,10 +169,19 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         onTaken(swap);
       })
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "Failed to take the order");
+        const message = err instanceof Error ? err.message : "Failed to take the order";
+        setError(message);
+        if (CAP_ERROR_RE.test(message)) setCapBlocked(true);
         void refresh();
       })
       .finally(() => setBusyId(null));
+  };
+
+  const confirmTake = () => {
+    if (!pending) return;
+    const order = pending;
+    setPending(null);
+    take(order);
   };
 
   const { asks, bids, maxCum, mid, spreadPct } = useMemo(() => {
@@ -169,7 +208,8 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     };
   }, [orders, ownOrderId]);
 
-  const canTake = Boolean(ethAccount && qrlAccount) && !takeDisabled && busyId === null;
+  const canTake =
+    Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
 
   const Row = ({ row, side }: { row: BookRow; side: "ask" | "bid" }) => {
     const depth = maxCum > 0n ? Number((row.cumEth * 1000n) / maxCum) / 10 : 0;
@@ -180,11 +220,12 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
       <button
         type="button"
         disabled={!canTake}
-        onClick={() => take(row.order)}
+        onClick={() => setPending(row.order)}
         title={`Take: you send ${fmtAmount(side === "ask" ? row.totalQrl : row.amountEth)} ${give}, receive ${fmtAmount(side === "ask" ? row.amountEth : row.totalQrl)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
         className={cn(
           "relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right font-mono text-xs",
           canTake ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
+          pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
           offline && "opacity-40",
         )}
       >
@@ -216,6 +257,46 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         </div>
       </CardHeader>
       <CardContent className="space-y-0 px-3 pb-3">
+        {capBlocked ? (
+          <div className="mx-2 mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-xs text-amber-400">
+            You have reached the per-visitor take limit (2 swaps at once, 6 per day). Finish or let
+            your current swaps expire before taking another.
+          </div>
+        ) : null}
+
+        {pending ? (
+          <div className="mx-2 mb-2 space-y-2 rounded-md border border-blue-accent/40 bg-blue-accent/10 p-3">
+            {(() => {
+              const t = describeTake(pending);
+              return (
+                <p className="text-sm">
+                  Take this order: send{" "}
+                  <span className="font-medium">
+                    {t.send} {t.sendAsset}
+                  </span>
+                  , receive{" "}
+                  <span className="font-medium">
+                    {t.recv} {t.recvAsset}
+                  </span>
+                  .
+                </p>
+              );
+            })()}
+            <p className="text-xs text-muted-foreground">
+              Confirming reserves this order and the maker starts locking their leg. It counts as one
+              of your 6 takes per day whether or not you complete it.
+            </p>
+            <div className="flex gap-2">
+              <Button size="sm" disabled={!canTake} onClick={confirmTake}>
+                Confirm take
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setPending(null)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-3 gap-2 px-2 pb-1.5 text-right text-[11px] text-muted-foreground">
           <span className="text-left">Price (QRL)</span>
           <span>Amount (ETH)</span>
