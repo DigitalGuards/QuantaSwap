@@ -52,7 +52,10 @@ export default function App() {
             element={<SandboxPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
           />
           <Route path="/how-it-works" element={<HowItWorksPage />} />
-          <Route path="/swap/:hashlock" element={<SwapStatusPage />} />
+          <Route
+            path="/swap/:hashlock"
+            element={<SwapStatusPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
+          />
           <Route path="*" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
         </Routes>
       </main>
