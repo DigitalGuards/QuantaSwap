@@ -44,6 +44,9 @@ export interface Config {
   resendAfterS: number;
   /** Do not claim (or lock) within this margin of the responder timeout. */
   claimSafetyS: number;
+  /** Wait this long after announcing before locking, so an instant taker
+   *  walk-away releases before our funds move. */
+  lockGraceS: number;
   initiatorWindowS: number;
   responderWindowS: number;
   stateFile: string;
@@ -99,6 +102,7 @@ export function loadConfig(): Config {
     txTimeoutMs: envInt("MM_TX_TIMEOUT_MS", 180_000),
     resendAfterS: envInt("MM_RESEND_AFTER_S", 240),
     claimSafetyS: envInt("MM_CLAIM_SAFETY_S", 600),
+    lockGraceS: envInt("MM_LOCK_GRACE_S", 30),
     initiatorWindowS: envInt("MM_INITIATOR_WINDOW_S", 7200),
     responderWindowS: envInt("MM_RESPONDER_WINDOW_S", 3600),
     stateFile: env("MM_STATE_FILE", new URL("../data/state.json", import.meta.url).pathname),
