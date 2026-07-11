@@ -3,7 +3,7 @@
 // are always re-verified against on-chain HTLC state before acting.
 
 import { ORDERBOOK_API } from "../config";
-import type { Direction } from "./activeSwap";
+import type { ActiveSwap, Direction } from "./activeSwap";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 
@@ -107,6 +107,15 @@ export function openBookStream(onBook: (orders: OrderView[]) => void): {
  *  Purely book-keeping either way, so callers may fire and forget. */
 export const releaseOrder = async (id: string, token: string): Promise<OrderView> =>
   (await api<{ order: OrderView }>("POST", `/orders/${id}/release`, { token })).order;
+
+/** Fire-and-forget release of a taker's reservation when they abandon or
+ *  finish a swap; no-op for makers/sandbox. Funds are always governed
+ *  on-chain, so failures are fine to ignore. */
+export const releaseTake = (s: ActiveSwap | null): void => {
+  if (s && s.role === "taker" && s.orderId && s.takerToken) {
+    void releaseOrder(s.orderId, s.takerToken).catch(() => undefined);
+  }
+};
 
 export const announceHashlock = async (
   id: string,
