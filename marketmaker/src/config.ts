@@ -11,6 +11,9 @@ export interface Config {
   qrlHexseed: string;
   /** Open orders to keep listed per direction. */
   ordersPerDirection: number;
+  /** Concurrent listings per price rung. 2 lets a second taker start the
+   *  same trade while the first swap is still settling. */
+  ordersPerLevel: number;
   /** Max orders simultaneously past `open` (accepted/locking). Caps how
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
@@ -85,6 +88,7 @@ export function loadConfig(): Config {
     ethPrivateKey: required("MM_ETH_PRIVATE_KEY"),
     qrlHexseed: required("MM_QRL_HEXSEED"),
     ordersPerDirection: envInt("MM_ORDERS_PER_DIRECTION", 2),
+    ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
     ethOrderWei: envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n), // 0.02 ETH base size
     // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).
