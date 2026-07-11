@@ -18,7 +18,7 @@ interface Props {
  *  without a counterparty. */
 export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
   return (
-    <div className="space-y-10 pb-16">
+    <div className="page-enter space-y-10 pb-16">
       <section className="pt-10 pb-2 text-center">
         <h1 className="text-3xl font-black tracking-tight md:text-4xl">Sandbox</h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
@@ -28,8 +28,8 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
       </section>
 
       <section className="mx-auto max-w-md space-y-4">
-        {eth.error ? <p className="text-sm text-red-400">{eth.error}</p> : null}
-        {qrl.error ? <p className="text-sm text-red-400">{qrl.error}</p> : null}
+        {eth.error ? <p className="text-sm text-destructive">{eth.error}</p> : null}
+        {qrl.error ? <p className="text-sm text-destructive">{qrl.error}</p> : null}
 
         {swap ? (
           swap.role === "sandbox" ? (
@@ -46,7 +46,7 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
           ) : (
             <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
               A market swap is in progress. Finish or discard it on the{" "}
-              <Link to="/" className="text-secondary underline">
+              <Link to="/" className="text-blue-accent hover:underline">
                 Swap page
               </Link>{" "}
               before starting a sandbox run.

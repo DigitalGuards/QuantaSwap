@@ -18,11 +18,21 @@ export function NetworkPanel() {
 
   const cell = (leg: typeof QRL_LEG | typeof ETH_LEG, height: number | undefined, addressUrl: string) => (
     <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-      <div className="flex justify-between">
-        <span className="text-muted-foreground">{leg.name}</span>
-        <span className="text-xs text-muted-foreground">block {height ?? "…"}</span>
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <span
+            aria-hidden
+            className={
+              height !== undefined
+                ? "glow-dot h-1.5 w-1.5 rounded-full bg-current text-success"
+                : "h-1.5 w-1.5 rounded-full bg-current text-muted-foreground/60"
+            }
+          />
+          {leg.name}
+        </span>
+        <span className="font-data text-xs text-muted-foreground">block {height ?? "…"}</span>
       </div>
-      <div className="font-mono text-xs">
+      <div className="font-data text-xs">
         HTLC{" "}
         <a href={addressUrl} target="_blank" rel="noreferrer" className="text-blue-accent hover:underline">
           {shortAddr(leg.htlc)}

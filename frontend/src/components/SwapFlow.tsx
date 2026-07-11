@@ -42,7 +42,7 @@ interface Props {
 const pillStyles: Record<string, string> = {
   none: "bg-muted/40 text-muted-foreground",
   open: "bg-blue-accent/10 text-blue-accent",
-  claimed: "bg-emerald-400/10 text-emerald-400",
+  claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
 
@@ -303,13 +303,13 @@ export function SwapFlow({
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
 
   return (
-    <Card className="border-l-2 border-l-secondary">
+    <Card className="surface-ember">
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">Swap in progress</CardTitle>
           <span className="text-xs text-muted-foreground">
             {roleLabel} ·{" "}
-            <span className="font-mono" title={hashlock}>
+            <span className="font-data" title={hashlock}>
               {hashlock.slice(0, 14)}…
             </span>
           </span>
@@ -323,7 +323,7 @@ export function SwapFlow({
       </CardHeader>
       <CardContent className="space-y-1">
         {complete ? (
-          <div className="mb-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 text-center text-sm font-semibold text-emerald-400">
+          <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
             Atomic swap complete on both chains
           </div>
         ) : null}
@@ -331,7 +331,8 @@ export function SwapFlow({
         {accountMismatch ? (
           <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
             A connected wallet differs from the address this swap was agreed with. Payouts still go
-            to the agreed addresses ({ownEth.slice(0, 8)}… / {ownQrl.slice(0, 8)}…).
+            to the agreed addresses (<span className="font-data">{ownEth.slice(0, 8)}…</span> /{" "}
+            <span className="font-data">{ownQrl.slice(0, 8)}…</span>).
           </p>
         ) : null}
 
@@ -346,7 +347,7 @@ export function SwapFlow({
                 className={cn(
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
                   step.done
-                    ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-400"
+                    ? "border-success/60 bg-success/10 text-success"
                     : step.own && step.canRun
                       ? "border-blue-accent/60 text-blue-accent"
                       : "border-border text-muted-foreground",
@@ -358,7 +359,7 @@ export function SwapFlow({
                 <h3 className="text-sm font-medium">{view.title}</h3>
                 <p className="text-xs leading-relaxed text-muted-foreground">{view.desc}</p>
                 {step.issue ? (
-                  <p className="text-xs text-red-400">
+                  <p className="text-xs text-destructive">
                     Not safe to proceed: the counterparty lock failed verification, {step.issue}.
                   </p>
                 ) : null}
@@ -413,7 +414,7 @@ export function SwapFlow({
           </div>
         ) : null}
 
-        {error ? <p className="pt-2 text-sm break-words text-red-400">{error}</p> : null}
+        {error ? <p className="pt-2 text-sm break-words text-destructive">{error}</p> : null}
 
         <div className="flex items-center justify-between pt-4">
           {swap.preimage ? (
@@ -457,7 +458,7 @@ export function SwapFlow({
           )}
         </div>
         {showSecret && swap.preimage ? (
-          <p className="font-mono text-xs break-all text-muted-foreground">{swap.preimage}</p>
+          <p className="font-data text-xs break-all text-muted-foreground">{swap.preimage}</p>
         ) : null}
       </CardContent>
     </Card>

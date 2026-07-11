@@ -183,18 +183,18 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
   const toLeg = order ? legByKey(responderLeg(order.direction)) : null;
 
   return (
-    <Card className="border-l-2 border-l-blue-accent">
+    <Card className="surface-ember">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Your open order</CardTitle>
-          <span className="font-mono text-xs text-muted-foreground">{myOrder.id}</span>
+          <span className="font-data text-xs text-muted-foreground">{myOrder.id}</span>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
         {order && fromLeg && toLeg ? (
           <p className="text-sm">
-            Give <span className="font-medium">{formatEther(BigInt(order.fromAmount))} {fromLeg.asset}</span>{" "}
-            for <span className="font-medium">{formatEther(BigInt(order.toAmount))} {toLeg.asset}</span>
+            Give <span className="font-data font-medium">{formatEther(BigInt(order.fromAmount))} {fromLeg.asset}</span>{" "}
+            for <span className="font-data font-medium">{formatEther(BigInt(order.toAmount))} {toLeg.asset}</span>
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">Loading order…</p>
@@ -204,14 +204,20 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
             {busy ? "Taker found: preparing the swap…" : "Taker found."}
           </p>
         ) : (
-          <p className="text-sm text-muted-foreground">
-            Listed on the order book, waiting for a taker. Keep this page open: when someone
-            accepts, you lock first.
+          <p className="flex items-start gap-2 text-sm text-muted-foreground">
+            <span
+              aria-hidden
+              className="glow-dot mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
+            />
+            <span>
+              Listed on the order book, waiting for a taker. Keep this page open: when someone
+              accepts, you lock first.
+            </span>
           </p>
         )}
         {error ? (
           <div className="space-y-2">
-            <p className="text-sm text-red-400">{error}</p>
+            <p className="text-sm text-destructive">{error}</p>
             {order?.status === "accepted" ? (
               <Button
                 size="sm"
