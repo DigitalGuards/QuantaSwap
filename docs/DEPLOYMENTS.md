@@ -89,11 +89,14 @@ in the order book (4 concurrent, 24/day) keep one visitor from clearing
 the book.
 
 The prod box runs a faster, deeper profile than the defaults (testnet
-funds, demo patience): `MM_ORDERS_PER_LEVEL=2` (two identical listings
-per rung so a second taker can start the same trade while the first swap
-settles), `MM_MAX_INFLIGHT=4`, `MM_TICK_MS=5000`, `MM_CONFIRMATIONS=1`,
-`MM_LOCK_GRACE_S=10`. The frontend's taker-side confirmation depth is 1
-to match (frontend/src/config.ts).
+funds, demo patience): `MM_ORDERS_PER_DIRECTION=4` with
+`MM_ORDERS_PER_LEVEL=2` (two identical listings per rung so a second
+taker can start the same trade while the first swap settles),
+`MM_MAX_INFLIGHT=8`, `MM_TICK_MS=5000`, `MM_CONFIRMATIONS=1`,
+`MM_LOCK_GRACE_S=10`. Keep listings x reads within the order book's
+per-minute read ceiling when deepening the ladder (each open listing
+costs the MM two reads per tick). The frontend's taker-side confirmation
+depth is 1 to match (frontend/src/config.ts).
 
 Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
 persisted swap state (including preimages of in-flight swaps) is in
