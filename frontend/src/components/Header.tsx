@@ -41,7 +41,7 @@ function WalletSlot({
           target="_blank"
           rel="noreferrer"
           title={`View address on ${explorerName}`}
-          className="rounded-md border border-border bg-muted/40 px-3 py-1.5 font-mono text-xs text-secondary hover:border-secondary/60"
+          className="font-data rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs text-blue-accent transition-colors hover:border-blue-accent/50"
         >
           {shortAddr(account)}
         </a>
@@ -89,7 +89,7 @@ export function Header(props: Props) {
                   cn(
                     "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                     isActive
-                      ? "bg-secondary/10 text-secondary"
+                      ? "bg-primary/10 text-primary"
                       : "text-muted-foreground hover:text-foreground",
                   )
                 }
@@ -132,7 +132,7 @@ export function Header(props: Props) {
             className={({ isActive }) =>
               cn(
                 "px-3 py-1 text-sm font-medium",
-                isActive ? "text-secondary" : "text-muted-foreground hover:text-foreground",
+                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground",
               )
             }
           >
