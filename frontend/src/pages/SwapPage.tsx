@@ -1,14 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
 import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
-import {
-  clearMyOrder,
-  loadMyOrder,
-  type ActiveSwap,
-  type MyOrderRef,
-} from "@/lib/activeSwap";
-import { announceHashlock, getOrder, OrderGoneError, releaseOrder } from "@/lib/orderbook";
-import { SwapFlow } from "@/components/SwapFlow";
+import { loadMyOrder, type ActiveSwap, type MyOrderRef } from "@/lib/activeSwap";
+import { releaseTake } from "@/lib/orderbook";
 import { PostOrderCard } from "@/components/PostOrderCard";
 import { MyOrderCard } from "@/components/MyOrderCard";
 import { OrderBookPanel } from "@/components/OrderBookPanel";
@@ -25,47 +20,16 @@ interface Props {
 export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
   const [myOrder, setMyOrder] = useState<MyOrderRef | null>(() => loadMyOrder());
   const [notice, setNotice] = useState<string | null>(null);
-  const reconciled = useRef(false);
+  const navigate = useNavigate();
 
-  // Tell the book a taker is done with its order (walk-away or discard) so
-  // the reservation stops counting against this visitor's take slots and,
-  // if the maker never locked, the listing returns to the book. Purely
-  // book-keeping: funds are always governed on-chain, so failures are fine.
-  const releaseTake = (s: ActiveSwap | null) => {
-    if (s && s.role === "taker" && s.orderId && s.takerToken) {
-      void releaseOrder(s.orderId, s.takerToken).catch(() => undefined);
-    }
-  };
-
-  // Crash recovery: if a maker swap was persisted but the tab died before
-  // the hashlock reached the order book, re-announce it so the taker's
-  // client can proceed. The preimage was saved first, so nothing is lost.
-  useEffect(() => {
-    if (reconciled.current) return;
-    if (!swap || swap.role !== "maker" || !myOrder || swap.orderId !== myOrder.id) return;
-    if (!swap.hashlock || swap.initiatorTimeout === null || swap.responderTimeout === null) return;
-    reconciled.current = true;
-    const settle = () => {
-      clearMyOrder();
-      setMyOrder(null);
-    };
-    getOrder(myOrder.id)
-      .then(async (order) => {
-        if (order.status === "accepted") {
-          await announceHashlock(myOrder.id, {
-            token: myOrder.token,
-            hashlock: swap.hashlock ?? "",
-            initiatorTimeout: swap.initiatorTimeout ?? 0,
-            responderTimeout: swap.responderTimeout ?? 0,
-          });
-        }
-        settle();
-      })
-      .catch((err: unknown) => {
-        if (err instanceof OrderGoneError) settle();
-        else reconciled.current = false; // transient; retry on next render
-      });
-  }, [swap, myOrder]);
+  // An active swap's canonical URL is /swap/<hashlock>: bookmarkable,
+  // shareable, and recorded in browser history. The interactive flow (and
+  // the maker announce-reconcile) lives on that route now; only a taker
+  // still waiting for the maker's hashlock stays here, since there is no
+  // hash to link yet.
+  if (swap && swap.hashlock) {
+    return <Navigate to={`/swap/${swap.hashlock}`} replace />;
+  }
 
   return (
     <div className="page-enter space-y-10 pb-16">
@@ -98,12 +62,13 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
 
         {swap ? (
           <div className="space-y-4">
-            {swap.role === "taker" && !swap.hashlock ? (
+            {swap.role === "taker" ? (
               <AwaitHashlock
                 swap={swap}
                 onReady={(updated) => {
                   setNotice(null);
                   setSwap(updated);
+                  if (updated.hashlock) navigate(`/swap/${updated.hashlock}`);
                 }}
                 onAbort={(reason) => {
                   releaseTake(swap);
@@ -111,21 +76,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                   setSwap(null);
                 }}
               />
-            ) : (
-              <SwapFlow
-                swap={swap}
-                ethAccount={eth.account}
-                qrlAccount={qrl.account}
-                browserProvider={eth.browserProvider}
-                ensureSepolia={eth.ensureSepolia}
-                qrlRequest={qrl.request}
-                qrlTransport={qrl.kind}
-                onDiscard={() => {
-                  releaseTake(swap);
-                  setSwap(null);
-                }}
-              />
-            )}
+            ) : null}
             <NetworkPanel />
           </div>
         ) : (
@@ -138,6 +89,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 onMatched={(matched) => {
                   setMyOrder(null);
                   setSwap(matched);
+                  if (matched.hashlock) navigate(`/swap/${matched.hashlock}`);
                 }}
                 onClosed={() => setMyOrder(null)}
               />
