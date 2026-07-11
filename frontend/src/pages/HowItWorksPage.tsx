@@ -180,7 +180,25 @@ export function HowItWorksPage() {
           . You pair the QRL leg straight from the MyQRLWallet app, desktop, or web wallet over the
           post-quantum connect bridge, and bring any EIP-6963 wallet such as MetaMask for the
           Ethereum leg. A solver mode, a Phala TEE-attested solver for single-click swaps without
-          running both legs yourself, is on the roadmap.
+          running both legs yourself, is on the roadmap. Learn more about the wallet at{" "}
+          <a
+            href="https://myqrlwallet.com"
+            target="_blank"
+            rel="noreferrer"
+            className="text-blue-accent hover:underline"
+          >
+            myqrlwallet.com
+          </a>
+          , or explore the chain on{" "}
+          <a
+            href="https://zondscan.com"
+            target="_blank"
+            rel="noreferrer"
+            className="text-blue-accent hover:underline"
+          >
+            ZondScan
+          </a>
+          .
         </p>
       </Section>
 
