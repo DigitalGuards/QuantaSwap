@@ -3,7 +3,7 @@
 // writes are encoded here and signed by the user's wallets.
 
 import { Interface } from "ethers";
-import { ETH_LEG, QRL_LEG, legByKey, type LegKey } from "../config";
+import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
@@ -11,6 +11,9 @@ export const HTLC_ABI = [
   "function claim(bytes32 hashlock, bytes32 preimage)",
   "function refund(bytes32 hashlock)",
   "function getSwap(bytes32 hashlock) view returns (tuple(address initiator, address recipient, address token, uint256 amount, uint256 timeout, uint8 status, bytes32 preimage))",
+  "event Locked(bytes32 indexed hashlock, address indexed initiator, address indexed recipient, address token, uint256 amount, uint256 timeout)",
+  "event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller)",
+  "event Refunded(bytes32 indexed hashlock)",
 ];
 
 export const htlcInterface = new Interface(HTLC_ABI);
@@ -106,6 +109,52 @@ export async function getBlockNumber(leg: LegKey): Promise<number> {
   const method = leg === "qrl" ? "qrl_blockNumber" : "eth_blockNumber";
   const fn = leg === "qrl" ? qrlRpc : ethRpc;
   return Number(BigInt((await fn(method, [])) as string));
+}
+
+export type SwapEventKind = "locked" | "claimed" | "refunded";
+
+export interface SwapEvent {
+  kind: SwapEventKind;
+  txHash: string;
+}
+
+function eventTopic(name: string): string {
+  const frag = htlcInterface.getEvent(name);
+  if (frag === null) throw new Error(`unknown HTLC event ${name}`);
+  return frag.topicHash;
+}
+
+const TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
+  [eventTopic("Locked"), "locked"],
+  [eventTopic("Claimed"), "claimed"],
+  [eventTopic("Refunded"), "refunded"],
+]);
+
+/** Every HTLC action (both parties') indexed by the shared hashlock, with
+ *  its transaction hash for explorer links. Chain-derived, so it works
+ *  for any visitor with no order-book record and no wallet. Both legs
+ *  scan from genesis: the QRL node is ours, and the ETH side uses the
+ *  logs-capable proxy (the main Sepolia RPC refuses log scans). */
+export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<SwapEvent[]> {
+  const cfg = legByKey(leg);
+  const params = [
+    { address: cfg.htlc, topics: [null, hashlock], fromBlock: "0x0", toBlock: "latest" },
+  ];
+  const raw = await (leg === "qrl"
+    ? qrlRpc("qrl_getLogs", params)
+    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
+  if (!Array.isArray(raw)) return [];
+  const events: SwapEvent[] = [];
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const log = entry as { topics?: unknown; transactionHash?: unknown };
+    const topic0 =
+      Array.isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
+    const kind = topic0 === null ? undefined : TOPIC_KIND.get(topic0);
+    if (kind === undefined || typeof log.transactionHash !== "string") continue;
+    events.push({ kind, txHash: log.transactionHash });
+  }
+  return events;
 }
 
 export const buildLockNativeData = (hashlock: string, recipient: string, timeout: number): string =>
