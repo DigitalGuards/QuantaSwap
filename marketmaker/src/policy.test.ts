@@ -4,7 +4,7 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { SwapStatus, type LegState } from "./htlc.js";
+import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc.js";
 import { decide, levelQuote, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
 
 const NOW = 1_800_000_000;
@@ -42,11 +42,14 @@ const leg = (status: number, overrides: Partial<LegState> = {}): LegState => ({
   status: status as LegState["status"],
   initiator: TAKER_ETH,
   recipient: `0x${MY_QRL.slice(1)}`,
+  token: NATIVE_TOKEN,
   amount: AMOUNT,
   timeout: T2,
   preimage: ZERO32,
   ...overrides,
 });
+
+const SCAM_TOKEN = "0x1111111111111111111111111111111111111111";
 
 function input(overrides: Partial<DecideInput> = {}): DecideInput {
   return {
@@ -149,6 +152,13 @@ describe("claiming the taker's lock (irreversible)", () => {
 
   it("never claims a short-paying lock", () => {
     const bad = leg(SwapStatus.Open, { amount: AMOUNT - 1n });
+    assert.equal(decide(lockedInputs(bad, bad)), "wait");
+  });
+
+  it("never claims a lock escrowing a token instead of native coin", () => {
+    // Right recipient, right amount, but a lockToken() record: claiming it
+    // reveals the secret and pays out a worthless ERC-20.
+    const bad = leg(SwapStatus.Open, { token: SCAM_TOKEN });
     assert.equal(decide(lockedInputs(bad, bad)), "wait");
   });
 

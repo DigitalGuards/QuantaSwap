@@ -6,7 +6,7 @@
 
 import { formatEther } from "ethers";
 import { CLAIM_MARGIN_S, legByKey, type LegKey } from "../config";
-import { SwapStatus, qToHex, type LegState } from "./htlc";
+import { NATIVE_TOKEN, SwapStatus, qToHex, type LegState } from "./htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "./activeSwap";
 
 export const ZERO32 = `0x${"0".repeat(64)}`;
@@ -41,6 +41,9 @@ export interface SwapMachine {
   revealedPreimage: string | null;
   /** Legs this role initiated that are Open and past their timeout. */
   refundableLegs: LegKey[];
+  /** Legs this role has escrowed (Open) on-chain right now, refundable or
+   *  not; discarding while any are here would strand funds. */
+  ownLockedLegs: LegKey[];
   /** The addresses this role agreed to swap with, per chain. */
   ownEth: string;
   ownQrl: string;
@@ -101,15 +104,15 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     [rLeg]: { recipient: addrOn(rLeg, "maker"), amount: BigInt(swap.toAmount) },
   } as Record<LegKey, { recipient: string; amount: bigint }>;
 
-  const timeoutOf = (leg: LegKey): number => (leg === iLeg ? initiatorTimeout : responderTimeout);
-
   // Taker-side verification of the maker's lock before responding with
   // funds. The order book announced the parameters; the chain confirms
   // them. Checked against the confirmation-depth snapshot, not the head:
   // a shallow lock could still be reorged into a different one.
   let initiatorLockIssue: string | null = null;
   if (iConfirmed && iConfirmed.status === SwapStatus.Open) {
-    if (!sameAddr(iConfirmed.recipient, legPlan[iLeg].recipient))
+    if (!sameAddr(iConfirmed.token, NATIVE_TOKEN))
+      initiatorLockIssue = `it escrows a token, not native ${iCfg.asset}`;
+    else if (!sameAddr(iConfirmed.recipient, legPlan[iLeg].recipient))
       initiatorLockIssue = "its recipient is not your address";
     else if (iConfirmed.amount !== legPlan[iLeg].amount)
       initiatorLockIssue = `it escrows ${formatEther(iConfirmed.amount)} ${iCfg.asset}, not the agreed ${formatEther(legPlan[iLeg].amount)}`;
@@ -127,7 +130,9 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   // require the same CLAIM_MARGIN_S cushion the taker uses on our lock.
   let responderLockIssue: string | null = null;
   if (rConfirmed && rConfirmed.status === SwapStatus.Open) {
-    if (!sameAddr(rConfirmed.recipient, legPlan[rLeg].recipient))
+    if (!sameAddr(rConfirmed.token, NATIVE_TOKEN))
+      responderLockIssue = `it escrows a token, not native ${rCfg.asset}`;
+    else if (!sameAddr(rConfirmed.recipient, legPlan[rLeg].recipient))
       responderLockIssue = "its recipient is not your address";
     else if (rConfirmed.amount !== legPlan[rLeg].amount)
       responderLockIssue = `it escrows ${formatEther(rConfirmed.amount)} ${rCfg.asset}, not the agreed ${formatEther(legPlan[rLeg].amount)}`;
@@ -193,11 +198,16 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       leg: iLeg,
       own: mySteps[3],
       done: Boolean(iState && iState.status === SwapStatus.Claimed),
+      // Gate on the initiator lock's OWN on-chain timeout, not the
+      // book-announced initiatorTimeout: a maker can announce a long window
+      // but lock a near-term one, and claim() reverts TimeoutPassed once the
+      // real deadline passes, so trusting the announced value would tell the
+      // taker a closed claim window is still open after the secret is public.
       canRun: Boolean(
         revealedPreimage &&
           iState &&
           iState.status === SwapStatus.Open &&
-          nowS < initiatorTimeout,
+          nowS < iState.timeout,
       ),
       issue: null,
       awaitingDepth: false,
@@ -206,12 +216,17 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
 
   const complete = iState?.status === SwapStatus.Claimed && rState?.status === SwapStatus.Claimed;
 
-  // You can only refund a leg you initiated: refund() pays the locker.
+  // You can only refund a leg you initiated: refund() pays the locker. The
+  // deadline comes from the leg's ACTUAL on-chain timeout (a third party
+  // could front-run the hashlock with a different one), not the announced
+  // value; on the honest path they are identical.
   const myLegs: LegKey[] =
     swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
-  const refundableLegs = myLegs.filter(
-    (leg) => legs[leg]?.status === SwapStatus.Open && nowS >= timeoutOf(leg),
-  );
+  const ownLockedLegs = myLegs.filter((leg) => legs[leg]?.status === SwapStatus.Open);
+  const refundableLegs = ownLockedLegs.filter((leg) => {
+    const state = legs[leg];
+    return state !== undefined && nowS >= state.timeout;
+  });
 
   return {
     iLeg,
@@ -220,6 +235,10 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     complete,
     revealedPreimage,
     refundableLegs,
+    /** My legs currently Open (escrowed) on-chain: discarding the swap
+     *  while any are here strands funds, since discard deletes the hashlock
+     *  and preimage the refund/claim path needs. */
+    ownLockedLegs,
     ownEth: addrOn("eth", swap.role === "taker" ? "taker" : "maker"),
     ownQrl: addrOn("qrl", swap.role === "taker" ? "taker" : "maker"),
     legPlan,
