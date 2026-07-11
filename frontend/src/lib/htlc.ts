@@ -3,7 +3,7 @@
 // writes are encoded here and signed by the user's wallets.
 
 import { Interface } from "ethers";
-import { ETH_LEG, QRL_LEG, legByKey, type LegKey } from "../config";
+import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
@@ -130,26 +130,19 @@ const TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
   [eventTopic("Refunded"), "refunded"],
 ]);
 
-/** Providers cap unbounded log scans (publicnode rejects ranges over 50k
- *  blocks), so the ETH leg scans a window comfortably longer than any
- *  swap's lifetime; the QRL leg is our own node and scans from genesis. */
-const ETH_LOG_WINDOW = 49_000;
-
 /** Every HTLC action (both parties') indexed by the shared hashlock, with
  *  its transaction hash for explorer links. Chain-derived, so it works
- *  for any visitor with no order-book record and no wallet. */
+ *  for any visitor with no order-book record and no wallet. Both legs
+ *  scan from genesis: the QRL node is ours, and the ETH side uses the
+ *  logs-capable proxy (the main Sepolia RPC refuses log scans). */
 export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<SwapEvent[]> {
   const cfg = legByKey(leg);
-  const fromBlock =
-    leg === "qrl"
-      ? "0x0"
-      : `0x${Math.max(0, (await getBlockNumber("eth")) - ETH_LOG_WINDOW).toString(16)}`;
   const params = [
-    { address: cfg.htlc, topics: [null, hashlock], fromBlock, toBlock: "latest" },
+    { address: cfg.htlc, topics: [null, hashlock], fromBlock: "0x0", toBlock: "latest" },
   ];
   const raw = await (leg === "qrl"
     ? qrlRpc("qrl_getLogs", params)
-    : ethRpc("eth_getLogs", params));
+    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
   if (!Array.isArray(raw)) return [];
   const events: SwapEvent[] = [];
   for (const entry of raw as unknown[]) {

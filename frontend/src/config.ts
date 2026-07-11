@@ -28,6 +28,12 @@ export const ETH_LEG = {
   explorerAddress: "https://sepolia.etherscan.io/address/",
 };
 
+// Separate proxy for eth_getLogs only: publicnode's free tier refuses log
+// scans ("archive request"), so event lookups go to the EF's ethpandaops
+// endpoint, which serves them from genesis. Everything else stays on the
+// main Sepolia RPC.
+export const ETH_LOGS_RPC = "/rpc/sepolia-logs";
+
 export type LegKey = "qrl" | "eth";
 
 export const legByKey = (key: LegKey) => (key === "qrl" ? QRL_LEG : ETH_LEG);
