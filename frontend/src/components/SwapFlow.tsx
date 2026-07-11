@@ -14,6 +14,7 @@ import {
   type LegState,
 } from "@/lib/htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
+import { getOrder, type OrderView } from "@/lib/orderbook";
 import {
   deriveSwapMachine,
   sameAddr,
@@ -74,6 +75,10 @@ export function SwapFlow({
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
+  // The order-book view of this swap, polled alongside chain state. Used to
+  // notice a taker walk-away (released) before the maker locks; funds are
+  // still governed on-chain, so this is advisory only.
+  const [order, setOrder] = useState<OrderView | null>(null);
 
   const { hashlock, initiatorTimeout } = swap;
 
@@ -116,6 +121,37 @@ export function SwapFlow({
     const t = setInterval(() => void refresh(), 5000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  // Advance the clock on the wall, independent of RPC success: the time
+  // gates (secret reveal, refund availability) must keep tightening even
+  // through an RPC outage, or they would evaluate against a frozen `nowS`
+  // and stay open past their real deadline.
+  useEffect(() => {
+    const t = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Poll the order-book view so a maker sees a taker's walk-away (released)
+  // before committing funds. Best-effort: chain state remains authoritative.
+  const orderId = swap.orderId;
+  useEffect(() => {
+    if (!orderId) return undefined;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const view = await getOrder(orderId);
+        if (!stop) setOrder(view);
+      } catch {
+        // transient or gone; ignore, the chain governs the funds
+      }
+    };
+    void poll();
+    const t = setInterval(() => void poll(), 5000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [orderId]);
 
   const sendOnLeg = useCallback(
     async (leg: LegKey, data: string, valueWei: bigint) => {
@@ -177,7 +213,15 @@ export function SwapFlow({
     return null;
   }
 
-  const { steps, complete, revealedPreimage, refundableLegs, ownEth, ownQrl, legPlan } = machine;
+  const { steps, complete, revealedPreimage, refundableLegs, ownLockedLegs, ownEth, ownQrl, legPlan } =
+    machine;
+
+  // The taker released their take before we (the maker) locked: our own leg
+  // has nothing on chain yet, so do not lock into a walked-away swap.
+  const takerWalkedAway =
+    swap.role === "maker" &&
+    ownLockedLegs.length === 0 &&
+    (order?.released === true || order?.status === "cancelled");
   const iCfg = legByKey(iLeg);
   const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
@@ -203,16 +247,28 @@ export function SwapFlow({
   const who = (ownStep: boolean) => (ownStep ? "You" : "The counterparty");
 
   // Presentation for each machine step: copy, action wiring, pending text.
+  const initiatorRefundAt = iState?.timeout ?? initiatorTimeout;
+
   const presentation: Record<
     StepModel["key"],
-    { title: string; desc: string; label: string; action: () => void; pendingText: string | null }
+    {
+      title: string;
+      desc: string;
+      label: string;
+      action: () => void;
+      pendingText: string | null;
+      /** Shown to the party who does NOT sign this step while it is the
+       *  live step, so waiting reads as progress, not a stall. */
+      waitingText: string;
+    }
   > = {
     "lock-initiator": {
       title: `Lock ${iCfg.asset} on ${iCfg.name}`,
-      desc: `${who(steps[0].own)} (initiator) escrow${steps[0].own ? "" : "s"} ${formatEther(legPlan[iLeg].amount)} ${iCfg.asset} under the hashlock. Refundable after ${new Date(initiatorTimeout * 1000).toLocaleTimeString()}.`,
+      desc: `${who(steps[0].own)} (initiator) escrow${steps[0].own ? "" : "s"} ${formatEther(legPlan[iLeg].amount)} ${iCfg.asset} under the hashlock. Refundable after ${new Date(initiatorRefundAt * 1000).toLocaleTimeString()}.`,
       label: `Lock ${iCfg.asset}`,
       action: () => lockLeg(iLeg),
       pendingText: null,
+      waitingText: `The maker published the hashlock and is broadcasting their lock on ${iCfg.name}; blocks there confirm in about a minute.`,
     },
     "lock-responder": {
       title: `Lock ${rCfg.asset} on ${rCfg.name}`,
@@ -220,6 +276,7 @@ export function SwapFlow({
       label: `Lock ${rCfg.asset}`,
       action: () => lockLeg(rLeg),
       pendingText: `Initiator lock detected on ${iCfg.name}; waiting for ${iCfg.confirmations}-block confirmation depth before it is safe to respond.`,
+      waitingText: "Waiting for the taker to lock their leg…",
     },
     "claim-responder": {
       title: `Claim ${rCfg.asset} (reveals the secret)`,
@@ -227,6 +284,7 @@ export function SwapFlow({
       label: `Claim ${rCfg.asset}`,
       action: () => swap.preimage && claimLeg(rLeg, swap.preimage),
       pendingText: `Responder lock detected on ${rCfg.name}; waiting for ${rCfg.confirmations}-block confirmation depth before the secret is safe to reveal.`,
+      waitingText: "Waiting for the maker to claim and reveal the secret…",
     },
     "claim-initiator": {
       title: `Claim ${iCfg.asset} with the revealed secret`,
@@ -234,6 +292,7 @@ export function SwapFlow({
       label: `Claim ${iCfg.asset}`,
       action: () => revealedPreimage && claimLeg(iLeg, revealedPreimage),
       pendingText: null,
+      waitingText: "Waiting for the taker to claim…",
     },
   };
 
@@ -308,18 +367,30 @@ export function SwapFlow({
                 ) : null}
                 {!step.done &&
                   (step.own ? (
-                    <Button
-                      size="sm"
-                      className="mt-1"
-                      disabled={!step.canRun || busy !== null}
-                      onClick={view.action}
-                    >
-                      {busy === `${step.key.startsWith("lock") ? "lock" : "claim"}-${step.leg}`
-                        ? "Waiting for wallet…"
-                        : view.label}
-                    </Button>
+                    <div className="space-y-1">
+                      {step.key === "lock-initiator" && takerWalkedAway ? (
+                        <p className="text-xs text-amber-400">
+                          The taker walked away before you locked. Do not lock; discard this swap
+                          below.
+                        </p>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        className="mt-1"
+                        disabled={
+                          !step.canRun ||
+                          busy !== null ||
+                          (step.key === "lock-initiator" && takerWalkedAway)
+                        }
+                        onClick={view.action}
+                      >
+                        {busy === `${step.key.startsWith("lock") ? "lock" : "claim"}-${step.leg}`
+                          ? "Waiting for wallet…"
+                          : view.label}
+                      </Button>
+                    </div>
                   ) : step.canRun ? (
-                    <p className="text-xs text-blue-accent">Waiting for the counterparty…</p>
+                    <p className="text-xs text-blue-accent">{view.waitingText}</p>
                   ) : null)}
               </div>
             </div>
@@ -357,22 +428,33 @@ export function SwapFlow({
           ) : (
             <span className="text-xs text-muted-foreground">The secret stays with the maker</span>
           )}
-          <Button
-            variant="link"
-            size="sm"
-            className="h-auto p-0"
-            onClick={() => {
-              if (
-                complete ||
-                window.confirm(
-                  "Discard this swap? If funds are still locked you will need the refund buttons later; local swap state is deleted.",
+          {complete ? (
+            <Button variant="link" size="sm" className="h-auto p-0" onClick={onDiscard}>
+              New swap
+            </Button>
+          ) : ownLockedLegs.length > 0 ? (
+            <span className="max-w-[60%] text-right text-xs text-amber-400">
+              Your {ownLockedLegs.map((leg) => legByKey(leg).asset).join(" and ")} is locked
+              on-chain. Refund it below once the timeout opens before discarding: discarding now
+              deletes the hashlock this swap needs to refund.
+            </span>
+          ) : (
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Discard this swap? Nothing is locked on your side, so no funds are at risk. Local swap state is deleted.",
+                  )
                 )
-              )
-                onDiscard();
-            }}
-          >
-            {complete ? "New swap" : "Discard swap"}
-          </Button>
+                  onDiscard();
+              }}
+            >
+              Discard swap
+            </Button>
+          )}
         </div>
         {showSecret && swap.preimage ? (
           <p className="font-mono text-xs break-all text-muted-foreground">{swap.preimage}</p>
