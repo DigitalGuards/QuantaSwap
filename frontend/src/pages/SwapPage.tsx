@@ -68,11 +68,11 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
   }, [swap, myOrder]);
 
   return (
-    <div className="space-y-10 pb-16">
+    <div className="page-enter space-y-10 pb-16">
       <section className="relative pt-10 pb-2 text-center">
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 -top-16 h-64 bg-[radial-gradient(ellipse_at_top,hsl(25_95%_53%/0.10),transparent_65%)]"
+          className="pointer-events-none absolute inset-x-0 -top-16 h-64 bg-[radial-gradient(ellipse_at_top,hsl(var(--secondary)/0.10),transparent_65%)]"
         />
         <h1 className="text-3xl font-black tracking-tight md:text-5xl">
           Atomic swaps for <span className="text-secondary">QRL</span>
@@ -86,8 +86,8 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
       <section className={swap ? "mx-auto max-w-md" : "mx-auto max-w-md lg:max-w-5xl"}>
         {eth.error || qrl.error || notice ? (
           <div className="mb-4 space-y-4">
-            {eth.error ? <p className="text-sm text-red-400">{eth.error}</p> : null}
-            {qrl.error ? <p className="text-sm text-red-400">{qrl.error}</p> : null}
+            {eth.error ? <p className="text-sm text-destructive">{eth.error}</p> : null}
+            {qrl.error ? <p className="text-sm text-destructive">{qrl.error}</p> : null}
             {notice ? (
               <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
                 {notice}
