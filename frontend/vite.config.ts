@@ -22,6 +22,12 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => "/",
       },
+      // Must precede /rpc/sepolia: Vite proxy keys prefix-match in order.
+      "/rpc/sepolia-logs": {
+        target: "https://rpc.sepolia.ethpandaops.io",
+        changeOrigin: true,
+        rewrite: () => "/",
+      },
       "/rpc/sepolia": {
         target: "https://ethereum-sepolia-rpc.publicnode.com",
         changeOrigin: true,
