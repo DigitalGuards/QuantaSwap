@@ -68,12 +68,15 @@ const LOCKING_LINGER_S = 24 * 3600; // past initiator timeout
 const DEFAULT_PRESENCE_TTL_S = 90;
 
 // Per-IP take caps so one visitor cannot clear the book for everyone
-// else. The frontend only drives one active swap at a time, so two
-// concurrent takes is already generous; the daily cap bounds slow-drip
-// draining. Bypassable with IP rotation, like every per-IP guard here;
-// the goal is fairness for demo traffic, not sybil resistance.
-const MAX_CONCURRENT_TAKES_PER_IP = 2;
-const MAX_TAKES_PER_IP_PER_DAY = 6;
+// else. Sized for repeat testnet testing: completed swaps hold their
+// concurrency slot until released or past T1 (the book never learns the
+// on-chain outcome), so the concurrent cap leaves headroom beyond the
+// two side-by-side swaps the book stocks per rung. The daily cap bounds
+// slow-drip draining. Bypassable with IP rotation, like every per-IP
+// guard here; the goal is fairness for demo traffic, not sybil
+// resistance.
+const MAX_CONCURRENT_TAKES_PER_IP = 4;
+const MAX_TAKES_PER_IP_PER_DAY = 24;
 const TAKE_WINDOW_S = 24 * 3600;
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;

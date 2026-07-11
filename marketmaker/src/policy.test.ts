@@ -282,6 +282,7 @@ describe("refill policy", () => {
     direction: "eth->qrl" as const,
     myOpenCount: 0,
     ordersPerDirection: 2,
+    ordersPerLevel: 1,
     inflightCount: 0,
     maxInflight: 2,
     balanceWei: 10n ** 18n,
@@ -295,6 +296,11 @@ describe("refill policy", () => {
 
   it("stops at the listing target", () => {
     assert.equal(shouldPost({ ...base, myOpenCount: 2 }), false);
+  });
+
+  it("scales the target by listings per rung", () => {
+    assert.equal(shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 2 }), true);
+    assert.equal(shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 4 }), false);
   });
 
   it("stops when in-flight exposure is maxed (griefing cap)", () => {

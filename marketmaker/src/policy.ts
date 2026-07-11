@@ -216,6 +216,7 @@ export interface RefillInput {
   direction: Direction;
   myOpenCount: number;
   ordersPerDirection: number;
+  ordersPerLevel: number;
   inflightCount: number;
   maxInflight: number;
   balanceWei: bigint;
@@ -223,11 +224,12 @@ export interface RefillInput {
   orderWei: bigint;
 }
 
-/** Repost only while under the listing target, under the in-flight
- *  exposure cap, and holding inventory beyond the reserve. */
+/** Repost only while under the listing target (rungs times listings per
+ *  rung), under the in-flight exposure cap, and holding inventory beyond
+ *  the reserve. */
 export function shouldPost(x: RefillInput): boolean {
   return (
-    x.myOpenCount < x.ordersPerDirection &&
+    x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&
     x.inflightCount < x.maxInflight &&
     x.balanceWei >= x.reserveWei + x.orderWei
   );

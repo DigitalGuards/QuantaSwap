@@ -276,16 +276,20 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
 
   for (const direction of ["eth->qrl", "qrl->eth"] as const) {
     const fromLeg = initiatorLeg(direction);
-    // Refill the lowest missing rung of the price ladder (one per tick,
-    // per direction, so a taken level reappears gradually).
-    const openLevels = new Set(
-      managed
-        .filter((m) => m.direction === direction && views.get(m.id)?.status === "open")
-        .map((m) => m.level),
-    );
+    // Refill the lowest under-stocked rung of the price ladder (one per
+    // tick, per direction, so a taken level reappears gradually). Each rung
+    // carries up to ordersPerLevel identical listings so concurrent takers
+    // can run the same trade side by side.
+    const openByLevel = new Map<number, number>();
+    for (const m of managed) {
+      if (m.direction !== direction || views.get(m.id)?.status !== "open") continue;
+      openByLevel.set(m.level, (openByLevel.get(m.level) ?? 0) + 1);
+    }
+    let myOpenCount = 0;
+    for (const count of openByLevel.values()) myOpenCount += count;
     let level = -1;
     for (let l = 0; l < cfg.ordersPerDirection; l += 1) {
-      if (!openLevels.has(l)) {
+      if ((openByLevel.get(l) ?? 0) < cfg.ordersPerLevel) {
         level = l;
         break;
       }
@@ -301,8 +305,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
     });
     const post = shouldPost({
       direction,
-      myOpenCount: openLevels.size,
+      myOpenCount,
       ordersPerDirection: cfg.ordersPerDirection,
+      ordersPerLevel: cfg.ordersPerLevel,
       inflightCount: inflight,
       maxInflight: cfg.maxInflight,
       balanceWei: balances[fromLeg],
@@ -371,7 +376,7 @@ async function main(): Promise<void> {
   log(`maker eth=${eth.address} qrl=${qrl.address}`);
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
-      `target ${cfg.ordersPerDirection}/direction, max inflight ${cfg.maxInflight}, ` +
+      `target ${cfg.ordersPerDirection} rung(s) x ${cfg.ordersPerLevel}/rung per direction, max inflight ${cfg.maxInflight}, ` +
       `base size ${cfg.ethOrderWei} wei ETH, price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli` : `${cfg.priceFeed} feed, reprice > ${cfg.repriceThresholdBps} bps drift`}`,
   );
   log(`managing ${state.all().length} persisted order(s)`);

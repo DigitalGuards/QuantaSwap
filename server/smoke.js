@@ -181,39 +181,65 @@ try {
     return { id: r.body.order.id, token: r.body.makerToken };
   };
 
+  // Mirror MAX_CONCURRENT_TAKES_PER_IP / MAX_TAKES_PER_IP_PER_DAY in
+  // src/store.ts; keep in sync.
+  const CONCURRENT_CAP = 4;
+  const DAILY_CAP = 24;
+
   const greedy = { "X-Forwarded-For": "203.0.113.7" };
-  const o1 = await mk();
-  const o2 = await mk();
-  const o3 = await mk();
-  const t1 = await api("POST", `/orders/${o1.id}/accept`, taker, greedy);
-  const t2 = await api("POST", `/orders/${o2.id}/accept`, taker, greedy);
-  check("two concurrent takes allowed", t1.status === 200 && t2.status === 200);
-  const t3 = await api("POST", `/orders/${o3.id}/accept`, taker, greedy);
-  check("third concurrent take capped", t3.status === 429);
-  const other = await api("POST", `/orders/${o3.id}/accept`, taker, {
+  const opens = [];
+  for (let i = 0; i <= CONCURRENT_CAP; i += 1) opens.push(await mk());
+  let greedyOk = true;
+  for (let i = 0; i < CONCURRENT_CAP; i += 1) {
+    const took = await api("POST", `/orders/${opens[i].id}/accept`, taker, greedy);
+    greedyOk = greedyOk && took.status === 200;
+  }
+  check(`${CONCURRENT_CAP} concurrent takes allowed`, greedyOk);
+  const over = await api("POST", `/orders/${opens[CONCURRENT_CAP].id}/accept`, taker, greedy);
+  check("take past the concurrency cap rejected", over.status === 429);
+  const other = await api("POST", `/orders/${opens[CONCURRENT_CAP].id}/accept`, taker, {
     "X-Forwarded-For": "203.0.113.8",
   });
   check("other visitors can still take", other.status === 200);
 
   const drip = { "X-Forwarded-For": "203.0.113.9" };
   let dripOk = true;
-  for (let i = 0; i < 6; i += 1) {
-    const o = await mk();
+  for (let i = 0; i < DAILY_CAP; i += 1) {
+    // Unique maker IP per lap: DAILY_CAP create+cancel pairs from a single
+    // IP would trip the per-minute mutation window before the take cap.
+    const dripMaker = { "X-Forwarded-For": `203.0.114.${i + 1}` };
+    const posted = await api(
+      "POST",
+      "/orders",
+      {
+        direction: "eth->qrl",
+        fromAmount: ONE_ETH.toString(),
+        toAmount: ONE_ETH.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+      },
+      dripMaker,
+    );
+    const o = { id: posted.body.order.id, token: posted.body.makerToken };
     const took = await api("POST", `/orders/${o.id}/accept`, taker, drip);
     dripOk = dripOk && took.status === 200;
-    await api("POST", `/orders/${o.id}/cancel`, { token: o.token }, makerHdr);
+    await api("POST", `/orders/${o.id}/cancel`, { token: o.token }, dripMaker);
   }
-  check("six spaced takes allowed", dripOk);
-  const o7 = await mk();
-  const t7 = await api("POST", `/orders/${o7.id}/accept`, taker, drip);
-  check("seventh take in a day capped", t7.status === 429);
+  check(`${DAILY_CAP} spaced takes allowed`, dripOk);
+  const oOver = await mk();
+  const tOver = await api("POST", `/orders/${oOver.id}/accept`, taker, drip);
+  check("take past the daily cap rejected", tOver.status === 429);
 
   console.log("taker release:");
   const walker = { "X-Forwarded-For": "203.0.113.20" };
-  const r1 = await mk();
-  const r2 = await mk();
-  const w1 = await api("POST", `/orders/${r1.id}/accept`, taker, walker);
-  const w2 = await api("POST", `/orders/${r2.id}/accept`, taker, walker);
+  const held = [];
+  for (let i = 0; i < CONCURRENT_CAP; i += 1) held.push(await mk());
+  const takes = [];
+  for (const o of held) {
+    takes.push(await api("POST", `/orders/${o.id}/accept`, taker, walker));
+  }
+  const [r1, r2] = held;
+  const [w1, w2] = takes;
   const r3 = await mk();
   const blocked = await api("POST", `/orders/${r3.id}/accept`, taker, walker);
   check("slots full before release", blocked.status === 429);
