@@ -9,6 +9,7 @@ import {
   type ActiveSwap,
 } from "@/lib/activeSwap";
 import { Header } from "@/components/Header";
+import { RouteMeta } from "@/components/RouteMeta";
 import { Footer } from "@/components/Footer";
 import { PairingModal } from "@/components/PairingModal";
 import { WalletPickerModal } from "@/components/WalletPickerModal";
@@ -31,6 +32,7 @@ export default function App() {
 
   return (
     <BrowserRouter>
+      <RouteMeta />
       <Header
         ethAccount={eth.account}
         onConnectEth={() => void eth.connect()}
