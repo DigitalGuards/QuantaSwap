@@ -16,6 +16,7 @@ import { WalletPickerModal } from "@/components/WalletPickerModal";
 import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
+import { SwapStatusPage } from "@/pages/SwapStatusPage";
 
 export default function App() {
   const eth = useEthWallet();
@@ -51,6 +52,7 @@ export default function App() {
             element={<SandboxPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
           />
           <Route path="/how-it-works" element={<HowItWorksPage />} />
+          <Route path="/swap/:hashlock" element={<SwapStatusPage />} />
           <Route path="*" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
         </Routes>
       </main>

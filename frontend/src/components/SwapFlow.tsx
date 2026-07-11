@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { formatEther } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { Check } from "lucide-react";
@@ -10,8 +11,10 @@ import {
   buildRefundData,
   getConfirmedLegState,
   getLegState,
+  getSwapEvents,
   qrlRpc,
   type LegState,
+  type SwapEvent,
 } from "@/lib/htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
@@ -130,6 +133,26 @@ export function SwapFlow({
     const t = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Explorer links for every step, recovered from the HTLCs' own events
+  // (indexed by hashlock), so the counterparty's transactions get links
+  // too, not just our own. Refetched when a leg's status changes.
+  const [legEvents, setLegEvents] = useState<Record<LegKey, SwapEvent[]>>({ qrl: [], eth: [] });
+  const iStatus = legs[iLeg]?.status;
+  const rStatus = legs[rLeg]?.status;
+  useEffect(() => {
+    if (!hashlock) return undefined;
+    let alive = true;
+    void Promise.all([
+      getSwapEvents("qrl", hashlock).catch((): SwapEvent[] => []),
+      getSwapEvents("eth", hashlock).catch((): SwapEvent[] => []),
+    ]).then(([qrl, eth]) => {
+      if (alive) setLegEvents({ qrl, eth });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [hashlock, iStatus, rStatus]);
 
   // Poll the order-book view so a maker sees a taker's walk-away (released)
   // before committing funds. Best-effort: chain state remains authoritative.
@@ -309,9 +332,13 @@ export function SwapFlow({
           <CardTitle className="text-xl">Swap in progress</CardTitle>
           <span className="text-xs text-muted-foreground">
             {roleLabel} ·{" "}
-            <span className="font-data" title={hashlock}>
+            <Link
+              to={`/swap/${hashlock}`}
+              className="font-data underline-offset-4 hover:underline"
+              title="Shareable status page for this swap"
+            >
               {hashlock.slice(0, 14)}…
-            </span>
+            </Link>
           </span>
         </div>
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -338,6 +365,10 @@ export function SwapFlow({
 
         {steps.map((step, i) => {
           const view = presentation[step.key];
+          const stepTxHash =
+            legEvents[step.leg].find(
+              (e) => e.kind === (step.key.startsWith("lock") ? "locked" : "claimed"),
+            )?.txHash ?? null;
           return (
             <div
               key={step.key}
@@ -365,6 +396,18 @@ export function SwapFlow({
                 ) : null}
                 {!step.done && !step.issue && step.awaitingDepth && view.pendingText ? (
                   <p className="text-xs text-amber-400">{view.pendingText}</p>
+                ) : null}
+                {stepTxHash ? (
+                  <p>
+                    <a
+                      className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+                      href={`${legByKey(step.leg).explorerTx}${stepTxHash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      view transaction on explorer
+                    </a>
+                  </p>
                 ) : null}
                 {!step.done &&
                   (step.own ? (

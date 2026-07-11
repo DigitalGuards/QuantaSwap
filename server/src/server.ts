@@ -11,12 +11,13 @@ const PRESENCE_TTL_S = Number(process.env["PRESENCE_TTL_S"] ?? 90);
 const MAX_BODY_BYTES = 4096;
 
 // Naive per-IP rate limit, resets every minute. Enough to blunt scripted
-// spam on a testnet demo; Cloudflare fronts the real thing. The read
-// ceiling leaves room for the local market maker (un-proxied, so keyed
-// to 127.0.0.1): at a 5s tick it issues one view GET plus one heartbeat
-// per open listing.
+// spam on a testnet demo; Cloudflare fronts the real thing. Both ceilings
+// leave room for the local market maker (un-proxied, so keyed to
+// 127.0.0.1): at a 5s tick it issues one view GET plus one heartbeat per
+// open listing, and a price-drift reprice cancels and reposts its whole
+// book inside one window.
 const WINDOW_MS = 60_000;
-const MAX_MUTATIONS_PER_WINDOW = 30;
+const MAX_MUTATIONS_PER_WINDOW = 120;
 const MAX_READS_PER_WINDOW = 720;
 const hits = new Map<string, { windowStart: number; reads: number; mutations: number }>();
 
@@ -30,7 +31,12 @@ function rateLimited(ip: string, mutation: boolean): boolean {
   }
   if (mutation) entry.mutations += 1;
   else entry.reads += 1;
-  return entry.mutations > MAX_MUTATIONS_PER_WINDOW || entry.reads > MAX_READS_PER_WINDOW;
+  // Class-scoped: a burst of mutations (a full-book reprice) must not
+  // starve reads (heartbeats, view polls), or the maker goes "offline"
+  // and stalls in-flight swaps for the rest of the window.
+  return mutation
+    ? entry.mutations > MAX_MUTATIONS_PER_WINDOW
+    : entry.reads > MAX_READS_PER_WINDOW;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
