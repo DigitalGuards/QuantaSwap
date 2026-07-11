@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { formatEther } from "ethers";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { cn } from "@/utils/cn";
 import { legByKey, type LegKey } from "@/config";
+import type { useEthWallet } from "@/hooks/useEthWallet";
+import type { useQrlWallet } from "@/hooks/useQrlWallet";
+import { useAnnounceReconcile } from "@/hooks/useAnnounceReconcile";
+import type { ActiveSwap } from "@/lib/activeSwap";
+import { releaseTake } from "@/lib/orderbook";
+import { SwapFlow } from "@/components/SwapFlow";
+import { NetworkPanel } from "@/components/NetworkPanel";
 import {
   getLegState,
   getSwapEvents,
@@ -130,16 +137,37 @@ function LegCard({
   );
 }
 
-export function SwapStatusPage() {
+interface Props {
+  eth: ReturnType<typeof useEthWallet>;
+  qrl: ReturnType<typeof useQrlWallet>;
+  swap: ActiveSwap | null;
+  setSwap: (swap: ActiveSwap | null) => void;
+}
+
+export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }: Props) {
   const { hashlock: raw } = useParams();
+  const navigate = useNavigate();
   const hashlock = raw !== undefined && HASHLOCK_RE.test(raw) ? raw.toLowerCase() : null;
+
+  // This URL is the canonical home of an active swap. When the swap in
+  // local storage matches the hash, render the interactive flow (this
+  // browser holds the taker token or the maker secret); any other visitor
+  // gets the read-only chain view further down.
+  const own =
+    swap !== null &&
+    hashlock !== null &&
+    swap.hashlock !== null &&
+    swap.hashlock.toLowerCase() === hashlock;
+  useAnnounceReconcile(own ? swap : null);
+
   const [qrl, setQrl] = useState<LegSnapshot | undefined>(undefined);
   const [eth, setEth] = useState<LegSnapshot | undefined>(undefined);
   const [events, setEvents] = useState<Record<LegKey, SwapEvent[]>>({ qrl: [], eth: [] });
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (hashlock === null) return;
+    // SwapFlow does its own polling for the interactive view.
+    if (hashlock === null || own) return;
     let alive = true;
     const read = (leg: LegKey, set: (s: LegSnapshot) => void) =>
       getLegState(leg, hashlock)
@@ -167,7 +195,7 @@ export function SwapStatusPage() {
       alive = false;
       clearInterval(t);
     };
-  }, [hashlock]);
+  }, [hashlock, own]);
 
   if (hashlock === null) {
     return (
@@ -185,11 +213,33 @@ export function SwapStatusPage() {
     );
   }
 
+  if (own && swap !== null) {
+    return (
+      <div className="page-enter mx-auto max-w-md space-y-4 pt-10 pb-16">
+        <SwapFlow
+          swap={swap}
+          ethAccount={ethWallet.account}
+          qrlAccount={qrlWallet.account}
+          browserProvider={ethWallet.browserProvider}
+          ensureSepolia={ethWallet.ensureSepolia}
+          qrlRequest={qrlWallet.request}
+          qrlTransport={qrlWallet.kind}
+          onDiscard={() => {
+            releaseTake(swap);
+            setSwap(null);
+            navigate("/");
+          }}
+        />
+        <NetworkPanel />
+      </div>
+    );
+  }
+
   const verdict = deriveVerdict(qrl ?? null, eth ?? null);
   const loading = qrl === undefined && eth === undefined;
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4 pt-10 pb-16">
+    <div className="page-enter mx-auto max-w-2xl space-y-4 pt-10 pb-16">
       <div className="flex items-baseline justify-between gap-4">
         <h1 className="text-2xl font-black tracking-tight">Swap status</h1>
         <button
