@@ -22,10 +22,18 @@ export interface LegState {
   status: SwapStatusValue;
   initiator: string;
   recipient: string;
+  /** ERC-20 address escrowed, or the zero address for the native coin. A
+   *  swap is only honest when this is native: a lockToken() record shares
+   *  the same struct and would otherwise pass every recipient/amount check
+   *  while paying out a worthless token on claim. */
+  token: string;
   amount: bigint;
   timeout: number;
   preimage: string;
 }
+
+/** The native-coin sentinel in the HTLC's `token` field (address(0)). */
+export const NATIVE_TOKEN = `0x${"0".repeat(40)}`;
 
 /** QRL v2 uses Q-prefixed 20-byte addresses; calldata wants raw hex. */
 export const qToHex = (addr: string): string =>
@@ -75,6 +83,7 @@ export async function getLegState(
     status: Number(swap.status) as SwapStatusValue,
     initiator: swap.initiator,
     recipient: swap.recipient,
+    token: swap.token,
     amount: swap.amount,
     timeout: Number(swap.timeout),
     preimage: swap.preimage,

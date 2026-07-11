@@ -3,7 +3,7 @@
 // next action. No IO here so every gate is unit-testable; index.ts
 // executes the decisions.
 
-import { SwapStatus, sameAddr, type LegState } from "./htlc.js";
+import { NATIVE_TOKEN, SwapStatus, sameAddr, type LegState } from "./htlc.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 
@@ -114,6 +114,7 @@ export function decide(x: DecideInput): Decision {
     x.rState.status === SwapStatus.Open &&
     x.rConfirmed !== null &&
     x.rConfirmed.status === SwapStatus.Open &&
+    sameAddr(x.rConfirmed.token, NATIVE_TOKEN) &&
     sameAddr(x.rConfirmed.recipient, x.expectedRecipient) &&
     x.rConfirmed.amount === x.expectedAmountWei &&
     nowS < x.rConfirmed.timeout - x.claimSafetyS &&
