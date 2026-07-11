@@ -72,7 +72,7 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
   }, [swap, onReady, onAbort]);
 
   return (
-    <Card className="border-l-2 border-l-blue-accent">
+    <Card className="surface-ember">
       <CardHeader className="pb-3">
         <CardTitle className="text-lg">Order taken</CardTitle>
       </CardHeader>

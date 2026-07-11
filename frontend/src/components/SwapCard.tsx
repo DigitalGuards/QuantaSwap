@@ -80,7 +80,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
             const next = e.target.value.replace(",", ".");
             if (next === "" || /^\d*\.?\d*$/.test(next)) setValue(next);
           }}
-          className="h-12 pr-16 text-lg"
+          className="font-data h-12 pr-16 text-lg"
         />
         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
           {leg.asset}
@@ -90,7 +90,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
   );
 
   return (
-    <Card className="border-l-2 border-l-secondary">
+    <Card className="surface-ember">
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">Swap</CardTitle>
@@ -118,7 +118,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
           <div className="flex justify-between">
             <span className="text-muted-foreground">Receive to</span>
-            <span className="font-mono text-xs">
+            <span className="font-data text-xs text-blue-accent">
               {toLeg.key === "qrl"
                 ? qrlAccount
                   ? shortAddr(qrlAccount)
@@ -130,7 +130,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
-            <span>2h initiator / 1h responder</span>
+            <span className="font-data">2h initiator / 1h responder</span>
           </div>
         </div>
 
@@ -144,7 +144,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
                 ? `Enter the ${toLeg.asset} amount`
                 : "Start atomic swap"}
         </Button>
-        {error ? <p className="text-sm text-red-400">{error}</p> : null}
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           Protocol-mode sandbox: no order book yet, so you act as both sides of the swap and can
           watch the HTLC handshake happen live on both chains. Rates are whatever you enter.

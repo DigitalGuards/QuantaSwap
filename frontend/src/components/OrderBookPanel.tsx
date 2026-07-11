@@ -5,9 +5,12 @@
 //
 // Color is polarity only (bid green / ask red, the exchange convention);
 // the sides are also labeled and spatially split, so identity never
-// rides on color alone. Depth fills are translucent 500-steps, text
-// wears the 400-steps (WCAG-strong on the navy surface); the pair's CVD
-// separation was validated (deutan dE 18+).
+// rides on color alone. Bids wear the theme's success token (~8:1 on the
+// obsidian card); ask text wears red-400 (~6.9:1) because the destructive
+// token (0 68% 46%) only reaches ~3.3:1 here and fails WCAG AA at this
+// size, so it stays reserved for error copy. This mirrors the wallet's
+// financial-polarity pairing (text-success with red-400/500). Depth
+// fills stay translucent /10 token steps.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatEther } from "ethers";
@@ -223,7 +226,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         onClick={() => setPending(row.order)}
         title={`Take: you send ${fmtAmount(side === "ask" ? row.totalQrl : row.amountEth)} ${give}, receive ${fmtAmount(side === "ask" ? row.amountEth : row.totalQrl)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
         className={cn(
-          "relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right font-mono text-xs",
+          "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
           canTake ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
           pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
           offline && "opacity-40",
@@ -233,11 +236,11 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
           aria-hidden
           className={cn(
             "absolute inset-y-[1px] right-0 rounded-l-sm",
-            side === "ask" ? "bg-red-500/10" : "bg-emerald-500/10",
+            side === "ask" ? "bg-destructive/10" : "bg-success/10",
           )}
           style={{ width: `${depth}%` }}
         />
-        <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-emerald-400")}>
+        <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
           {busyId === row.order.id ? "taking…" : fmtPrice.format(row.price)}
         </span>
         <span className="relative text-foreground/90">{fmtAmount(row.amountEth)}</span>
@@ -251,7 +254,10 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Order book</CardTitle>
-          <span className="text-xs text-muted-foreground">
+          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {orders !== null ? (
+              <span aria-hidden className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success" />
+            ) : null}
             {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/ETH`}
           </span>
         </div>
@@ -320,8 +326,8 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
             ) : null}
 
             <div className="my-1 flex items-baseline justify-between border-y border-border/60 px-2 py-1.5">
-              <span className="font-mono text-sm font-semibold">
-                {mid !== undefined ? fmtPrice.format(mid) : "—"}
+              <span className="font-data text-sm font-semibold">
+                {mid !== undefined ? fmtPrice.format(mid) : "-"}
                 <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">QRL/ETH mid</span>
               </span>
               <span className="text-[11px] text-muted-foreground">
@@ -341,7 +347,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         <div className="space-y-1 px-2 pt-2">
           <p className="text-[11px] text-muted-foreground">
             <span className="text-red-400">asks</span>: buy ETH with QRL ·{" "}
-            <span className="text-emerald-400">bids</span>: buy QRL with ETH · each row is one
+            <span className="text-success">bids</span>: buy QRL with ETH · each row is one
             takeable order
           </p>
           {!ethAccount || !qrlAccount ? (
@@ -352,7 +358,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
               Finish or cancel your own order before taking another.
             </p>
           ) : null}
-          {error ? <p className="text-sm text-red-400">{error}</p> : null}
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
         </div>
       </CardContent>
     </Card>
