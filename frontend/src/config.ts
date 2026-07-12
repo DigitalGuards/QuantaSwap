@@ -12,7 +12,7 @@ export const QRL_LEG = {
   // 2026-07-12 redeploy (lockToken enforces received == amount).
   htlc: "Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13",
   rpc: "/rpc/qrl",
-  confirmations: 1,
+  confirmations: 0,
   explorerTx: "https://zondscan.com/tx/",
   explorerAddress: "https://zondscan.com/address/",
 };
@@ -27,7 +27,7 @@ export const ETH_LEG = {
   // 2026-07-12 redeploy (lockToken enforces received == amount).
   htlc: "0x31993bB91ECeD6141a1667c072f214C8DF20f7DB",
   rpc: "/rpc/sepolia",
-  confirmations: 1,
+  confirmations: 0,
   explorerTx: "https://sepolia.etherscan.io/tx/",
   explorerAddress: "https://sepolia.etherscan.io/address/",
 };
