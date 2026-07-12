@@ -22,12 +22,18 @@ pragma hyperion >=0.0;
  *   - sha256 (not keccak256) so non-EVM counterparties (BTC-family HTLCs)
  *     stay possible later.
  *
- * Fee-on-transfer and rebasing tokens are NOT supported; the launch asset
- * on the Ethereum leg is WETH, and the QRL leg uses the native coin.
+ * Ethereum-leg assets: WETH, USDC and USDT (registry: config/tokens.json);
+ * the QRL leg uses the native coin. USDT's non-standard ERC-20 surface
+ * (no return values) is tolerated by _transferCall. Fee-on-transfer and
+ * rebasing tokens are NOT supported, and lockToken enforces that: it
+ * verifies the contract received exactly `amount`, so a token that skims
+ * a transfer fee (USDT carries a dormant fee switch) cannot create a swap
+ * whose payout would be funded by other swaps' escrow.
  */
 interface IERC20 {
     function transfer(address to, uint256 value) external returns (bool);
     function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 contract HTLC {
@@ -70,6 +76,7 @@ contract HTLC {
     error TimeoutNotReached();
     error TimeoutPassed();
     error TransferFailed();
+    error UnsupportedToken();
     error Reentrancy();
 
     modifier nonReentrant() {
@@ -85,7 +92,9 @@ contract HTLC {
     }
 
     /// @notice Lock `amount` of ERC-20 `token` under `hashlock` for `recipient`.
-    /// @dev Requires prior approval for exactly `amount`.
+    /// @dev Requires prior approval for exactly `amount`. Reverts with
+    ///      UnsupportedToken unless the contract's balance grows by exactly
+    ///      `amount` (rejects fee-on-transfer behavior).
     function lockToken(
         bytes32 hashlock,
         address recipient,
@@ -95,7 +104,9 @@ contract HTLC {
     ) external nonReentrant {
         if (token == address(0) || token.code.length == 0) revert InvalidParams();
         _lock(hashlock, recipient, token, amount, timeout);
+        uint256 before = IERC20(token).balanceOf(address(this));
         _transferCall(token, abi.encodeWithSelector(IERC20.transferFrom.selector, msg.sender, address(this), amount));
+        if (IERC20(token).balanceOf(address(this)) - before != amount) revert UnsupportedToken();
     }
 
     /// @notice Pay out to the swap's recipient by revealing the preimage.

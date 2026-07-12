@@ -1,10 +1,10 @@
 # QuantaSwap Architecture
 
-Status: design draft, July 2026. No code exists yet; this document is the build spec for Phases 1-3.
+Status: build spec, July 2026. Phases 1-2 (protocol mode: HTLC contracts, order book, market maker, frontend) are live at quantaswap.io; solver mode (Phase 3) is not built yet.
 
 ## 1. Goal and constraints
 
-Swap WETH (Ethereum) and native QRL (QRL v2 / Zond, EVM-compatible) with atomic settlement and no custodian.
+Swap WETH or a supported stablecoin (USDC, USDT) on Ethereum against native QRL (QRL v2 / Zond, EVM-compatible) with atomic settlement and no custodian.
 
 Constraints that shape the design:
 
@@ -31,7 +31,7 @@ struct Swap {
 }
 ```
 
-- `lock(...)` pulls funds in (ERC-20 `transferFrom`, or `msg.value` for native QRL) and stores the record under `swapId = sha256(hashlock, initiator, recipient, token, amount, timeout)`.
+- `lock(...)` pulls funds in (ERC-20 `transferFrom`, or `msg.value` for native QRL) and stores the record under `swapId = sha256(hashlock, initiator, recipient, token, amount, timeout)`. For ERC-20 locks the contract verifies its balance grew by exactly `amount` and rejects the lock otherwise (`UnsupportedToken`): a fee-on-transfer or rebasing token could otherwise record a swap whose later payout would be funded by other swaps' escrow.
 - `claim(swapId, secret)` verifies `sha256(secret) == hashlock`, pays `recipient`, stores the revealed secret in the record, emits it in the event. **Permissionless**: anyone may call it; the payout target is fixed at lock time. This is what enables sponsored claims (section 5).
 - `refund(swapId)` after `timeout`, pays `initiator`.
 - **Hashlock freshness**: the contract rejects a `lock` whose `hashlock` matches any prior swap on that contract. Reusing a secret whose preimage is already public would let anyone race the claim; clients must generate a fresh 32-byte CSPRNG secret per swap, and the contract enforces it defensively.
@@ -50,6 +50,19 @@ T1 (initiator leg)  >= 2 * T2
 ```
 
 Rationale: the secret is revealed on the responder's leg at claim time. The responder then needs the remaining `T1 - now` to claim the initiator's leg. If `T1` were short, a claim near `T2` would leave the responder unable to collect. Testnet defaults: T2 = 2h, T1 = 4h. Finality margin covers Ethereum's ~13 min (2-epoch) finality and the equivalent on QRL v2 (qrysm Gasper); deep-reorg risk on either chain is why margins are hours, not minutes.
+
+### Ethereum-leg asset set: WETH, USDC, USDT
+
+The HTLC is token-agnostic (`lockToken` takes any ERC-20 address), so adding an asset is a client/registry decision, not a contract change. The launch set is WETH, USDC and USDT, declared in `config/tokens.json`: the registry carries each token's verified address per chain, decimals, dust minimum, and quirk flags, and is validated by the test gate. Order-book pairs in protocol mode: QRL/WETH, QRL/USDC, QRL/USDT.
+
+What the stablecoins require beyond vanilla ERC-20:
+
+- **Decimals.** USDC/USDT use 6 decimals, WETH 18. All protocol math is in base units; clients format amounts using the registry's `decimals`, never a hardcoded 18.
+- **USDT's non-standard surface.** `approve`/`transfer`/`transferFrom` return no data; the HTLC's `_transferCall` accepts empty return data (and still rejects a returned `false`). USDT also enforces an approval race guard: a nonzero allowance cannot be changed, only reset. The client rule (already policy for WETH) is exact-amount approvals per swap: `transferFrom` then consumes the allowance back to zero, so the next approve is a fresh `0 -> amount`. If an approve happened but the lock never did, clients must reset the stale allowance to zero before re-approving (`scripts/smoke-eth-erc20.js` shows the flow).
+- **USDT's dormant fee switch.** Mainnet USDT ships a fee-on-transfer mechanism currently set to zero. If it ever activates, `lockToken`'s received-amount check rejects new USDT locks outright rather than silently under-collateralizing the escrow. Swaps already open at that moment still settle from the balance actually held.
+- **Issuer centralization (blocklist/freeze).** Circle and Tether can block addresses. Consequences for a swap leg in flight: a blocked *recipient* makes `claim` revert, and the initiator recovers via `refund` after the timeout; a blocked *initiator* strands the refund until the issuer unblocks them; a blocked *HTLC contract address* freezes every open swap in that token. This risk is borne by the party holding the stablecoin leg (the QRL leg is unaffected either way) and is analogous to the ECDSA note in section 1: it belongs to the asset, not to the protocol. The blocklist scenarios are exercised in the test suite.
+
+Testnet mapping: Circle operates official Sepolia USDC (fundable at faucet.circle.com); Tether publishes no Sepolia deployment, so the QRL/USDT pair uses `tUSDT` (`contracts/testnet/TestStable.hyp`, deployed via `npm run deploy:test-stable`), which replicates USDT's 6 decimals, missing return values and approval race guard.
 
 ### Known protocol weakness: the free option
 
@@ -100,7 +113,8 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 - **Reorg safety**: respond/claim only after the counterparty lock is visible at confirmation depth on the observed leg; timelock margins sized accordingly (section 2). Implemented client-side: the frontend re-reads the swap struct at `head - N` (per-leg `confirmations` in `frontend/src/config.ts`, N=3 on testnet) and gates the taker's lock and the maker's secret reveal on that snapshot, fail-closed when the historical read fails. Mainnet should raise this to the `finalized` tag.
 - **Hashlock reuse**: enforced fresh per contract (section 2); clients also never reuse secrets across chains or swaps.
 - **Griefing**: lock dust limits (minimum amounts) to prevent order-book spam with unclaimable dust swaps.
-- **WETH approvals**: exact-amount approvals per swap in the UI, no unlimited allowances.
+- **ERC-20 approvals**: exact-amount approvals per swap in the UI, no unlimited allowances. Stale nonzero allowances are reset to zero before re-approving (required by USDT's approval race guard, harmless elsewhere).
+- **Stablecoin issuer risk**: blocklist/freeze scenarios and the USDT fee switch are analyzed in section 2 ("Ethereum-leg asset set"); the residual risks sit with the stablecoin holder, not the counterparty.
 - **Solver key management**: solver's chain keys live inside the TEE; attestation covers the code that uses them.
 - **No admin keys in the HTLC contracts**: no pause, no upgrade, no owner. What is deployed is final; fixes ship as new deployments.
 
@@ -113,7 +127,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 ## 9. Open questions
 
 1. Adopt/cross-audit charlie's contracts when published, or clean-room? (Decide when the code drops.)
-2. Ethereum-side asset set: WETH only at launch, or ETH + USDC?
+2. ~~Ethereum-side asset set: WETH only at launch, or ETH + USDC?~~ Resolved 2026-07: WETH + USDC + USDT from launch, registry-driven (`config/tokens.json`, section 2). Raw ETH stays out: one code path (`lockToken`) for every Ethereum-leg asset, and wrapping is a solved UX problem.
 3. ~~Order book transport for protocol mode~~ Resolved July 2026: dedicated lightweight service (`server/`, plain node:http, JSON-file persistence, same-origin `/api` proxy). On-chain orders remain a possible zero-infra upgrade later.
 4. Phala deployment specifics: contract vs Phat Contract vs dstack-style CVM; attestation verification surface in the frontend.
 5. Solver inventory sourcing and rebalancing across chains.
