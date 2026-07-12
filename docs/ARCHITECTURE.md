@@ -103,7 +103,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 ## 8. Deployment
 
 - **Domain**: quantaswap.io, Cloudflare zone active (DigitalGuards account). Origin CA cert pattern per workspace CLAUDE.md 7b when a host is chosen; likely co-located with QuantaPool on the consolidated box.
-- **Testnets**: Sepolia (11155111) + QRL v2 testnet (1337). QRL RPC: `https://qrlwallet.com/api/qrl-rpc/testnet` proxy, direct node `http://REDACTED:8545` as fallback. `qrl_*` namespace, Q-prefix addresses.
+- **Testnets**: Sepolia (11155111) + QRL v2 testnet (1337). QRL RPC: `https://qrlwallet.com/api/qrl-rpc/testnet` proxy. `qrl_*` namespace, Q-prefix addresses.
 - **Toolchain**: native `hypc` binary (build instructions in QuantaPool's CLAUDE.md) via `npm run compile`; anvil-based integration tests via `npm test`; deploys via `npm run deploy:qrl` / `npm run deploy:eth`; live smokes via `scripts/smoke-{qrl,eth}.js`.
 
 ## 9. Open questions
