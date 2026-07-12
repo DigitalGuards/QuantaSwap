@@ -1,7 +1,27 @@
 // Env-driven configuration. The two signing secrets are required; every
-// knob has a testnet-sized default. Amounts are wei bigints.
+// knob has a testnet-sized default. Amounts are base-unit bigints (wei
+// for the native coins, token units for ERC-20 assets).
+
+import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
+
+/** Ladder policy for one ETH-leg asset. */
+export interface AssetPolicy {
+  /** Rung-0 listing size in the asset's base units. */
+  baseUnits: bigint;
+  /** Inventory floor kept unlisted, in the asset's base units. */
+  reserveUnits: bigint;
+  /** Price-ladder rungs per direction for this asset's pair. */
+  ordersPerDirection: number;
+}
 
 export interface Config {
+  /** ETH-leg assets to stock, from MM_ASSETS (default native ETH only).
+   *  Every entry must have a price feed; tUSDT (no feed) is rejected. */
+  assets: AssetSymbol[];
+  /** Per-asset ladder policy, one entry per configured asset. ETH reuses
+   *  the wei knobs below; token assets read MM_<ASSET>_BASE,
+   *  MM_<ASSET>_RESERVE (human units), MM_<ASSET>_ORDERS_PER_DIRECTION. */
+  assetPolicies: Map<AssetSymbol, AssetPolicy>;
   orderbookUrl: string;
   ethRpcUrl: string;
   qrlRpcUrl: string;
@@ -18,7 +38,8 @@ export interface Config {
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
   ethOrderWei: bigint;
-  /** Static mid (QRL/ETH integer milli); only used when the feed is off. */
+  /** Static mid (QRL/ETH integer milli); only used when the feed is off,
+   *  and only for the ETH pair (token pairs never quote without a feed). */
   midPriceMilli: bigint;
   /** "coingecko" tracks the live cross rate; "off" pins midPriceMilli. */
   priceFeed: "coingecko" | "off";
@@ -78,19 +99,86 @@ function required(name: string): string {
   return v;
 }
 
+/** Human-unit decimal amount (e.g. "5" or "2.5" USDC) to base units. */
+function envUnits(name: string, fallback: string, decimals: number): bigint {
+  const raw = env(name, fallback);
+  const m = /^([0-9]{1,15})(?:\.([0-9]+))?$/.exec(raw);
+  if (m === null || (m[2] !== undefined && m[2].length > decimals)) {
+    throw new Error(`${name} must be a decimal amount with at most ${decimals} fractional digits`);
+  }
+  return BigInt((m[1] ?? "0") + (m[2] ?? "").padEnd(decimals, "0"));
+}
+
+function parseAssets(raw: string): AssetSymbol[] {
+  const out: AssetSymbol[] = [];
+  for (const part of raw.split(",")) {
+    const sym = part.trim();
+    if (sym === "") continue;
+    if (!isAssetSymbol(sym)) {
+      throw new Error(`MM_ASSETS: unknown asset "${sym}" (valid: ${ASSET_SYMBOLS.join(", ")})`);
+    }
+    if (assetInfo(sym).coingeckoId === null) {
+      throw new Error(`MM_ASSETS: ${sym} has no price feed and cannot be stocked`);
+    }
+    if (out.includes(sym)) throw new Error(`MM_ASSETS: duplicate asset "${sym}"`);
+    out.push(sym);
+  }
+  if (out.length === 0) throw new Error("MM_ASSETS must list at least one asset");
+  return out;
+}
+
+/** Per-asset ladder knobs. ETH keeps its original env surface; token
+ *  assets read MM_<ASSET>_* in human units (defaults sized for USDC). */
+function loadAssetPolicies(
+  assets: AssetSymbol[],
+  eth: AssetPolicy,
+): Map<AssetSymbol, AssetPolicy> {
+  const policies = new Map<AssetSymbol, AssetPolicy>();
+  for (const symbol of assets) {
+    if (symbol === "ETH") {
+      policies.set(symbol, eth);
+      continue;
+    }
+    const info = assetInfo(symbol);
+    const prefix = `MM_${symbol.toUpperCase()}`;
+    const policy: AssetPolicy = {
+      baseUnits: envUnits(`${prefix}_BASE`, "5", info.decimals),
+      reserveUnits: envUnits(`${prefix}_RESERVE`, "6", info.decimals),
+      ordersPerDirection: envInt(`${prefix}_ORDERS_PER_DIRECTION`, 2),
+    };
+    if (policy.baseUnits < info.minBaseUnits) {
+      throw new Error(`${prefix}_BASE is below the ${symbol} minimum lock amount`);
+    }
+    policies.set(symbol, policy);
+  }
+  return policies;
+}
+
 export function loadConfig(): Config {
+  const assets = parseAssets(env("MM_ASSETS", "ETH"));
+  const ordersPerDirection = envInt("MM_ORDERS_PER_DIRECTION", 2);
+  const ethOrderWei = envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n); // 0.02 ETH base size
+  const ethReserveWei = envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n);
   return {
+    assets,
+    assetPolicies: loadAssetPolicies(assets, {
+      baseUnits: ethOrderWei,
+      reserveUnits: ethReserveWei,
+      ordersPerDirection,
+    }),
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
     ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
     qrlRpcUrl: env("MM_QRL_RPC_URL", "http://127.0.0.1:8545"),
-    ethHtlc: env("MM_ETH_HTLC", "0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c"),
-    qrlHtlc: env("MM_QRL_HTLC", "Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee"),
+    // 2026-07-12 redeploy: lockToken enforces received == amount on both
+    // legs (docs/DEPLOYMENTS.md).
+    ethHtlc: env("MM_ETH_HTLC", "0x31993bB91ECeD6141a1667c072f214C8DF20f7DB"),
+    qrlHtlc: env("MM_QRL_HTLC", "Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13"),
     ethPrivateKey: required("MM_ETH_PRIVATE_KEY"),
     qrlHexseed: required("MM_QRL_HEXSEED"),
-    ordersPerDirection: envInt("MM_ORDERS_PER_DIRECTION", 2),
+    ordersPerDirection,
     ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
-    ethOrderWei: envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n), // 0.02 ETH base size
+    ethOrderWei,
     // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).
     midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
     priceFeed: env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
@@ -98,7 +186,7 @@ export function loadConfig(): Config {
     priceMaxAgeS: envInt("MM_PRICE_MAX_AGE_S", 1800),
     repriceThresholdBps: envWei("MM_REPRICE_THRESHOLD_BPS", 100n), // 1%
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung
-    ethReserveWei: envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n),
+    ethReserveWei,
     qrlReserveWei: envWei("MM_QRL_RESERVE_WEI", 5n * 10n ** 18n),
     confirmations: envInt("MM_CONFIRMATIONS", 3),
     tickMs: envInt("MM_TICK_MS", 15_000),

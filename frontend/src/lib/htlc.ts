@@ -18,6 +18,19 @@ export const HTLC_ABI = [
 
 export const htlcInterface = new Interface(HTLC_ABI);
 
+// Minimal ERC-20 surface for the token lock flow. `approve` is declared
+// WITHOUT a return type on purpose: USDT-style tokens (tUSDT here, quirk
+// noReturnValue) return no data from approve/transfer, so callers must
+// never decode approve return data; success is judged by the receipt
+// status alone. The selector is identical either way (return types are
+// not part of the selector).
+export const ERC20_ABI = [
+  "function approve(address spender, uint256 amount)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+];
+
+export const erc20Interface = new Interface(ERC20_ABI);
+
 export const SwapStatus = { None: 0, Open: 1, Claimed: 2, Refunded: 3 } as const;
 export type SwapStatusValue = (typeof SwapStatus)[keyof typeof SwapStatus];
 
@@ -159,6 +172,34 @@ export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<Swap
 
 export const buildLockNativeData = (hashlock: string, recipient: string, timeout: number): string =>
   htlcInterface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+
+/** ERC-20 escrow lock: the amount rides in calldata (msg.value must be 0)
+ *  and the HTLC pulls the tokens via transferFrom, so the exact-amount
+ *  allowance must already be in place. */
+export const buildLockTokenData = (
+  hashlock: string,
+  recipient: string,
+  token: string,
+  amount: bigint,
+  timeout: number,
+): string =>
+  htlcInterface.encodeFunctionData("lockToken", [hashlock, qToHex(recipient), token, amount, timeout]);
+
+/** approve(spender, amount) calldata; sent to the TOKEN contract, not the
+ *  HTLC. Raw calldata by design: see the noReturnValue note on ERC20_ABI. */
+export const buildApproveData = (spender: string, amount: bigint): string =>
+  erc20Interface.encodeFunctionData("approve", [spender, amount]);
+
+/** Current allowance(owner, spender) on an ERC-20, read via eth_call on
+ *  the Sepolia leg. Used to skip an already-exact approval (crash-resume
+ *  idempotency) and to detect a stale nonzero allowance that approvalRace
+ *  tokens require resetting to 0 first. */
+export async function allowanceOf(token: string, owner: string, spender: string): Promise<bigint> {
+  const data = erc20Interface.encodeFunctionData("allowance", [owner, spender]);
+  const raw = (await ethRpc("eth_call", [{ to: token, data }, "latest"])) as string;
+  const [value] = erc20Interface.decodeFunctionResult("allowance", raw) as unknown as [bigint];
+  return value;
+}
 
 export const buildClaimData = (hashlock: string, preimage: string): string =>
   htlcInterface.encodeFunctionData("claim", [hashlock, preimage]);

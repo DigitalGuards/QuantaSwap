@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { formatEther } from "ethers";
-import { INITIATOR_TIMEOUT_S, RESPONDER_TIMEOUT_S, legByKey } from "@/config";
+import { formatUnits } from "ethers";
+import { ETH_ASSETS, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "@/config";
 import {
   clearMyOrder,
-  initiatorLeg,
   loadActiveSwap,
-  responderLeg,
   saveActiveSwap,
   type ActiveSwap,
   type MyOrderRef,
@@ -75,6 +73,9 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
             orderId: current.id,
             takerToken: null,
             direction: current.direction,
+            // Anchored locally at post time, like the payout addresses:
+            // the book's copy of the asset field is never trusted.
+            ethAsset: myOrder.asset,
             fromAmount: current.fromAmount,
             toAmount: current.toAmount,
             makerEthAccount: ethAccount,
@@ -130,7 +131,7 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         setBusy(false);
       }
     },
-    [myOrder.token, ethAccount, qrlAccount, onMatched],
+    [myOrder.token, myOrder.asset, ethAccount, qrlAccount, onMatched],
   );
 
   useEffect(() => {
@@ -179,8 +180,15 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
       .finally(() => setBusy(false));
   };
 
-  const fromLeg = order ? legByKey(initiatorLeg(order.direction)) : null;
-  const toLeg = order ? legByKey(responderLeg(order.direction)) : null;
+  // Amount formatting follows the order's ETH-leg asset (anchored locally
+  // in myOrder.asset); the QRL side is always native 18-decimal QRL.
+  const asset = ETH_ASSETS[myOrder.asset];
+  const sideOf = (leg: "eth" | "qrl") =>
+    leg === "eth"
+      ? { symbol: asset.symbol, decimals: asset.decimals }
+      : { symbol: QRL_LEG.asset, decimals: 18 };
+  const fromSide = order ? sideOf(order.direction === "eth->qrl" ? "eth" : "qrl") : null;
+  const toSide = order ? sideOf(order.direction === "eth->qrl" ? "qrl" : "eth") : null;
 
   return (
     <Card className="surface-ember">
@@ -191,10 +199,10 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {order && fromLeg && toLeg ? (
+        {order && fromSide && toSide ? (
           <p className="text-sm">
-            Give <span className="font-data font-medium">{formatEther(BigInt(order.fromAmount))} {fromLeg.asset}</span>{" "}
-            for <span className="font-data font-medium">{formatEther(BigInt(order.toAmount))} {toLeg.asset}</span>
+            Give <span className="font-data font-medium">{formatUnits(BigInt(order.fromAmount), fromSide.decimals)} {fromSide.symbol}</span>{" "}
+            for <span className="font-data font-medium">{formatUnits(BigInt(order.toAmount), toSide.decimals)} {toSide.symbol}</span>
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">Loading order…</p>

@@ -1,9 +1,43 @@
 # Deployments
 
-## Testnet, 2026-07-08
+## Testnet, 2026-07-12 (stablecoin artifact, CURRENT)
 
-One hypc-compiled artifact deployed to both chains, byte-identical runtime (2797 bytes).
+One hypc-compiled artifact deployed to both chains, byte-identical runtime (3088 bytes).
 Compiler: native `hypc` 0.2.0-develop.2026.4.13+commit.d5d1b977, optimizer enabled, 200 runs.
+Adds the `lockToken` received-amount check (`UnsupportedToken`) over the 2026-07-08 artifact.
+
+| Leg | Chain | Contract | Address | Deploy tx |
+|---|---|---|---|---|
+| QRL | QRL v2 testnet (1337) | HTLC | `Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13` | `0xba8b05615c15854466eb6321326f13d6ced789c3bef482631971a2c0975106b8` |
+| Ethereum | Sepolia (11155111) | HTLC | `0x31993bB91ECeD6141a1667c072f214C8DF20f7DB` | `0xfbbccb70350614cb11bac396a274a76147bf7b8f77bff5c8c6b71c5362692d5a` |
+| Ethereum | Sepolia (11155111) | TestStable (tUSDT faucet) | `0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0` | `0x73420889a8c387fdbeeb9c65f9d3385945b78ca355243e909ac908b1ecabe85f` |
+
+Deployers unchanged: `Q6153d37Fa4DA7193E6219DCBd2bBe62Fa12905b1` (QRL leg), `0x035F07bCb487E51547417dEC7664b013a11Ef234` (Sepolia leg).
+
+### Post-deploy smokes, 2026-07-12 (live lock -> claim round trips, status + preimage + balances verified)
+
+| Path | Claim tx |
+|---|---|
+| QRL native (0.001 QRL) | `0xf6cac45501ef77c4eb4d65c33242663cacc5cb7af4e47e4b5052163dd538cbb6` |
+| Sepolia native (1000 wei) | `0xc7c485adac4e74e0e96de478a4dd98f87234249eed3a412c24e31d2e92e4f29c` |
+| Sepolia USDC (0.1 USDC, lockToken) | `0x63f464eff6b0ce13c4b20149c026abd48c590e5a3f93abb541768b68d6f391b7` |
+| Sepolia tUSDT (0.1 tUSDT, lockToken + approval-race flow) | `0x924ab43e5a362fbea206034895324e3cba5f19343b0b417a0b33c723acecb00e` |
+
+```bash
+node scripts/smoke-qrl.js Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13
+node scripts/smoke-eth.js 0x31993bB91ECeD6141a1667c072f214C8DF20f7DB
+node scripts/smoke-eth-erc20.js 0x31993bB91ECeD6141a1667c072f214C8DF20f7DB 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238  # USDC
+node scripts/smoke-eth-erc20.js 0x31993bB91ECeD6141a1667c072f214C8DF20f7DB 0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0  # tUSDT
+```
+
+MM inventory: 54 USDC (90% of the funder wallet's 60) moved to the MM ETH wallet
+`0x48fF8564DF1980e74667dec3A85E3b4b67844b6B` on 2026-07-12, tx
+`0x5fcb49ddd65e55d6b93003c1c901ddc64ca4b5559f404da644f7279c678c7965`.
+
+## Testnet, 2026-07-08 (superseded)
+
+Kept for the record: swaps opened on these addresses settle there. Runtime 2797 bytes (no
+received-amount check); safe for native and WETH, do not point clients at it for stables.
 
 | Leg | Chain | HTLC address | Deploy tx |
 |---|---|---|---|
@@ -102,35 +136,22 @@ Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
 persisted swap state (including preimages of in-flight swaps) is in
 `data/state.json`, mode 600.
 
-## Stablecoin support status (pending rollout)
+## Stablecoin pairs (QRL/USDC, QRL/tUSDT)
 
-The stablecoin work (2026-07) added a received-amount check to `lockToken`
-(`UnsupportedToken` on fee-on-transfer behavior), so the current source no
-longer matches the artifact deployed above. The deployed 2026-07-08 contracts
-remain safe for native-coin and WETH swaps, but **redeploy both legs before
-advertising USDC/USDT pairs**, then update this file.
+Shipped 2026-07-12: contracts, tUSDT, and inventory are live (tables above);
+the frontend, order book, and market maker carry the asset dimension (symbol
+strings `ETH | USDC | tUSDT` on the wire, base-unit amounts, registry-resolved
+token addresses verified on-chain by every client). The MM stocks QRL/USDC
+(CoinGecko usd-coin/qrl cross mid); QRL/tUSDT has no MM liquidity, the tUSDT
+faucet (`faucet()` on the token, 10,000 per call) makes it self-serve for
+testing the USDT approval-race path.
 
-quantaswap.io is live, so this is a coordinated rollout, not just two deploy
-runs:
+MM stablecoin knobs (box `.env`): `MM_ASSETS=ETH,USDC`, `MM_USDC_BASE=5`
+(rung-0 listing size), `MM_USDC_RESERVE=6` (kept unlisted, 10% of the funded
+54), `MM_USDC_ORDERS_PER_DIRECTION=2`. Watch the order book read ceiling when
+deepening ladders: every open listing still costs 2 reads per tick.
 
-1. Client integration first: the frontend swap card, order book and market
-   maker still assume a single QRL/WETH pair with 18 decimals. Teach them to
-   read `config/tokens.json` (asset picker, per-token decimals, approve-reset
-   flow for USDT) before any redeploy.
-2. Deploy the Sepolia USDT stand-in: `npm run deploy:test-stable`, record the
-   tUSDT address in `config/tokens.json` (chain `11155111`).
-3. Deploy the new HTLC artifact to both legs (`npm run deploy:qrl` /
-   `npm run deploy:eth`). Old and new contracts coexist; nothing breaks yet.
-4. Stop the market maker from listing new orders and let the book drain:
-   in-flight swaps settle or refund on the OLD addresses (swap records do not
-   migrate; the T1 = 4h window bounds the wait).
-5. Point frontend config, order book and MM at the new HTLC addresses,
-   restart, and update the tables above.
-6. Smoke the ERC-20 path. The MM's ETH inventory wallet
-   (`0x48fF8564DF1980e74667dec3A85E3b4b67844b6B`) already holds Sepolia USDC;
-   more is fundable at faucet.circle.com.
-
-```bash
-node scripts/smoke-eth-erc20.js <new-htlc-address> 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238  # USDC
-node scripts/smoke-eth-erc20.js <new-htlc-address> <tusdt-address>                             # tUSDT
-```
+Cutover note (2026-07-12): HTLC addresses changed with this rollout. Swaps
+opened on the 2026-07-08 contracts settle there (records do not migrate); the
+old MM listings were cancelled at cutover and in-flight swaps drained before
+the restart. USDC more fundable at faucet.circle.com if inventory runs dry.

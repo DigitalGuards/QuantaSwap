@@ -15,6 +15,9 @@ interface Props {
   onStart: (swap: ActiveSwap) => void;
 }
 
+// The /sandbox flow stays native-ETH only by design: no asset picker
+// here, and the persisted swap pins ethAsset to "ETH". Stablecoin legs
+// (USDC, tUSDT) live in the order-book flow on the main swap page.
 export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
   const [direction, setDirection] = useState<Direction>("eth->qrl");
   const [fromAmount, setFromAmount] = useState("");
@@ -41,6 +44,8 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
         orderId: null,
         takerToken: null,
         direction,
+        // Sandbox swaps are always the native pair (see the note above).
+        ethAsset: "ETH",
         preimage: secret.preimage,
         hashlock: secret.hashlock,
         fromAmount: parseEther(fromAmount).toString(),

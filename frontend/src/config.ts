@@ -9,7 +9,8 @@ export const QRL_LEG = {
   name: "QRL v2 testnet",
   asset: "QRL",
   chainIdHex: "0x539",
-  htlc: "Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee",
+  // 2026-07-12 redeploy (lockToken enforces received == amount).
+  htlc: "Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13",
   rpc: "/rpc/qrl",
   confirmations: 1,
   explorerTx: "https://zondscan.com/tx/",
@@ -19,14 +20,29 @@ export const QRL_LEG = {
 export const ETH_LEG = {
   key: "eth" as const,
   name: "Sepolia",
+  // The chain's native coin; ERC-20 legs carry their asset on the order
+  // and the persisted swap (see lib/assetRegistry.ts).
   asset: "ETH",
   chainIdHex: "0xaa36a7",
-  htlc: "0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c",
+  // 2026-07-12 redeploy (lockToken enforces received == amount).
+  htlc: "0x31993bB91ECeD6141a1667c072f214C8DF20f7DB",
   rpc: "/rpc/sepolia",
   confirmations: 1,
   explorerTx: "https://sepolia.etherscan.io/tx/",
   explorerAddress: "https://sepolia.etherscan.io/address/",
 };
+
+// The ETH-leg asset model: the Sepolia leg can escrow native ETH or a
+// registry ERC-20 (USDC, tUSDT); the QRL leg is always native QRL.
+export {
+  ETH_ASSETS,
+  ETH_ASSET_SYMBOLS,
+  ethAssetByAddress,
+  ethAssetSymbolOrNull,
+  type EthAsset,
+  type EthAssetQuirks,
+  type EthAssetSymbol,
+} from "./lib/assetRegistry";
 
 // Separate proxy for eth_getLogs only: publicnode's free tier refuses log
 // scans ("archive request"), so event lookups go to the EF's ethpandaops
@@ -46,8 +62,10 @@ export const RESPONDER_TIMEOUT_S = 1 * 3600;
 // Order book service, same-origin (nginx in prod, Vite proxy in dev).
 export const ORDERBOOK_API = "/api";
 
-// Dust guard for orders; mirrored server-side in server/src/store.ts.
-export const MIN_AMOUNT_WEI = 10n ** 15n;
+// Dust guard for the QRL side of orders (0.001 QRL); mirrored server-side
+// in server/src/store.ts. The ETH-leg floor is per asset: see
+// EthAsset.minBaseUnits in lib/assetRegistry.ts.
+export const MIN_QRL_AMOUNT_WEI = 10n ** 15n;
 
 // A taker only locks if the maker's timeout leaves at least this much
 // claim window beyond the responder timeout.

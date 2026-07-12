@@ -4,6 +4,7 @@
 // terminal state on both legs. The taker never holds the preimage.
 
 import type { LegKey } from "../config";
+import { ethAssetSymbolOrNull, type EthAssetSymbol } from "./assetRegistry";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type SwapRole = "maker" | "taker" | "sandbox";
@@ -17,9 +18,15 @@ export interface ActiveSwap {
   takerToken: string | null;
   /** Maker's perspective: the maker escrows `fromAmount` on the from-chain. */
   direction: Direction;
-  /** Wei on the initiator (maker) leg, decimal string. */
+  /** The asset escrowed on the Ethereum leg. Agreed at take time and
+   *  persisted here; counterparty locks are verified against THIS value's
+   *  registry address, never against anything book-provided. Swaps stored
+   *  before it existed hydrate to "ETH". */
+  ethAsset: EthAssetSymbol;
+  /** Base units of the initiator (maker) leg's asset, decimal string
+   *  (QRL wei for the qrl leg; the ETH-leg asset's base units otherwise). */
   fromAmount: string;
-  /** Wei on the responder (taker) leg, decimal string. */
+  /** Base units of the responder (taker) leg's asset, decimal string. */
   toAmount: string;
   makerEthAccount: string;
   makerQrlAccount: string;
@@ -65,6 +72,8 @@ function migrateLegacy(): ActiveSwap | null {
       orderId: null,
       takerToken: null,
       direction: old.direction,
+      // The demo predates ERC-20 legs: always native ETH.
+      ethAsset: "ETH",
       fromAmount: old.fromAmount,
       toAmount: old.toAmount,
       makerEthAccount: old.ethAccount,
@@ -92,6 +101,10 @@ export function loadActiveSwap(): ActiveSwap | null {
       const swap = JSON.parse(raw) as ActiveSwap;
       // Swaps stored before the taker token existed.
       swap.takerToken ??= null;
+      // Swaps stored before the ETH-leg asset existed mean native ETH;
+      // anything the registry does not know also normalizes to ETH, which
+      // fails closed downstream (token verification rejects the mismatch).
+      swap.ethAsset = ethAssetSymbolOrNull(swap.ethAsset) ?? "ETH";
       return swap;
     }
     return migrateLegacy();
@@ -108,10 +121,13 @@ export function clearActiveSwap(): void {
   localStorage.removeItem(KEY);
 }
 
-/** The maker's open-order handle; the token authorizes cancel + hashlock. */
+/** The maker's open-order handle; the token authorizes cancel + hashlock.
+ *  The asset is anchored locally at post time (like the maker's payout
+ *  addresses) so a hostile book cannot re-label the maker's own order. */
 export interface MyOrderRef {
   id: string;
   token: string;
+  asset: EthAssetSymbol;
 }
 
 const ORDER_KEY = "quantaswap.myorder.v1";
@@ -119,7 +135,11 @@ const ORDER_KEY = "quantaswap.myorder.v1";
 export function loadMyOrder(): MyOrderRef | null {
   try {
     const raw = localStorage.getItem(ORDER_KEY);
-    return raw ? (JSON.parse(raw) as MyOrderRef) : null;
+    if (!raw) return null;
+    const ref = JSON.parse(raw) as MyOrderRef;
+    // Handles stored before the ETH-leg asset existed mean native ETH.
+    ref.asset = ethAssetSymbolOrNull(ref.asset) ?? "ETH";
+    return ref;
   } catch {
     return null;
   }
