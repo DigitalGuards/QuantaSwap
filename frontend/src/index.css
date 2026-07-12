@@ -98,6 +98,11 @@
     --ring: 24 96% 55%;
 
     --radius: 0.75rem;
+
+    /* Dark-only site: without this, native control chrome (select
+       popups, unchecked checkboxes) renders in the browser's light
+       defaults and glares against the theme. */
+    color-scheme: dark;
   }
 
   /* Customized scrollbar */

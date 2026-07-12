@@ -134,7 +134,10 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
       className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md border border-border/60 bg-muted/40 px-1.5 py-1 text-sm font-medium text-muted-foreground"
     >
       {ETH_ASSET_SYMBOLS.map((s) => (
-        <option key={s} value={s}>
+        // Option rows live in the native popup, which ignores most CSS;
+        // explicit colors (plus :root color-scheme) keep them readable
+        // on platforms that render the list themselves.
+        <option key={s} value={s} className="bg-popover text-foreground">
           {s}
         </option>
       ))}
