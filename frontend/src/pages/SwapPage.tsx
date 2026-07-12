@@ -4,7 +4,7 @@ import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
 import { loadMyOrder, type ActiveSwap, type MyOrderRef } from "@/lib/activeSwap";
 import { releaseTake } from "@/lib/orderbook";
-import { PostOrderCard } from "@/components/PostOrderCard";
+import { PostOrderCard, type OrderDraft } from "@/components/PostOrderCard";
 import { MyOrderCard } from "@/components/MyOrderCard";
 import { OrderBookPanel } from "@/components/OrderBookPanel";
 import { AwaitHashlock } from "@/components/AwaitHashlock";
@@ -20,6 +20,8 @@ interface Props {
 export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
   const [myOrder, setMyOrder] = useState<MyOrderRef | null>(() => loadMyOrder());
   const [notice, setNotice] = useState<string | null>(null);
+  // "Edit as my order" hand-off from the book to the post form.
+  const [prefill, setPrefill] = useState<OrderDraft | null>(null);
   const navigate = useNavigate();
 
   // An active swap's canonical URL is /swap/<hashlock>: bookmarkable,
@@ -97,6 +99,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
               <PostOrderCard
                 ethAccount={eth.account}
                 qrlAccount={qrl.account}
+                prefill={prefill}
                 onPosted={setMyOrder}
               />
             )}
@@ -110,6 +113,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                   setNotice(null);
                   setSwap(taken);
                 }}
+                onPrefill={setPrefill}
               />
               <NetworkPanel />
             </div>

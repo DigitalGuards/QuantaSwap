@@ -26,6 +26,7 @@ import {
   type EthAssetSymbol,
 } from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
+import type { OrderDraft } from "@/components/PostOrderCard";
 import {
   acceptOrder,
   listOrders,
@@ -42,11 +43,14 @@ import { cn } from "@/utils/cn";
 interface Props {
   ethAccount: string | null;
   qrlAccount: string | null;
-  /** The maker's own listing is shown in its own card, not here. */
+  /** The maker's own listing renders marked ("yours") and untakeable. */
   ownOrderId: string | null;
   /** Taking is disabled while you have an order or swap of your own. */
   takeDisabled: boolean;
   onTaken: (swap: ActiveSwap) => void;
+  /** "Edit as my order": loads the clicked row's terms (viewer's
+   *  perspective) into the post form instead of taking it. */
+  onPrefill?: (draft: OrderDraft) => void;
 }
 
 interface BookRow {
@@ -124,7 +128,14 @@ function cumulate(rows: Omit<BookRow, "cumUnits">[]): BookRow[] {
   });
 }
 
-export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisabled, onTaken }: Props) {
+export function OrderBookPanel({
+  ethAccount,
+  qrlAccount,
+  ownOrderId,
+  takeDisabled,
+  onTaken,
+  onPrefill,
+}: Props) {
   const [orders, setOrders] = useState<OrderView[] | null>(null);
   const [pair, setPair] = useState<EthAssetSymbol>("ETH");
   const [error, setError] = useState<string | null>(null);
@@ -285,10 +296,14 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     const get = side === "ask" ? QRL_LEG.asset : asset.symbol;
     const offline = row.order.makerSeen === false;
     const own = row.order.id === ownOrderId;
+    // Selecting a row is harmless (it only opens the banner); wallet
+    // and cap gating applies to the Confirm-take button, so the terms
+    // stay inspectable and "Edit as my order" stays reachable.
+    const selectable = !own && !takeDisabled;
     return (
       <button
         type="button"
-        disabled={!canTake || own}
+        disabled={!selectable}
         onClick={() => setPending(row.order)}
         title={
           own
@@ -297,7 +312,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         }
         className={cn(
           "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
-          canTake && !own ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
+          selectable ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
           pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
           offline && !own && "opacity-40",
         )}
@@ -389,13 +404,35 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
               );
             })()}
             <p className="text-xs text-muted-foreground">
-              Confirming reserves this order and the maker starts locking their leg. It counts as one
-              of your 6 takes per day whether or not you complete it.
+              Confirming reserves this order and the maker starts locking their leg. It counts
+              toward your daily take allowance whether or not you complete it.
             </p>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button size="sm" disabled={!canTake} onClick={confirmTake}>
                 Confirm take
               </Button>
+              {onPrefill ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title="Load these terms into the post form to tweak and list your own order"
+                  onClick={() => {
+                    // The viewer's perspective: they would give the
+                    // order's toAmount side and want its fromAmount side,
+                    // so their own listing is the mirror direction.
+                    const sellsAsset = pending.direction === "eth->qrl";
+                    onPrefill({
+                      direction: sellsAsset ? "qrl->eth" : "eth->qrl",
+                      asset: pair,
+                      fromAmount: fmtAmount(BigInt(pending.toAmount), sellsAsset ? 18 : asset.decimals),
+                      toAmount: fmtAmount(BigInt(pending.fromAmount), sellsAsset ? asset.decimals : 18),
+                    });
+                    setPending(null);
+                  }}
+                >
+                  Edit as my order
+                </Button>
+              ) : null}
               <Button variant="outline" size="sm" onClick={() => setPending(null)}>
                 Cancel
               </Button>

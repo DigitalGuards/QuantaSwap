@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatUnits, parseUnits } from "ethers";
 import { ArrowDownUp, BookPlus } from "lucide-react";
 import {
@@ -18,9 +18,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
 
+/** A draft for the post form, human-unit input strings. Built by the
+ *  order book's "Edit as my order" action: the clicked row's terms from
+ *  the viewer's perspective, ready to tweak instead of hand-deriving
+ *  prices from the book. */
+export interface OrderDraft {
+  direction: Direction;
+  asset: EthAssetSymbol;
+  fromAmount: string;
+  toAmount: string;
+}
+
 interface Props {
   ethAccount: string | null;
   qrlAccount: string | null;
+  /** Latest draft to load into the form (a fresh object per request). */
+  prefill?: OrderDraft | null;
   onPosted: (ref: MyOrderRef) => void;
 }
 
@@ -42,7 +55,7 @@ const parseAmount = (value: string, decimals: number, symbol: string): bigint =>
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 
-export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
+export function PostOrderCard({ ethAccount, qrlAccount, prefill, onPosted }: Props) {
   const [direction, setDirection] = useState<Direction>("eth->qrl");
   const [assetSymbol, setAssetSymbol] = useState<EthAssetSymbol>("ETH");
   const [fromAmount, setFromAmount] = useState("");
@@ -52,6 +65,17 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
   const [allowedQrl, setAllowedQrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Load an explicit draft over whatever is in the form (each request is
+  // a fresh object, so the same row can be loaded twice).
+  useEffect(() => {
+    if (!prefill) return;
+    setDirection(prefill.direction);
+    setAssetSymbol(prefill.asset);
+    setFromAmount(prefill.fromAmount);
+    setToAmount(prefill.toAmount);
+    setError(null);
+  }, [prefill]);
 
   const asset = ETH_ASSETS[assetSymbol];
   // The ETH-leg side gives `asset`; the QRL side is always native QRL.
