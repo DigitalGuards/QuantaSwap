@@ -4,30 +4,30 @@ import { cn } from "@/utils/cn";
 // and the new (QRL, ember) on the right; the feet are the two-way crossing.
 // The arcs keep their brand hues (battery blue / QRL orange, which the
 // blue-accent and secondary tokens carry verbatim); the disc behind them
-// was old blue-slate page chrome and now reads from the surface tokens.
+// reads from the surface tokens. Arrowheads are deliberately oversized
+// (roughly 2x the stroke width) after community feedback that the originals
+// vanished at favicon sizes; keep them dominant in any future tweak.
 const Mark = () => (
   <svg width="28" height="28" viewBox="0 0 120 120" aria-hidden>
     <circle cx="60" cy="60" r="56" fill="hsl(var(--muted))" stroke="hsl(var(--border))" strokeWidth="4" />
-    <g transform="translate(0,5)">
-      <path
-        d="M60 28 A 26 26 0 0 0 44 74.5 C 43.5 79.5 41 83.5 36 83.5 L 35 83.5"
-        stroke="hsl(var(--blue-accent))"
-        strokeWidth="12"
-        fill="none"
-        strokeLinecap="butt"
-        strokeLinejoin="round"
-      />
-      <polygon points="35.5,76 35.5,91 21,83.5" fill="hsl(var(--blue-accent))" />
-      <path
-        d="M60 28 A 26 26 0 0 1 76 74.5 C 76.5 79.5 79 83.5 84 83.5 L 85 83.5"
-        stroke="hsl(var(--secondary))"
-        strokeWidth="12"
-        fill="none"
-        strokeLinecap="butt"
-        strokeLinejoin="round"
-      />
-      <polygon points="84.5,76 84.5,91 99,83.5" fill="hsl(var(--secondary))" />
-    </g>
+    <path
+      d="M60 30 A 24 24 0 0 0 45 72 C 44.5 77 42 81 37 81 L 35 81"
+      stroke="hsl(var(--blue-accent))"
+      strokeWidth="14"
+      fill="none"
+      strokeLinecap="butt"
+      strokeLinejoin="round"
+    />
+    <polygon points="35,68 35,94 12,81" fill="hsl(var(--blue-accent))" />
+    <path
+      d="M60 30 A 24 24 0 0 1 75 72 C 75.5 77 78 81 83 81 L 85 81"
+      stroke="hsl(var(--secondary))"
+      strokeWidth="14"
+      fill="none"
+      strokeLinecap="butt"
+      strokeLinejoin="round"
+    />
+    <polygon points="85,68 85,94 108,81" fill="hsl(var(--secondary))" />
   </svg>
 );
 

@@ -1,0 +1,42 @@
+<!--
+  QuantaSwap OG card source (1200x630). The shipped PNG is a render of this
+  file; keep them in sync. Regenerate from frontend/brand/ with:
+
+    rsvg-convert -w 1200 -h 630 og-card.svg -o ../public/og-image.png
+
+  Type is Lato (system font; install fonts-lato before rendering). The mark
+  geometry here mirrors frontend/public/favicon.svg: if the mark changes,
+  update both watermark and badge groups below.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="880" cy="430" r="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f97316" stop-opacity="0.11"/>
+      <stop offset="1" stop-color="#f97316" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="strip" x1="0" y1="0" x2="1200" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#52acf3"/>
+      <stop offset="1" stop-color="#eb7a30"/>
+    </linearGradient>
+    <g id="mark-arms">
+      <path d="M60 30 A 24 24 0 0 0 45 72 C 44.5 77 42 81 37 81 L 35 81"
+            stroke="#4aafff" stroke-width="14" fill="none" stroke-linecap="butt" stroke-linejoin="round"/>
+      <polygon points="35,68 35,94 12,81" fill="#4aafff"/>
+      <path d="M60 30 A 24 24 0 0 1 75 72 C 75.5 77 78 81 83 81 L 85 81"
+            stroke="#f97316" stroke-width="14" fill="none" stroke-linecap="butt" stroke-linejoin="round"/>
+      <polygon points="85,68 85,94 108,81" fill="#f97316"/>
+    </g>
+  </defs>
+  <rect width="1200" height="630" fill="#0a0e1a"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <use href="#mark-arms" transform="translate(597.6,-95.9) scale(7.54)" opacity="0.10"/>
+  <g transform="translate(80,80) scale(1.2667)">
+    <circle cx="60" cy="60" r="56" fill="#070c16"/>
+    <use href="#mark-arms"/>
+  </g>
+  <text x="85" y="379" font-family="Lato" font-weight="700" font-size="90" fill="#f5f3f0">QuantaSwap</text>
+  <text x="85" y="458" font-family="Lato" font-weight="400" font-size="33" fill="rgb(201,200,212)">Trustless atomic swaps between ETH and QRL 2.0.</text>
+  <text x="85" y="507" font-family="Lato" font-weight="400" font-size="33" fill="rgb(201,200,212)">No custodian. No bridge.</text>
+  <text x="85" y="567" font-family="Lato" font-weight="700" font-size="29" fill="#4aafff">quantaswap.io</text>
+  <rect x="0" y="620" width="1200" height="10" fill="url(#strip)"/>
+</svg>
