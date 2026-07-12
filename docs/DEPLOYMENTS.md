@@ -25,7 +25,6 @@ Rerun the smokes any time:
 node scripts/smoke-qrl.js Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee
 node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 ```
-<<<<<<< HEAD
 
 ## Updating a running deployment
 
