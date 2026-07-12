@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { formatEther } from "ethers";
+import { formatUnits } from "ethers";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { cn } from "@/utils/cn";
-import { legByKey, type LegKey } from "@/config";
+import { ethAssetByAddress, legByKey, type LegKey } from "@/config";
 import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
 import { useAnnounceReconcile } from "@/hooks/useAnnounceReconcile";
@@ -15,11 +15,13 @@ import {
   getLegState,
   getSwapEvents,
   hexToQ,
+  NATIVE_TOKEN,
   SwapStatus,
   shortAddr,
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
+import { sameAddr } from "@/lib/swapMachine";
 import { deriveVerdict, HASHLOCK_RE, type LegSnapshot } from "@/lib/swapStatus";
 
 // Public, shareable status page for any swap, keyed by its hashlock: the
@@ -65,7 +67,22 @@ function LegCard({
   const asQ = (addr: string) => (leg === "qrl" ? hexToQ(addr) : addr);
   const rows: Array<[string, string]> = [];
   if (snapshot !== null && snapshot !== undefined && snapshot.status !== SwapStatus.None) {
-    rows.push(["Amount", `${formatEther(snapshot.amount)} ${cfg.asset}`]);
+    // The escrow's own token field picks the display asset: native
+    // sentinel means the leg's coin, a registry ERC-20 (ETH leg only)
+    // shows its symbol and decimals, and an UNKNOWN token must never
+    // render as any known asset: it shows raw base units plus the
+    // truncated token address instead.
+    if (sameAddr(snapshot.token, NATIVE_TOKEN)) {
+      rows.push(["Amount", `${formatUnits(snapshot.amount, 18)} ${cfg.asset}`]);
+    } else {
+      const known = leg === "eth" ? ethAssetByAddress(snapshot.token) : null;
+      if (known !== null) {
+        rows.push(["Amount", `${formatUnits(snapshot.amount, known.decimals)} ${known.symbol}`]);
+      } else {
+        rows.push(["Amount", `${snapshot.amount.toString()} base units`]);
+        rows.push(["Token", shortAddr(snapshot.token)]);
+      }
+    }
     rows.push(["Pays out to", asQ(snapshot.recipient)]);
     rows.push(["Locked by", asQ(snapshot.initiator)]);
     rows.push(["Timeout", new Date(snapshot.timeout * 1000).toLocaleString()]);

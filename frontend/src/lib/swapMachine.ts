@@ -4,8 +4,8 @@
 // no React here so the whole matrix (maker/taker/sandbox x chain states)
 // is unit-testable; SwapFlow renders what this returns.
 
-import { formatEther } from "ethers";
-import { CLAIM_MARGIN_S, legByKey, type LegKey } from "../config";
+import { formatUnits } from "ethers";
+import { CLAIM_MARGIN_S, ETH_ASSETS, QRL_LEG, type LegKey } from "../config";
 import { NATIVE_TOKEN, SwapStatus, qToHex, type LegState } from "./htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "./activeSwap";
 
@@ -32,6 +32,19 @@ export interface StepModel {
   awaitingDepth: boolean;
 }
 
+/** One leg's agreed terms: recipient and amount fixed at take time, plus
+ *  the asset the escrow must hold. `expectedToken` is the address(0)
+ *  sentinel for native legs and the registry ERC-20 address otherwise;
+ *  counterparty locks are valid ONLY when the on-chain token equals it. */
+export interface LegPlan {
+  recipient: string;
+  /** Base units of this leg's asset. */
+  amount: bigint;
+  expectedToken: string;
+  symbol: string;
+  decimals: number;
+}
+
 export interface SwapMachine {
   iLeg: LegKey;
   rLeg: LegKey;
@@ -47,7 +60,7 @@ export interface SwapMachine {
   /** The addresses this role agreed to swap with, per chain. */
   ownEth: string;
   ownQrl: string;
-  legPlan: Record<LegKey, { recipient: string; amount: bigint }>;
+  legPlan: Record<LegKey, LegPlan>;
 }
 
 export interface SwapMachineInput {
@@ -71,8 +84,6 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
 
   const iLeg = initiatorLeg(swap.direction);
   const rLeg = responderLeg(swap.direction);
-  const iCfg = legByKey(iLeg);
-  const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
   const rState = legs[rLeg];
   const iConfirmed = confirmed[iLeg];
@@ -99,23 +110,50 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         ? swap.makerQrlAccount
         : swap.takerQrlAccount;
 
+  // The asset each leg must escrow. The QRL leg is always native; the ETH
+  // leg's asset comes from the locally persisted swap (agreed at take
+  // time), resolved against the compiled-in registry, never from the
+  // order book or from chain state.
+  const ethAsset = ETH_ASSETS[swap.ethAsset];
+  const assetOn = (leg: LegKey): Pick<LegPlan, "expectedToken" | "symbol" | "decimals"> =>
+    leg === "eth"
+      ? {
+          expectedToken: ethAsset.address ?? NATIVE_TOKEN,
+          symbol: ethAsset.symbol,
+          decimals: ethAsset.decimals,
+        }
+      : { expectedToken: NATIVE_TOKEN, symbol: QRL_LEG.asset, decimals: 18 };
+
   const legPlan = {
-    [iLeg]: { recipient: addrOn(iLeg, "taker"), amount: BigInt(swap.fromAmount) },
-    [rLeg]: { recipient: addrOn(rLeg, "maker"), amount: BigInt(swap.toAmount) },
-  } as Record<LegKey, { recipient: string; amount: bigint }>;
+    [iLeg]: { recipient: addrOn(iLeg, "taker"), amount: BigInt(swap.fromAmount), ...assetOn(iLeg) },
+    [rLeg]: { recipient: addrOn(rLeg, "maker"), amount: BigInt(swap.toAmount), ...assetOn(rLeg) },
+  } as Record<LegKey, LegPlan>;
+
+  // The token identity check on a counterparty lock. A lockToken() record
+  // shares the getSwap struct with lockNative(), so without this a lock
+  // paying out the wrong (possibly worthless) asset would pass every
+  // recipient/amount check. Fail closed: only the exact expected token
+  // (native sentinel or the agreed asset's registry address) is honest.
+  const tokenIssue = (confirmedToken: string, plan: LegPlan): string | null => {
+    if (sameAddr(confirmedToken, plan.expectedToken)) return null;
+    return sameAddr(plan.expectedToken, NATIVE_TOKEN)
+      ? `it escrows a token, not native ${plan.symbol}`
+      : `it escrows the wrong token contract, not the agreed ${plan.symbol}`;
+  };
 
   // Taker-side verification of the maker's lock before responding with
   // funds. The order book announced the parameters; the chain confirms
   // them. Checked against the confirmation-depth snapshot, not the head:
   // a shallow lock could still be reorged into a different one.
+  const iPlan = legPlan[iLeg];
   let initiatorLockIssue: string | null = null;
   if (iConfirmed && iConfirmed.status === SwapStatus.Open) {
-    if (!sameAddr(iConfirmed.token, NATIVE_TOKEN))
-      initiatorLockIssue = `it escrows a token, not native ${iCfg.asset}`;
-    else if (!sameAddr(iConfirmed.recipient, legPlan[iLeg].recipient))
+    const badToken = tokenIssue(iConfirmed.token, iPlan);
+    if (badToken !== null) initiatorLockIssue = badToken;
+    else if (!sameAddr(iConfirmed.recipient, iPlan.recipient))
       initiatorLockIssue = "its recipient is not your address";
-    else if (iConfirmed.amount !== legPlan[iLeg].amount)
-      initiatorLockIssue = `it escrows ${formatEther(iConfirmed.amount)} ${iCfg.asset}, not the agreed ${formatEther(legPlan[iLeg].amount)}`;
+    else if (iConfirmed.amount !== iPlan.amount)
+      initiatorLockIssue = `it escrows ${formatUnits(iConfirmed.amount, iPlan.decimals)} ${iPlan.symbol}, not the agreed ${formatUnits(iPlan.amount, iPlan.decimals)}`;
     else if (iConfirmed.timeout < responderTimeout + CLAIM_MARGIN_S)
       initiatorLockIssue = "its timeout leaves you too little claim window";
   }
@@ -128,14 +166,15 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   // announced window would publish the secret into a claim that expires
   // before it mines, letting the taker refund and then claim our leg. We
   // require the same CLAIM_MARGIN_S cushion the taker uses on our lock.
+  const rPlan = legPlan[rLeg];
   let responderLockIssue: string | null = null;
   if (rConfirmed && rConfirmed.status === SwapStatus.Open) {
-    if (!sameAddr(rConfirmed.token, NATIVE_TOKEN))
-      responderLockIssue = `it escrows a token, not native ${rCfg.asset}`;
-    else if (!sameAddr(rConfirmed.recipient, legPlan[rLeg].recipient))
+    const badToken = tokenIssue(rConfirmed.token, rPlan);
+    if (badToken !== null) responderLockIssue = badToken;
+    else if (!sameAddr(rConfirmed.recipient, rPlan.recipient))
       responderLockIssue = "its recipient is not your address";
-    else if (rConfirmed.amount !== legPlan[rLeg].amount)
-      responderLockIssue = `it escrows ${formatEther(rConfirmed.amount)} ${rCfg.asset}, not the agreed ${formatEther(legPlan[rLeg].amount)}`;
+    else if (rConfirmed.amount !== rPlan.amount)
+      responderLockIssue = `it escrows ${formatUnits(rConfirmed.amount, rPlan.decimals)} ${rPlan.symbol}, not the agreed ${formatUnits(rPlan.amount, rPlan.decimals)}`;
     else if (rConfirmed.timeout < nowS + CLAIM_MARGIN_S)
       responderLockIssue = "its timeout leaves too little window to reveal the secret safely";
   }

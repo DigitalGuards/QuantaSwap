@@ -3,11 +3,13 @@
 // send funds into reverts (best case) on contracts that can never change.
 
 import { describe, expect, it } from "vitest";
-import { Interface } from "ethers";
+import { Interface, id } from "ethers";
 import {
   HTLC_ABI,
+  buildApproveData,
   buildClaimData,
   buildLockNativeData,
+  buildLockTokenData,
   buildRefundData,
   hexToQ,
   qToHex,
@@ -17,6 +19,8 @@ import {
 const HASHLOCK = `0x${"12".repeat(32)}`;
 const PREIMAGE = `0x${"34".repeat(32)}`;
 const RECIPIENT = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TOKEN = "0xcccccccccccccccccccccccccccccccccccccccc";
+const AMOUNT = 25_000_000n; // 25 USDC in 6-decimal base units
 const TIMEOUT = 1_800_007_200;
 
 describe("address prefix bridging", () => {
@@ -55,6 +59,42 @@ describe("calldata encoding", () => {
     );
     expect(buildClaimData(HASHLOCK, PREIMAGE)).toBe("0x84cc9dfb" + "12".repeat(32) + "34".repeat(32));
     expect(buildRefundData(HASHLOCK)).toBe("0x7249fbb6" + "12".repeat(32));
+  });
+
+  it("lockToken accepts Q-prefixed recipients and encodes the hex form", () => {
+    const fromQ = buildLockTokenData(HASHLOCK, `Q${RECIPIENT.slice(2)}`, TOKEN, AMOUNT, TIMEOUT);
+    const fromHex = buildLockTokenData(HASHLOCK, RECIPIENT, TOKEN, AMOUNT, TIMEOUT);
+    expect(fromQ).toBe(fromHex);
+    expect(fromQ).toBe(
+      iface.encodeFunctionData("lockToken", [HASHLOCK, RECIPIENT, TOKEN, AMOUNT, TIMEOUT]),
+    );
+  });
+
+  it("lockToken and approve selectors derive from their canonical signatures", () => {
+    // The selectors are recomputed from the signatures here so a drifted
+    // ABI string in htlc.ts cannot silently change the wire format.
+    expect(id("lockToken(bytes32,address,address,uint256,uint256)").slice(0, 10)).toBe("0xecac467d");
+    expect(id("approve(address,uint256)").slice(0, 10)).toBe("0x095ea7b3");
+    expect(buildLockTokenData(HASHLOCK, RECIPIENT, TOKEN, AMOUNT, TIMEOUT).slice(0, 10)).toBe(
+      "0xecac467d",
+    );
+    expect(buildApproveData(RECIPIENT, AMOUNT).slice(0, 10)).toBe("0x095ea7b3");
+  });
+
+  it("lockToken and approve calldata layout stay pinned to the deployed ABI", () => {
+    expect(buildLockTokenData(HASHLOCK, RECIPIENT, TOKEN, AMOUNT, TIMEOUT)).toBe(
+      "0xecac467d" +
+        "12".repeat(32) +
+        "000000000000000000000000" +
+        "bb".repeat(20) +
+        "000000000000000000000000" +
+        "cc".repeat(20) +
+        AMOUNT.toString(16).padStart(64, "0") +
+        TIMEOUT.toString(16).padStart(64, "0"),
+    );
+    expect(buildApproveData(TOKEN, 0n)).toBe(
+      "0x095ea7b3" + "000000000000000000000000" + "cc".repeat(20) + "0".repeat(64),
+    );
   });
 });
 

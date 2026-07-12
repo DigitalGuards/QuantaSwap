@@ -1,6 +1,7 @@
 // Order book API client, mirroring frontend/src/lib/orderbook.ts. Nothing
 // returned here is trusted for fund movement.
 
+import type { AssetSymbol } from "./assets.js";
 import type { Direction } from "./policy.js";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
@@ -8,6 +9,10 @@ export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 export interface OrderView {
   id: string;
   direction: Direction;
+  /** ETH-leg asset symbol; absent on books predating stable pairs
+   *  (means ETH). Untrusted like everything else here: the maker
+   *  verifies the escrowed token on chain against its own registry. */
+  asset?: AssetSymbol;
   fromAmount: string;
   toAmount: string;
   makerEthAccount: string;
@@ -58,6 +63,7 @@ export class OrderBookClient {
 
   async create(body: {
     direction: Direction;
+    asset: AssetSymbol;
     fromAmount: string;
     toAmount: string;
     makerEthAccount: string;

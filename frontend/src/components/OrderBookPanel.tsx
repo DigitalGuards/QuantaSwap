@@ -1,7 +1,9 @@
-// Exchange-style order book for the single QRL/ETH pair. Asks (makers
-// selling ETH for QRL) stack above the spread, bids below, both with
-// cumulative depth bars anchored right. Every row is one takeable
-// protocol-mode order; clicking it starts the swap as taker.
+// Exchange-style order book, one pair per tab: QRL against each enabled
+// ETH-leg asset (native ETH, USDC, tUSDT). Asks (makers selling the
+// asset for QRL) stack above the spread, bids below, both with
+// cumulative depth bars anchored right and scoped to the active pair.
+// Every row is one takeable protocol-mode order; clicking it starts the
+// swap as taker.
 //
 // Color is polarity only (bid green / ask red, the exchange convention);
 // the sides are also labeled and spatially split, so identity never
@@ -13,7 +15,14 @@
 // fills stay translucent /10 token steps.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { formatEther } from "ethers";
+import { formatEther, formatUnits } from "ethers";
+import {
+  ETH_ASSETS,
+  ETH_ASSET_SYMBOLS,
+  QRL_LEG,
+  type EthAsset,
+  type EthAssetSymbol,
+} from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
 import {
   acceptOrder,
@@ -39,14 +48,14 @@ interface Props {
 
 interface BookRow {
   order: OrderView;
-  /** QRL per ETH. */
+  /** QRL per 1 whole unit of the pair's ETH-leg asset. */
   price: number;
-  /** ETH changing hands. */
-  amountEth: bigint;
-  /** QRL changing hands. */
+  /** ETH-leg asset changing hands, in its base units. */
+  amountUnits: bigint;
+  /** QRL changing hands, wei. */
   totalQrl: bigint;
-  /** Cumulative ETH from the best price outward, for the depth bar. */
-  cumEth: bigint;
+  /** Cumulative asset units from the best price outward, for the depth bar. */
+  cumUnits: bigint;
 }
 
 const fmtPrice = new Intl.NumberFormat("en-US", {
@@ -54,25 +63,28 @@ const fmtPrice = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
-const fmtAmount = (wei: bigint): string => {
-  const s = formatEther(wei);
+const fmtAmount = (units: bigint, decimals: number): string => {
+  const s = formatUnits(units, decimals);
   return s.endsWith(".0") ? s.slice(0, -2) : s;
 };
 
 /** What taking this order costs the taker, in the taker's own terms: they
  *  send the maker's `toAmount` and receive the maker's `fromAmount`. */
-function describeTake(order: OrderView): {
+function describeTake(
+  order: OrderView,
+  asset: EthAsset,
+): {
   send: string;
   sendAsset: string;
   recv: string;
   recvAsset: string;
 } {
-  const sellsEth = order.direction === "eth->qrl";
+  const sellsAsset = order.direction === "eth->qrl";
   return {
-    send: fmtAmount(BigInt(order.toAmount)),
-    sendAsset: sellsEth ? "QRL" : "ETH",
-    recv: fmtAmount(BigInt(order.fromAmount)),
-    recvAsset: sellsEth ? "ETH" : "QRL",
+    send: fmtAmount(BigInt(order.toAmount), sellsAsset ? 18 : asset.decimals),
+    sendAsset: sellsAsset ? QRL_LEG.asset : asset.symbol,
+    recv: fmtAmount(BigInt(order.fromAmount), sellsAsset ? asset.decimals : 18),
+    recvAsset: sellsAsset ? asset.symbol : QRL_LEG.asset,
   };
 }
 
@@ -81,25 +93,32 @@ function describeTake(order: OrderView): {
 // line, so a full book does not read as takeable when it is not.
 const CAP_ERROR_RE = /take limit|swaps in progress/i;
 
-/** Price and sizes of one order, taker's perspective on the QRL/ETH pair. */
-function toRow(order: OrderView): Omit<BookRow, "cumEth"> {
-  const sellsEth = order.direction === "eth->qrl";
-  const amountEth = BigInt(sellsEth ? order.fromAmount : order.toAmount);
-  const totalQrl = BigInt(sellsEth ? order.toAmount : order.fromAmount);
-  const price = Number(formatEther(totalQrl)) / Number(formatEther(amountEth));
-  return { order, price, amountEth, totalQrl };
+/** Price and sizes of one order, taker's perspective on the active pair.
+ *  Price is QRL wei per one WHOLE asset unit via bigint cross math (a
+ *  float division of the raw strings would be off by 10^12 for 6-decimal
+ *  assets), floated only at the end for display and sorting. */
+function toRow(order: OrderView, asset: EthAsset): Omit<BookRow, "cumUnits"> {
+  const sellsAsset = order.direction === "eth->qrl";
+  const amountUnits = BigInt(sellsAsset ? order.fromAmount : order.toAmount);
+  const totalQrl = BigInt(sellsAsset ? order.toAmount : order.fromAmount);
+  const price =
+    amountUnits === 0n
+      ? 0
+      : Number(formatEther((totalQrl * 10n ** BigInt(asset.decimals)) / amountUnits));
+  return { order, price, amountUnits, totalQrl };
 }
 
-function cumulate(rows: Omit<BookRow, "cumEth">[]): BookRow[] {
+function cumulate(rows: Omit<BookRow, "cumUnits">[]): BookRow[] {
   let cum = 0n;
   return rows.map((r) => {
-    cum += r.amountEth;
-    return { ...r, cumEth: cum };
+    cum += r.amountUnits;
+    return { ...r, cumUnits: cum };
   });
 }
 
 export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisabled, onTaken }: Props) {
   const [orders, setOrders] = useState<OrderView[] | null>(null);
+  const [pair, setPair] = useState<EthAssetSymbol>("ETH");
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   // A row clicked but not yet confirmed. Taking reserves the order and
@@ -109,6 +128,8 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
   // Set when the server refuses further takes (per-IP caps reached); blocks
   // the whole book until the caps free rather than 429-ing click by click.
   const [capBlocked, setCapBlocked] = useState(false);
+
+  const asset = ETH_ASSETS[pair];
 
   const refresh = useCallback(async () => {
     try {
@@ -138,13 +159,17 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     setBusyId(order.id);
     const taker = { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount };
     // Take by terms: if this exact row was just sniped, fill the next
-    // order at the same terms or better instead of failing. Offline-maker
-    // rows are excluded from matching, so those go by explicit id.
+    // order at the same terms or better instead of failing. The request
+    // carries the active pair's asset so a QRL/USDC take can never fill a
+    // QRL/ETH order whose raw amounts happen to satisfy the bounds.
+    // Offline-maker rows are excluded from matching, so those go by
+    // explicit id.
     const request =
       order.makerSeen === false
         ? acceptOrder(order.id, taker)
         : takeOrder({
             direction: order.direction,
+            asset: pair,
             maxPay: order.toAmount,
             minReceive: order.fromAmount,
             ...taker,
@@ -156,6 +181,10 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
           orderId: accepted.id,
           takerToken,
           direction: accepted.direction,
+          // The asset the taker agreed to is the displayed pair, anchored
+          // client-side; on-chain token verification runs against this,
+          // never against a book-provided value.
+          ethAsset: pair,
           fromAmount: accepted.fromAmount,
           toAmount: accepted.toAmount,
           makerEthAccount: accepted.makerEthAccount,
@@ -188,16 +217,27 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
   };
 
   const { asks, bids, maxCum, mid, spreadPct } = useMemo(() => {
-    const visible = (orders ?? []).filter((o) => o.id !== ownOrderId);
-    // Asks: makers selling ETH for QRL (taker pays QRL). Best = lowest price.
+    // Orders of other pairs (and of assets this build does not know) are
+    // invisible here: unknown symbols match no tab, so they fail closed
+    // out of the UI entirely.
+    const visible = (orders ?? []).filter(
+      (o) => o.id !== ownOrderId && (o.asset ?? "ETH") === pair,
+    );
+    // Asks: makers selling the asset for QRL (taker pays QRL). Best = lowest price.
     const askRows = cumulate(
-      visible.filter((o) => o.direction === "eth->qrl").map(toRow).sort((a, b) => a.price - b.price),
+      visible
+        .filter((o) => o.direction === "eth->qrl")
+        .map((o) => toRow(o, asset))
+        .sort((a, b) => a.price - b.price),
     );
-    // Bids: makers buying ETH with QRL (taker pays ETH). Best = highest price.
+    // Bids: makers buying the asset with QRL (taker pays the asset). Best = highest price.
     const bidRows = cumulate(
-      visible.filter((o) => o.direction === "qrl->eth").map(toRow).sort((a, b) => b.price - a.price),
+      visible
+        .filter((o) => o.direction === "qrl->eth")
+        .map((o) => toRow(o, asset))
+        .sort((a, b) => b.price - a.price),
     );
-    const top = [askRows.at(-1)?.cumEth ?? 0n, bidRows.at(-1)?.cumEth ?? 0n];
+    const top = [askRows.at(-1)?.cumUnits ?? 0n, bidRows.at(-1)?.cumUnits ?? 0n];
     const bestAsk = askRows[0]?.price;
     const bestBid = bidRows[0]?.price;
     const m = bestAsk !== undefined && bestBid !== undefined ? (bestAsk + bestBid) / 2 : (bestAsk ?? bestBid);
@@ -209,22 +249,22 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
       mid: m,
       spreadPct: s,
     };
-  }, [orders, ownOrderId]);
+  }, [orders, ownOrderId, pair, asset]);
 
   const canTake =
     Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
 
   const Row = ({ row, side }: { row: BookRow; side: "ask" | "bid" }) => {
-    const depth = maxCum > 0n ? Number((row.cumEth * 1000n) / maxCum) / 10 : 0;
-    const give = side === "ask" ? "QRL" : "ETH";
-    const get = side === "ask" ? "ETH" : "QRL";
+    const depth = maxCum > 0n ? Number((row.cumUnits * 1000n) / maxCum) / 10 : 0;
+    const give = side === "ask" ? QRL_LEG.asset : asset.symbol;
+    const get = side === "ask" ? asset.symbol : QRL_LEG.asset;
     const offline = row.order.makerSeen === false;
     return (
       <button
         type="button"
         disabled={!canTake}
         onClick={() => setPending(row.order)}
-        title={`Take: you send ${fmtAmount(side === "ask" ? row.totalQrl : row.amountEth)} ${give}, receive ${fmtAmount(side === "ask" ? row.amountEth : row.totalQrl)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
+        title={`Take: you send ${side === "ask" ? fmtAmount(row.totalQrl, 18) : fmtAmount(row.amountUnits, asset.decimals)} ${give}, receive ${side === "ask" ? fmtAmount(row.amountUnits, asset.decimals) : fmtAmount(row.totalQrl, 18)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
         className={cn(
           "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
           canTake ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
@@ -243,8 +283,10 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
           {busyId === row.order.id ? "taking…" : fmtPrice.format(row.price)}
         </span>
-        <span className="relative text-foreground/90">{fmtAmount(row.amountEth)}</span>
-        <span className="relative text-muted-foreground">{fmtAmount(row.totalQrl)}</span>
+        <span className="relative text-foreground/90">
+          {fmtAmount(row.amountUnits, asset.decimals)}
+        </span>
+        <span className="relative text-muted-foreground">{fmtAmount(row.totalQrl, 18)}</span>
       </button>
     );
   };
@@ -258,8 +300,31 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
             {orders !== null ? (
               <span aria-hidden className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success" />
             ) : null}
-            {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/ETH`}
+            {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
           </span>
+        </div>
+        <div className="flex gap-1 pt-1" role="tablist" aria-label="trading pair">
+          {ETH_ASSET_SYMBOLS.map((s) => (
+            <button
+              key={s}
+              type="button"
+              role="tab"
+              aria-selected={pair === s}
+              onClick={() => {
+                setPair(s);
+                setPending(null);
+                setError(null);
+              }}
+              className={cn(
+                "rounded-md px-2 py-1 text-xs font-medium",
+                pair === s
+                  ? "bg-muted/60 text-foreground"
+                  : "text-muted-foreground hover:bg-muted/40",
+              )}
+            >
+              QRL/{s}
+            </button>
+          ))}
         </div>
       </CardHeader>
       <CardContent className="space-y-0 px-3 pb-3">
@@ -273,7 +338,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         {pending ? (
           <div className="mx-2 mb-2 space-y-2 rounded-md border border-blue-accent/40 bg-blue-accent/10 p-3">
             {(() => {
-              const t = describeTake(pending);
+              const t = describeTake(pending, asset);
               return (
                 <p className="text-sm">
                   Take this order: send{" "}
@@ -305,13 +370,13 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
 
         <div className="grid grid-cols-3 gap-2 px-2 pb-1.5 text-right text-[11px] text-muted-foreground">
           <span className="text-left">Price (QRL)</span>
-          <span>Amount (ETH)</span>
+          <span>Amount ({pair})</span>
           <span>Total (QRL)</span>
         </div>
 
         {asks.length === 0 && bids.length === 0 ? (
           <p className="px-2 py-3 text-sm text-muted-foreground">
-            No open orders right now. Post one, or check back shortly.
+            No open QRL/{pair} orders right now. Post one, or check back shortly.
           </p>
         ) : (
           <>
@@ -328,7 +393,9 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
             <div className="my-1 flex items-baseline justify-between border-y border-border/60 px-2 py-1.5">
               <span className="font-data text-sm font-semibold">
                 {mid !== undefined ? fmtPrice.format(mid) : "-"}
-                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">QRL/ETH mid</span>
+                <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
+                  QRL/{pair} mid
+                </span>
               </span>
               <span className="text-[11px] text-muted-foreground">
                 {spreadPct !== null ? `spread ${spreadPct.toFixed(2)}%` : "one-sided"}
@@ -346,8 +413,8 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
 
         <div className="space-y-1 px-2 pt-2">
           <p className="text-[11px] text-muted-foreground">
-            <span className="text-red-400">asks</span>: buy ETH with QRL ·{" "}
-            <span className="text-success">bids</span>: buy QRL with ETH · each row is one
+            <span className="text-red-400">asks</span>: buy {pair} with QRL ·{" "}
+            <span className="text-success">bids</span>: buy QRL with {pair} · each row is one
             takeable order
           </p>
           {!ethAccount || !qrlAccount ? (

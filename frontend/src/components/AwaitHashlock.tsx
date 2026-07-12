@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { CLAIM_MARGIN_S } from "@/config";
+import { formatUnits } from "ethers";
+import { CLAIM_MARGIN_S, ETH_ASSETS, QRL_LEG } from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
 import { getOrder, OrderGoneError } from "@/lib/orderbook";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
@@ -71,12 +72,37 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
     };
   }, [swap, onReady, onAbort]);
 
+  // The taker sends the responder leg (toAmount) and receives the
+  // initiator leg (fromAmount); amounts format with the order's ETH-leg
+  // asset (QRL is always native, 18 decimals).
+  const asset = ETH_ASSETS[swap.ethAsset];
+  const sellsAsset = swap.direction === "eth->qrl";
+  const send = {
+    amount: formatUnits(BigInt(swap.toAmount), sellsAsset ? 18 : asset.decimals),
+    symbol: sellsAsset ? QRL_LEG.asset : asset.symbol,
+  };
+  const recv = {
+    amount: formatUnits(BigInt(swap.fromAmount), sellsAsset ? asset.decimals : 18),
+    symbol: sellsAsset ? asset.symbol : QRL_LEG.asset,
+  };
+
   return (
     <Card className="surface-ember">
       <CardHeader className="pb-3">
         <CardTitle className="text-lg">Order taken</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
+        <p className="text-sm">
+          You send{" "}
+          <span className="font-data font-medium">
+            {send.amount} {send.symbol}
+          </span>{" "}
+          and receive{" "}
+          <span className="font-data font-medium">
+            {recv.amount} {recv.symbol}
+          </span>
+          .
+        </p>
         <p className="text-sm text-muted-foreground">
           Waiting for the maker to publish the hashlock and lock their leg. No funds move from
           your side until you verify their lock on-chain in the next step.

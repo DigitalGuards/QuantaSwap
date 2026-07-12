@@ -7,6 +7,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { QRL_BOUNDS, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
+import { ApiError } from "./errors.js";
+
+export { ApiError } from "./errors.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
@@ -14,9 +18,15 @@ export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 export interface Order {
   id: string;
   direction: Direction;
-  /** Wei the maker escrows on their from-chain, decimal string. */
+  /** Ethereum-leg asset symbol; the QRL leg is always native QRL (18
+   *  decimals). Absent on the wire and in pre-rollout persisted rows
+   *  means ETH. */
+  asset: AssetSymbol;
+  /** Base units of the from-side asset the maker escrows, decimal
+   *  string: the order's asset for eth->qrl, QRL wei for qrl->eth. */
   fromAmount: string;
-  /** Wei the maker expects on the other chain, decimal string. */
+  /** Base units of the to-side asset the maker expects, decimal string:
+   *  QRL wei for eth->qrl, the order's asset for qrl->eth. */
   toAmount: string;
   makerEthAccount: string;
   makerQrlAccount: string;
@@ -55,9 +65,7 @@ export type PublicOrder = Omit<
   makerSeen: boolean;
 };
 
-// Mirrored client-side; keep in sync with frontend/src/config.ts.
-const MIN_AMOUNT_WEI = 10n ** 15n; // 0.001, dust/spam guard
-const MAX_AMOUNT_WEI = 10n ** 24n;
+// Per-asset amount bounds live in assets.ts (mirrored client-side).
 const MAX_OPEN_ORDERS = 200;
 const OPEN_TTL_S = 48 * 3600;
 const ACCEPTED_TTL_S = 3600; // accepted but never locked: cancel
@@ -84,27 +92,20 @@ const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
 const AMOUNT_RE = /^[0-9]{1,30}$/;
 
-export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 const nowS = (): number => Math.floor(Date.now() / 1000);
 
 const sha256Hex = (s: string): string => createHash("sha256").update(s).digest("hex");
 
-function requireAmount(raw: unknown, field: string): string {
+function requireAmount(raw: unknown, field: string, bounds: AmountBounds): string {
   if (typeof raw !== "string" || !AMOUNT_RE.test(raw)) {
-    throw new ApiError(400, `${field} must be a decimal wei string`);
+    throw new ApiError(400, `${field} must be a decimal base-unit string`);
   }
-  const wei = BigInt(raw);
-  if (wei < MIN_AMOUNT_WEI) throw new ApiError(400, `${field} is below the 0.001 minimum`);
-  if (wei > MAX_AMOUNT_WEI) throw new ApiError(400, `${field} exceeds the maximum`);
-  return wei.toString();
+  const units = BigInt(raw);
+  if (units < bounds.minBaseUnits) {
+    throw new ApiError(400, `${field} is below the ${bounds.minLabel} minimum`);
+  }
+  if (units > bounds.maxBaseUnits) throw new ApiError(400, `${field} exceeds the maximum`);
+  return units.toString();
 }
 
 function requireAddress(raw: unknown, field: string, re: RegExp): string {
@@ -150,9 +151,14 @@ export class OrderStore {
   private load(): void {
     try {
       const raw = readFileSync(this.dataFile, "utf8");
-      const parsed = JSON.parse(raw) as Order[];
+      // Rows persisted before the stablecoin rollout predate the asset
+      // field; absent means ETH (the wire-level default), so hydrate it
+      // here and every order in memory carries a concrete asset.
+      type PersistedOrder = Omit<Order, "asset"> & { asset?: AssetSymbol };
+      const parsed = JSON.parse(raw) as PersistedOrder[];
       const now = nowS();
-      for (const order of parsed) {
+      for (const row of parsed) {
+        const order: Order = { ...row, asset: row.asset ?? "ETH" };
         this.orders.set(order.id, order);
         // Presence does not survive restarts; grant loaded listings one
         // TTL window so a deploy does not flap the whole book offline.
@@ -240,13 +246,20 @@ export class OrderStore {
     if (openCount >= MAX_OPEN_ORDERS) throw new ApiError(503, "order book is full");
 
     const direction = requireDirection(body["direction"]);
+    // Asset first: the direction decides which side of the order is
+    // denominated in the asset's base units and which is QRL wei, and
+    // the amount bounds follow from that.
+    const asset = requireAsset(body["asset"]);
+    const [fromBounds, toBounds]: [AmountBounds, AmountBounds] =
+      direction === "eth->qrl" ? [asset, QRL_BOUNDS] : [QRL_BOUNDS, asset];
     const now = nowS();
     const makerToken = randomBytes(32).toString("hex");
     const order: Order = {
       id: randomBytes(8).toString("hex"),
       direction,
-      fromAmount: requireAmount(body["fromAmount"], "fromAmount"),
-      toAmount: requireAmount(body["toAmount"], "toAmount"),
+      asset: asset.symbol,
+      fromAmount: requireAmount(body["fromAmount"], "fromAmount", fromBounds),
+      toAmount: requireAmount(body["toAmount"], "toAmount", toBounds),
       makerEthAccount: requireAddress(body["makerEthAccount"], "makerEthAccount", ETH_ADDR_RE),
       makerQrlAccount: requireAddress(body["makerQrlAccount"], "makerQrlAccount", QRL_ADDR_RE),
       status: "open",
@@ -327,28 +340,39 @@ export class OrderStore {
    *  toAmount) to receive at least `minReceive` (the order's fromAmount)".
    *  Atomically fills the best matching open order, so two takers racing
    *  for the same row both fill while depth exists, and a stale click can
-   *  only ever fill at the terms the taker saw or better. Offline makers
-   *  are skipped: their orders are takeable by explicit id only. */
+   *  only ever fill at the terms the taker saw or better. Matching is
+   *  asset-scoped: a USDC request never fills an ETH order whose raw
+   *  numbers happen to overlap. Offline makers are skipped: their orders
+   *  are takeable by explicit id only. */
   take(
     body: Record<string, unknown>,
     takerIp: string,
   ): { order: PublicOrder; takerToken: string } {
     this.sweep();
     const direction = requireDirection(body["direction"]);
-    const maxPay = BigInt(requireAmount(body["maxPay"], "maxPay"));
-    const minReceive = BigInt(requireAmount(body["minReceive"], "minReceive"));
+    // The taker pays the order's toAmount side and receives its
+    // fromAmount side, so the asset-vs-QRL bounds mapping is the
+    // reverse of create().
+    const asset = requireAsset(body["asset"]);
+    const [payBounds, receiveBounds]: [AmountBounds, AmountBounds] =
+      direction === "eth->qrl" ? [QRL_BOUNDS, asset] : [asset, QRL_BOUNDS];
+    const maxPay = BigInt(requireAmount(body["maxPay"], "maxPay", payBounds));
+    const minReceive = BigInt(requireAmount(body["minReceive"], "minReceive", receiveBounds));
 
     const now = nowS();
     const candidates = [...this.orders.values()].filter(
       (o) =>
         o.status === "open" &&
         o.direction === direction &&
+        o.asset === asset.symbol &&
         BigInt(o.toAmount) <= maxPay &&
         BigInt(o.fromAmount) >= minReceive &&
         this.isSeen(o, now),
     );
     // Best rate for the taker first (receive/pay, exact via cross
-    // multiplication), then the larger fill, then FIFO.
+    // multiplication; rates only compare within one pair, which the
+    // asset-scoped filter above guarantees), then the larger fill, then
+    // FIFO.
     candidates.sort((a, b) => {
       const cross = BigInt(a.fromAmount) * BigInt(b.toAmount) - BigInt(b.fromAmount) * BigInt(a.toAmount);
       if (cross !== 0n) return cross > 0n ? -1 : 1;

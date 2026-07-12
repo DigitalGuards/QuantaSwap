@@ -32,6 +32,7 @@ const swap: ActiveSwap = {
   orderId: "order-1",
   takerToken: null,
   direction: "eth->qrl",
+  ethAsset: "ETH",
   fromAmount: "1000000000000000000",
   toAmount: "5000000000000000000",
   makerEthAccount: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -73,6 +74,24 @@ describe("active swap persistence", () => {
     localStorage.setItem("quantaswap.swap.v2", JSON.stringify(legacy));
     expect(loadActiveSwap()).toEqual({ ...swap, takerToken: null });
   });
+
+  it("hydrates swaps stored before the ETH-leg asset existed as native ETH", () => {
+    const { ethAsset: _omit, ...legacy } = swap;
+    localStorage.setItem("quantaswap.swap.v2", JSON.stringify(legacy));
+    expect(loadActiveSwap()).toEqual({ ...swap, ethAsset: "ETH" });
+  });
+
+  it("keeps a stored stable-pair asset intact", () => {
+    saveActiveSwap({ ...swap, ethAsset: "USDC" });
+    expect(loadActiveSwap()?.ethAsset).toBe("USDC");
+    saveActiveSwap({ ...swap, ethAsset: "tUSDT" });
+    expect(loadActiveSwap()?.ethAsset).toBe("tUSDT");
+  });
+
+  it("normalizes an unknown persisted asset to ETH (fails closed downstream)", () => {
+    localStorage.setItem("quantaswap.swap.v2", JSON.stringify({ ...swap, ethAsset: "DOGE" }));
+    expect(loadActiveSwap()?.ethAsset).toBe("ETH");
+  });
 });
 
 describe("legacy demo.v1 migration", () => {
@@ -97,6 +116,8 @@ describe("legacy demo.v1 migration", () => {
     expect(migrated?.role).toBe("sandbox");
     expect(migrated?.orderId).toBeNull();
     expect(migrated?.direction).toBe("qrl->eth");
+    // The demo predates ERC-20 legs: always native ETH.
+    expect(migrated?.ethAsset).toBe("ETH");
     expect(migrated?.preimage).toBe(swap.preimage);
     // Sandbox plays both parties with the same accounts.
     expect(migrated?.makerEthAccount).toBe(swap.makerEthAccount);
@@ -117,9 +138,14 @@ describe("legacy demo.v1 migration", () => {
 
 describe("my-order handle", () => {
   it("roundtrips and survives corruption", () => {
-    saveMyOrder({ id: "o1", token: "t1" });
-    expect(loadMyOrder()).toEqual({ id: "o1", token: "t1" });
+    saveMyOrder({ id: "o1", token: "t1", asset: "USDC" });
+    expect(loadMyOrder()).toEqual({ id: "o1", token: "t1", asset: "USDC" });
     localStorage.setItem("quantaswap.myorder.v1", "?");
     expect(loadMyOrder()).toBeNull();
+  });
+
+  it("hydrates handles stored before the asset existed as native ETH", () => {
+    localStorage.setItem("quantaswap.myorder.v1", JSON.stringify({ id: "o1", token: "t1" }));
+    expect(loadMyOrder()).toEqual({ id: "o1", token: "t1", asset: "ETH" });
   });
 });

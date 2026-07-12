@@ -3,7 +3,7 @@
 // including the rejections that keep the book clean. Run via `npm test`.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +16,10 @@ const child = spawn(process.execPath, [new URL("./dist/server.js", import.meta.u
   env: { ...process.env, PORT: String(PORT), ORDERBOOK_DATA: dataFile, PRESENCE_TTL_S: "1" },
   stdio: ["ignore", "inherit", "inherit"],
 });
+
+/** Second instance for the legacy-persistence section; spawned late,
+ *  killed in the shared finally. */
+let child2 = null;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -38,10 +42,10 @@ async function api(method, path, body, headers = {}) {
   return { status: res.status, body: await res.json() };
 }
 
-async function waitForHealth() {
+async function waitForHealth(base = BASE) {
   for (let i = 0; i < 50; i += 1) {
     try {
-      const res = await fetch(`${BASE}/health`);
+      const res = await fetch(`${base}/health`);
       if (res.ok) return;
     } catch {
       // not up yet
@@ -90,6 +94,7 @@ try {
   const { id } = created.body.order;
   const token = created.body.makerToken;
   check("token not leaked on order", created.body.order.makerTokenHash === undefined);
+  check("asset-less create defaults to ETH", created.body.order.asset === "ETH");
 
   const list = await api("GET", "/orders");
   check("order listed while open", list.body.orders.some((o) => o.id === id));
@@ -376,6 +381,142 @@ try {
   });
   check("offline orders stay takeable by explicit id", explicitTake.status === 200);
 
+  console.log("per-asset orders:");
+  const HUNDRED_USDC = 100n * 10n ** 6n; // 6-decimal base units
+  const TWO_QRL = 2n * ONE_ETH; // QRL is native, always 18 decimals
+  const stableTaker = { "X-Forwarded-For": "203.0.113.40" };
+
+  const usdcDust = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      asset: "USDC",
+      fromAmount: "999999", // one base unit below 1 USDC
+      toAmount: TWO_QRL.toString(),
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  check(
+    "sub-minimum USDC rejected with the per-asset floor",
+    usdcDust.status === 400 && String(usdcDust.body.error).includes("1 USDC"),
+  );
+
+  const qrlSideDust = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      asset: "USDC",
+      fromAmount: HUNDRED_USDC.toString(),
+      toAmount: "1000", // QRL side keeps the 18-decimal wei floor
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  check("QRL side of a USDC order keeps the wei floor", qrlSideDust.status === 400);
+
+  const badAsset = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      asset: "DOGE",
+      fromAmount: ONE_ETH.toString(),
+      toAmount: ONE_ETH.toString(),
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  check("unknown asset rejected", badAsset.status === 400);
+
+  const nullAsset = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      asset: null,
+      fromAmount: ONE_ETH.toString(),
+      toAmount: ONE_ETH.toString(),
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  check("null asset rejected (only absent means ETH)", nullAsset.status === 400);
+
+  // Cross-match guard: an ETH order whose raw numbers overlap a USDC
+  // request (1 ETH escrowed = 1e18 >= any USDC minReceive, same QRL
+  // toAmount) must never fill it. Freshly created, so it is online and
+  // WOULD match if the filter were not asset-scoped.
+  const ethOverlap = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      fromAmount: ONE_ETH.toString(),
+      toAmount: TWO_QRL.toString(),
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  const usdcTerms = {
+    direction: "eth->qrl",
+    asset: "USDC",
+    maxPay: TWO_QRL.toString(), // QRL wei the taker pays
+    minReceive: HUNDRED_USDC.toString(), // USDC base units the taker receives
+    ...taker,
+  };
+  const crossMatch = await api("POST", "/orders/take", usdcTerms, stableTaker);
+  check("take-by-terms never cross-matches assets", crossMatch.status === 409);
+
+  const usdcCreated = await api(
+    "POST",
+    "/orders",
+    {
+      direction: "eth->qrl",
+      asset: "USDC",
+      fromAmount: HUNDRED_USDC.toString(), // 1e8, below the old 1e15 wei floor
+      toAmount: TWO_QRL.toString(),
+      makerEthAccount: ETH_A,
+      makerQrlAccount: QRL_A,
+    },
+    makerHdr,
+  );
+  check(
+    "USDC order accepted at 6-decimal amounts",
+    usdcCreated.status === 201 && usdcCreated.body.order.asset === "USDC",
+  );
+  const usdcListed = await api("GET", "/orders");
+  check(
+    "asset field present in the order list",
+    usdcListed.body.orders.some((o) => o.id === usdcCreated.body.order.id && o.asset === "USDC"),
+  );
+
+  const usdcTake = await api("POST", "/orders/take", usdcTerms, stableTaker);
+  check(
+    "USDC take fills the USDC order",
+    usdcTake.status === 200 &&
+      usdcTake.body.order.id === usdcCreated.body.order.id &&
+      usdcTake.body.order.asset === "USDC",
+  );
+  const ethTerms = {
+    direction: "eth->qrl",
+    maxPay: TWO_QRL.toString(),
+    minReceive: ONE_ETH.toString(),
+    ...taker,
+  };
+  const ethTake = await api("POST", "/orders/take", ethTerms, stableTaker);
+  check(
+    "asset-less take defaults to ETH and leaves USDC alone",
+    ethTake.status === 200 && ethTake.body.order.id === ethOverlap.body.order.id,
+  );
+
   console.log("book stream:");
   const streamRes = await fetch(`${BASE}/orders/stream`);
   check(
@@ -399,12 +540,53 @@ try {
     streamed += await nextChunk();
   }
   check("stream pushes book changes", streamed.includes(streamedOrder.id));
+  check("stream payload carries the asset field", streamed.includes('"asset":"ETH"'));
   await reader.cancel().catch(() => undefined);
+
+  console.log("legacy persistence:");
+  // A pre-stablecoin data file: full order rows, no asset field. The
+  // store must hydrate them as ETH so prod data survives the rollout.
+  const PORT2 = PORT + 2000;
+  const BASE2 = `http://127.0.0.1:${PORT2}/api`;
+  const legacyFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-legacy-")), "orders.json");
+  const legacyNow = Math.floor(Date.now() / 1000);
+  writeFileSync(
+    legacyFile,
+    JSON.stringify([
+      {
+        id: "00000000000000ab",
+        direction: "eth->qrl",
+        fromAmount: ONE_ETH.toString(),
+        toAmount: TWO_QRL.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+        status: "open",
+        takerEthAccount: null,
+        takerQrlAccount: null,
+        hashlock: null,
+        initiatorTimeout: null,
+        responderTimeout: null,
+        createdAt: legacyNow,
+        updatedAt: legacyNow,
+        makerTokenHash: "0".repeat(64),
+      },
+    ]),
+  );
+  child2 = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
+    env: { ...process.env, PORT: String(PORT2), ORDERBOOK_DATA: legacyFile, PRESENCE_TTL_S: "90" },
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  await waitForHealth(BASE2);
+  const legacyList = await fetch(`${BASE2}/orders`).then((r) => r.json());
+  const legacyRow = legacyList.orders.find((o) => o.id === "00000000000000ab");
+  check("legacy asset-less row still listed", legacyRow !== undefined);
+  check("legacy row hydrates as ETH", legacyRow !== undefined && legacyRow.asset === "ETH");
 } catch (err) {
   failures += 1;
   console.error("smoke run crashed:", err);
 } finally {
   child.kill("SIGTERM");
+  if (child2 !== null) child2.kill("SIGTERM");
 }
 
 if (failures > 0) {

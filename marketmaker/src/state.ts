@@ -12,15 +12,18 @@ export class StateFile {
   constructor(private readonly file: string) {
     try {
       const parsed = JSON.parse(readFileSync(this.file, "utf8")) as ManagedOrder[];
-      // `level`/`quotedMidMilli`/`announcedAt` arrived after earlier
-      // releases; old records mean rung 0, an unknown (reprice-worthy) mid,
-      // and no announce grace.
+      // `level`/`quotedMidMilli`/`announcedAt`/`asset` arrived after
+      // earlier releases; old records mean rung 0, an unknown
+      // (reprice-worthy) mid, no announce grace, and a native-ETH pair
+      // (so pre-upgrade in-flight swaps keep settling under the native
+      // claim gate).
       for (const o of parsed) {
         this.orders.set(o.id, {
           ...o,
           level: o.level ?? 0,
           quotedMidMilli: o.quotedMidMilli ?? null,
           announcedAt: o.announcedAt ?? null,
+          asset: o.asset ?? "ETH",
         });
       }
     } catch {
