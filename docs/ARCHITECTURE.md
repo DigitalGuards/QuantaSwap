@@ -83,6 +83,7 @@ Pure HTLC. Order discovery is an order book; matching produces the parameters bo
 - Take-by-terms: the frontend takes orders by bounds derived from the clicked row ("pay at most X, receive at least Y"), not by id. The book atomically fills the best open order within bounds, so two takers racing for one row both fill while depth exists, and a stale click can only fill at the terms the taker saw or better. Take-by-id stays available for explicitly chosen orders.
 - Maker presence: makers heartbeat their listings (maker-token authed, in-memory only). Orders whose maker has not been seen within the presence TTL (90s) are dimmed in the UI and skipped by take-by-terms matching, so takers stop reserving orders whose maker cannot respond; they remain takeable by explicit id. The browser maker beats while its order card is open; the market maker beats every tick.
 - Live book: `GET /orders/stream` (SSE) pushes the open list on connect and on every change, shrinking the stale-row window from the old 5s poll to one broadcast. The poll remains as a fallback while the stream is down.
+- Full wire-level reference for the order book service: [ORDERBOOK_API.md](ORDERBOOK_API.md). Guide for running the maker side (browser or headless): [LIQUIDITY_PROVIDERS.md](LIQUIDITY_PROVIDERS.md).
 
 ## 4. Solver mode (Phase 3)
 
@@ -121,7 +122,7 @@ React + Vite, mirroring QuantaPool frontend conventions (hardened TS, zero-warni
 ## 8. Deployment
 
 - **Domain**: quantaswap.io, Cloudflare zone active (DigitalGuards account). Origin CA cert pattern per workspace CLAUDE.md 7b when a host is chosen; likely co-located with QuantaPool on the consolidated box.
-- **Testnets**: Sepolia (11155111) + QRL v2 testnet (1337). QRL RPC: `https://qrlwallet.com/api/qrl-rpc/testnet` proxy, direct node `http://REDACTED:8545` as fallback. `qrl_*` namespace, Q-prefix addresses.
+- **Testnets**: Sepolia (11155111) + QRL v2 testnet (1337). QRL RPC: `https://qrlwallet.com/api/qrl-rpc/testnet` proxy. `qrl_*` namespace, Q-prefix addresses.
 - **Toolchain**: native `hypc` binary (build instructions in QuantaPool's CLAUDE.md) via `npm run compile`; anvil-based integration tests via `npm test`; deploys via `npm run deploy:qrl` / `npm run deploy:eth`; live smokes via `scripts/smoke-{qrl,eth}.js`.
 
 ## 9. Open questions

@@ -30,10 +30,6 @@ node scripts/smoke-eth-erc20.js 0x31993bB91ECeD6141a1667c072f214C8DF20f7DB 0x1c7
 node scripts/smoke-eth-erc20.js 0x31993bB91ECeD6141a1667c072f214C8DF20f7DB 0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0  # tUSDT
 ```
 
-MM inventory: 54 USDC (90% of the funder wallet's 60) moved to the MM ETH wallet
-`0x48fF8564DF1980e74667dec3A85E3b4b67844b6B` on 2026-07-12, tx
-`0x5fcb49ddd65e55d6b93003c1c901ddc64ca4b5559f404da644f7279c678c7965`.
-
 ## Testnet, 2026-07-08 (superseded)
 
 Kept for the record: swaps opened on these addresses settle there. Runtime 2797 bytes (no
@@ -60,81 +56,19 @@ node scripts/smoke-qrl.js Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee
 node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 ```
 
-## Updating a running deployment
+## Live services (quantaswap.io)
 
-- Frontend: build `frontend/dist` locally, tar-over-ssh as **root** (ops has no sudo): extract into `/var/www/quantaswap`, then `chown -R www-data:www-data` it.
-- Order book: tar `server/{src,package.json,tsconfig.json,smoke.js}` to `ops@…:~/quantaswap-orderbook` (never touch `data/`), `npm run build`, `pm2 restart quantaswap-orderbook`, check `/api/health`.
-- Market maker: tar `marketmaker/{src,package.json,tsconfig.json}` to `~/quantaswap-marketmaker` (never touch `data/` or `.env`), `npm run build`, `pm2 restart quantaswap-marketmaker`, watch the boot lines in `pm2 logs`.
-
-## Order book service (quantaswap.io)
-
-Runs on the `REDACTED` box next to the frontend webroot. Coordination only, never custody; losing it strands no funds.
-
-```bash
-# one-time setup as ops
-cd ~/quantaswap-orderbook   # clone or rsync of server/
-npm install && npm run build
-pm2 start dist/server.js --name quantaswap-orderbook
-pm2 save
-```
-
-Defaults: `PORT=8091` (binds 127.0.0.1 only), data file `server/data/orders.json` (override with `ORDERBOOK_DATA`).
-
-nginx vhost addition (same-origin, alongside the existing `/rpc/*` proxies):
-
-```nginx
-location /api/ {
-    proxy_pass http://127.0.0.1:8091;
-    proxy_http_version 1.1;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header CF-Connecting-IP $http_cf_connecting_ip;
-}
-```
-
-Health check: `curl -s https://quantaswap.io/api/health` returns `{"status":"ok"}`.
-
-## Market maker (quantaswap.io)
-
-Always-online protocol-mode maker (`marketmaker/`) that keeps the book
-stocked so visitors always have takeable orders. Same box, next to the
-order book. It is an ordinary maker driving the public protocol: killing
-it strands no one (in-flight swaps settle via the HTLC windows; its open
-orders expire off the book).
-
-```bash
-# one-time setup as ops
-cd ~/quantaswap-marketmaker   # clone or rsync of marketmaker/
-npm install && npm run build
-cp .env.example .env          # then fill MM_ETH_PRIVATE_KEY + MM_QRL_HEXSEED (chmod 600)
-pm2 start "node --env-file=.env dist/index.js" --name quantaswap-marketmaker
-pm2 save
-```
-
-Inventory wallets (testnet, funded 2026-07-09 from the project funders):
-ETH `0x48fF8564DF1980e74667dec3A85E3b4b67844b6B`, QRL
-`Q7D4175166aA4b696Cf77c23808811ef5Ffa7C36B`. Keys live only in the box
-`.env` and the workstation copy; never in the repo.
-
-Policy defaults: 2 open orders per direction (0.02 ETH <-> 2 QRL), one
-listing per price rung, max 2 swaps in flight (caps what a griefer can
-tie up), balance reserves keep gas headroom, confirmation depth 3 before
-claiming, refunds automatic after the initiator window. Per-IP take caps
-in the order book (4 concurrent, 24/day) keep one visitor from clearing
-the book.
-
-The prod box runs a faster, deeper profile than the defaults (testnet
-funds, demo patience): `MM_ORDERS_PER_DIRECTION=4` with
-`MM_ORDERS_PER_LEVEL=2` (two identical listings per rung so a second
-taker can start the same trade while the first swap settles),
-`MM_MAX_INFLIGHT=8`, `MM_TICK_MS=5000`, `MM_CONFIRMATIONS=1`,
-`MM_LOCK_GRACE_S=10`. Keep listings x reads within the order book's
-per-minute read ceiling when deepening the ladder (each open listing
-costs the MM two reads per tick). The frontend's taker-side confirmation
-depth is 1 to match (frontend/src/config.ts).
-
-Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
-persisted swap state (including preimages of in-flight swaps) is in
-`data/state.json`, mode 600.
+- **Order book**: coordination only, never custody; losing it strands no funds.
+  Same-origin behind `/api`; health check: `curl -s https://quantaswap.io/api/health`
+  returns `{"status":"ok"}`. Full API reference: [ORDERBOOK_API.md](ORDERBOOK_API.md).
+- **Market maker** (`marketmaker/`): an always-online protocol-mode maker that keeps
+  the book stocked so visitors always have takeable orders. It is an ordinary maker
+  driving the public protocol: killing it strands no one (in-flight swaps settle via
+  the HTLC windows; its open orders expire off the book). Policy defaults live in
+  `marketmaker/src/config.ts` and are documented in `marketmaker/.env.example`;
+  anyone can run their own — see [LIQUIDITY_PROVIDERS.md](LIQUIDITY_PROVIDERS.md).
+- The operational runbook (server layout, deploy procedure, production tuning) lives
+  outside the repo.
 
 ## Stablecoin pairs (QRL/USDC, QRL/tUSDT)
 
@@ -145,11 +79,6 @@ token addresses verified on-chain by every client). The MM stocks QRL/USDC
 (CoinGecko usd-coin/qrl cross mid); QRL/tUSDT has no MM liquidity, the tUSDT
 faucet (`faucet()` on the token, 10,000 per call) makes it self-serve for
 testing the USDT approval-race path.
-
-MM stablecoin knobs (box `.env`): `MM_ASSETS=ETH,USDC`, `MM_USDC_BASE=5`
-(rung-0 listing size), `MM_USDC_RESERVE=6` (kept unlisted, 10% of the funded
-54), `MM_USDC_ORDERS_PER_DIRECTION=2`. Watch the order book read ceiling when
-deepening ladders: every open listing still costs 2 reads per tick.
 
 Cutover note (2026-07-12): HTLC addresses changed with this rollout. Swaps
 opened on the 2026-07-08 contracts settle there (records do not migrate); the
