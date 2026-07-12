@@ -162,7 +162,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
   }, [refresh]);
 
   const take = (order: OrderView) => {
-    if (!ethAccount || !qrlAccount) return;
+    if (!ethAccount || !qrlAccount || order.id === ownOrderId) return;
     setError(null);
     setBusyId(order.id);
     const taker = { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount };
@@ -240,10 +240,10 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
   const { asks, bids, maxCum, mid, spreadPct } = useMemo(() => {
     // Orders of other pairs (and of assets this build does not know) are
     // invisible here: unknown symbols match no tab, so they fail closed
-    // out of the UI entirely.
-    const visible = (orders ?? []).filter(
-      (o) => o.id !== ownOrderId && (o.asset ?? "ETH") === pair,
-    );
+    // out of the UI entirely. The caller's own order stays visible (a
+    // hidden row reads as "my order vanished") but is marked and never
+    // takeable.
+    const visible = (orders ?? []).filter((o) => (o.asset ?? "ETH") === pair);
     // QRL is the base: asks are makers SELLING QRL for the quote asset
     // (direction qrl->eth), best = lowest quote price.
     const askRows = cumulate(
@@ -272,7 +272,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
       mid: m,
       spreadPct: s,
     };
-  }, [orders, ownOrderId, pair, asset]);
+  }, [orders, pair, asset]);
 
   const canTake =
     Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
@@ -284,17 +284,22 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
     const give = side === "ask" ? asset.symbol : QRL_LEG.asset;
     const get = side === "ask" ? QRL_LEG.asset : asset.symbol;
     const offline = row.order.makerSeen === false;
+    const own = row.order.id === ownOrderId;
     return (
       <button
         type="button"
-        disabled={!canTake}
+        disabled={!canTake || own}
         onClick={() => setPending(row.order)}
-        title={`Take: you send ${side === "ask" ? fmtAmount(row.amountUnits, asset.decimals) : fmtAmount(row.totalQrl, 18)} ${give}, receive ${side === "ask" ? fmtAmount(row.totalQrl, 18) : fmtAmount(row.amountUnits, asset.decimals)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`}
+        title={
+          own
+            ? "Your own order; manage it from your open-order card"
+            : `Take: you send ${side === "ask" ? fmtAmount(row.amountUnits, asset.decimals) : fmtAmount(row.totalQrl, 18)} ${give}, receive ${side === "ask" ? fmtAmount(row.totalQrl, 18) : fmtAmount(row.amountUnits, asset.decimals)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`
+        }
         className={cn(
           "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
-          canTake ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
+          canTake && !own ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
           pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
-          offline && "opacity-40",
+          offline && !own && "opacity-40",
         )}
       >
         <span
@@ -307,6 +312,11 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
         />
         <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
           {busyId === row.order.id ? "taking…" : fmtPrice(row.price, asset.decimals)}
+          {own ? (
+            <span className="ml-1.5 rounded-sm bg-blue-accent/15 px-1 py-px text-[10px] font-medium text-blue-accent">
+              yours
+            </span>
+          ) : null}
         </span>
         <span className="relative text-foreground/90">{fmtAmount(row.totalQrl, 18)}</span>
         <span className="relative text-muted-foreground">
