@@ -18,9 +18,9 @@ export default defineConfig({
         changeOrigin: true,
       },
       "/rpc/qrl": {
-        target: "http://REDACTED:8545",
+        target: "https://qrlwallet.com",
         changeOrigin: true,
-        rewrite: () => "/",
+        rewrite: () => "/api/qrl-rpc/testnet",
       },
       // Must precede /rpc/sepolia: Vite proxy keys prefix-match in order.
       "/rpc/sepolia-logs": {
