@@ -9,10 +9,11 @@ import {
   type MyOrderRef,
 } from "@/lib/activeSwap";
 import { generateSecret } from "@/lib/secrets";
-import { announceHashlock, getOrder, OrderGoneError, type OrderView } from "@/lib/orderbook";
+import { announceHashlock, getOrder, OrderGoneError, shareFragment, type OrderView } from "@/lib/orderbook";
 import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
+import { Input } from "@/components/UI/Input";
 
 interface Props {
   myOrder: MyOrderRef;
@@ -34,7 +35,15 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
   const matching = useRef(false);
+
+  // Private orders live behind their share link; the maker's own reads
+  // carry the token too (the listing 404s without it).
+  const shareUrl =
+    myOrder.shareToken === null
+      ? null
+      : `${window.location.origin}/o/${myOrder.id}${shareFragment(myOrder.shareToken)}`;
 
   const close = useCallback(() => {
     clearMyOrder();
@@ -72,6 +81,7 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
             role: "maker",
             orderId: current.id,
             takerToken: null,
+            shareToken: myOrder.shareToken,
             direction: current.direction,
             // Anchored locally at post time, like the payout addresses:
             // the book's copy of the asset and amount fields is never
@@ -103,7 +113,7 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         } catch (err) {
           // The announce may have applied even though we saw an error
           // (lost response, or a 409 on retry). Converge via the book.
-          const after = await getOrder(current.id);
+          const after = await getOrder(current.id, myOrder.shareToken ?? undefined);
           if (after.status === "open") {
             // The taker released before we announced; nothing published,
             // the listing is back on the book. Keep waiting.
@@ -133,14 +143,14 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         setBusy(false);
       }
     },
-    [myOrder.token, myOrder.asset, myOrder.fromAmount, myOrder.toAmount, ethAccount, qrlAccount, onMatched],
+    [myOrder.token, myOrder.asset, myOrder.fromAmount, myOrder.toAmount, myOrder.shareToken, ethAccount, qrlAccount, onMatched],
   );
 
   useEffect(() => {
     let stop = false;
     const poll = async () => {
       try {
-        const current = await getOrder(myOrder.id);
+        const current = await getOrder(myOrder.id, myOrder.shareToken ?? undefined);
         if (stop) return;
         setOrder(current);
         if (current.status === "accepted") void startSwap(current);
@@ -155,7 +165,7 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
       stop = true;
       clearInterval(t);
     };
-  }, [myOrder.id, startSwap, close]);
+  }, [myOrder.id, myOrder.shareToken, startSwap, close]);
 
   // Maker liveness: while this card is mounted the listing stays in the
   // takeable set; a closed tab ages out after the book's presence TTL, so
@@ -220,11 +230,42 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
               className="glow-dot mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
             />
             <span>
-              Listed on the order book, waiting for a taker. Keep this page open: when someone
-              accepts, you lock first.
+              {shareUrl
+                ? "Private order: hidden from the book. Keep this page open: when your counterparty accepts, you lock first."
+                : "Listed on the order book, waiting for a taker. Keep this page open: when someone accepts, you lock first."}
             </span>
           </p>
         )}
+        {shareUrl && order?.status === "open" ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <Input
+                readOnly
+                value={shareUrl}
+                onFocus={(e) => e.currentTarget.select()}
+                aria-label="Private order share link"
+                className="font-data h-8 text-xs"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  void navigator.clipboard.writeText(shareUrl).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1500);
+                  });
+                }}
+              >
+                {copied ? "Copied" : "Copy"}
+              </Button>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              {order.allowedTakerEth || order.allowedTakerQrl
+                ? "Anyone with this link can view the order, but only the reserved taker can accept it."
+                : "Anyone with this link can take the order; share it only with your counterparty."}
+            </p>
+          </div>
+        ) : null}
         {error ? (
           <div className="space-y-2">
             <p className="text-sm text-destructive">{error}</p>

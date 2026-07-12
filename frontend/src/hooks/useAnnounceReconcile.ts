@@ -18,7 +18,7 @@ export function useAnnounceReconcile(swap: ActiveSwap | null): void {
     const myOrder = loadMyOrder();
     if (!myOrder || swap.orderId !== myOrder.id) return;
     reconciled.current = true;
-    getOrder(myOrder.id)
+    getOrder(myOrder.id, myOrder.shareToken ?? undefined)
       .then(async (order) => {
         if (order.status === "accepted") {
           await announceHashlock(myOrder.id, {

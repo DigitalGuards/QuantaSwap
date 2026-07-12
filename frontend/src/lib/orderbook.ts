@@ -34,16 +34,29 @@ export interface OrderView {
   /** The maker's client heartbeated recently, so a take can actually
    *  proceed. Optional for books predating it. */
   makerSeen?: boolean;
+  /** Private orders are excluded from the book and take-by-terms and are
+   *  reachable only by id with the share token. Optional for books
+   *  predating the feature (absent means public). */
+  visibility?: "public" | "private";
+  /** Taker restriction on a private order; informational here (the book
+   *  enforces it on accept, the maker's client re-verifies regardless). */
+  allowedTakerEth?: string;
+  allowedTakerQrl?: string;
   createdAt: number;
   updatedAt: number;
 }
 
 export class OrderGoneError extends Error {}
 
-async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function api<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  headers?: Record<string, string>,
+): Promise<T> {
   const res = await fetch(`${ORDERBOOK_API}${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const payload = (await res.json().catch(() => ({}))) as { error?: string };
@@ -55,8 +68,18 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<T> 
 export const listOrders = async (): Promise<OrderView[]> =>
   (await api<{ orders: OrderView[] }>("GET", "/orders")).orders;
 
-export const getOrder = async (id: string): Promise<OrderView> =>
-  (await api<{ order: OrderView }>("GET", `/orders/${id}`)).order;
+/** Private orders demand the share token (sent as a header so it never
+ *  lands in server logs; the browser keeps it in the URL fragment, which
+ *  never leaves the page) and 404 without it. */
+export const getOrder = async (id: string, shareToken?: string): Promise<OrderView> =>
+  (
+    await api<{ order: OrderView }>(
+      "GET",
+      `/orders/${id}`,
+      undefined,
+      shareToken === undefined ? undefined : { "X-Share-Token": shareToken },
+    )
+  ).order;
 
 export const createOrder = async (body: {
   direction: Direction;
@@ -66,13 +89,29 @@ export const createOrder = async (body: {
   toAmount: string;
   makerEthAccount: string;
   makerQrlAccount: string;
-}): Promise<{ order: OrderView; makerToken: string }> => api("POST", "/orders", body);
+  /** Private orders skip the public book; the response carries the share
+   *  token whose URL the maker hands to the counterparty. */
+  visibility?: "public" | "private";
+  allowedTakerEth?: string;
+  allowedTakerQrl?: string;
+}): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
+  api("POST", "/orders", body);
 
 export const acceptOrder = async (
   id: string,
-  body: { takerEthAccount: string; takerQrlAccount: string },
+  body: { takerEthAccount: string; takerQrlAccount: string; shareToken?: string },
 ): Promise<{ order: OrderView; takerToken: string }> =>
   api("POST", `/orders/${id}/accept`, body);
+
+/** Fragment carrying a private order's share token on /o/<id> links. In
+ *  the fragment (never the query string) so it stays out of every access
+ *  log between the browser and the SPA. */
+export const shareFragment = (token: string): string => `#k=${token}`;
+
+export const parseShareToken = (hash: string): string | null => {
+  const m = /^#k=([0-9a-f]{64})$/.exec(hash);
+  return m?.[1] ?? null;
+};
 
 /** Take by terms rather than by id: atomically fills the best open order
  *  where the taker pays at most `maxPay` (the order's toAmount) and

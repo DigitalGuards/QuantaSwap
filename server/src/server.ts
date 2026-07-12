@@ -215,7 +215,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const action = match[2];
     if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
     if (method === "GET" && action === undefined) {
-      sendJson(res, 200, { order: store.get(id) });
+      // Private orders gate on the share token; it rides in a header (a
+      // query string would land in nginx/CF access logs, and the browser
+      // client keeps it in the URL fragment, which never leaves the page).
+      const share = req.headers["x-share-token"];
+      sendJson(res, 200, { order: store.get(id, typeof share === "string" ? share : undefined) });
       return;
     }
     if (method === "POST" && action !== undefined) {

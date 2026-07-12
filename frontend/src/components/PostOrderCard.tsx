@@ -39,11 +39,17 @@ const parseAmount = (value: string, decimals: number, symbol: string): bigint =>
   return parseUnits(value, decimals);
 };
 
+const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
+
 export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
   const [direction, setDirection] = useState<Direction>("eth->qrl");
   const [assetSymbol, setAssetSymbol] = useState<EthAssetSymbol>("ETH");
   const [fromAmount, setFromAmount] = useState("");
   const [toAmount, setToAmount] = useState("");
+  const [isPrivate, setIsPrivate] = useState(false);
+  const [allowedEth, setAllowedEth] = useState("");
+  const [allowedQrl, setAllowedQrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -73,13 +79,30 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
       }
       const fromUnits = direction === "eth->qrl" ? ethUnits : qrlWei;
       const toUnits = direction === "eth->qrl" ? qrlWei : ethUnits;
-      const { order, makerToken } = await createOrder({
+      const restrictEth = allowedEth.trim();
+      const restrictQrl = allowedQrl.trim();
+      if (isPrivate) {
+        if (restrictEth && !ETH_ADDR_RE.test(restrictEth)) {
+          throw new Error("Taker ETH address must be a 0x-prefixed 20-byte address");
+        }
+        if (restrictQrl && !QRL_ADDR_RE.test(restrictQrl)) {
+          throw new Error("Taker QRL address must be a Q-prefixed 20-byte address");
+        }
+      }
+      const { order, makerToken, shareToken } = await createOrder({
         direction,
         asset: asset.symbol,
         fromAmount: fromUnits.toString(),
         toAmount: toUnits.toString(),
         makerEthAccount: ethAccount,
         makerQrlAccount: qrlAccount,
+        ...(isPrivate
+          ? {
+              visibility: "private" as const,
+              ...(restrictEth ? { allowedTakerEth: restrictEth } : {}),
+              ...(restrictQrl ? { allowedTakerQrl: restrictQrl } : {}),
+            }
+          : {}),
       });
       // Anchor the terms we just posted, not the book's echo of them:
       // MyOrderCard builds the swap from this handle at match time.
@@ -89,6 +112,7 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
         asset: asset.symbol,
         fromAmount: fromUnits.toString(),
         toAmount: toUnits.toString(),
+        shareToken: shareToken ?? null,
       };
       saveMyOrder(ref);
       onPosted(ref);
@@ -197,6 +221,42 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
           </div>
         </div>
 
+        <div className="space-y-2">
+          <label className="flex cursor-pointer items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={isPrivate}
+              onChange={(e) => setIsPrivate(e.target.checked)}
+              className="h-4 w-4 accent-[hsl(var(--primary))]"
+            />
+            <span className="font-medium">Private swap</span>
+            <span className="text-xs text-muted-foreground">
+              hidden from the book, shared by link
+            </span>
+          </label>
+          {isPrivate ? (
+            <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-3">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                You get a one-off link to hand to your counterparty (OTC style). Optionally
+                reserve the order for their addresses; leave blank to let anyone with the link
+                take it.
+              </p>
+              <Input
+                placeholder="Taker ETH address (optional, 0x…)"
+                value={allowedEth}
+                onChange={(e) => setAllowedEth(e.target.value)}
+                className="font-data h-9 text-xs"
+              />
+              <Input
+                placeholder="Taker QRL address (optional, Q…)"
+                value={allowedQrl}
+                onChange={(e) => setAllowedQrl(e.target.value)}
+                className="font-data h-9 text-xs"
+              />
+            </div>
+          ) : null}
+        </div>
+
         <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void post()}>
           <BookPlus className="h-4 w-4" />
           {!ethAccount || !qrlAccount
@@ -207,7 +267,9 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
                 ? `Enter the ${toSymbol} amount`
                 : busy
                   ? "Posting…"
-                  : "Post order"}
+                  : isPrivate
+                    ? "Post private order"
+                    : "Post order"}
         </Button>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">

@@ -17,6 +17,7 @@ import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
 import { SwapStatusPage } from "@/pages/SwapStatusPage";
+import { PrivateOrderPage } from "@/pages/PrivateOrderPage";
 
 export default function App() {
   const eth = useEthWallet();
@@ -55,6 +56,10 @@ export default function App() {
           <Route
             path="/swap/:hashlock"
             element={<SwapStatusPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
+          />
+          <Route
+            path="/o/:id"
+            element={<PrivateOrderPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
           />
           <Route path="*" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
         </Routes>

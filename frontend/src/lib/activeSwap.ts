@@ -16,6 +16,10 @@ export interface ActiveSwap {
   /** Authorizes the taker's release (walk-away) on the order book; null
    *  for maker/sandbox roles and for swaps stored before it existed. */
   takerToken: string | null;
+  /** Share token of a private order: both participants keep it so they
+   *  can go on reading the listing (hashlock announce, status polls),
+   *  which 404s without it. Absent/null for public orders. */
+  shareToken?: string | null;
   /** Maker's perspective: the maker escrows `fromAmount` on the from-chain. */
   direction: Direction;
   /** The asset escrowed on the Ethereum leg. Agreed at take time and
@@ -134,6 +138,9 @@ export interface MyOrderRef {
   fromAmount: string | null;
   /** Base units the maker expects, decimal string; null pre-anchoring. */
   toAmount: string | null;
+  /** Share token when the order is private (null for public orders):
+   *  builds the /o/<id> link and authorizes the maker's own reads. */
+  shareToken: string | null;
 }
 
 const ORDER_KEY = "quantaswap.myorder.v1";
@@ -145,9 +152,10 @@ export function loadMyOrder(): MyOrderRef | null {
     const ref = JSON.parse(raw) as MyOrderRef;
     // Handles stored before the ETH-leg asset existed mean native ETH.
     ref.asset = ethAssetSymbolOrNull(ref.asset) ?? "ETH";
-    // Handles stored before amount anchoring existed.
+    // Handles stored before amount anchoring / private orders existed.
     ref.fromAmount ??= null;
     ref.toAmount ??= null;
+    ref.shareToken ??= null;
     return ref;
   } catch {
     return null;

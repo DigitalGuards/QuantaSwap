@@ -29,7 +29,7 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
     let stop = false;
     const poll = async () => {
       try {
-        const order = await getOrder(orderId);
+        const order = await getOrder(orderId, swap.shareToken ?? undefined);
         if (stop) return;
         if (order.status === "cancelled") {
           onAbort("The maker cancelled the order before locking. Nothing was at risk.");

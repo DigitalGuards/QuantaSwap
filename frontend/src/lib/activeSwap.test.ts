@@ -144,6 +144,7 @@ describe("my-order handle", () => {
       asset: "USDC" as const,
       fromAmount: "5000000",
       toAmount: "6000000000000000000",
+      shareToken: "ab".repeat(32),
     };
     saveMyOrder(ref);
     expect(loadMyOrder()).toEqual(ref);
@@ -161,6 +162,7 @@ describe("my-order handle", () => {
       asset: "ETH",
       fromAmount: null,
       toAmount: null,
+      shareToken: null,
     });
   });
 
@@ -175,6 +177,7 @@ describe("my-order handle", () => {
       asset: "USDC",
       fromAmount: null,
       toAmount: null,
+      shareToken: null,
     });
   });
 });
