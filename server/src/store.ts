@@ -7,7 +7,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { QRL_BOUNDS, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
+import { QRL_BOUNDS, isKnownAsset, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
 import { ApiError } from "./errors.js";
 
 export { ApiError } from "./errors.js";
@@ -153,12 +153,23 @@ export class OrderStore {
       const raw = readFileSync(this.dataFile, "utf8");
       // Rows persisted before the stablecoin rollout predate the asset
       // field; absent means ETH (the wire-level default), so hydrate it
-      // here and every order in memory carries a concrete asset.
-      type PersistedOrder = Omit<Order, "asset"> & { asset?: AssetSymbol };
+      // here and every order in memory carries a concrete asset. A
+      // present-but-unknown symbol means a newer or corrupted writer;
+      // relabeling it would misprice the order, so drop the row instead
+      // (funds, if any, are governed on-chain, and the coordination
+      // record alone is not worth crash-looping the whole book over).
+      type PersistedOrder = Omit<Order, "asset"> & { asset?: string };
       const parsed = JSON.parse(raw) as PersistedOrder[];
       const now = nowS();
       for (const row of parsed) {
-        const order: Order = { ...row, asset: row.asset ?? "ETH" };
+        const asset: string = row.asset ?? "ETH";
+        if (!isKnownAsset(asset)) {
+          console.warn(
+            `[orderbook] dropping persisted order ${row.id}: unknown asset ${JSON.stringify(row.asset)}`,
+          );
+          continue;
+        }
+        const order: Order = { ...row, asset };
         this.orders.set(order.id, order);
         // Presence does not survive restarts; grant loaded listings one
         // TTL window so a deploy does not flap the whole book offline.

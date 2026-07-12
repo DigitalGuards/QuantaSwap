@@ -30,6 +30,7 @@ import {
   acceptOrder,
   listOrders,
   openBookStream,
+  releaseOrder,
   takeOrder,
   type OrderView,
 } from "@/lib/orderbook";
@@ -183,6 +184,18 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
           });
     request
       .then(({ order: accepted, takerToken }) => {
+        // Take-by-terms may legitimately fill a different row, but only
+        // ever at the terms the user clicked or better. The response is
+        // still the untrusted book's word, so re-check it before the
+        // amounts are persisted as what this client will escrow and
+        // verify against.
+        if (
+          BigInt(accepted.toAmount) > BigInt(order.toAmount) ||
+          BigInt(accepted.fromAmount) < BigInt(order.fromAmount)
+        ) {
+          void releaseOrder(accepted.id, takerToken).catch(() => undefined);
+          throw new Error("The order book returned worse terms than displayed; the take was abandoned.");
+        }
         const swap: ActiveSwap = {
           role: "taker",
           orderId: accepted.id,

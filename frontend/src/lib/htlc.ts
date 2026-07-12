@@ -106,15 +106,24 @@ export async function getLegState(
   };
 }
 
+/** Pure depth arithmetic for the confirmed snapshot: the block a lock
+ *  must be visible at, `confirmations` behind the head, clamped at
+ *  genesis. 0 reads the head block itself. */
+export const confirmedBlock = (head: number, confirmations: number): number =>
+  Math.max(0, head - confirmations);
+
 /** The swap struct as it looked `confirmations` blocks behind the head.
- *  A lock is only trustworthy for irreversible responses (locking the
- *  other leg, revealing the secret) once it is visible at this depth; a
- *  shallow reorg cannot rewrite it out from under the counterparty. The
- *  struct is immutable once created (hashlock freshness is enforced by
- *  the contract), so the confirmed snapshot's fields are canonical. */
+ *  Irreversible responses (locking the other leg, revealing the secret)
+ *  only trust a lock once it is visible at this depth. The reorg
+ *  protection is exactly as strong as the configured depth: 0 trusts
+ *  the head block, so a 1-block reorg can drop a lock this snapshot
+ *  just reported (accepted for testnet speed, see config.ts; mainnet
+ *  gates on the `finalized` tag). The struct is immutable once created
+ *  (hashlock freshness is enforced by the contract), so a confirmed
+ *  snapshot's fields are canonical. */
 export async function getConfirmedLegState(leg: LegKey, hashlock: string): Promise<LegState> {
   const head = await getBlockNumber(leg);
-  const depth = Math.max(0, head - legByKey(leg).confirmations);
+  const depth = confirmedBlock(head, legByKey(leg).confirmations);
   return getLegState(leg, hashlock, `0x${depth.toString(16)}`);
 }
 

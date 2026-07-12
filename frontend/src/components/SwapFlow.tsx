@@ -55,6 +55,14 @@ const pillStyles: Record<string, string> = {
 
 const statusName = ["none", "open", "claimed", "refunded"] as const;
 
+// With confirmations 0 (testnet speed, see config.ts) there is no depth
+// wait to describe; the pending state only shows while the confirmed
+// snapshot catches up to the latest leg read.
+const depthWait = (confirmations: number): string =>
+  confirmations > 0
+    ? `waiting for ${confirmations}-block confirmation depth`
+    : "confirming it at the chain head";
+
 function StatusPill({ state }: { state: LegState | undefined }) {
   const name = (state ? statusName[state.status] : undefined) ?? "none";
   return (
@@ -361,7 +369,7 @@ export function SwapFlow({
       desc: `${who(steps[1].own)} (responder) verif${steps[1].own ? "y" : "ies"} the initiator lock on-chain, then escrow${steps[1].own ? "" : "s"} ${fmtLeg(rPlan)} under the same hashlock with the shorter timeout${rLeg === "eth" && ethAsset.address !== null ? ", approving the HTLC for the exact amount first" : ""}.`,
       label: `Lock ${rPlan.symbol}`,
       action: () => lockLeg(rLeg),
-      pendingText: `Initiator lock detected on ${iCfg.name}; waiting for ${iCfg.confirmations}-block confirmation depth before it is safe to respond.`,
+      pendingText: `Initiator lock detected on ${iCfg.name}; ${depthWait(iCfg.confirmations)} before it is safe to respond.`,
       waitingText: "Waiting for the taker to lock their leg…",
     },
     "claim-responder": {
@@ -369,7 +377,7 @@ export function SwapFlow({
       desc: `${who(steps[2].own)} (initiator) claim${steps[2].own ? "" : "s"} the responder leg. The preimage becomes public on-chain; from here the swap can only complete.`,
       label: `Claim ${rPlan.symbol}`,
       action: () => swap.preimage && claimLeg(rLeg, swap.preimage),
-      pendingText: `Responder lock detected on ${rCfg.name}; waiting for ${rCfg.confirmations}-block confirmation depth before the secret is safe to reveal.`,
+      pendingText: `Responder lock detected on ${rCfg.name}; ${depthWait(rCfg.confirmations)} before the secret is safe to reveal.`,
       waitingText: "Waiting for the maker to claim and reveal the secret…",
     },
     "claim-initiator": {

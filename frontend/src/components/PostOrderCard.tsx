@@ -81,7 +81,15 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
         makerEthAccount: ethAccount,
         makerQrlAccount: qrlAccount,
       });
-      const ref: MyOrderRef = { id: order.id, token: makerToken, asset: asset.symbol };
+      // Anchor the terms we just posted, not the book's echo of them:
+      // MyOrderCard builds the swap from this handle at match time.
+      const ref: MyOrderRef = {
+        id: order.id,
+        token: makerToken,
+        asset: asset.symbol,
+        fromAmount: fromUnits.toString(),
+        toAmount: toUnits.toString(),
+      };
       saveMyOrder(ref);
       onPosted(ref);
     } catch (err) {

@@ -57,4 +57,25 @@ describe("state hydration", () => {
       assert.equal(state.all()[0]?.asset, "USDC");
     });
   });
+
+  it("refuses to start on a record with an unknown asset", () => {
+    // Version skew or tampering: relabeling would verify the wrong token,
+    // and dropping the record would erase its preimage on the next
+    // persist. The daemon must stop instead.
+    assert.throws(
+      () => withStateFile([{ ...preUpgradeRecord, id: "order-3", asset: "DOGE" }], () => undefined),
+      /unknown asset/,
+    );
+  });
+
+  it("refuses to start on a malformed state file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-test-"));
+    try {
+      const file = join(dir, "state.json");
+      writeFileSync(file, "{not json", "utf8");
+      assert.throws(() => new StateFile(file));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

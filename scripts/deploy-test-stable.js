@@ -24,7 +24,14 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(rpc);
   const wallet = new ethers.Wallet(key, provider);
   const { chainId } = await provider.getNetwork();
-  if (chainId === 1n) throw new Error("refusing to deploy a faucet token to Ethereum mainnet");
+  // Allowlist, not a mainnet denylist: a free-mint faucet token must never
+  // reach any real chain, including ones that do not exist yet.
+  const allowedChains = [11155111n, 31337n]; // Sepolia + local anvil
+  if (!allowedChains.includes(chainId)) {
+    throw new Error(
+      `refusing to deploy a faucet token to chain ${chainId}; allowed: Sepolia (11155111) and local anvil (31337)`,
+    );
+  }
   console.log(`[deploy-test-stable] deployer ${wallet.address} on chain ${chainId}`);
 
   const factory = new ethers.ContractFactory(abi, bytecode, wallet);

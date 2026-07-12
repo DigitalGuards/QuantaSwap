@@ -65,6 +65,12 @@ const BY_SYMBOL: ReadonlyMap<string, Asset> = new Map(
   [ETH, USDC, TUSDT].map((a) => [a.symbol, a]),
 );
 
+/** Membership check for persisted rows (requireAsset is the wire-level
+ *  gate and throws an ApiError instead). */
+export function isKnownAsset(raw: string): raw is AssetSymbol {
+  return BY_SYMBOL.has(raw);
+}
+
 /** Validates a wire-level asset field. Absent means ETH so pre-asset
  *  clients keep working; anything else must name a known symbol
  *  exactly (case-sensitive). */
