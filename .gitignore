@@ -7,6 +7,9 @@ coverage/
 .env
 .env.*
 !.env.example
+# Local operating notes; never tracked (private infrastructure detail)
+CLAUDE.md
+docs/OPS.md
 *.log
 .DS_Store
 server/data/
