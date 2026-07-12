@@ -6,7 +6,7 @@ Part of the MyQRLWallet ecosystem (MyQRLWallet, QuantaPool, zondscan, QNS). Open
 
 ## Why
 
-QRL needs exchange options that do not depend on centralized listings. There is standing OTC demand today, and listing status is outside the community's control. QuantaSwap is a standing, self-custodial venue to swap WETH and QRL directly: no custodian, no wrapped-asset bridge, no operator that can steal funds.
+QRL needs exchange options that do not depend on centralized listings. There is standing OTC demand today, and listing status is outside the community's control. QuantaSwap is a standing, self-custodial venue to swap WETH or major stablecoins (USDC, USDT) against QRL directly: no custodian, no wrapped-asset bridge, no operator that can steal funds.
 
 ## How it works
 
@@ -30,6 +30,8 @@ Two modes share the same on-chain core:
 | Protocol mode | Order book; both parties sign on both chains | Contracts only, zero operators, zero maintenance | Built first |
 | Solver mode | Uniswap-style single-sided swap against solver liquidity | TEE-attested solver (Phala) as counterparty; settlement still HTLC-atomic | Built second |
 
+The WETH in the diagram stands for any supported Ethereum-leg asset: the same `lockToken` path carries WETH, USDC and USDT (asset registry: [`config/tokens.json`](config/tokens.json), including USDT's non-standard ERC-20 behavior and issuer blocklist analysis).
+
 Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Wallet integration
@@ -43,7 +45,9 @@ Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITE
 ```
 contracts/
   hyperion/    HTLC source (.hyp, compiled with hypc, deployed to BOTH chains)
-  test/        Test-only mock tokens
+  test/        Test-only mock tokens (never deployed)
+  testnet/     tUSDT faucet token (Sepolia stand-in for USDT)
+config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
 server/        Order book service (coordination only, never custody; zero runtime deps)

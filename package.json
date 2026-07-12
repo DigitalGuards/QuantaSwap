@@ -8,7 +8,8 @@
     "compile": "node scripts/compile.js",
     "test": "node scripts/test-local.js",
     "deploy:qrl": "node scripts/deploy-qrl.js",
-    "deploy:eth": "node scripts/deploy-eth.js"
+    "deploy:eth": "node scripts/deploy-eth.js",
+    "deploy:test-stable": "node scripts/deploy-test-stable.js"
   },
   "dependencies": {
     "@theqrl/web3": "^0.4.0",
