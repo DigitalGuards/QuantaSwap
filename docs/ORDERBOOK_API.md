@@ -46,6 +46,12 @@ per-order capability tokens (64 hex chars, 32 CSPRNG bytes):
   `hashlock` and `cancel` on that order.
 - **Taker token**: returned once by `POST /orders/:id/accept` or
   `POST /orders/take`. Authorizes `release` on that order.
+- **Share token** (private orders only): returned once by `POST /orders` when
+  `visibility` is `private`. It is the capability that reads
+  (`GET /orders/:id`, `X-Share-Token` header) and accepts
+  (`POST /orders/:id/accept`, `shareToken` body field) the order; the maker
+  hands it to the intended counterparty, typically inside a share link's URL
+  fragment so it never touches server logs.
 
 The server stores only the sha256 of each token; if you lose a token it cannot
 be recovered. Treat tokens as secrets for the lifetime of the order (leaking a
@@ -75,6 +81,9 @@ hashes and taker-IP bookkeeping are never serialized):
   "responderTimeout": null,
   "released": false,                // taker walked away after the maker locked
   "makerSeen": true,                // maker heartbeated within the presence TTL (90s)
+  "visibility": "public",           // public | private (see Private orders)
+  "allowedTakerEth": "0x…",         // present only on restricted private orders
+  "allowedTakerQrl": "Q…",          // present only on restricted private orders
   "createdAt": 1752300000,          // unix seconds
   "updatedAt": 1752300000
 }
@@ -130,6 +139,25 @@ take-by-terms matching skips it (it stays takeable by explicit id). Presence is
 in-memory only; after a server restart every loaded open order gets one TTL
 window of grace to re-heartbeat.
 
+### Private orders
+
+For OTC trades where the two parties already found each other and only need
+trustless execution. A private order (`"visibility": "private"` on create):
+
+- never appears in `GET /orders` or the SSE stream, and take-by-terms never
+  matches it, even at exact terms;
+- is readable and acceptable only with its share token. Without a valid token,
+  reads and accepts answer the same `404` as a nonexistent id, so an id alone
+  (which transits URLs and access logs) confirms nothing;
+- may carry `allowedTakerEth`/`allowedTakerQrl`: then accept additionally
+  rejects any other taker addresses with `403`, so even a leaked link cannot
+  be sniped. The restriction is a convenience filter; the maker's client
+  re-verifies the taker before locking, and the HTLC fixes the recipient at
+  lock time (the trust model is unchanged).
+
+Everything after accept (hashlock announce, locking, release, cancel, TTLs) is
+identical to a public order.
+
 ## Rate limits
 
 Per-IP, fixed one-minute windows, split by class so a burst of one cannot
@@ -137,7 +165,7 @@ starve the other (`429 rate limited, slow down`):
 
 | Class | Limit | Notes |
 |---|---|---|
-| Reads (`GET`) | 720/min | heartbeats count as reads despite being `POST` |
+| Reads (`GET`) | 1440/min | heartbeats count as reads despite being `POST` |
 | Mutations (other `POST`) | 120/min | |
 
 Take caps, per IP (fairness for shared demo liquidity, not sybil resistance):
@@ -160,7 +188,8 @@ Liveness probe. → `200 {"status":"ok"}`.
 ### `GET /orders`
 
 The open book, newest first. → `200 {"orders": [Order, …]}`. Only `open`
-orders are listed; fetch other statuses by id.
+**public** orders are listed; fetch other statuses (and private orders, with
+their share token) by id.
 
 ### `GET /orders/stream`
 
@@ -181,6 +210,9 @@ poll as fallback. Browser `EventSource` reconnects on its own.
 One order, any status. → `200 {"order": Order}`. `404 order not found` for
 unknown/expired ids (ids are 16 lowercase hex chars; anything else is a 404).
 
+Private orders additionally require the share token in the `X-Share-Token`
+header; without a valid token the response is the same `404` as an unknown id.
+
 ### `POST /orders`: list an order (maker)
 
 ```jsonc
@@ -190,14 +222,19 @@ unknown/expired ids (ids are 16 lowercase hex chars; anything else is a 404).
   "fromAmount": "5000000",           // required, base units of the maker leg
   "toAmount": "2000000000000000000", // required, base units of the taker leg
   "makerEthAccount": "0x…",          // required
-  "makerQrlAccount": "Q…"            // required
+  "makerQrlAccount": "Q…",           // required
+  "visibility": "private",           // optional, default public
+  "allowedTakerEth": "0x…",          // optional, private orders only
+  "allowedTakerQrl": "Q…"            // optional, private orders only
 }
 ```
 
-→ `201 {"order": Order, "makerToken": "<64 hex>"}`. The token is shown exactly
+→ `201 {"order": Order, "makerToken": "<64 hex>"}`, plus
+`"shareToken": "<64 hex>"` when the order is private. Tokens are shown exactly
 once. Creation counts as a heartbeat.
 
-Errors: `400` per-field validation, `503 order book is full`.
+Errors: `400` per-field validation (including taker restrictions on a public
+order), `503 order book is full`.
 
 ### `POST /orders/take`: take by terms (taker)
 
@@ -205,8 +242,9 @@ Atomically fills the **best** open order matching the caller's bounds: "I pay
 at most `maxPay` (the order's `toAmount`) to receive at least `minReceive`
 (the order's `fromAmount`)". Two takers racing for one displayed row both fill
 while depth exists, and a stale click can only fill at the terms the taker saw
-or better. Matching is asset-scoped and skips offline makers
-(`makerSeen: false`). Best taker rate wins, then larger fill, then FIFO.
+or better. Matching is asset-scoped, skips offline makers
+(`makerSeen: false`) and never matches private orders. Best taker rate wins,
+then larger fill, then FIFO.
 
 ```jsonc
 {
@@ -230,12 +268,18 @@ Reserves a specific order (including offline-maker orders take-by-terms would
 skip).
 
 ```jsonc
-{ "takerEthAccount": "0x…", "takerQrlAccount": "Q…" }
+{
+  "takerEthAccount": "0x…",
+  "takerQrlAccount": "Q…",
+  "shareToken": "<64 hex>"           // required for private orders
+}
 ```
 
 → `200 {"order": Order, "takerToken": "<64 hex>"}`.
 
-Errors: `404`, `409 order is no longer open`, `429` take caps.
+Errors: `404` (also a private order without a valid `shareToken`),
+`403 this order is reserved for a specific taker`,
+`409 order is no longer open`, `429` take caps.
 
 ### `POST /orders/:id/hashlock`: announce the swap parameters (maker)
 

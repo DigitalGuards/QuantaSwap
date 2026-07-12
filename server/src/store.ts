@@ -14,6 +14,7 @@ export { ApiError } from "./errors.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
+export type Visibility = "public" | "private";
 
 export interface Order {
   id: string;
@@ -38,6 +39,19 @@ export interface Order {
   responderTimeout: number | null;
   createdAt: number;
   updatedAt: number;
+  /** Private orders are excluded from the public list, the SSE stream
+   *  and take-by-terms; they are reachable only by id, gated on the
+   *  share token. Rows persisted before the feature mean public. */
+  visibility: Visibility;
+  /** sha256 of a private order's share token (the capability-URL
+   *  secret); never serialized to clients. Present iff private. */
+  shareTokenHash?: string;
+  /** Optional taker restriction on private orders: accept rejects any
+   *  other taker address. A convenience filter only; the maker's client
+   *  re-verifies the taker independently before locking, and the HTLC
+   *  fixes the recipient at lock time. */
+  allowedTakerEth?: string;
+  allowedTakerQrl?: string;
   /** sha256 of the maker's bearer token; never serialized to clients. */
   makerTokenHash: string;
   /** sha256 of the taker's bearer token (minted on accept, authorizes
@@ -54,7 +68,7 @@ export interface Order {
 
 export type PublicOrder = Omit<
   Order,
-  "makerTokenHash" | "takerTokenHash" | "acceptorIpHash" | "acceptedAt" | "releasedAt"
+  "makerTokenHash" | "takerTokenHash" | "acceptorIpHash" | "acceptedAt" | "releasedAt" | "shareTokenHash"
 > & {
   /** The taker released a locking-phase order: the maker should not
    *  (further) commit funds to it. Derived from `releasedAt`. */
@@ -158,7 +172,10 @@ export class OrderStore {
       // relabeling it would misprice the order, so drop the row instead
       // (funds, if any, are governed on-chain, and the coordination
       // record alone is not worth crash-looping the whole book over).
-      type PersistedOrder = Omit<Order, "asset"> & { asset?: string };
+      type PersistedOrder = Omit<Order, "asset" | "visibility"> & {
+        asset?: string;
+        visibility?: string;
+      };
       const parsed = JSON.parse(raw) as PersistedOrder[];
       const now = nowS();
       for (const row of parsed) {
@@ -169,7 +186,12 @@ export class OrderStore {
           );
           continue;
         }
-        const order: Order = { ...row, asset };
+        // Privacy-leaning hydration: any evidence a row was private (the
+        // explicit flag or a stored share-token hash) keeps it out of the
+        // public list even if the flag itself got mangled.
+        const visibility: Visibility =
+          row.visibility === "private" || row.shareTokenHash !== undefined ? "private" : "public";
+        const order: Order = { ...row, asset, visibility };
         this.orders.set(order.id, order);
         // Presence does not survive restarts; grant loaded listings one
         // TTL window so a deploy does not flap the whole book offline.
@@ -198,6 +220,7 @@ export class OrderStore {
       takerTokenHash: _omit2,
       acceptorIpHash: _omit3,
       acceptedAt: _omit4,
+      shareTokenHash: _omit5,
       releasedAt,
       ...rest
     } = order;
@@ -239,19 +262,37 @@ export class OrderStore {
   listOpen(): PublicOrder[] {
     this.sweep();
     return [...this.orders.values()]
-      .filter((o) => o.status === "open")
+      .filter((o) => o.status === "open" && o.visibility === "public")
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((o) => this.pub(o));
   }
 
-  get(id: string): PublicOrder {
+  /** Private orders demand the share token and 404 without it: an id
+   *  alone (which transits URLs and access logs) must not confirm a
+   *  private listing exists, let alone reveal its terms. */
+  get(id: string, shareToken?: string): PublicOrder {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
+    if (order.visibility === "private" && !this.shareAuthorized(order, shareToken)) {
+      throw new ApiError(404, "order not found");
+    }
     return this.pub(order);
   }
 
-  create(body: Record<string, unknown>): { order: PublicOrder; makerToken: string } {
+  private shareAuthorized(order: Order, shareToken: unknown): boolean {
+    return (
+      typeof shareToken === "string" &&
+      order.shareTokenHash !== undefined &&
+      sha256Hex(shareToken) === order.shareTokenHash
+    );
+  }
+
+  create(body: Record<string, unknown>): {
+    order: PublicOrder;
+    makerToken: string;
+    shareToken?: string;
+  } {
     this.sweep();
     const openCount = [...this.orders.values()].filter((o) => o.status === "open").length;
     if (openCount >= MAX_OPEN_ORDERS) throw new ApiError(503, "order book is full");
@@ -263,12 +304,41 @@ export class OrderStore {
     const asset = requireAsset(body["asset"]);
     const [fromBounds, toBounds]: [AmountBounds, AmountBounds] =
       direction === "eth->qrl" ? [asset, QRL_BOUNDS] : [QRL_BOUNDS, asset];
+
+    const rawVisibility = body["visibility"];
+    if (rawVisibility !== undefined && rawVisibility !== "public" && rawVisibility !== "private") {
+      throw new ApiError(400, "visibility must be public or private");
+    }
+    const visibility: Visibility = rawVisibility === "private" ? "private" : "public";
+    // The share token is the capability that finds and takes the order
+    // (shared out of band by the maker); the optional taker restriction
+    // pins the counterparty even if the link leaks. Neither makes sense
+    // on a publicly listed order.
+    let shareToken: string | undefined;
+    let allowedTakerEth: string | undefined;
+    let allowedTakerQrl: string | undefined;
+    if (visibility === "private") {
+      shareToken = randomBytes(32).toString("hex");
+      if (body["allowedTakerEth"] !== undefined) {
+        allowedTakerEth = requireAddress(body["allowedTakerEth"], "allowedTakerEth", ETH_ADDR_RE);
+      }
+      if (body["allowedTakerQrl"] !== undefined) {
+        allowedTakerQrl = requireAddress(body["allowedTakerQrl"], "allowedTakerQrl", QRL_ADDR_RE);
+      }
+    } else if (body["allowedTakerEth"] !== undefined || body["allowedTakerQrl"] !== undefined) {
+      throw new ApiError(400, "taker restrictions require a private order");
+    }
+
     const now = nowS();
     const makerToken = randomBytes(32).toString("hex");
     const order: Order = {
       id: randomBytes(8).toString("hex"),
       direction,
       asset: asset.symbol,
+      visibility,
+      ...(shareToken !== undefined ? { shareTokenHash: sha256Hex(shareToken) } : {}),
+      ...(allowedTakerEth !== undefined ? { allowedTakerEth } : {}),
+      ...(allowedTakerQrl !== undefined ? { allowedTakerQrl } : {}),
       fromAmount: requireAmount(body["fromAmount"], "fromAmount", fromBounds),
       toAmount: requireAmount(body["toAmount"], "toAmount", toBounds),
       makerEthAccount: requireAddress(body["makerEthAccount"], "makerEthAccount", ETH_ADDR_RE),
@@ -286,7 +356,11 @@ export class OrderStore {
     this.orders.set(order.id, order);
     this.seenAt.set(order.id, now); // creating it proves the maker is here
     this.persist();
-    return { order: this.pub(order), makerToken };
+    return {
+      order: this.pub(order),
+      makerToken,
+      ...(shareToken !== undefined ? { shareToken } : {}),
+    };
   }
 
   /** Per-IP caps, taker validation and the open->accepted transition,
@@ -322,9 +396,23 @@ export class OrderStore {
       throw new ApiError(429, "daily take limit reached; leave some liquidity for others");
     }
 
+    const takerEthAccount = requireAddress(body["takerEthAccount"], "takerEthAccount", ETH_ADDR_RE);
+    const takerQrlAccount = requireAddress(body["takerQrlAccount"], "takerQrlAccount", QRL_ADDR_RE);
+    // Maker-declared taker restriction (private OTC orders): a courtesy
+    // filter here; the maker's client re-verifies the taker before
+    // locking, and the HTLC fixes the recipient at lock time.
+    if (
+      (order.allowedTakerEth !== undefined &&
+        order.allowedTakerEth.toLowerCase() !== takerEthAccount.toLowerCase()) ||
+      (order.allowedTakerQrl !== undefined &&
+        order.allowedTakerQrl.toLowerCase() !== takerQrlAccount.toLowerCase())
+    ) {
+      throw new ApiError(403, "this order is reserved for a specific taker");
+    }
+
     const takerToken = randomBytes(32).toString("hex");
-    order.takerEthAccount = requireAddress(body["takerEthAccount"], "takerEthAccount", ETH_ADDR_RE);
-    order.takerQrlAccount = requireAddress(body["takerQrlAccount"], "takerQrlAccount", QRL_ADDR_RE);
+    order.takerEthAccount = takerEthAccount;
+    order.takerQrlAccount = takerQrlAccount;
     order.status = "accepted";
     order.takerTokenHash = sha256Hex(takerToken);
     order.acceptorIpHash = ipHash;
@@ -343,6 +431,11 @@ export class OrderStore {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
+    // Same 404 as a missing order: an id alone must not confirm a
+    // private listing exists.
+    if (order.visibility === "private" && !this.shareAuthorized(order, body["shareToken"])) {
+      throw new ApiError(404, "order not found");
+    }
     if (order.status !== "open") throw new ApiError(409, "order is no longer open");
     return this.commitTake(order, body, takerIp);
   }
@@ -374,6 +467,7 @@ export class OrderStore {
     const candidates = [...this.orders.values()].filter(
       (o) =>
         o.status === "open" &&
+        o.visibility === "public" &&
         o.direction === direction &&
         o.asset === asset.symbol &&
         BigInt(o.toAmount) <= maxPay &&

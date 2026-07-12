@@ -18,7 +18,9 @@ export function RouteMeta() {
   useEffect(() => {
     document.title = pathname.startsWith("/swap/")
       ? "Swap status | QuantaSwap"
-      : (TITLES[pathname] ?? DEFAULT_TITLE);
+      : pathname.startsWith("/o/")
+        ? "Private swap | QuantaSwap"
+        : (TITLES[pathname] ?? DEFAULT_TITLE);
   }, [pathname]);
 
   return null;

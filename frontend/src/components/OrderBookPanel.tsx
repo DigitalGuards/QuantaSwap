@@ -200,6 +200,7 @@ export function OrderBookPanel({ ethAccount, qrlAccount, ownOrderId, takeDisable
           role: "taker",
           orderId: accepted.id,
           takerToken,
+          shareToken: null,
           direction: accepted.direction,
           // The asset the taker agreed to is the displayed pair, anchored
           // client-side; on-chain token verification runs against this,

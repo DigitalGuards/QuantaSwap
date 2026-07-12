@@ -517,6 +517,127 @@ try {
     ethTake.status === 200 && ethTake.body.order.id === ethOverlap.body.order.id,
   );
 
+  console.log("private orders:");
+  const privTaker = { takerEthAccount: ETH_B, takerQrlAccount: QRL_B };
+  const privHdr = { "X-Forwarded-For": "203.0.113.50" };
+  const mkPrivate = async (extra = {}) =>
+    api(
+      "POST",
+      "/orders",
+      {
+        direction: "qrl->eth",
+        fromAmount: (5n * 10n ** 18n).toString(),
+        toAmount: ONE_ETH.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+        visibility: "private",
+        ...extra,
+      },
+      privHdr,
+    );
+
+  const priv = await mkPrivate();
+  check(
+    "private create mints a share token",
+    priv.status === 201 && typeof priv.body.shareToken === "string",
+  );
+  check("share token hash not leaked on the order", priv.body.order.shareTokenHash === undefined);
+  check("order reports private visibility", priv.body.order.visibility === "private");
+  const privId = priv.body.order.id;
+  const share = priv.body.shareToken;
+
+  const openList = await api("GET", "/orders");
+  check(
+    "private order hidden from the public list",
+    !openList.body.orders.some((o) => o.id === privId),
+  );
+
+  const blindGet = await api("GET", `/orders/${privId}`);
+  check("get without share token 404s", blindGet.status === 404);
+  const wrongGet = await api("GET", `/orders/${privId}`, undefined, {
+    "X-Share-Token": "0".repeat(64),
+  });
+  check("get with a wrong share token 404s", wrongGet.status === 404);
+  const authedGet = await api("GET", `/orders/${privId}`, undefined, { "X-Share-Token": share });
+  check(
+    "get with the share token returns the order",
+    authedGet.status === 200 && authedGet.body.order.id === privId,
+  );
+
+  const privTerms = await api(
+    "POST",
+    "/orders/take",
+    {
+      direction: "qrl->eth",
+      maxPay: ONE_ETH.toString(),
+      minReceive: (5n * 10n ** 18n).toString(),
+      ...privTaker,
+    },
+    { "X-Forwarded-For": "203.0.113.51" },
+  );
+  check("take-by-terms never matches a private order", privTerms.status === 409);
+
+  const blindAccept = await api("POST", `/orders/${privId}/accept`, privTaker, {
+    "X-Forwarded-For": "203.0.113.51",
+  });
+  check("accept without share token 404s", blindAccept.status === 404);
+  const authedAccept = await api(
+    "POST",
+    `/orders/${privId}/accept`,
+    { ...privTaker, shareToken: share },
+    { "X-Forwarded-For": "203.0.113.51" },
+  );
+  check(
+    "accept with the share token succeeds",
+    authedAccept.status === 200 && authedAccept.body.order.status === "accepted",
+  );
+
+  const restricted = await mkPrivate({ allowedTakerEth: ETH_B, allowedTakerQrl: QRL_B });
+  const rId = restricted.body.order.id;
+  const rShare = restricted.body.shareToken;
+  const wrongTaker = await api(
+    "POST",
+    `/orders/${rId}/accept`,
+    { takerEthAccount: `0x${"e".repeat(40)}`, takerQrlAccount: QRL_B, shareToken: rShare },
+    { "X-Forwarded-For": "203.0.113.52" },
+  );
+  check("restricted order rejects a different taker", wrongTaker.status === 403);
+  const rightTaker = await api(
+    "POST",
+    `/orders/${rId}/accept`,
+    { ...privTaker, shareToken: rShare },
+    { "X-Forwarded-For": "203.0.113.52" },
+  );
+  check("restricted order accepts the named taker", rightTaker.status === 200);
+  check(
+    "restriction addresses visible with the share token",
+    rightTaker.body.order.allowedTakerEth === ETH_B,
+  );
+
+  const restrictedPublic = await api("POST", "/orders", {
+    direction: "qrl->eth",
+    fromAmount: (5n * 10n ** 18n).toString(),
+    toAmount: ONE_ETH.toString(),
+    makerEthAccount: ETH_A,
+    makerQrlAccount: QRL_A,
+    allowedTakerEth: ETH_B,
+  });
+  check("taker restriction on a public order rejected", restrictedPublic.status === 400);
+  const badVis = await api("POST", "/orders", {
+    direction: "qrl->eth",
+    fromAmount: (5n * 10n ** 18n).toString(),
+    toAmount: ONE_ETH.toString(),
+    makerEthAccount: ETH_A,
+    makerQrlAccount: QRL_A,
+    visibility: "unlisted",
+  });
+  check("unknown visibility rejected", badVis.status === 400);
+
+  // Stays open through the stream section below, which asserts it never
+  // appears in any pushed book payload.
+  const privOpen = await mkPrivate();
+  const privOpenId = privOpen.body.order.id;
+
   console.log("book stream:");
   const streamRes = await fetch(`${BASE}/orders/stream`);
   check(
@@ -541,6 +662,10 @@ try {
   }
   check("stream pushes book changes", streamed.includes(streamedOrder.id));
   check("stream payload carries the asset field", streamed.includes('"asset":"ETH"'));
+  check(
+    "stream payload excludes private orders",
+    !(firstEvent + streamed).includes(privOpenId),
+  );
   await reader.cancel().catch(() => undefined);
 
   console.log("legacy persistence:");
