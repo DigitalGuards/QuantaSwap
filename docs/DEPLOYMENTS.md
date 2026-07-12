@@ -25,6 +25,7 @@ Rerun the smokes any time:
 node scripts/smoke-qrl.js Q94cd8e406d2bb4ea251dce3f0558941f2ac056ee
 node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 ```
+<<<<<<< HEAD
 
 ## Updating a running deployment
 
@@ -101,3 +102,36 @@ depth is 1 to match (frontend/src/config.ts).
 Watch it: `pm2 logs quantaswap-marketmaker` (never logs secrets); the
 persisted swap state (including preimages of in-flight swaps) is in
 `data/state.json`, mode 600.
+
+## Stablecoin support status (pending rollout)
+
+The stablecoin work (2026-07) added a received-amount check to `lockToken`
+(`UnsupportedToken` on fee-on-transfer behavior), so the current source no
+longer matches the artifact deployed above. The deployed 2026-07-08 contracts
+remain safe for native-coin and WETH swaps, but **redeploy both legs before
+advertising USDC/USDT pairs**, then update this file.
+
+quantaswap.io is live, so this is a coordinated rollout, not just two deploy
+runs:
+
+1. Client integration first: the frontend swap card, order book and market
+   maker still assume a single QRL/WETH pair with 18 decimals. Teach them to
+   read `config/tokens.json` (asset picker, per-token decimals, approve-reset
+   flow for USDT) before any redeploy.
+2. Deploy the Sepolia USDT stand-in: `npm run deploy:test-stable`, record the
+   tUSDT address in `config/tokens.json` (chain `11155111`).
+3. Deploy the new HTLC artifact to both legs (`npm run deploy:qrl` /
+   `npm run deploy:eth`). Old and new contracts coexist; nothing breaks yet.
+4. Stop the market maker from listing new orders and let the book drain:
+   in-flight swaps settle or refund on the OLD addresses (swap records do not
+   migrate; the T1 = 4h window bounds the wait).
+5. Point frontend config, order book and MM at the new HTLC addresses,
+   restart, and update the tables above.
+6. Smoke the ERC-20 path. The MM's ETH inventory wallet
+   (`0x48fF8564DF1980e74667dec3A85E3b4b67844b6B`) already holds Sepolia USDC;
+   more is fundable at faucet.circle.com.
+
+```bash
+node scripts/smoke-eth-erc20.js <new-htlc-address> 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238  # USDC
+node scripts/smoke-eth-erc20.js <new-htlc-address> <tusdt-address>                             # tUSDT
+```

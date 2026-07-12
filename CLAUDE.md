@@ -4,9 +4,9 @@ Operating rules for Claude sessions in `/home/waterfall/myqrlwallet/QuantaSwap`.
 
 ## What this repo is
 
-Cross-chain HTLC atomic swaps between Ethereum (WETH) and QRL v2 (native QRL). Two modes: protocol mode (pure HTLC + order book, zero operators) and solver mode (Phala TEE-attested solver, uniswap-style single-sided UX). Read `docs/ARCHITECTURE.md` before touching anything; it is the build spec.
+Cross-chain HTLC atomic swaps between Ethereum (WETH, USDC, USDT; registry in `config/tokens.json`) and QRL v2 (native QRL). Two modes: protocol mode (pure HTLC + order book, zero operators) and solver mode (Phala TEE-attested solver, uniswap-style single-sided UX). Read `docs/ARCHITECTURE.md` before touching anything; it is the build spec.
 
-Domain quantaswap.io (Cloudflare zone active, nothing deployed yet). Will be public OSS under DigitalGuards, GPL-3.0. No GitHub remote yet.
+Live at quantaswap.io (Cloudflare zone, DigitalGuards account). Public OSS: `DigitalGuards/QuantaSwap`, GPL-3.0.
 
 ## Chain facts
 

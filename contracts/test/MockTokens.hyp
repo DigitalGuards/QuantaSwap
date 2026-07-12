@@ -65,6 +65,10 @@ contract NoReturnToken {
 // Always returns false without reverting; also doubles as a non-payable
 // recipient for native payout failure tests (no receive function).
 contract FalseToken {
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
+    }
+
     function approve(address, uint256) external pure returns (bool) {
         return true;
     }
@@ -75,5 +79,108 @@ contract FalseToken {
 
     function transferFrom(address, address, uint256) external pure returns (bool) {
         return false;
+    }
+}
+
+// Full USDT semantics: no return values (like NoReturnToken) plus the
+// approval race guard, so changing a nonzero allowance requires an
+// approve(0) reset first. Clients must handle this to support USDT.
+contract ApprovalRaceToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 value) external {
+        balanceOf[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external {
+        require(value == 0 || allowance[msg.sender][spender] == 0, "approval race");
+        allowance[msg.sender][spender] = value;
+    }
+
+    function transfer(address to, uint256 value) external {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external {
+        require(balanceOf[from] >= value, "balance");
+        require(allowance[from][msg.sender] >= value, "allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+    }
+}
+
+// USDC/USDT-style issuer blocklist: transfers touching a blocked address
+// revert. setBlocked is unpermissioned because this is a test double.
+contract BlocklistToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => bool) public blocked;
+
+    function mint(address to, uint256 value) external {
+        balanceOf[to] += value;
+    }
+
+    function setBlocked(address account, bool isBlocked) external {
+        blocked[account] = isBlocked;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(!blocked[msg.sender] && !blocked[to], "blocked");
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(!blocked[from] && !blocked[to], "blocked");
+        require(balanceOf[from] >= value, "balance");
+        require(allowance[from][msg.sender] >= value, "allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+}
+
+// Fee-on-transfer: the recipient is credited value minus a 1% fee. USDT
+// ships this mechanism with the fee currently set to zero; the HTLC must
+// reject any token where it is active.
+contract FeeToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 value) external {
+        balanceOf[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(balanceOf[msg.sender] >= value, "balance");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value - value / 100;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(balanceOf[from] >= value, "balance");
+        require(allowance[from][msg.sender] >= value, "allowance");
+        allowance[from][msg.sender] -= value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value - value / 100;
+        return true;
     }
 }
