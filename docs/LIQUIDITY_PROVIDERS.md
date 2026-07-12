@@ -17,8 +17,8 @@ Wire-level details for every endpoint mentioned here:
 The frontend at [quantaswap.io](https://quantaswap.io) has the full maker flow
 built in: post an order from the *Post order* card with your connected
 Ethereum (EIP-6963) and QRL (MyQRLWallet connect) accounts, and your listing
-card walks you through the swap when a taker arrives — lock, hashlock
-announcement, claim or refund — with secrets generated and held in the browser.
+card walks you through the swap when a taker arrives (lock, hashlock
+announcement, claim or refund) with secrets generated and held in the browser.
 
 The catch: **maker presence is tied to the open tab.** Your client heartbeats
 the listing while its card is open; close the tab and after 90 seconds the
@@ -30,7 +30,7 @@ always-on book.
 
 Run a client against the order book API. You have two starting points:
 
-- **Run or adapt `marketmaker/`** — the reference implementation used to stock
+- **Run or adapt `marketmaker/`**: the reference implementation used to stock
   the public book. Hardened TypeScript, deps only `ethers` + `@theqrl/web3`.
   It runs the whole maker lifecycle unattended: announce, lock, depth-verified
   claim, refund, repost, plus a price ladder tracking a CoinGecko cross rate,
@@ -38,7 +38,7 @@ Run a client against the order book API. You have two starting points:
   through the pure decision core in `marketmaker/src/policy.ts` (tested by
   `npm test`). Configuration is documented in `marketmaker/.env.example`; the
   two signing keys live only in your untracked `.env`.
-- **Write your own** — the API is small and unauthenticated beyond per-order
+- **Write your own**: the API is small and unauthenticated beyond per-order
   bearer tokens. `marketmaker/src/orderbook.ts` and
   `frontend/src/lib/orderbook.ts` are compact client references.
 
@@ -48,32 +48,32 @@ The maker is always the **initiator**: after a taker reserves your order, you
 generate the secret, lock first, and your claim of the taker's leg is what
 reveals the secret that lets the taker claim yours.
 
-1. **Post** — `POST /orders` with direction, asset, both amounts (base units)
+1. **Post**: `POST /orders` with direction, asset, both amounts (base units)
    and your two addresses. Store the returned `makerToken`; it is shown once.
-2. **Heartbeat** — `POST /orders/:id/heartbeat` at least every 90 s per open
+2. **Heartbeat**: `POST /orders/:id/heartbeat` at least every 90 s per open
    listing (the reference maker beats every tick). Offline listings are
    skipped by take-by-terms matching.
-3. **Watch for a take** — poll `GET /orders/:id` or subscribe to
+3. **Watch for a take**: poll `GET /orders/:id` or subscribe to
    `GET /orders/stream`. A take moves the order to `accepted` and fills in the
    taker's addresses.
-4. **Lock first** — generate a fresh 32-byte CSPRNG secret, compute
+4. **Lock first**: generate a fresh 32-byte CSPRNG secret, compute
    `hashlock = sha256(secret)`, and lock your leg on-chain with the taker as
    recipient and the initiator timeout. The contract enforces hashlock
    freshness, so never reuse a secret across swaps or chains.
-5. **Announce** — `POST /orders/:id/hashlock` with the hashlock and both
+5. **Announce**: `POST /orders/:id/hashlock` with the hashlock and both
    unix-second timeouts. The book enforces (and the contracts embody) the
    timelock asymmetry: your initiator window must be at least **2×** the
    responder window, so the taker can never claim your leg while you can no
    longer claim theirs.
-6. **Verify the taker's lock, then claim** — wait for the taker's HTLC lock,
+6. **Verify the taker's lock, then claim**: wait for the taker's HTLC lock,
    re-read it on-chain **at your confirmation depth** (the reference maker
    re-reads at `head - N`), and verify recipient, amount, token address and
-   timeout against your own registry — never against book data. Only then
+   timeout against your own registry, never against book data. Only then
    claim the taker's leg, which publishes the secret.
-7. **Or refund** — if the taker never locks (or locks wrong), do nothing until
+7. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
-8. **Repost** — a filled or cancelled listing is gone; post a new order to
+8. **Repost**: a filled or cancelled listing is gone; post a new order to
    stay in the book. `POST /orders/:id/cancel` pulls a live listing (funds
    already locked stay governed on-chain).
 

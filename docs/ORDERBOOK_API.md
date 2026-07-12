@@ -42,14 +42,14 @@ Consequences for integrators:
 There is no registration, no accounts, no API keys. Authorization is by
 per-order capability tokens (64 hex chars, 32 CSPRNG bytes):
 
-- **Maker token** — returned once by `POST /orders`. Authorizes `heartbeat`,
+- **Maker token**: returned once by `POST /orders`. Authorizes `heartbeat`,
   `hashlock` and `cancel` on that order.
-- **Taker token** — returned once by `POST /orders/:id/accept` or
+- **Taker token**: returned once by `POST /orders/:id/accept` or
   `POST /orders/take`. Authorizes `release` on that order.
 
 The server stores only the sha256 of each token; if you lose a token it cannot
 be recovered. Treat tokens as secrets for the lifetime of the order (leaking a
-maker token lets someone cancel your listing or announce a bogus hashlock —
+maker token lets someone cancel your listing or announce a bogus hashlock;
 never funds, per the trust model, but it can grief the swap).
 
 ## The order object
@@ -142,7 +142,7 @@ starve the other (`429 rate limited, slow down`):
 
 Take caps, per IP (fairness for shared demo liquidity, not sybil resistance):
 
-- **4 concurrent takes** — a take occupies a slot through the `accepted` phase
+- **4 concurrent takes**: a take occupies a slot through the `accepted` phase
   and the `locking` phase up to the initiator timeout; releasing frees it
   (`429 you already have swaps in progress; finish or let them expire`).
 - **24 takes per rolling 24 h**
@@ -173,7 +173,7 @@ data: {"orders":[…]}
 ```
 
 Comment pings (`: ping`) flow roughly every 15 s to hold idle proxies open.
-`503` (JSON body) when the connection caps are hit — keep a slow `GET /orders`
+`503` (JSON body) when the connection caps are hit; keep a slow `GET /orders`
 poll as fallback. Browser `EventSource` reconnects on its own.
 
 ### `GET /orders/:id`
@@ -181,7 +181,7 @@ poll as fallback. Browser `EventSource` reconnects on its own.
 One order, any status. → `200 {"order": Order}`. `404 order not found` for
 unknown/expired ids (ids are 16 lowercase hex chars; anything else is a 404).
 
-### `POST /orders` — list an order (maker)
+### `POST /orders`: list an order (maker)
 
 ```jsonc
 {
@@ -199,7 +199,7 @@ once. Creation counts as a heartbeat.
 
 Errors: `400` per-field validation, `503 order book is full`.
 
-### `POST /orders/take` — take by terms (taker)
+### `POST /orders/take`: take by terms (taker)
 
 Atomically fills the **best** open order matching the caller's bounds: "I pay
 at most `maxPay` (the order's `toAmount`) to receive at least `minReceive`
@@ -224,7 +224,7 @@ or better. Matching is asset-scoped and skips offline makers
 Errors: `400` validation, `409 no open order matches those terms; the book may
 have moved`, `429` take caps.
 
-### `POST /orders/:id/accept` — take by id (taker)
+### `POST /orders/:id/accept`: take by id (taker)
 
 Reserves a specific order (including offline-maker orders take-by-terms would
 skip).
@@ -237,7 +237,7 @@ skip).
 
 Errors: `404`, `409 order is no longer open`, `429` take caps.
 
-### `POST /orders/:id/hashlock` — announce the swap parameters (maker)
+### `POST /orders/:id/hashlock`: announce the swap parameters (maker)
 
 Called after the maker (always the initiator) has locked on-chain. Moves the
 order `accepted -> locking` and publishes what the taker needs to verify the
@@ -254,7 +254,7 @@ lock and respond.
 
 Enforced (mirroring the contract-level invariant; clients still re-verify
 on-chain): `responderTimeout > now + 600`, and
-`initiatorTimeout - now >= 2 * (responderTimeout - now)` — the initiator's
+`initiatorTimeout - now >= 2 * (responderTimeout - now)`: the initiator's
 window must cover the responder's twice over.
 
 → `200 {"order": Order}`.
@@ -262,7 +262,7 @@ window must cover the responder's twice over.
 Errors: `403 invalid maker token`, `409 order is not awaiting a hashlock`,
 `400` hashlock/timeout validation.
 
-### `POST /orders/:id/heartbeat` — maker presence ping (maker)
+### `POST /orders/:id/heartbeat`: maker presence ping (maker)
 
 ```jsonc
 { "token": "<makerToken>" }
@@ -274,7 +274,7 @@ limit: deliberately cheap to call every few seconds. Beat at least once per
 
 Errors: `404`, `403 invalid maker token`.
 
-### `POST /orders/:id/cancel` — pull a listing (maker)
+### `POST /orders/:id/cancel`: pull a listing (maker)
 
 ```jsonc
 { "token": "<makerToken>" }
@@ -285,7 +285,7 @@ funds already locked on-chain remain governed by the HTLC claim/refund paths.
 
 Errors: `404`, `403 invalid maker token`.
 
-### `POST /orders/:id/release` — taker walk-away (taker)
+### `POST /orders/:id/release`: taker walk-away (taker)
 
 ```jsonc
 { "token": "<takerToken>" }
@@ -297,7 +297,7 @@ Errors: `404`, `403 invalid maker token`.
   untouched, taker fields cleared, and the take stops counting against the
   taker's caps entirely.
 - **After the maker locks** (`locking`): the listing stays as-is (chain state
-  governs the funds) and the order is flagged `released: true` — the maker
+  governs the funds) and the order is flagged `released: true`; the maker
   should not commit further funds. The take stops occupying a concurrency slot,
   but still counts against the daily cap (it already cost the maker gas and a
   lockup).

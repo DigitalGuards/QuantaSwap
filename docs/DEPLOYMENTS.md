@@ -66,7 +66,7 @@ node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
   driving the public protocol: killing it strands no one (in-flight swaps settle via
   the HTLC windows; its open orders expire off the book). Policy defaults live in
   `marketmaker/src/config.ts` and are documented in `marketmaker/.env.example`;
-  anyone can run their own — see [LIQUIDITY_PROVIDERS.md](LIQUIDITY_PROVIDERS.md).
+  anyone can run their own; see [LIQUIDITY_PROVIDERS.md](LIQUIDITY_PROVIDERS.md).
 - The operational runbook (server layout, deploy procedure, production tuning) lives
   outside the repo.
 
