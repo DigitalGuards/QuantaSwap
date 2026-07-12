@@ -138,14 +138,43 @@ describe("legacy demo.v1 migration", () => {
 
 describe("my-order handle", () => {
   it("roundtrips and survives corruption", () => {
-    saveMyOrder({ id: "o1", token: "t1", asset: "USDC" });
-    expect(loadMyOrder()).toEqual({ id: "o1", token: "t1", asset: "USDC" });
+    const ref = {
+      id: "o1",
+      token: "t1",
+      asset: "USDC" as const,
+      fromAmount: "5000000",
+      toAmount: "6000000000000000000",
+    };
+    saveMyOrder(ref);
+    expect(loadMyOrder()).toEqual(ref);
     localStorage.setItem("quantaswap.myorder.v1", "?");
     expect(loadMyOrder()).toBeNull();
   });
 
   it("hydrates handles stored before the asset existed as native ETH", () => {
     localStorage.setItem("quantaswap.myorder.v1", JSON.stringify({ id: "o1", token: "t1" }));
-    expect(loadMyOrder()).toEqual({ id: "o1", token: "t1", asset: "ETH" });
+    // Pre-asset handles also predate amount anchoring: both hydrate null
+    // and the match flow falls back to the book copy for those.
+    expect(loadMyOrder()).toEqual({
+      id: "o1",
+      token: "t1",
+      asset: "ETH",
+      fromAmount: null,
+      toAmount: null,
+    });
+  });
+
+  it("hydrates handles stored before amount anchoring with null amounts", () => {
+    localStorage.setItem(
+      "quantaswap.myorder.v1",
+      JSON.stringify({ id: "o1", token: "t1", asset: "USDC" }),
+    );
+    expect(loadMyOrder()).toEqual({
+      id: "o1",
+      token: "t1",
+      asset: "USDC",
+      fromAmount: null,
+      toAmount: null,
+    });
   });
 });

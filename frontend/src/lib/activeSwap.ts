@@ -122,12 +122,18 @@ export function clearActiveSwap(): void {
 }
 
 /** The maker's open-order handle; the token authorizes cancel + hashlock.
- *  The asset is anchored locally at post time (like the maker's payout
- *  addresses) so a hostile book cannot re-label the maker's own order. */
+ *  The asset AND both amounts are anchored locally at post time (like the
+ *  maker's payout addresses) so a hostile book cannot re-label or resize
+ *  the maker's own order at match time. */
 export interface MyOrderRef {
   id: string;
   token: string;
   asset: EthAssetSymbol;
+  /** Base units the maker escrows, decimal string; null on handles stored
+   *  before amount anchoring existed (those fall back to the book copy). */
+  fromAmount: string | null;
+  /** Base units the maker expects, decimal string; null pre-anchoring. */
+  toAmount: string | null;
 }
 
 const ORDER_KEY = "quantaswap.myorder.v1";
@@ -139,6 +145,9 @@ export function loadMyOrder(): MyOrderRef | null {
     const ref = JSON.parse(raw) as MyOrderRef;
     // Handles stored before the ETH-leg asset existed mean native ETH.
     ref.asset = ethAssetSymbolOrNull(ref.asset) ?? "ETH";
+    // Handles stored before amount anchoring existed.
+    ref.fromAmount ??= null;
+    ref.toAmount ??= null;
     return ref;
   } catch {
     return null;

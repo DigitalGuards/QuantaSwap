@@ -26,13 +26,12 @@ contract TestStable {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    /// @notice Faucet: mints 10,000 tUSDT to the caller.
+    /// @notice Faucet: mints 10,000 tUSDT to the caller. The fixed-drip
+    ///         faucet is the ONLY mint surface; an arbitrary-amount mint
+    ///         would be pointless extra surface on a token that anyone
+    ///         can already print for free.
     function faucet() external {
         _mint(msg.sender, 10_000 * 10 ** 6);
-    }
-
-    function mint(address to, uint256 value) external {
-        _mint(to, value);
     }
 
     // USDT semantics: no return value, and a nonzero allowance must be

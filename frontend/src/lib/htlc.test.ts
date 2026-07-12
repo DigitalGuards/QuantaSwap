@@ -11,6 +11,7 @@ import {
   buildLockNativeData,
   buildLockTokenData,
   buildRefundData,
+  confirmedBlock,
   hexToQ,
   qToHex,
   shortAddr,
@@ -95,6 +96,24 @@ describe("calldata encoding", () => {
     expect(buildApproveData(TOKEN, 0n)).toBe(
       "0x095ea7b3" + "000000000000000000000000" + "cc".repeat(20) + "0".repeat(64),
     );
+  });
+});
+
+describe("confirmed-snapshot depth arithmetic", () => {
+  // Pins what the `confirmations` config values actually mean: the block
+  // the irreversible-response gates read counterparty locks at. A silent
+  // change here changes the protocol's reorg margin.
+  it("confirmations 0 reads the head block itself (zero reorg margin)", () => {
+    expect(confirmedBlock(1000, 0)).toBe(1000);
+  });
+
+  it("confirmations N reads N blocks behind the head", () => {
+    expect(confirmedBlock(1000, 1)).toBe(999);
+    expect(confirmedBlock(1000, 3)).toBe(997);
+  });
+
+  it("clamps at genesis instead of going negative", () => {
+    expect(confirmedBlock(2, 5)).toBe(0);
   });
 });
 

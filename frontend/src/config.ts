@@ -1,9 +1,11 @@
-// `confirmations`: block depth a counterparty lock must reach before this
-// client acts on it irreversibly (taker locking, maker revealing the
-// secret). Depth 1 is sized for testnet demo patience (~40s on QRL's
-// ~40s blocks, ~12s on Sepolia); production should gate on the
-// `finalized` tag instead (ARCHITECTURE section 2 sizes the timelock
-// margins for full ~13 min finality).
+// `confirmations`: extra block depth a counterparty lock must reach
+// before this client acts on it irreversibly (taker locking, maker
+// revealing the secret). 0 acts as soon as the lock is included at the
+// head block: a deliberate testnet-speed choice that accepts depth-1
+// reorg risk (worst case, the maker's claim broadcast publishes the
+// preimage while the taker's lock reorgs away; see lib/htlc.ts).
+// Production MUST gate on the `finalized` tag instead (ARCHITECTURE
+// section 2 sizes the timelock margins for full ~13 min finality).
 export const QRL_LEG = {
   key: "qrl" as const,
   name: "QRL v2 testnet",

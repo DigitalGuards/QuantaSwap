@@ -14,11 +14,15 @@ const MAX_BODY_BYTES = 4096;
 // spam on a testnet demo; Cloudflare fronts the real thing. Both ceilings
 // leave room for the local market maker (un-proxied, so keyed to
 // 127.0.0.1): at a 5s tick it issues one view GET plus one heartbeat per
-// open listing, and a price-drift reprice cancels and reposts its whole
-// book inside one window.
+// open listing PLUS one view GET per in-flight take. At multi-pair prod
+// depth (28 listings) that is ~672 read-class calls/min before a single
+// take is in flight, so the read ceiling is sized at roughly 2x that
+// baseline; starving heartbeats flaps the maker "offline" mid-swap. A
+// price-drift reprice cancels and reposts the whole book inside one
+// mutation window.
 const WINDOW_MS = 60_000;
 const MAX_MUTATIONS_PER_WINDOW = 120;
-const MAX_READS_PER_WINDOW = 720;
+const MAX_READS_PER_WINDOW = 1440;
 const hits = new Map<string, { windowStart: number; reads: number; mutations: number }>();
 
 function rateLimited(ip: string, mutation: boolean): boolean {

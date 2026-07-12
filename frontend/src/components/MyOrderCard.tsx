@@ -74,10 +74,12 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
             takerToken: null,
             direction: current.direction,
             // Anchored locally at post time, like the payout addresses:
-            // the book's copy of the asset field is never trusted.
+            // the book's copy of the asset and amount fields is never
+            // trusted (the book copy is only a fallback for handles
+            // stored before amount anchoring existed).
             ethAsset: myOrder.asset,
-            fromAmount: current.fromAmount,
-            toAmount: current.toAmount,
+            fromAmount: myOrder.fromAmount ?? current.fromAmount,
+            toAmount: myOrder.toAmount ?? current.toAmount,
             makerEthAccount: ethAccount,
             makerQrlAccount: qrlAccount,
             takerEthAccount: current.takerEthAccount,
@@ -131,7 +133,7 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         setBusy(false);
       }
     },
-    [myOrder.token, myOrder.asset, ethAccount, qrlAccount, onMatched],
+    [myOrder.token, myOrder.asset, myOrder.fromAmount, myOrder.toAmount, ethAccount, qrlAccount, onMatched],
   );
 
   useEffect(() => {
