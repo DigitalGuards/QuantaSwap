@@ -1,7 +1,15 @@
 import { useState } from "react";
-import { parseEther } from "ethers";
+import { formatUnits, parseUnits } from "ethers";
 import { ArrowDownUp, BookPlus } from "lucide-react";
-import { ETH_LEG, MIN_AMOUNT_WEI, QRL_LEG } from "@/config";
+import {
+  ETH_ASSETS,
+  ETH_ASSET_SYMBOLS,
+  ETH_LEG,
+  MIN_QRL_AMOUNT_WEI,
+  QRL_LEG,
+  ethAssetSymbolOrNull,
+  type EthAssetSymbol,
+} from "@/config";
 import type { Direction } from "@/lib/activeSwap";
 import { saveMyOrder, type MyOrderRef } from "@/lib/activeSwap";
 import { createOrder } from "@/lib/orderbook";
@@ -16,15 +24,33 @@ interface Props {
   onPosted: (ref: MyOrderRef) => void;
 }
 
+const trimAmount = (units: bigint, decimals: number): string => {
+  const s = formatUnits(units, decimals);
+  return s.endsWith(".0") ? s.slice(0, -2) : s;
+};
+
+/** parseUnits with a friendly error instead of ethers' internal one when
+ *  the input carries more fraction digits than the asset supports. */
+const parseAmount = (value: string, decimals: number, symbol: string): bigint => {
+  const fraction = value.split(".")[1];
+  if (fraction !== undefined && fraction.length > decimals) {
+    throw new Error(`${symbol} supports at most ${decimals} decimal places`);
+  }
+  return parseUnits(value, decimals);
+};
+
 export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
   const [direction, setDirection] = useState<Direction>("eth->qrl");
+  const [assetSymbol, setAssetSymbol] = useState<EthAssetSymbol>("ETH");
   const [fromAmount, setFromAmount] = useState("");
   const [toAmount, setToAmount] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const fromLeg = direction === "eth->qrl" ? ETH_LEG : QRL_LEG;
-  const toLeg = direction === "eth->qrl" ? QRL_LEG : ETH_LEG;
+  const asset = ETH_ASSETS[assetSymbol];
+  // The ETH-leg side gives `asset`; the QRL side is always native QRL.
+  const fromSymbol = direction === "eth->qrl" ? asset.symbol : QRL_LEG.asset;
+  const toSymbol = direction === "eth->qrl" ? QRL_LEG.asset : asset.symbol;
 
   const ready = Boolean(ethAccount && qrlAccount && Number(fromAmount) > 0 && Number(toAmount) > 0);
 
@@ -33,19 +59,29 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
     setError(null);
     setBusy(true);
     try {
-      const fromWei = parseEther(fromAmount);
-      const toWei = parseEther(toAmount);
-      if (fromWei < MIN_AMOUNT_WEI || toWei < MIN_AMOUNT_WEI) {
-        throw new Error("Amounts must be at least 0.001");
+      const ethSide = direction === "eth->qrl" ? fromAmount : toAmount;
+      const qrlSide = direction === "eth->qrl" ? toAmount : fromAmount;
+      const ethUnits = parseAmount(ethSide, asset.decimals, asset.symbol);
+      const qrlWei = parseAmount(qrlSide, 18, QRL_LEG.asset);
+      if (ethUnits < asset.minBaseUnits) {
+        throw new Error(
+          `${asset.symbol} amount must be at least ${trimAmount(asset.minBaseUnits, asset.decimals)}`,
+        );
       }
+      if (qrlWei < MIN_QRL_AMOUNT_WEI) {
+        throw new Error(`QRL amount must be at least ${trimAmount(MIN_QRL_AMOUNT_WEI, 18)}`);
+      }
+      const fromUnits = direction === "eth->qrl" ? ethUnits : qrlWei;
+      const toUnits = direction === "eth->qrl" ? qrlWei : ethUnits;
       const { order, makerToken } = await createOrder({
         direction,
-        fromAmount: fromWei.toString(),
-        toAmount: toWei.toString(),
+        asset: asset.symbol,
+        fromAmount: fromUnits.toString(),
+        toAmount: toUnits.toString(),
         makerEthAccount: ethAccount,
         makerQrlAccount: qrlAccount,
       });
-      const ref: MyOrderRef = { id: order.id, token: makerToken };
+      const ref: MyOrderRef = { id: order.id, token: makerToken, asset: asset.symbol };
       saveMyOrder(ref);
       onPosted(ref);
     } catch (err) {
@@ -55,31 +91,55 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
     }
   };
 
+  const assetPicker = (
+    <select
+      aria-label="Ethereum-leg asset"
+      value={assetSymbol}
+      onChange={(e) => {
+        const next = ethAssetSymbolOrNull(e.target.value);
+        if (next !== null) setAssetSymbol(next);
+      }}
+      className="absolute top-1/2 right-2 -translate-y-1/2 rounded-md border border-border/60 bg-muted/40 px-1.5 py-1 text-sm font-medium text-muted-foreground"
+    >
+      {ETH_ASSET_SYMBOLS.map((s) => (
+        <option key={s} value={s}>
+          {s}
+        </option>
+      ))}
+    </select>
+  );
+
   const legBox = (
     kind: "You give" | "You want",
-    leg: typeof ETH_LEG | typeof QRL_LEG,
+    side: "eth" | "qrl",
     value: string,
     setValue: (v: string) => void,
   ) => (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>{kind}</span>
-        <span>{leg.name}</span>
+        <span>{side === "eth" ? ETH_LEG.name : QRL_LEG.name}</span>
       </div>
       <div className="relative">
         <Input
           inputMode="decimal"
-          placeholder="0.0"
+          placeholder={
+            side === "eth" ? `min ${trimAmount(asset.minBaseUnits, asset.decimals)}` : "0.0"
+          }
           value={value}
           onChange={(e) => {
             const next = e.target.value.replace(",", ".");
             if (next === "" || /^\d*\.?\d*$/.test(next)) setValue(next);
           }}
-          className="font-data h-12 pr-16 text-lg"
+          className="font-data h-12 pr-20 text-lg"
         />
-        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
-          {leg.asset}
-        </span>
+        {side === "eth" ? (
+          assetPicker
+        ) : (
+          <span className="absolute top-1/2 right-3 -translate-y-1/2 text-sm font-medium text-muted-foreground">
+            {QRL_LEG.asset}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -93,7 +153,7 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {legBox("You give", fromLeg, fromAmount, setFromAmount)}
+        {legBox("You give", direction === "eth->qrl" ? "eth" : "qrl", fromAmount, setFromAmount)}
         <div className="flex justify-center">
           <Button
             variant="outline"
@@ -108,13 +168,13 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
             <ArrowDownUp className="h-4 w-4" />
           </Button>
         </div>
-        {legBox("You want", toLeg, toAmount, setToAmount)}
+        {legBox("You want", direction === "eth->qrl" ? "qrl" : "eth", toAmount, setToAmount)}
 
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Receive {toLeg.asset} to</span>
+            <span className="text-muted-foreground">Receive {toSymbol} to</span>
             <span className="font-data text-xs text-blue-accent">
-              {toLeg.key === "qrl"
+              {direction === "eth->qrl"
                 ? qrlAccount
                   ? shortAddr(qrlAccount)
                   : "connect QRL wallet"
@@ -134,9 +194,9 @@ export function PostOrderCard({ ethAccount, qrlAccount, onPosted }: Props) {
           {!ethAccount || !qrlAccount
             ? "Connect both wallets to post"
             : !(Number(fromAmount) > 0)
-              ? `Enter the ${fromLeg.asset} amount`
+              ? `Enter the ${fromSymbol} amount`
               : !(Number(toAmount) > 0)
-                ? `Enter the ${toLeg.asset} amount`
+                ? `Enter the ${toSymbol} amount`
                 : busy
                   ? "Posting…"
                   : "Post order"}

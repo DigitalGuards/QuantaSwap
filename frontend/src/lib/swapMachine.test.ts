@@ -3,7 +3,7 @@
 // assertions pin exact gating behavior, not implementation details.
 
 import { describe, expect, it } from "vitest";
-import { CLAIM_MARGIN_S } from "../config";
+import { CLAIM_MARGIN_S, ETH_ASSETS } from "../config";
 import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc";
 import type { ActiveSwap, SwapRole } from "./activeSwap";
 import { ZERO32, deriveSwapMachine, sameAddr, type LegStates } from "./swapMachine";
@@ -28,6 +28,7 @@ function swapFor(role: SwapRole, overrides: Partial<ActiveSwap> = {}): ActiveSwa
     orderId: role === "sandbox" ? null : "order-1",
     takerToken: role === "taker" ? "taker-token-1" : null,
     direction: "eth->qrl",
+    ethAsset: "ETH",
     fromAmount: ETH_AMOUNT.toString(),
     toAmount: QRL_AMOUNT.toString(),
     makerEthAccount: MAKER_ETH,
@@ -288,6 +289,135 @@ describe("step 3: secret reveal (maker's irreversible commit)", () => {
     const m = derive("maker", { eth: iOpen(), qrl: shouted }, { eth: iOpen(), qrl: shouted });
     expect(m.steps[2].issue).toBeNull();
     expect(m.steps[2].canRun).toBe(true);
+  });
+});
+
+describe("ERC-20 ETH-leg verification (stable pairs)", () => {
+  const USDC_ADDRESS = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238";
+  const USDC_AMOUNT = 25n * 10n ** 6n; // 25 USDC in 6-decimal base units
+
+  // QRL/USDC pair, direction eth->qrl: the maker escrows USDC on the
+  // initiator (eth) leg, so the TAKER's verification demands the token.
+  const usdcSwap: Partial<ActiveSwap> = {
+    ethAsset: "USDC",
+    fromAmount: USDC_AMOUNT.toString(),
+  };
+
+  const iOpenUsdc = (overrides: Partial<LegState> = {}): LegState =>
+    iOpen({ token: USDC_ADDRESS, amount: USDC_AMOUNT, ...overrides });
+
+  it("pins the registry facts the verification resolves symbols against", () => {
+    expect(ETH_ASSETS.ETH.address).toBeNull();
+    expect(ETH_ASSETS.USDC.address).toBe(USDC_ADDRESS);
+    expect(ETH_ASSETS.USDC.decimals).toBe(6);
+    expect(ETH_ASSETS.tUSDT.address).toBe("0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0");
+    expect(ETH_ASSETS.tUSDT.quirks.approvalRace).toBe(true);
+    expect(ETH_ASSETS.tUSDT.quirks.noReturnValue).toBe(true);
+  });
+
+  it("exposes the expected token on the leg plan (native sentinel only for native assets)", () => {
+    const native = derive("taker", { eth: none(), qrl: none() }, {});
+    expect(native.legPlan.eth.expectedToken).toBe(NATIVE_TOKEN);
+    expect(native.legPlan.qrl.expectedToken).toBe(NATIVE_TOKEN);
+    const usdc = derive("taker", { eth: none(), qrl: none() }, {}, { swap: usdcSwap });
+    expect(usdc.legPlan.eth.expectedToken).toBe(USDC_ADDRESS);
+    expect(usdc.legPlan.eth.symbol).toBe("USDC");
+    expect(usdc.legPlan.eth.decimals).toBe(6);
+    expect(usdc.legPlan.qrl.expectedToken).toBe(NATIVE_TOKEN);
+  });
+
+  it("accepts a confirmed initiator lock escrowing exactly the agreed USDC", () => {
+    const good = iOpenUsdc();
+    const m = derive(
+      "taker",
+      { eth: good, qrl: none() },
+      { eth: good, qrl: none() },
+      { swap: usdcSwap },
+    );
+    expect(m.steps[1].issue).toBeNull();
+    expect(m.steps[1].canRun).toBe(true);
+  });
+
+  it("rejects a confirmed lock escrowing native coin when USDC was agreed", () => {
+    const bad = iOpenUsdc({ token: NATIVE_TOKEN });
+    const m = derive(
+      "taker",
+      { eth: bad, qrl: none() },
+      { eth: bad, qrl: none() },
+      { swap: usdcSwap },
+    );
+    expect(m.steps[1].canRun).toBe(false);
+    expect(m.steps[1].issue).toBe("it escrows the wrong token contract, not the agreed USDC");
+  });
+
+  it("rejects a confirmed lock escrowing a different token when USDC was agreed", () => {
+    const bad = iOpenUsdc({ token: SCAM_TOKEN });
+    const m = derive(
+      "taker",
+      { eth: bad, qrl: none() },
+      { eth: bad, qrl: none() },
+      { swap: usdcSwap },
+    );
+    expect(m.steps[1].canRun).toBe(false);
+    expect(m.steps[1].issue).toBe("it escrows the wrong token contract, not the agreed USDC");
+  });
+
+  it("rejects a USDC lock whose amount is off by one base unit, formatted in 6 decimals", () => {
+    const bad = iOpenUsdc({ amount: USDC_AMOUNT - 1n });
+    const m = derive(
+      "taker",
+      { eth: bad, qrl: none() },
+      { eth: bad, qrl: none() },
+      { swap: usdcSwap },
+    );
+    expect(m.steps[1].canRun).toBe(false);
+    expect(m.steps[1].issue).toBe("it escrows 24.999999 USDC, not the agreed 25.0");
+  });
+
+  // QRL/USDC pair, direction qrl->eth: the ETH leg is the responder leg,
+  // so it is the MAKER's secret-reveal gate that demands the token.
+  const usdcReverse: Partial<ActiveSwap> = {
+    direction: "qrl->eth",
+    ethAsset: "USDC",
+    fromAmount: QRL_AMOUNT.toString(),
+    toAmount: USDC_AMOUNT.toString(),
+  };
+
+  /** Maker's own qrl-leg lock in the reversed direction. */
+  const qrlLockRev = (): LegState => ({
+    status: SwapStatus.Open,
+    initiator: `0x${MAKER_QRL.slice(1)}`,
+    recipient: `0x${TAKER_QRL.slice(1)}`,
+    token: NATIVE_TOKEN,
+    amount: QRL_AMOUNT,
+    timeout: I_TIMEOUT,
+    preimage: ZERO32,
+  });
+
+  /** Taker's eth-leg USDC lock in the reversed direction. */
+  const ethLockRev = (overrides: Partial<LegState> = {}): LegState => ({
+    status: SwapStatus.Open,
+    initiator: TAKER_ETH,
+    recipient: MAKER_ETH,
+    token: USDC_ADDRESS,
+    amount: USDC_AMOUNT,
+    timeout: R_TIMEOUT,
+    preimage: ZERO32,
+    ...overrides,
+  });
+
+  it("maker reveals only against the exact USDC escrow on a qrl->eth pair", () => {
+    const legs = { qrl: qrlLockRev(), eth: ethLockRev() };
+    const m = derive("maker", legs, legs, { swap: usdcReverse });
+    expect(m.steps[2].issue).toBeNull();
+    expect(m.steps[2].canRun).toBe(true);
+  });
+
+  it("maker never reveals against a native lock when the pair is QRL/USDC (qrl->eth)", () => {
+    const legs = { qrl: qrlLockRev(), eth: ethLockRev({ token: NATIVE_TOKEN }) };
+    const m = derive("maker", legs, legs, { swap: usdcReverse });
+    expect(m.steps[2].canRun).toBe(false);
+    expect(m.steps[2].issue).toBe("it escrows the wrong token contract, not the agreed USDC");
   });
 });
 

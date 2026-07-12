@@ -74,8 +74,12 @@ export class EthLeg {
     return this.provider.getBalance(this.address);
   }
 
-  async send(data: string, valueWei: bigint): Promise<string> {
-    const tx = await this.wallet.sendTransaction({ to: this.htlc, data, value: valueWei });
+  /** Sends to the HTLC by default; ERC-20 approvals pass the token
+   *  contract as `to`. Success is judged by the receipt status alone
+   *  (wait() throws on a reverted tx), never by decoded return data, so
+   *  no-return-value tokens (tUSDT) are safe. */
+  async send(data: string, valueWei: bigint, to = this.htlc): Promise<string> {
+    const tx = await this.wallet.sendTransaction({ to, data, value: valueWei });
     // Bound the confirmation wait: a stuck tx throws instead of hanging the
     // tick forever, and decide() reconciles from chain state next tick.
     await tx.wait(1, this.txTimeoutMs);

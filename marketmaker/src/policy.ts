@@ -3,18 +3,23 @@
 // next action. No IO here so every gate is unit-testable; index.ts
 // executes the decisions.
 
-import { NATIVE_TOKEN, SwapStatus, sameAddr, type LegState } from "./htlc.js";
+import type { AssetSymbol } from "./assets.js";
+import { SwapStatus, sameAddr, type LegState } from "./htlc.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 
 export interface ManagedOrder {
   id: string;
+  /** Order book bearer AUTH token for this listing; NOT an asset. */
   token: string;
   direction: Direction;
+  /** ETH-leg asset symbol; the QRL leg is always native. Old persisted
+   *  records default to "ETH" on hydration. */
+  asset: AssetSymbol;
   /** Price-ladder level this listing fills (0 = tightest). */
   level: number;
-  /** Mid (milli-QRL/ETH) this listing was quoted at; null = pre-feed
-   *  record, treated as due for repricing. */
+  /** Mid (milli-QRL per whole unit of `asset`) this listing was quoted
+   *  at; null = pre-feed record, treated as due for repricing. */
   quotedMidMilli: string | null;
   fromAmount: string;
   toAmount: string;
@@ -59,7 +64,13 @@ export interface DecideInput {
   rConfirmed: LegState | null;
   /** Our receiving address on the responder leg. */
   expectedRecipient: string;
+  /** Exact amount the responder lock must escrow, in the receive asset's
+   *  base units (QRL wei, or ERC-20 units for a token leg). */
   expectedAmountWei: bigint;
+  /** Token the responder lock must escrow: the compiled-in registry
+   *  address of the order's asset when we receive the ETH leg, the
+   *  native sentinel (address(0)) otherwise. Never book-provided. */
+  expectedToken: string;
   nowS: number;
   resendAfterS: number;
   claimSafetyS: number;
@@ -103,8 +114,8 @@ export function decide(x: DecideInput): Decision {
 
   // Claim the taker's lock once it is verified AT DEPTH and there is a
   // comfortable margin before its timeout closes the claim window. A lock
-  // with wrong recipient/amount is simply never claimed: we lose nothing
-  // and our own leg refunds at t1.
+  // with the wrong token, recipient, or amount is simply never claimed:
+  // we lose nothing and our own leg refunds at t1.
   //
   // The claim window is gated on the responder lock's OWN on-chain timeout
   // (`rConfirmed.timeout`), never the t2 we announced. The taker sets the
@@ -121,7 +132,7 @@ export function decide(x: DecideInput): Decision {
     x.rState.status === SwapStatus.Open &&
     x.rConfirmed !== null &&
     x.rConfirmed.status === SwapStatus.Open &&
-    sameAddr(x.rConfirmed.token, NATIVE_TOKEN) &&
+    sameAddr(x.rConfirmed.token, x.expectedToken) &&
     sameAddr(x.rConfirmed.recipient, x.expectedRecipient) &&
     x.rConfirmed.amount === x.expectedAmountWei &&
     nowS < x.rConfirmed.timeout - x.claimSafetyS &&
@@ -182,34 +193,41 @@ export function decide(x: DecideInput): Decision {
 }
 
 export interface LevelQuote {
-  /** Wei the maker escrows on its from-chain. */
+  /** Base units the maker escrows on its from-chain. */
   fromAmount: string;
-  /** Wei the maker expects back. */
+  /** Base units the maker expects back. */
   toAmount: string;
 }
 
 /** One rung of the price ladder. Deeper levels quote wider prices and
  *  bigger sizes, like a real book: level 0 asks mid + step, bids
- *  mid - step; level n scales both by n+1. Prices are QRL per ETH in
- *  integer milli to keep the wei math exact. */
+ *  mid - step; level n scales both by n+1. Prices are QRL per whole
+ *  asset unit in integer milli; the 10^(18 - assetDecimals) bridge maps
+ *  the asset's base units onto 18-decimal QRL wei exactly, so the math
+ *  stays integer for 6-decimal assets (USDC, tUSDT) and reduces to the
+ *  original formula for 18-decimal native ETH. */
 export function levelQuote(args: {
   direction: Direction;
   level: number;
-  baseEthWei: bigint;
+  /** Rung-0 size in the ETH-leg asset's base units. */
+  baseUnits: bigint;
+  /** Mid in milli-QRL per whole unit of the asset. */
   midPriceMilli: bigint;
   stepBps: bigint;
+  /** Decimals of the ETH-leg asset (18 for native ETH, 6 for USDC). */
+  assetDecimals: number;
 }): LevelQuote {
   const rung = BigInt(args.level + 1);
-  const ethWei = args.baseEthWei * rung;
+  const units = args.baseUnits * rung;
   const offsetBps = args.stepBps * rung;
   const priceMilli =
     args.direction === "eth->qrl"
       ? (args.midPriceMilli * (10_000n + offsetBps)) / 10_000n // ask: above mid
       : (args.midPriceMilli * (10_000n - offsetBps)) / 10_000n; // bid: below mid
-  const qrlWei = (ethWei * priceMilli) / 1000n;
+  const qrlWei = (units * priceMilli * 10n ** BigInt(18 - args.assetDecimals)) / 1000n;
   return args.direction === "eth->qrl"
-    ? { fromAmount: ethWei.toString(), toAmount: qrlWei.toString() }
-    : { fromAmount: qrlWei.toString(), toAmount: ethWei.toString() };
+    ? { fromAmount: units.toString(), toAmount: qrlWei.toString() }
+    : { fromAmount: qrlWei.toString(), toAmount: units.toString() };
 }
 
 export interface RefillInput {
@@ -219,18 +237,27 @@ export interface RefillInput {
   ordersPerLevel: number;
   inflightCount: number;
   maxInflight: number;
+  /** From-side inventory in the from-asset's base units (native wei, or
+   *  ERC-20 units for a token pair). */
   balanceWei: bigint;
   reserveWei: bigint;
   orderWei: bigint;
+  /** Native balance of the chain that pays gas for the pair's ETH-leg
+   *  actions: equal to balanceWei/reserveWei for native pairs, the ETH
+   *  native balance and reserve for token pairs (gas headroom for
+   *  approve + lockToken + claim). */
+  gasBalanceWei: bigint;
+  gasReserveWei: bigint;
 }
 
 /** Repost only while under the listing target (rungs times listings per
- *  rung), under the in-flight exposure cap, and holding inventory beyond
- *  the reserve. */
+ *  rung), under the in-flight exposure cap, holding inventory beyond the
+ *  reserve, and holding native gas headroom on the ETH leg. */
 export function shouldPost(x: RefillInput): boolean {
   return (
     x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&
     x.inflightCount < x.maxInflight &&
-    x.balanceWei >= x.reserveWei + x.orderWei
+    x.balanceWei >= x.reserveWei + x.orderWei &&
+    x.gasBalanceWei >= x.gasReserveWei
   );
 }

@@ -2,7 +2,7 @@
 // this API is trusted for fund movement: recipients, amounts and timeouts
 // are always re-verified against on-chain HTLC state before acting.
 
-import { ORDERBOOK_API } from "../config";
+import { ORDERBOOK_API, type EthAssetSymbol } from "../config";
 import type { ActiveSwap, Direction } from "./activeSwap";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
@@ -10,7 +10,15 @@ export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 export interface OrderView {
   id: string;
   direction: Direction;
+  /** ETH-leg asset symbol; absent on books/rows predating stable pairs
+   *  and means "ETH". Untrusted like every book field: clients resolve
+   *  the symbol against their own registry and verify the escrowed token
+   *  address on-chain. */
+  asset?: EthAssetSymbol;
+  /** Base units of the maker leg's asset (QRL wei or ETH-leg asset units
+   *  per `asset` and direction), decimal string. */
   fromAmount: string;
+  /** Base units of the taker leg's asset, decimal string. */
   toAmount: string;
   makerEthAccount: string;
   makerQrlAccount: string;
@@ -52,6 +60,8 @@ export const getOrder = async (id: string): Promise<OrderView> =>
 
 export const createOrder = async (body: {
   direction: Direction;
+  /** ETH-leg asset symbol for the pair this order trades. */
+  asset: EthAssetSymbol;
   fromAmount: string;
   toAmount: string;
   makerEthAccount: string;
@@ -71,6 +81,9 @@ export const acceptOrder = async (
  *  click can only fill at the terms the taker saw or better. */
 export const takeOrder = async (body: {
   direction: Direction;
+  /** ETH-leg asset of the pair to match; orders of other assets never
+   *  fill this request even when their raw amounts satisfy the bounds. */
+  asset: EthAssetSymbol;
   maxPay: string;
   minReceive: string;
   takerEthAccount: string;

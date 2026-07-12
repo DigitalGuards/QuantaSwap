@@ -6,12 +6,24 @@ import { Interface } from "ethers";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
+  "function lockToken(bytes32 hashlock, address recipient, address token, uint256 amount, uint256 timeout)",
   "function claim(bytes32 hashlock, bytes32 preimage)",
   "function refund(bytes32 hashlock)",
   "function getSwap(bytes32 hashlock) view returns (tuple(address initiator, address recipient, address token, uint256 amount, uint256 timeout, uint8 status, bytes32 preimage))",
 ];
 
+/** Minimal ERC-20 surface for the token leg. approve is declared with no
+ *  return value on purpose: USDT-style tokens return no data, so the
+ *  maker sends raw calldata and trusts the receipt status only, never a
+ *  decoded return value. */
+export const ERC20_ABI = [
+  "function approve(address spender, uint256 amount)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function balanceOf(address holder) view returns (uint256)",
+];
+
 const iface = new Interface(HTLC_ABI);
+const erc20 = new Interface(ERC20_ABI);
 
 export const SwapStatus = { None: 0, Open: 1, Claimed: 2, Refunded: 3 } as const;
 export type SwapStatusValue = (typeof SwapStatus)[keyof typeof SwapStatus];
@@ -23,9 +35,12 @@ export interface LegState {
   status: SwapStatusValue;
   initiator: string;
   recipient: string;
-  /** ERC-20 escrowed, or the zero address for native coin. A lockToken()
-   *  record shares the struct and would pass recipient/amount checks while
-   *  paying a worthless token on claim, so it must be verified native. */
+  /** ERC-20 escrowed, or the zero address for native coin. lockNative()
+   *  and lockToken() records share the struct, so a counterparty lock is
+   *  claimable ONLY when this equals the exact token address expected for
+   *  the agreed asset (the native sentinel for native legs): a lock with
+   *  the right recipient and amount but the wrong token pays out a
+   *  worthless balance on claim. */
   token: string;
   amount: bigint;
   timeout: number;
@@ -123,6 +138,52 @@ export async function getConfirmedSwapState(
 
 export const encodeLock = (hashlock: string, recipient: string, timeout: number): string =>
   iface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+
+/** lockToken calldata: value rides in the calldata (msg.value 0) after an
+ *  exact-amount approval. */
+export const encodeLockToken = (
+  hashlock: string,
+  recipient: string,
+  token: string,
+  amount: bigint,
+  timeout: number,
+): string =>
+  iface.encodeFunctionData("lockToken", [hashlock, qToHex(recipient), token, amount, timeout]);
+
+export const encodeApprove = (spender: string, amount: bigint): string =>
+  erc20.encodeFunctionData("approve", [spender, amount]);
+
+/** Current allowance(owner, spender) on `token`; a plain eth_call read,
+ *  safe to decode for every token (the no-return-data quirk applies to
+ *  approve/transfer writes only). */
+export async function erc20Allowance(
+  leg: LegRpc,
+  token: string,
+  owner: string,
+  spender: string,
+): Promise<bigint> {
+  const data = erc20.encodeFunctionData("allowance", [owner, spender]);
+  const raw = (await rpc(
+    leg.url,
+    `${leg.ns}_call`,
+    [{ to: token, data }, "latest"],
+    leg.timeoutMs,
+  )) as string;
+  const [value] = erc20.decodeFunctionResult("allowance", raw) as unknown as [bigint];
+  return value;
+}
+
+export async function erc20BalanceOf(leg: LegRpc, token: string, holder: string): Promise<bigint> {
+  const data = erc20.encodeFunctionData("balanceOf", [holder]);
+  const raw = (await rpc(
+    leg.url,
+    `${leg.ns}_call`,
+    [{ to: token, data }, "latest"],
+    leg.timeoutMs,
+  )) as string;
+  const [value] = erc20.decodeFunctionResult("balanceOf", raw) as unknown as [bigint];
+  return value;
+}
 
 export const encodeClaim = (hashlock: string, preimage: string): string =>
   iface.encodeFunctionData("claim", [hashlock, preimage]);

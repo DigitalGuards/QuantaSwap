@@ -11,6 +11,12 @@ describe("midMilliFromUsd", () => {
     assert.equal(midMilliFromUsd(1712.34, 1.02), BigInt(Math.round((1712.34 / 1.02) * 1000)));
   });
 
+  it("derives the USDC cross rate with the same math", () => {
+    // 1 USD USDC over 0.5 USD QRL = 2 QRL per USDC = 2000 milli
+    assert.equal(midMilliFromUsd(1, 0.5), 2_000n);
+    assert.equal(midMilliFromUsd(0.9998, 0.02), BigInt(Math.round((0.9998 / 0.02) * 1000)));
+  });
+
   it("rejects garbage quotes", () => {
     assert.equal(midMilliFromUsd(0, 1), null);
     assert.equal(midMilliFromUsd(1700, 0), null);
@@ -33,14 +39,21 @@ describe("needsReprice", () => {
 describe("staleness gate", () => {
   const opts = { url: "unused", refreshS: 300, maxAgeS: 1800, timeoutMs: 20_000, log: () => undefined };
 
-  it("static mode always quotes", () => {
+  it("static mode always quotes the ETH pair", () => {
     const feed = new PriceFeed({ ...opts, staticMilli: 1_700_000n });
-    assert.equal(feed.current(0), 1_700_000n);
-    assert.equal(feed.current(10_000_000), 1_700_000n);
+    assert.equal(feed.current(0, "ETH"), 1_700_000n);
+    assert.equal(feed.current(10_000_000, "ETH"), 1_700_000n);
+  });
+
+  it("static mode never quotes token pairs (no static mid exists for them)", () => {
+    const feed = new PriceFeed({ ...opts, staticMilli: 1_700_000n });
+    assert.equal(feed.current(0, "USDC"), null);
+    assert.equal(feed.current(0, "tUSDT"), null);
   });
 
   it("feed mode quotes nothing before the first successful fetch", () => {
     const feed = new PriceFeed({ ...opts, staticMilli: null });
-    assert.equal(feed.current(1000), null);
+    assert.equal(feed.current(1000, "ETH"), null);
+    assert.equal(feed.current(1000, "USDC"), null);
   });
 });

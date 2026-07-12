@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { formatEther } from "ethers";
+import { formatUnits } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { Check } from "lucide-react";
-import { ETH_LEG, QRL_LEG, legByKey } from "@/config";
+import { ETH_ASSETS, ETH_LEG, QRL_LEG, legByKey } from "@/config";
 import type { LegKey } from "@/config";
 import {
+  allowanceOf,
+  buildApproveData,
   buildClaimData,
   buildLockNativeData,
+  buildLockTokenData,
   buildRefundData,
   getConfirmedLegState,
   getLegState,
@@ -21,6 +24,7 @@ import { getOrder, type OrderView } from "@/lib/orderbook";
 import {
   deriveSwapMachine,
   sameAddr,
+  type LegPlan,
   type LegStates,
   type StepModel,
 } from "@/lib/swapMachine";
@@ -75,6 +79,10 @@ export function SwapFlow({
   // two irreversible responses (taker locks, maker reveals the secret).
   const [confirmedLegs, setConfirmedLegs] = useState<LegStates>({});
   const [busy, setBusy] = useState<string | null>(null);
+  // Sub-step progress for multi-transaction lock flows (ERC-20 legs need
+  // approve, sometimes an approvalRace reset first, then lockToken); shown
+  // on the busy button so the user knows which wallet prompt this is.
+  const [lockStage, setLockStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
@@ -177,12 +185,17 @@ export function SwapFlow({
   }, [orderId]);
 
   const sendOnLeg = useCallback(
-    async (leg: LegKey, data: string, valueWei: bigint) => {
+    // `ethTo` overrides the ETH-leg target for ERC-20 approve transactions
+    // (which go to the token contract); everything else goes to the HTLC.
+    // The QRL leg always targets its HTLC. Return data is never decoded
+    // (noReturnValue tokens forbid it); success = the receipt confirming
+    // without revert (tx.wait throws on a reverted receipt).
+    async (leg: LegKey, data: string, valueWei: bigint, ethTo: string = ETH_LEG.htlc) => {
       if (leg === "eth") {
         if (!browserProvider) throw new Error("Ethereum wallet not connected");
         await ensureSepolia();
         const signer = await browserProvider.getSigner();
-        const tx = await signer.sendTransaction({ to: ETH_LEG.htlc, data, value: valueWei });
+        const tx = await signer.sendTransaction({ to: ethTo, data, value: valueWei });
         await tx.wait();
       } else {
         if (!qrlAccount) throw new Error("QRL wallet not connected");
@@ -229,7 +242,10 @@ export function SwapFlow({
     void fn()
       .then(refresh)
       .catch((err: unknown) => setError(errorMessage(err)))
-      .finally(() => setBusy(null));
+      .finally(() => {
+        setBusy(null);
+        setLockStage(null);
+      });
   };
 
   if (!machine || !hashlock || initiatorTimeout === null) {
@@ -249,12 +265,59 @@ export function SwapFlow({
   const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
   const rState = legs[rLeg];
+  const ethAsset = ETH_ASSETS[swap.ethAsset];
+  const iPlan = legPlan[iLeg];
+  const rPlan = legPlan[rLeg];
+  const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
+
+  /** The exact-amount, USDT-safe ERC-20 lock sequence (up to three
+   *  transactions, every send confirmed before the next):
+   *  1. read allowance(owner, htlc); equal to the lock amount means a
+   *     previous run already approved (crash-resume idempotency): skip
+   *     straight to lockToken.
+   *  2. a stale NONZERO allowance on an approvalRace token (tUSDT) must
+   *     be reset with approve(htlc, 0) first, or the next approve reverts.
+   *  3. approve(htlc, exact amount), then lockToken with value 0 (the
+   *     amount rides in calldata and the HTLC pulls via transferFrom).
+   *  Every send targets the configured HTLC or the registry token address
+   *  only, and approve return data is never decoded (noReturnValue). */
+  const lockEthToken = async (token: string, plan: LegPlan, timeout: number) => {
+    if (!ethAccount) throw new Error("Ethereum wallet not connected");
+    const symbol = ethAsset.symbol;
+    const allowance = await allowanceOf(token, ethAccount, ETH_LEG.htlc);
+    const needsApprove = allowance !== plan.amount;
+    const needsReset = needsApprove && allowance !== 0n && ethAsset.quirks.approvalRace;
+    const total = 1 + (needsApprove ? 1 : 0) + (needsReset ? 1 : 0);
+    let stepNo = 0;
+    const stage = (label: string) => {
+      stepNo += 1;
+      setLockStage(total > 1 ? `${label} (${stepNo}/${total})` : label);
+    };
+    if (needsReset) {
+      stage(`Reset ${symbol} approval`);
+      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, 0n), 0n, token);
+    }
+    if (needsApprove) {
+      stage(`Approve ${symbol}`);
+      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, plan.amount), 0n, token);
+    }
+    stage(`Lock ${symbol}`);
+    await sendOnLeg(
+      "eth",
+      buildLockTokenData(hashlock, plan.recipient, token, plan.amount, timeout),
+      0n,
+    );
+  };
 
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
-      await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
+      if (leg === "eth" && ethAsset.address !== null) {
+        await lockEthToken(ethAsset.address, plan, timeout);
+      } else {
+        await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
+      }
     });
 
   const claimLeg = (leg: LegKey, preimage: string) =>
@@ -286,33 +349,33 @@ export function SwapFlow({
     }
   > = {
     "lock-initiator": {
-      title: `Lock ${iCfg.asset} on ${iCfg.name}`,
-      desc: `${who(steps[0].own)} (initiator) escrow${steps[0].own ? "" : "s"} ${formatEther(legPlan[iLeg].amount)} ${iCfg.asset} under the hashlock. Refundable after ${new Date(initiatorRefundAt * 1000).toLocaleTimeString()}.`,
-      label: `Lock ${iCfg.asset}`,
+      title: `Lock ${iPlan.symbol} on ${iCfg.name}`,
+      desc: `${who(steps[0].own)} (initiator) escrow${steps[0].own ? "" : "s"} ${fmtLeg(iPlan)} under the hashlock${iLeg === "eth" && ethAsset.address !== null ? ", approving the HTLC for the exact amount first" : ""}. Refundable after ${new Date(initiatorRefundAt * 1000).toLocaleTimeString()}.`,
+      label: `Lock ${iPlan.symbol}`,
       action: () => lockLeg(iLeg),
       pendingText: null,
       waitingText: `The maker published the hashlock and is broadcasting their lock on ${iCfg.name}; blocks there confirm in about a minute.`,
     },
     "lock-responder": {
-      title: `Lock ${rCfg.asset} on ${rCfg.name}`,
-      desc: `${who(steps[1].own)} (responder) verif${steps[1].own ? "y" : "ies"} the initiator lock on-chain, then escrow${steps[1].own ? "" : "s"} ${formatEther(legPlan[rLeg].amount)} ${rCfg.asset} under the same hashlock with the shorter timeout.`,
-      label: `Lock ${rCfg.asset}`,
+      title: `Lock ${rPlan.symbol} on ${rCfg.name}`,
+      desc: `${who(steps[1].own)} (responder) verif${steps[1].own ? "y" : "ies"} the initiator lock on-chain, then escrow${steps[1].own ? "" : "s"} ${fmtLeg(rPlan)} under the same hashlock with the shorter timeout${rLeg === "eth" && ethAsset.address !== null ? ", approving the HTLC for the exact amount first" : ""}.`,
+      label: `Lock ${rPlan.symbol}`,
       action: () => lockLeg(rLeg),
       pendingText: `Initiator lock detected on ${iCfg.name}; waiting for ${iCfg.confirmations}-block confirmation depth before it is safe to respond.`,
       waitingText: "Waiting for the taker to lock their leg…",
     },
     "claim-responder": {
-      title: `Claim ${rCfg.asset} (reveals the secret)`,
+      title: `Claim ${rPlan.symbol} (reveals the secret)`,
       desc: `${who(steps[2].own)} (initiator) claim${steps[2].own ? "" : "s"} the responder leg. The preimage becomes public on-chain; from here the swap can only complete.`,
-      label: `Claim ${rCfg.asset}`,
+      label: `Claim ${rPlan.symbol}`,
       action: () => swap.preimage && claimLeg(rLeg, swap.preimage),
       pendingText: `Responder lock detected on ${rCfg.name}; waiting for ${rCfg.confirmations}-block confirmation depth before the secret is safe to reveal.`,
       waitingText: "Waiting for the maker to claim and reveal the secret…",
     },
     "claim-initiator": {
-      title: `Claim ${iCfg.asset} with the revealed secret`,
+      title: `Claim ${iPlan.symbol} with the revealed secret`,
       desc: `${who(steps[3].own)} read${steps[3].own ? "" : "s"} the now-public preimage from the other chain and claim${steps[3].own ? "" : "s"} the initiator leg. No trust required at any point.`,
-      label: `Claim ${iCfg.asset}`,
+      label: `Claim ${iPlan.symbol}`,
       action: () => revealedPreimage && claimLeg(iLeg, revealedPreimage),
       pendingText: null,
       waitingText: "Waiting for the taker to claim…",
@@ -429,7 +492,9 @@ export function SwapFlow({
                         onClick={view.action}
                       >
                         {busy === `${step.key.startsWith("lock") ? "lock" : "claim"}-${step.leg}`
-                          ? "Waiting for wallet…"
+                          ? lockStage !== null
+                            ? `${lockStage}…`
+                            : "Waiting for wallet…"
                           : view.label}
                       </Button>
                     </div>
@@ -451,7 +516,7 @@ export function SwapFlow({
                 disabled={busy !== null}
                 onClick={() => refundLeg(leg)}
               >
-                Refund {legByKey(leg).asset} leg
+                Refund {legPlan[leg].symbol} leg
               </Button>
             ))}
           </div>
@@ -478,7 +543,7 @@ export function SwapFlow({
             </Button>
           ) : ownLockedLegs.length > 0 ? (
             <span className="max-w-[60%] text-right text-xs text-amber-400">
-              Your {ownLockedLegs.map((leg) => legByKey(leg).asset).join(" and ")} is locked
+              Your {ownLockedLegs.map((leg) => legPlan[leg].symbol).join(" and ")} is locked
               on-chain. Refund it below once the timeout opens before discarding: discarding now
               deletes the hashlock this swap needs to refund.
             </span>
