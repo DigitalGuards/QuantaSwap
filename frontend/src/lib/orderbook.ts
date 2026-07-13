@@ -42,6 +42,10 @@ export interface OrderView {
    *  enforces it on accept, the maker's client re-verifies regardless). */
   allowedTakerEth?: string;
   allowedTakerQrl?: string;
+  /** Pre-funded listing: the maker escrowed on-chain at post time, so
+   *  `hashlock`/`initiatorTimeout` are set while still open. A claim, not
+   *  a fact: clients verify the escrow on-chain before trusting it. */
+  prelocked?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -94,6 +98,9 @@ export const createOrder = async (body: {
   visibility?: "public" | "private";
   allowedTakerEth?: string;
   allowedTakerQrl?: string;
+  /** Pre-funded listing: the open lock is already on-chain under this
+   *  hashlock with this fixed T1; announce later echoes both verbatim. */
+  prelock?: { hashlock: string; initiatorTimeout: number };
 }): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
   api("POST", "/orders", body);
 

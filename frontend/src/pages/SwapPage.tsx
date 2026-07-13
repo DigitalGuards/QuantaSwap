@@ -88,6 +88,10 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 myOrder={myOrder}
                 ethAccount={eth.account}
                 qrlAccount={qrl.account}
+                browserProvider={eth.browserProvider}
+                ensureSepolia={eth.ensureSepolia}
+                qrlRequest={qrl.request}
+                qrlTransport={qrl.kind}
                 onMatched={(matched) => {
                   setMyOrder(null);
                   setSwap(matched);
@@ -99,6 +103,10 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
               <PostOrderCard
                 ethAccount={eth.account}
                 qrlAccount={qrl.account}
+                browserProvider={eth.browserProvider}
+                ensureSepolia={eth.ensureSepolia}
+                qrlRequest={qrl.request}
+                qrlTransport={qrl.kind}
                 prefill={prefill}
                 onPosted={setMyOrder}
               />

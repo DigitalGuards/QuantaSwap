@@ -73,4 +73,15 @@ export const MIN_QRL_AMOUNT_WEI = 10n ** 15n;
 // claim window beyond the responder timeout.
 export const CLAIM_MARGIN_S = 30 * 60;
 
+// Pre-funded (prelocked) listings: the open-recipient lock's T1 window,
+// sized to the book's 48h listing TTL so the listing's expiry and the
+// escrow's refund opening coincide.
+export const PRELOCK_INITIATOR_TIMEOUT_S = 48 * 3600;
+
+// A prelocked order is takeable only while this much of its fixed T1
+// remains: the announce-time 2x invariant for a fresh responder window,
+// plus the claim margin for accept->announce->assign latency. Mirrored
+// server-side in server/src/store.ts (MIN_TAKEABLE_RUNWAY_S).
+export const MIN_TAKEABLE_RUNWAY_S = 2 * RESPONDER_TIMEOUT_S + CLAIM_MARGIN_S;
+
 export const GITHUB_URL = "https://github.com/DigitalGuards/QuantaSwap";

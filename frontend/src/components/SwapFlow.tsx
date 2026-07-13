@@ -3,22 +3,22 @@ import { Link } from "react-router-dom";
 import { formatUnits } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { Check } from "lucide-react";
-import { ETH_ASSETS, ETH_LEG, QRL_LEG, legByKey } from "@/config";
+import { ETH_ASSETS, legByKey } from "@/config";
 import type { LegKey } from "@/config";
 import {
-  allowanceOf,
-  buildApproveData,
+  buildAssignData,
   buildClaimData,
   buildLockNativeData,
   buildLockTokenData,
   buildRefundData,
+  buildReleaseData,
   getConfirmedLegState,
   getLegState,
   getSwapEvents,
-  qrlRpc,
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
+import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
 import {
@@ -192,55 +192,10 @@ export function SwapFlow({
     };
   }, [orderId]);
 
-  const sendOnLeg = useCallback(
-    // `ethTo` overrides the ETH-leg target for ERC-20 approve transactions
-    // (which go to the token contract); everything else goes to the HTLC.
-    // The QRL leg always targets its HTLC. Return data is never decoded
-    // (noReturnValue tokens forbid it); success = the receipt confirming
-    // without revert (tx.wait throws on a reverted receipt).
-    async (leg: LegKey, data: string, valueWei: bigint, ethTo: string = ETH_LEG.htlc) => {
-      if (leg === "eth") {
-        if (!browserProvider) throw new Error("Ethereum wallet not connected");
-        await ensureSepolia();
-        const signer = await browserProvider.getSigner();
-        const tx = await signer.sendTransaction({ to: ethTo, data, value: valueWei });
-        await tx.wait();
-      } else {
-        if (!qrlAccount) throw new Error("QRL wallet not connected");
-        let tx: Record<string, unknown> = {
-          from: qrlAccount,
-          to: QRL_LEG.htlc,
-          data,
-          ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
-        };
-        if (qrlTransport === "extension") {
-          // The extension does not estimate gas; it feeds the dApp's fields
-          // into @theqrl/web3 0.5 signTransaction. Its legacy (gasPrice)
-          // branch fails web3 gas validation, so request type "0x2": the
-          // extension then fills maxFee/maxPriorityFee itself, the exact
-          // shape its own internal sends use. Numeric gas under both keys,
-          // decimal-string value. The relay wallet estimates itself, so it
-          // keeps the minimal hex shape.
-          let gasLimit = 1_500_000;
-          try {
-            const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
-            gasLimit = Number((BigInt(estimated) * 130n) / 100n);
-          } catch {
-            // estimation can fail on some proxies; fall back to a safe limit
-          }
-          tx = {
-            from: qrlAccount,
-            to: QRL_LEG.htlc,
-            value: valueWei.toString(),
-            data,
-            gas: gasLimit,
-            gasLimit,
-            type: "0x2",
-          };
-        }
-        await qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
-      }
-    },
+  // Shared with the prelock post flow; see lib/legSender.ts for the
+  // transport quirks (extension gas shape, approve targeting).
+  const sendOnLeg = useMemo(
+    () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
@@ -260,69 +215,67 @@ export function SwapFlow({
     return null;
   }
 
-  const { steps, complete, revealedPreimage, refundableLegs, ownLockedLegs, ownEth, ownQrl, legPlan } =
-    machine;
+  const {
+    steps,
+    complete,
+    revealedPreimage,
+    refundableLegs,
+    releasableLegs,
+    awaitingAssign,
+    ownLockedLegs,
+    ownEth,
+    ownQrl,
+    legPlan,
+  } = machine;
 
-  // The taker released their take before we (the maker) locked: our own leg
-  // has nothing on chain yet, so do not lock into a walked-away swap.
+  // The taker released their take before we (the maker) committed to
+  // them: classic flow, nothing of ours on chain; prelocked flow, escrow
+  // on chain but still unassigned (assigning now would strand it until
+  // T1 for a taker who already left; release instead).
   const takerWalkedAway =
     swap.role === "maker" &&
-    ownLockedLegs.length === 0 &&
-    (order?.released === true || order?.status === "cancelled");
+    (order?.released === true || order?.status === "cancelled") &&
+    (swap.prelocked === true ? releasableLegs.length > 0 : ownLockedLegs.length === 0);
   const iCfg = legByKey(iLeg);
   const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
   const rState = legs[rLeg];
+  // A prelocked maker's escrow is Open from the first render, but `legs`
+  // starts empty and stays empty through an RPC outage (refresh swallows
+  // errors). Until a successful read proves otherwise, treat the initiator
+  // leg as possibly-live and refuse to discard: an unknown state must fail
+  // closed, or the maker could delete the only copy of the hashlock while
+  // the escrow is still Open. Once loaded, an Open escrow flows into
+  // ownLockedLegs (warning + release) and a settled one frees the discard.
+  const prelockChainUnknown = swap.prelocked === true && swap.role === "maker" && iState === undefined;
   const ethAsset = ETH_ASSETS[swap.ethAsset];
   const iPlan = legPlan[iLeg];
   const rPlan = legPlan[rLeg];
   const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
-
-  /** The exact-amount, USDT-safe ERC-20 lock sequence (up to three
-   *  transactions, every send confirmed before the next):
-   *  1. read allowance(owner, htlc); equal to the lock amount means a
-   *     previous run already approved (crash-resume idempotency): skip
-   *     straight to lockToken.
-   *  2. a stale NONZERO allowance on an approvalRace token (tUSDT) must
-   *     be reset with approve(htlc, 0) first, or the next approve reverts.
-   *  3. approve(htlc, exact amount), then lockToken with value 0 (the
-   *     amount rides in calldata and the HTLC pulls via transferFrom).
-   *  Every send targets the configured HTLC or the registry token address
-   *  only, and approve return data is never decoded (noReturnValue). */
-  const lockEthToken = async (token: string, plan: LegPlan, timeout: number) => {
-    if (!ethAccount) throw new Error("Ethereum wallet not connected");
-    const symbol = ethAsset.symbol;
-    const allowance = await allowanceOf(token, ethAccount, ETH_LEG.htlc);
-    const needsApprove = allowance !== plan.amount;
-    const needsReset = needsApprove && allowance !== 0n && ethAsset.quirks.approvalRace;
-    const total = 1 + (needsApprove ? 1 : 0) + (needsReset ? 1 : 0);
-    let stepNo = 0;
-    const stage = (label: string) => {
-      stepNo += 1;
-      setLockStage(total > 1 ? `${label} (${stepNo}/${total})` : label);
-    };
-    if (needsReset) {
-      stage(`Reset ${symbol} approval`);
-      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, 0n), 0n, token);
-    }
-    if (needsApprove) {
-      stage(`Approve ${symbol}`);
-      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, plan.amount), 0n, token);
-    }
-    stage(`Lock ${symbol}`);
-    await sendOnLeg(
-      "eth",
-      buildLockTokenData(hashlock, plan.recipient, token, plan.amount, timeout),
-      0n,
-    );
-  };
 
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
       if (leg === "eth" && ethAsset.address !== null) {
-        await lockEthToken(ethAsset.address, plan, timeout);
+        // The USDT-safe approve/reset/lock sequencer lives in legSender.ts
+        // (shared with the prelock post flow); only the calldata differs.
+        await sendEthTokenLock({
+          send: sendOnLeg,
+          ethAccount,
+          token: ethAsset.address,
+          symbol: ethAsset.symbol,
+          amount: plan.amount,
+          approvalRace: ethAsset.quirks.approvalRace,
+          lockData: buildLockTokenData(
+            hashlock,
+            plan.recipient,
+            ethAsset.address,
+            plan.amount,
+            timeout,
+          ),
+          onStage: setLockStage,
+        });
       } else {
         await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
       }
@@ -337,6 +290,23 @@ export function SwapFlow({
     runAction(`refund-${leg}`, async () => {
       await sendOnLeg(leg, buildRefundData(hashlock), 0n);
     });
+
+  // Prelocked swaps only: one-time recipient assignment on the maker's
+  // pre-funded escrow, and the on-demand escrow reclaim (the abort path
+  // while unassigned).
+  const assignLeg = (leg: LegKey) =>
+    runAction(`assign-${leg}`, async () => {
+      await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
+    });
+
+  const releaseLeg = (leg: LegKey) =>
+    runAction(`release-${leg}`, async () => {
+      await sendOnLeg(leg, buildReleaseData(hashlock), 0n);
+    });
+
+  /** Busy-state key for a step's own action button. */
+  const actionKey = (key: StepModel["key"], leg: LegKey): string =>
+    `${key.startsWith("lock") ? "lock" : key.startsWith("assign") ? "assign" : "claim"}-${leg}`;
 
   const who = (ownStep: boolean) => (ownStep ? "You" : "The counterparty");
 
@@ -363,6 +333,14 @@ export function SwapFlow({
       action: () => lockLeg(iLeg),
       pendingText: null,
       waitingText: `The maker published the hashlock and is broadcasting their lock on ${iCfg.name}; blocks there confirm in about a minute.`,
+    },
+    "assign-initiator": {
+      title: `Assign the taker on ${iCfg.name}`,
+      desc: `${who(steps[0].own)} pre-funded ${fmtLeg(iPlan)} at post time; ${steps[0].own ? "you now fix" : "they now fix"} the taker as its recipient with a one-time on-chain assignment. Until that lands, the escrow stays releasable on demand.`,
+      label: "Assign taker",
+      action: () => assignLeg(iLeg),
+      pendingText: `Assignment detected on ${iCfg.name}; ${depthWait(iCfg.confirmations)} before it is safe to respond.`,
+      waitingText: "Waiting for the maker to assign your address to the pre-funded escrow…",
     },
     "lock-responder": {
       title: `Lock ${rPlan.symbol} on ${rCfg.name}`,
@@ -438,7 +416,13 @@ export function SwapFlow({
           const view = presentation[step.key];
           const stepTxHash =
             legEvents[step.leg].find(
-              (e) => e.kind === (step.key.startsWith("lock") ? "locked" : "claimed"),
+              (e) =>
+                e.kind ===
+                (step.key.startsWith("lock")
+                  ? "locked"
+                  : step.key.startsWith("assign")
+                    ? "assigned"
+                    : "claimed"),
             )?.txHash ?? null;
           return (
             <div
@@ -483,10 +467,12 @@ export function SwapFlow({
                 {!step.done &&
                   (step.own ? (
                     <div className="space-y-1">
-                      {step.key === "lock-initiator" && takerWalkedAway ? (
+                      {(step.key === "lock-initiator" || step.key === "assign-initiator") &&
+                      takerWalkedAway ? (
                         <p className="text-xs text-amber-400">
-                          The taker walked away before you locked. Do not lock; discard this swap
-                          below.
+                          {step.key === "assign-initiator"
+                            ? "The taker walked away. Do not assign (it would commit your escrow to them until the timeout); release your escrow below."
+                            : "The taker walked away before you locked. Do not lock; discard this swap below."}
                         </p>
                       ) : null}
                       <Button
@@ -495,11 +481,12 @@ export function SwapFlow({
                         disabled={
                           !step.canRun ||
                           busy !== null ||
-                          (step.key === "lock-initiator" && takerWalkedAway)
+                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
+                            takerWalkedAway)
                         }
                         onClick={view.action}
                       >
-                        {busy === `${step.key.startsWith("lock") ? "lock" : "claim"}-${step.leg}`
+                        {busy === actionKey(step.key, step.leg)
                           ? lockStage !== null
                             ? `${lockStage}…`
                             : "Waiting for wallet…"
@@ -508,6 +495,10 @@ export function SwapFlow({
                     </div>
                   ) : step.canRun ? (
                     <p className="text-xs text-blue-accent">{view.waitingText}</p>
+                  ) : step.key === "lock-responder" && awaitingAssign ? (
+                    <p className="text-xs text-blue-accent">
+                      {presentation["assign-initiator"].waitingText}
+                    </p>
                   ) : null)}
               </div>
             </div>
@@ -527,6 +518,30 @@ export function SwapFlow({
                 Refund {legPlan[leg].symbol} leg
               </Button>
             ))}
+          </div>
+        ) : null}
+
+        {releasableLegs.length > 0 && !complete && swap.role !== "taker" ? (
+          <div className="space-y-1.5 pt-3">
+            <div className="flex gap-2">
+              {releasableLegs.map((leg) => (
+                <Button
+                  key={leg}
+                  variant="destructive"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => releaseLeg(leg)}
+                >
+                  {busy === `release-${leg}`
+                    ? "Waiting for wallet…"
+                    : `Release ${legPlan[leg].symbol} escrow`}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Your pre-funded escrow is still unassigned: releasing returns it to your wallet
+              immediately and abandons this swap.
+            </p>
           </div>
         ) : null}
 
@@ -552,8 +567,15 @@ export function SwapFlow({
           ) : ownLockedLegs.length > 0 ? (
             <span className="max-w-[60%] text-right text-xs text-amber-400">
               Your {ownLockedLegs.map((leg) => legPlan[leg].symbol).join(" and ")} is locked
-              on-chain. Refund it below once the timeout opens before discarding: discarding now
-              deletes the hashlock this swap needs to refund.
+              on-chain.{" "}
+              {releasableLegs.length > 0
+                ? "Release it below before discarding: discarding deletes the hashlock the escrow needs."
+                : "Refund it below once the timeout opens before discarding: discarding now deletes the hashlock this swap needs to refund."}
+            </span>
+          ) : prelockChainUnknown ? (
+            <span className="max-w-[60%] text-right text-xs text-amber-400">
+              Checking your pre-funded escrow on-chain before allowing discard. If your funds are
+              still locked, a Release button appears here.
             </span>
           ) : (
             <Button

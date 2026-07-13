@@ -50,6 +50,7 @@ const toneStyles = {
 
 const eventLabel: Record<SwapEvent["kind"], string> = {
   locked: "lock tx",
+  assigned: "assign tx",
   claimed: "claim tx",
   refunded: "refund tx",
 };

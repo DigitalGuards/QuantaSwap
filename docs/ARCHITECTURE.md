@@ -32,9 +32,26 @@ struct Swap {
 ```
 
 - `lock(...)` pulls funds in (ERC-20 `transferFrom`, or `msg.value` for native QRL) and stores the record under `swapId = sha256(hashlock, initiator, recipient, token, amount, timeout)`. For ERC-20 locks the contract verifies its balance grew by exactly `amount` and rejects the lock otherwise (`UnsupportedToken`): a fee-on-transfer or rebasing token could otherwise record a swap whose later payout would be funded by other swaps' escrow.
-- `claim(swapId, secret)` verifies `sha256(secret) == hashlock`, pays `recipient`, stores the revealed secret in the record, emits it in the event. **Permissionless**: anyone may call it; the payout target is fixed at lock time. This is what enables sponsored claims (section 5).
+- `claim(swapId, secret)` verifies `sha256(secret) == hashlock`, pays `recipient`, stores the revealed secret in the record, emits it in the event. **Permissionless**: anyone may call it; the payout target is fixed at lock time, or, for open-recipient locks (below), at the initiator's one-time `assign()`, and `claim` reverts while it is unset. Either way a sponsored claim (section 5) can only pay the target the fund-owner chose.
 - `refund(swapId)` after `timeout`, pays `initiator`.
 - **Hashlock freshness**: the contract rejects a `lock` whose `hashlock` matches any prior swap on that contract. Reusing a secret whose preimage is already public would let anyone race the claim; clients must generate a fresh 32-byte CSPRNG secret per swap, and the contract enforces it defensively.
+
+### Open-recipient locks (prelock)
+
+`lockNativeOpen`/`lockTokenOpen` escrow with `recipient = address(0)`: a pre-funded listing made before any counterparty exists. Two functions complete the lifecycle:
+
+- `assign(hashlock, recipient)`: initiator-only and **write-once**. It sets the payout target; from that moment the swap is indistinguishable from a classic lock (refund only at timeout). Assign closes at `timeout` alongside `claim`: past it, refund is already open and a payout target would only create ambiguity.
+- `release(hashlock)`: initiator-only, valid **only while unassigned**, with no timeout gate (it is the initiator's own unencumbered money; post-timeout it merely duplicates the permissionless refund). It returns the escrow on demand and emits the ordinary `Refunded` event. Release and a nonzero recipient are mutually exclusive by construction, so the recipient's claim guarantee begins the moment `assign` lands.
+
+`claim` reverts (`NotAssigned`) while the recipient is unset; without that guard a native claim would burn the funds to `address(0)`.
+
+Client rules the contract cannot enforce (the frontend's swap machine gates all three):
+
+- announce (freeze the taker pairing on the book) **before** assigning: assign is one-time, and assigning a taker who then walks away strands the escrow until T1;
+- never assign while the shared hashlock is already used on the responder chain: records there are permanent, a dust-cost squat is enough, and assigning would trade the on-demand release for a forced wait until T1 (release instead, relist with a fresh secret);
+- never reveal the secret while the own escrow is unassigned: with the preimage public, an unassigned lock could still be released, taking both sides.
+
+Capital note, extending the free-option analysis below: a prelocked maker widens their own commitment from lock-at-match to lock-at-post, in exchange for a provably funded listing and a one-transaction match step; the exposure is bounded by `release()` while untaken. The taker-side option is unchanged.
 
 ### Hash function
 

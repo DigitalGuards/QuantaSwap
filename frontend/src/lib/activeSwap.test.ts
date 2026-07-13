@@ -5,11 +5,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearActiveSwap,
+  clearPrelockStage,
   loadActiveSwap,
   loadMyOrder,
+  loadPrelockStage,
   saveActiveSwap,
   saveMyOrder,
+  savePrelockStage,
   type ActiveSwap,
+  type PrelockStage,
 } from "./activeSwap";
 
 // Minimal localStorage for the node test environment.
@@ -92,6 +96,13 @@ describe("active swap persistence", () => {
     localStorage.setItem("quantaswap.swap.v2", JSON.stringify({ ...swap, ethAsset: "DOGE" }));
     expect(loadActiveSwap()?.ethAsset).toBe("ETH");
   });
+
+  it("roundtrips the prelocked flag and leaves classic swaps without it", () => {
+    saveActiveSwap({ ...swap, prelocked: true });
+    expect(loadActiveSwap()?.prelocked).toBe(true);
+    saveActiveSwap(swap);
+    expect(loadActiveSwap()?.prelocked).toBeUndefined();
+  });
 });
 
 describe("legacy demo.v1 migration", () => {
@@ -145,11 +156,31 @@ describe("my-order handle", () => {
       fromAmount: "5000000",
       toAmount: "6000000000000000000",
       shareToken: "ab".repeat(32),
+      prelock: null,
     };
     saveMyOrder(ref);
     expect(loadMyOrder()).toEqual(ref);
     localStorage.setItem("quantaswap.myorder.v1", "?");
     expect(loadMyOrder()).toBeNull();
+  });
+
+  it("roundtrips a pre-funded handle's escrow anchors, preimage included", () => {
+    const ref = {
+      id: "o1",
+      token: "t1",
+      asset: "ETH" as const,
+      fromAmount: "1000000000000000000",
+      toAmount: "5000000000000000000",
+      shareToken: null,
+      prelock: {
+        hashlock: `0x${"12".repeat(32)}`,
+        preimage: `0x${"34".repeat(32)}`,
+        initiatorTimeout: 1_800_172_800,
+        leg: "eth" as const,
+      },
+    };
+    saveMyOrder(ref);
+    expect(loadMyOrder()).toEqual(ref);
   });
 
   it("hydrates handles stored before the asset existed as native ETH", () => {
@@ -163,6 +194,7 @@ describe("my-order handle", () => {
       fromAmount: null,
       toAmount: null,
       shareToken: null,
+      prelock: null,
     });
   });
 
@@ -178,6 +210,34 @@ describe("my-order handle", () => {
       fromAmount: null,
       toAmount: null,
       shareToken: null,
+      prelock: null,
     });
+  });
+});
+
+describe("prelock staging record", () => {
+  const stage: PrelockStage = {
+    hashlock: `0x${"12".repeat(32)}`,
+    preimage: `0x${"34".repeat(32)}`,
+    initiatorTimeout: 1_800_172_800,
+    leg: "eth",
+    direction: "eth->qrl",
+    asset: "ETH",
+    fromAmount: "1000000000000000000",
+    toAmount: "5000000000000000000",
+    visibility: "private",
+    allowedTakerEth: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    allowedTakerQrl: null,
+    createdAt: 1_800_000_000,
+  };
+
+  it("roundtrips, clears, and survives corruption", () => {
+    expect(loadPrelockStage()).toBeNull();
+    savePrelockStage(stage);
+    expect(loadPrelockStage()).toEqual(stage);
+    clearPrelockStage();
+    expect(loadPrelockStage()).toBeNull();
+    localStorage.setItem("quantaswap.prelockstage.v1", "{nope");
+    expect(loadPrelockStage()).toBeNull();
   });
 });
