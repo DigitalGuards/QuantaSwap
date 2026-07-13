@@ -10,12 +10,20 @@ pragma hyperion >=0.0;
  *
  * @dev Design invariants (see docs/ARCHITECTURE.md):
  *   - No owner, no pause, no upgrade path. What is deployed is final.
- *   - claim() is permissionless with the payout target fixed at lock time.
- *     This enables sponsored claims: a relayer can submit the claim for a
- *     recipient who has no gas on this chain, and funds can only reach the
- *     recipient chosen by the locker.
- *   - claim() closes at `timeout`, refund() opens at `timeout`. The windows
- *     never overlap, so timelock reasoning stays simple.
+ *   - claim() is permissionless with the payout target fixed at lock time,
+ *     or, for open-recipient locks, at the initiator's one-time assign().
+ *     The recipient is write-once: once nonzero it can never change, and
+ *     claim() reverts while it is unset, so a sponsored claim (a relayer
+ *     submitting for a recipient who has no gas on this chain) can still
+ *     only pay the target the fund-owner chose.
+ *   - An open-recipient lock is refundable by its initiator at any time via
+ *     release() UNTIL assigned; after assign() it behaves identically to a
+ *     classic lock (refund only at timeout). release() and a nonzero
+ *     recipient are mutually exclusive by construction, so the recipient's
+ *     claim guarantee begins the moment assign() lands.
+ *   - claim() closes at `timeout`, refund() opens at `timeout`, and
+ *     assign() also closes at `timeout`. The windows never overlap, so
+ *     timelock reasoning stays simple.
  *   - A hashlock is single-use per contract instance, forever. Records are
  *     never deleted, so a secret whose preimage became public can never
  *     gate funds on this contract again.
@@ -46,7 +54,7 @@ contract HTLC {
 
     struct Swap {
         address initiator; // funded this leg, refund target
-        address recipient; // fixed claim payout target
+        address recipient; // claim payout target; address(0) while an open lock awaits assign()
         address token; // ERC-20 address, or the zero address for the native coin
         uint256 amount;
         uint256 timeout; // unix time: claim() before it, refund() from it
@@ -66,6 +74,7 @@ contract HTLC {
         uint256 amount,
         uint256 timeout
     );
+    event Assigned(bytes32 indexed hashlock, address indexed recipient);
     event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller);
     event Refunded(bytes32 indexed hashlock);
 
@@ -78,6 +87,9 @@ contract HTLC {
     error TransferFailed();
     error UnsupportedToken();
     error Reentrancy();
+    error NotInitiator();
+    error AlreadyAssigned();
+    error NotAssigned();
 
     modifier nonReentrant() {
         if (_entered != 1) revert Reentrancy();
@@ -88,7 +100,7 @@ contract HTLC {
 
     /// @notice Lock native coin under `hashlock` for `recipient`.
     function lockNative(bytes32 hashlock, address recipient, uint256 timeout) external payable nonReentrant {
-        _lock(hashlock, recipient, address(0), msg.value, timeout);
+        _lock(hashlock, recipient, address(0), msg.value, timeout, false);
     }
 
     /// @notice Lock `amount` of ERC-20 `token` under `hashlock` for `recipient`.
@@ -102,11 +114,63 @@ contract HTLC {
         uint256 amount,
         uint256 timeout
     ) external nonReentrant {
-        if (token == address(0) || token.code.length == 0) revert InvalidParams();
-        _lock(hashlock, recipient, token, amount, timeout);
-        uint256 before = IERC20(token).balanceOf(address(this));
-        _transferCall(token, abi.encodeWithSelector(IERC20.transferFrom.selector, msg.sender, address(this), amount));
-        if (IERC20(token).balanceOf(address(this)) - before != amount) revert UnsupportedToken();
+        _lockToken(hashlock, recipient, token, amount, timeout, false);
+    }
+
+    /// @notice Lock native coin under `hashlock` with the recipient left
+    ///         unset (a pre-funded listing). Fix the payout target later
+    ///         with assign(), or take the funds back at any time with
+    ///         release() while still unassigned.
+    function lockNativeOpen(bytes32 hashlock, uint256 timeout) external payable nonReentrant {
+        _lock(hashlock, address(0), address(0), msg.value, timeout, true);
+    }
+
+    /// @notice Lock `amount` of ERC-20 `token` under `hashlock` with the
+    ///         recipient left unset (a pre-funded listing). Same approval
+    ///         and exact-received-amount rules as lockToken.
+    function lockTokenOpen(
+        bytes32 hashlock,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    ) external nonReentrant {
+        _lockToken(hashlock, address(0), token, amount, timeout, true);
+    }
+
+    /// @notice Fix the claim payout target of an open-recipient lock.
+    ///         Initiator-only and one-time: the recipient is write-once,
+    ///         and once it is set the swap is indistinguishable from a
+    ///         classic lock. Closes at `timeout` alongside claim(); past
+    ///         it, refund() is already open and a payout target would only
+    ///         create claim/refund ambiguity.
+    function assign(bytes32 hashlock, address recipient) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (msg.sender != s.initiator) revert NotInitiator();
+        if (s.recipient != address(0)) revert AlreadyAssigned();
+        if (recipient == address(0)) revert InvalidParams();
+        if (block.timestamp >= s.timeout) revert TimeoutPassed();
+
+        s.recipient = recipient;
+        emit Assigned(hashlock, recipient);
+    }
+
+    /// @notice Return an open-recipient lock's funds to the initiator on
+    ///         demand. Valid only while unassigned, before and after
+    ///         `timeout` alike (past it this merely duplicates the
+    ///         permissionless refund); once assign() lands, the
+    ///         timeout-gated refund() is the only way back. Emits Refunded:
+    ///         to every observer a release is a refund that happened early.
+    function release(bytes32 hashlock) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (msg.sender != s.initiator) revert NotInitiator();
+        if (s.recipient != address(0)) revert AlreadyAssigned();
+
+        s.status = Status.Refunded;
+        emit Refunded(hashlock);
+
+        _payout(s.token, s.initiator, s.amount);
     }
 
     /// @notice Pay out to the swap's recipient by revealing the preimage.
@@ -114,6 +178,9 @@ contract HTLC {
     function claim(bytes32 hashlock, bytes32 preimage) external nonReentrant {
         Swap storage s = _swaps[hashlock];
         if (s.status != Status.Open) revert SwapNotOpen();
+        // An unassigned open lock has no payout target yet; without this
+        // guard a native claim would burn the funds to address(0).
+        if (s.recipient == address(0)) revert NotAssigned();
         if (block.timestamp >= s.timeout) revert TimeoutPassed();
         if (sha256(abi.encodePacked(preimage)) != hashlock) revert WrongPreimage();
 
@@ -141,9 +208,32 @@ contract HTLC {
         return _swaps[hashlock];
     }
 
-    function _lock(bytes32 hashlock, address recipient, address token, uint256 amount, uint256 timeout) private {
+    function _lockToken(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout,
+        bool openRecipient
+    ) private {
+        if (token == address(0) || token.code.length == 0) revert InvalidParams();
+        _lock(hashlock, recipient, token, amount, timeout, openRecipient);
+        uint256 before = IERC20(token).balanceOf(address(this));
+        _transferCall(token, abi.encodeWithSelector(IERC20.transferFrom.selector, msg.sender, address(this), amount));
+        if (IERC20(token).balanceOf(address(this)) - before != amount) revert UnsupportedToken();
+    }
+
+    function _lock(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout,
+        bool openRecipient
+    ) private {
         if (_swaps[hashlock].status != Status.None) revert HashlockAlreadyUsed();
-        if (hashlock == bytes32(0) || recipient == address(0) || amount == 0) revert InvalidParams();
+        if (hashlock == bytes32(0) || amount == 0) revert InvalidParams();
+        if (!openRecipient && recipient == address(0)) revert InvalidParams();
         if (timeout <= block.timestamp) revert InvalidParams();
 
         _swaps[hashlock] = Swap({
