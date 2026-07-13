@@ -3,11 +3,9 @@ import { Link } from "react-router-dom";
 import { formatUnits } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { Check } from "lucide-react";
-import { ETH_ASSETS, ETH_LEG, QRL_LEG, legByKey } from "@/config";
+import { ETH_ASSETS, legByKey } from "@/config";
 import type { LegKey } from "@/config";
 import {
-  allowanceOf,
-  buildApproveData,
   buildClaimData,
   buildLockNativeData,
   buildLockTokenData,
@@ -15,10 +13,10 @@ import {
   getConfirmedLegState,
   getLegState,
   getSwapEvents,
-  qrlRpc,
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
+import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
 import {
@@ -192,55 +190,10 @@ export function SwapFlow({
     };
   }, [orderId]);
 
-  const sendOnLeg = useCallback(
-    // `ethTo` overrides the ETH-leg target for ERC-20 approve transactions
-    // (which go to the token contract); everything else goes to the HTLC.
-    // The QRL leg always targets its HTLC. Return data is never decoded
-    // (noReturnValue tokens forbid it); success = the receipt confirming
-    // without revert (tx.wait throws on a reverted receipt).
-    async (leg: LegKey, data: string, valueWei: bigint, ethTo: string = ETH_LEG.htlc) => {
-      if (leg === "eth") {
-        if (!browserProvider) throw new Error("Ethereum wallet not connected");
-        await ensureSepolia();
-        const signer = await browserProvider.getSigner();
-        const tx = await signer.sendTransaction({ to: ethTo, data, value: valueWei });
-        await tx.wait();
-      } else {
-        if (!qrlAccount) throw new Error("QRL wallet not connected");
-        let tx: Record<string, unknown> = {
-          from: qrlAccount,
-          to: QRL_LEG.htlc,
-          data,
-          ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
-        };
-        if (qrlTransport === "extension") {
-          // The extension does not estimate gas; it feeds the dApp's fields
-          // into @theqrl/web3 0.5 signTransaction. Its legacy (gasPrice)
-          // branch fails web3 gas validation, so request type "0x2": the
-          // extension then fills maxFee/maxPriorityFee itself, the exact
-          // shape its own internal sends use. Numeric gas under both keys,
-          // decimal-string value. The relay wallet estimates itself, so it
-          // keeps the minimal hex shape.
-          let gasLimit = 1_500_000;
-          try {
-            const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
-            gasLimit = Number((BigInt(estimated) * 130n) / 100n);
-          } catch {
-            // estimation can fail on some proxies; fall back to a safe limit
-          }
-          tx = {
-            from: qrlAccount,
-            to: QRL_LEG.htlc,
-            value: valueWei.toString(),
-            data,
-            gas: gasLimit,
-            gasLimit,
-            type: "0x2",
-          };
-        }
-        await qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
-      }
-    },
+  // Shared with the prelock post flow; see lib/legSender.ts for the
+  // transport quirks (extension gas shape, approve targeting).
+  const sendOnLeg = useMemo(
+    () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
@@ -278,51 +231,29 @@ export function SwapFlow({
   const rPlan = legPlan[rLeg];
   const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
 
-  /** The exact-amount, USDT-safe ERC-20 lock sequence (up to three
-   *  transactions, every send confirmed before the next):
-   *  1. read allowance(owner, htlc); equal to the lock amount means a
-   *     previous run already approved (crash-resume idempotency): skip
-   *     straight to lockToken.
-   *  2. a stale NONZERO allowance on an approvalRace token (tUSDT) must
-   *     be reset with approve(htlc, 0) first, or the next approve reverts.
-   *  3. approve(htlc, exact amount), then lockToken with value 0 (the
-   *     amount rides in calldata and the HTLC pulls via transferFrom).
-   *  Every send targets the configured HTLC or the registry token address
-   *  only, and approve return data is never decoded (noReturnValue). */
-  const lockEthToken = async (token: string, plan: LegPlan, timeout: number) => {
-    if (!ethAccount) throw new Error("Ethereum wallet not connected");
-    const symbol = ethAsset.symbol;
-    const allowance = await allowanceOf(token, ethAccount, ETH_LEG.htlc);
-    const needsApprove = allowance !== plan.amount;
-    const needsReset = needsApprove && allowance !== 0n && ethAsset.quirks.approvalRace;
-    const total = 1 + (needsApprove ? 1 : 0) + (needsReset ? 1 : 0);
-    let stepNo = 0;
-    const stage = (label: string) => {
-      stepNo += 1;
-      setLockStage(total > 1 ? `${label} (${stepNo}/${total})` : label);
-    };
-    if (needsReset) {
-      stage(`Reset ${symbol} approval`);
-      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, 0n), 0n, token);
-    }
-    if (needsApprove) {
-      stage(`Approve ${symbol}`);
-      await sendOnLeg("eth", buildApproveData(ETH_LEG.htlc, plan.amount), 0n, token);
-    }
-    stage(`Lock ${symbol}`);
-    await sendOnLeg(
-      "eth",
-      buildLockTokenData(hashlock, plan.recipient, token, plan.amount, timeout),
-      0n,
-    );
-  };
-
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
       if (leg === "eth" && ethAsset.address !== null) {
-        await lockEthToken(ethAsset.address, plan, timeout);
+        // The USDT-safe approve/reset/lock sequencer lives in legSender.ts
+        // (shared with the prelock post flow); only the calldata differs.
+        await sendEthTokenLock({
+          send: sendOnLeg,
+          ethAccount,
+          token: ethAsset.address,
+          symbol: ethAsset.symbol,
+          amount: plan.amount,
+          approvalRace: ethAsset.quirks.approvalRace,
+          lockData: buildLockTokenData(
+            hashlock,
+            plan.recipient,
+            ethAsset.address,
+            plan.amount,
+            timeout,
+          ),
+          onStage: setLockStage,
+        });
       } else {
         await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
       }
