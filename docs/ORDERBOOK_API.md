@@ -84,6 +84,8 @@ hashes and taker-IP bookkeeping are never serialized):
   "visibility": "public",           // public | private (see Private orders)
   "allowedTakerEth": "0x…",         // present only on restricted private orders
   "allowedTakerQrl": "Q…",          // present only on restricted private orders
+  "prelocked": true,                // present only on pre-funded orders (see below);
+                                    // hashlock/initiatorTimeout are then set while open
   "createdAt": 1752300000,          // unix seconds
   "updatedAt": 1752300000
 }
@@ -158,6 +160,30 @@ trustless execution. A private order (`"visibility": "private"` on create):
 Everything after accept (hashlock announce, locking, release, cancel, TTLs) is
 identical to a public order.
 
+### Pre-funded (prelocked) orders
+
+A maker may escrow on-chain at post time with an open-recipient lock (HTLC v2
+`lockNativeOpen`/`lockTokenOpen`) and list the order with
+`prelock: { hashlock, initiatorTimeout }`. The book then:
+
+- carries `prelocked: true` plus the anchored `hashlock` and
+  `initiatorTimeout` while the order is still `open` (for every other order,
+  a non-null hashlock implies status `locking`);
+- rejects a create whose `initiatorTimeout` is closer than **3 h** or further
+  than **72 h** out, or whose hashlock collides with another live order;
+- stops offering the order (list, take-by-terms, accept all skip or `409`)
+  once less than **2 h 30 m** of the fixed T1 remains: below that a fresh 1 h
+  responder window plus the clients' claim margin no longer fits;
+- requires the maker's announce to echo the stored `hashlock` and
+  `initiatorTimeout` verbatim (`400` on mismatch: a desynced maker cannot
+  produce a matching escrow).
+
+The book cannot verify the escrow (it has no RPC on purpose). Clients treat
+`prelocked` as a hint and verify the open lock on-chain: status Open, agreed
+token and amount, recipient still unset, enough T1 runway. The maker's client
+assigns the taker as recipient at match (`assign`), and can reclaim an
+untaken escrow at any moment with `release`.
+
 ## Rate limits
 
 Per-IP, fixed one-minute windows, split by class so a burst of one cannot
@@ -225,7 +251,11 @@ header; without a valid token the response is the same `404` as an unknown id.
   "makerQrlAccount": "Q…",           // required
   "visibility": "private",           // optional, default public
   "allowedTakerEth": "0x…",          // optional, private orders only
-  "allowedTakerQrl": "Q…"            // optional, private orders only
+  "allowedTakerQrl": "Q…",           // optional, private orders only
+  "prelock": {                       // optional: pre-funded listing
+    "hashlock": "0x<64 lowercase hex>",
+    "initiatorTimeout": 1752472800   // unix seconds, now+3h .. now+72h
+  }
 }
 ```
 
@@ -234,7 +264,8 @@ header; without a valid token the response is the same `404` as an unknown id.
 once. Creation counts as a heartbeat.
 
 Errors: `400` per-field validation (including taker restrictions on a public
-order), `503 order book is full`.
+order and the prelock window), `409 an order with this hashlock already
+exists`, `503 order book is full`.
 
 ### `POST /orders/take`: take by terms (taker)
 
@@ -279,7 +310,9 @@ skip).
 
 Errors: `404` (also a private order without a valid `shareToken`),
 `403 this order is reserved for a specific taker`,
-`409 order is no longer open`, `429` take caps.
+`409 order is no longer open`,
+`409 this pre-funded order has too little time left to swap safely`,
+`429` take caps.
 
 ### `POST /orders/:id/hashlock`: announce the swap parameters (maker)
 
@@ -300,6 +333,10 @@ Enforced (mirroring the contract-level invariant; clients still re-verify
 on-chain): `responderTimeout > now + 600`, and
 `initiatorTimeout - now >= 2 * (responderTimeout - now)`: the initiator's
 window must cover the responder's twice over.
+
+On a pre-funded order the maker locked at POST time, not here; `hashlock` and
+`initiatorTimeout` must echo the values anchored at create (`400` on
+mismatch), and only `responderTimeout` is new.
 
 → `200 {"order": Order}`.
 

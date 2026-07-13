@@ -37,6 +37,12 @@ export interface Order {
   hashlock: string | null;
   initiatorTimeout: number | null;
   responderTimeout: number | null;
+  /** Pre-funded listing: the maker escrowed on-chain at post time, so
+   *  `hashlock` and `initiatorTimeout` are already set while the order is
+   *  still open (for every other row, non-null hashlock implies status
+   *  `locking`). Announce must echo both verbatim. Absent means classic.
+   *  The book cannot verify the escrow; clients check it on-chain. */
+  prelocked?: boolean;
   createdAt: number;
   updatedAt: number;
   /** Private orders are excluded from the public list, the SSE stream
@@ -100,6 +106,16 @@ const DEFAULT_PRESENCE_TTL_S = 90;
 const MAX_CONCURRENT_TAKES_PER_IP = 4;
 const MAX_TAKES_PER_IP_PER_DAY = 24;
 const TAKE_WINDOW_S = 24 * 3600;
+
+// Pre-funded (prelocked) listings: the T1 window accepted at create, and
+// the remaining-runway floor under which they stop being takeable. The
+// floor is the announce-time 2x invariant for a fresh 1h responder window
+// (7200s) plus the clients' 30min claim margin, so an order taken at the
+// edge still clears both the announce check below and the taker's
+// on-chain timeout verification after accept->announce->assign latency.
+const PRELOCK_MIN_T1_S = 3 * 3600;
+const PRELOCK_MAX_T1_S = 72 * 3600;
+const MIN_TAKEABLE_RUNWAY_S = 2 * 3600 + 1800;
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
@@ -172,9 +188,10 @@ export class OrderStore {
       // relabeling it would misprice the order, so drop the row instead
       // (funds, if any, are governed on-chain, and the coordination
       // record alone is not worth crash-looping the whole book over).
-      type PersistedOrder = Omit<Order, "asset" | "visibility"> & {
+      type PersistedOrder = Omit<Order, "asset" | "visibility" | "prelocked"> & {
         asset?: string;
         visibility?: string;
+        prelocked?: unknown;
       };
       const parsed = JSON.parse(raw) as PersistedOrder[];
       const now = nowS();
@@ -191,7 +208,14 @@ export class OrderStore {
         // public list even if the flag itself got mangled.
         const visibility: Visibility =
           row.visibility === "private" || row.shareTokenHash !== undefined ? "private" : "public";
-        const order: Order = { ...row, asset, visibility };
+        // A prelocked flag without its anchored hashlock/T1 is a mangled
+        // row; hydrate it as classic rather than wedging announce later.
+        const { prelocked: rawPrelocked, ...rest } = row;
+        const prelocked =
+          rawPrelocked === true &&
+          typeof row.hashlock === "string" &&
+          typeof row.initiatorTimeout === "number";
+        const order: Order = { ...rest, asset, visibility, ...(prelocked ? { prelocked: true } : {}) };
         this.orders.set(order.id, order);
         // Presence does not survive restarts; grant loaded listings one
         // TTL window so a deploy does not flap the whole book offline.
@@ -259,10 +283,23 @@ export class OrderStore {
     if (dirty) this.persist();
   }
 
+  /** A prelocked listing is takeable only while enough of its fixed T1
+   *  remains for a full swap (see MIN_TAKEABLE_RUNWAY_S); past the floor
+   *  it stops being offered and waits for the maker to release + relist.
+   *  Classic orders have no T1 until announce and always pass. */
+  private hasRunway(order: Order, now: number): boolean {
+    return (
+      order.prelocked !== true ||
+      order.initiatorTimeout === null ||
+      order.initiatorTimeout - now >= MIN_TAKEABLE_RUNWAY_S
+    );
+  }
+
   listOpen(): PublicOrder[] {
     this.sweep();
+    const now = nowS();
     return [...this.orders.values()]
-      .filter((o) => o.status === "open" && o.visibility === "public")
+      .filter((o) => o.status === "open" && o.visibility === "public" && this.hasRunway(o, now))
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((o) => this.pub(o));
   }
@@ -330,6 +367,43 @@ export class OrderStore {
     }
 
     const now = nowS();
+    // Pre-funded listings: the maker already escrowed on-chain under this
+    // hashlock with a long fixed T1; announce later reuses both verbatim.
+    // Shape and window checks only; the escrow itself is verified on-chain
+    // by clients (the book has no RPC and never trusts itself anyway).
+    let prelock: { hashlock: string; initiatorTimeout: number } | undefined;
+    const rawPrelock = body["prelock"];
+    if (rawPrelock !== undefined) {
+      if (typeof rawPrelock !== "object" || rawPrelock === null) {
+        throw new ApiError(400, "prelock must be an object");
+      }
+      const p = rawPrelock as Record<string, unknown>;
+      const hashlock = p["hashlock"];
+      if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
+        throw new ApiError(400, "prelock.hashlock must be 32 bytes of lowercase hex");
+      }
+      const initiatorTimeout = p["initiatorTimeout"];
+      if (typeof initiatorTimeout !== "number" || !Number.isInteger(initiatorTimeout)) {
+        throw new ApiError(400, "prelock.initiatorTimeout must be a unix-second integer");
+      }
+      if (initiatorTimeout < now + PRELOCK_MIN_T1_S) {
+        throw new ApiError(400, "prelock.initiatorTimeout is too soon for a takeable listing");
+      }
+      if (initiatorTimeout > now + PRELOCK_MAX_T1_S) {
+        throw new ApiError(400, "prelock.initiatorTimeout is too far out");
+      }
+      const normalized = hashlock.toLowerCase();
+      // One live book row per hashlock: the contract enforces single-use
+      // on-chain, and two listings sharing one escrow could each pass the
+      // announce echo check while only one swap can ever settle.
+      for (const other of this.orders.values()) {
+        if (other.hashlock === normalized && other.status !== "cancelled") {
+          throw new ApiError(409, "an order with this hashlock already exists");
+        }
+      }
+      prelock = { hashlock: normalized, initiatorTimeout };
+    }
+
     const makerToken = randomBytes(32).toString("hex");
     const order: Order = {
       id: randomBytes(8).toString("hex"),
@@ -346,9 +420,10 @@ export class OrderStore {
       status: "open",
       takerEthAccount: null,
       takerQrlAccount: null,
-      hashlock: null,
-      initiatorTimeout: null,
+      hashlock: prelock?.hashlock ?? null,
+      initiatorTimeout: prelock?.initiatorTimeout ?? null,
       responderTimeout: null,
+      ...(prelock !== undefined ? { prelocked: true } : {}),
       createdAt: now,
       updatedAt: now,
       makerTokenHash: sha256Hex(makerToken),
@@ -437,6 +512,9 @@ export class OrderStore {
       throw new ApiError(404, "order not found");
     }
     if (order.status !== "open") throw new ApiError(409, "order is no longer open");
+    if (!this.hasRunway(order, nowS())) {
+      throw new ApiError(409, "this pre-funded order has too little time left to swap safely");
+    }
     return this.commitTake(order, body, takerIp);
   }
 
@@ -472,7 +550,8 @@ export class OrderStore {
         o.asset === asset.symbol &&
         BigInt(o.toAmount) <= maxPay &&
         BigInt(o.fromAmount) >= minReceive &&
-        this.isSeen(o, now),
+        this.isSeen(o, now) &&
+        this.hasRunway(o, now),
     );
     // Best rate for the taker first (receive/pay, exact via cross
     // multiplication; rates only compare within one pair, which the
@@ -534,6 +613,19 @@ export class OrderStore {
       throw new ApiError(400, "timeouts must be unix-second integers");
     }
     const now = nowS();
+    if (order.prelocked === true) {
+      // A pre-funded order's hashlock and T1 were fixed at post time (the
+      // escrow already sits on-chain under them); the maker client must
+      // echo them exactly. A mismatch means a desynced maker, e.g. one
+      // that lost local state and regenerated a secret: refuse before the
+      // taker wastes a verification round on an escrow that cannot match.
+      if (hashlock.toLowerCase() !== order.hashlock) {
+        throw new ApiError(400, "hashlock does not match the pre-funded escrow");
+      }
+      if (initiatorTimeout !== order.initiatorTimeout) {
+        throw new ApiError(400, "initiatorTimeout does not match the pre-funded escrow");
+      }
+    }
     // Invariant from the architecture spec: the initiator's window must
     // cover the responder's window twice over. Clients re-verify on-chain.
     if (responderTimeout <= now + 600) throw new ApiError(400, "responder timeout is too soon");

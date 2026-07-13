@@ -638,6 +638,98 @@ try {
   const privOpen = await mkPrivate();
   const privOpenId = privOpen.body.order.id;
 
+  console.log("prelocked orders:");
+  const preHdr = { "X-Forwarded-For": "203.0.113.60" };
+  const preTaker = { takerEthAccount: ETH_B, takerQrlAccount: QRL_B };
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const HASH_PRE = `0x${"5".repeat(64)}`;
+  const mkPre = async (extra = {}) =>
+    api(
+      "POST",
+      "/orders",
+      {
+        direction: "eth->qrl",
+        fromAmount: ONE_ETH.toString(),
+        toAmount: TWO_QRL.toString(),
+        makerEthAccount: ETH_A,
+        makerQrlAccount: QRL_A,
+        ...extra,
+      },
+      preHdr,
+    );
+
+  const badShape = await mkPre({ prelock: "yes" });
+  check("non-object prelock rejected", badShape.status === 400);
+  const badHash = await mkPre({
+    prelock: { hashlock: "0xnothex", initiatorTimeout: nowSec() + 48 * 3600 },
+  });
+  check("malformed prelock hashlock rejected", badHash.status === 400);
+  const tooSoon = await mkPre({
+    prelock: { hashlock: HASH_PRE, initiatorTimeout: nowSec() + 3600 },
+  });
+  check("prelock T1 under the floor rejected", tooSoon.status === 400);
+  const tooFar = await mkPre({
+    prelock: { hashlock: HASH_PRE, initiatorTimeout: nowSec() + 100 * 3600 },
+  });
+  check("prelock T1 past the ceiling rejected", tooFar.status === 400);
+
+  const preT1 = nowSec() + 48 * 3600;
+  const pre = await mkPre({ prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 } });
+  check(
+    "prelocked create round-trips flag, hashlock and T1",
+    pre.status === 201 &&
+      pre.body.order.prelocked === true &&
+      pre.body.order.hashlock === HASH_PRE &&
+      pre.body.order.initiatorTimeout === preT1,
+  );
+  const preId = pre.body.order.id;
+  const preToken = pre.body.makerToken;
+
+  const dupHash = await mkPre({ prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 } });
+  check("second live order with the same hashlock rejected", dupHash.status === 409);
+
+  const preList = await api("GET", "/orders");
+  const listedPre = preList.body.orders.find((o) => o.id === preId);
+  check(
+    "prelocked order listed with the flag while open",
+    listedPre !== undefined && listedPre.prelocked === true,
+  );
+  check(
+    "classic orders carry no prelocked key on the wire",
+    preList.body.orders.every((o) => o.id === preId || !("prelocked" in o)),
+  );
+
+  const preAccept = await api("POST", `/orders/${preId}/accept`, preTaker, {
+    "X-Forwarded-For": "203.0.113.61",
+  });
+  check("prelocked order accepted", preAccept.status === 200);
+  const wrongEcho = await api("POST", `/orders/${preId}/hashlock`, {
+    token: preToken,
+    hashlock: `0x${"6".repeat(64)}`,
+    initiatorTimeout: preT1,
+    responderTimeout: nowSec() + 3600,
+  });
+  check("announce with a mismatched hashlock rejected", wrongEcho.status === 400);
+  const wrongT1 = await api("POST", `/orders/${preId}/hashlock`, {
+    token: preToken,
+    hashlock: HASH_PRE,
+    initiatorTimeout: preT1 + 60,
+    responderTimeout: nowSec() + 3600,
+  });
+  check("announce with a mismatched T1 rejected", wrongT1.status === 400);
+  const goodEcho = await api("POST", `/orders/${preId}/hashlock`, {
+    token: preToken,
+    hashlock: HASH_PRE,
+    initiatorTimeout: preT1,
+    responderTimeout: nowSec() + 3600,
+  });
+  check(
+    "announce echoing the stored escrow succeeds",
+    goodEcho.status === 200 &&
+      goodEcho.body.order.status === "locking" &&
+      goodEcho.body.order.initiatorTimeout === preT1,
+  );
+
   console.log("book stream:");
   const streamRes = await fetch(`${BASE}/orders/stream`);
   check(
@@ -675,26 +767,44 @@ try {
   const BASE2 = `http://127.0.0.1:${PORT2}/api`;
   const legacyFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-legacy-")), "orders.json");
   const legacyNow = Math.floor(Date.now() / 1000);
+  const legacyBase = {
+    direction: "eth->qrl",
+    fromAmount: ONE_ETH.toString(),
+    toAmount: TWO_QRL.toString(),
+    makerEthAccount: ETH_A,
+    makerQrlAccount: QRL_A,
+    status: "open",
+    takerEthAccount: null,
+    takerQrlAccount: null,
+    hashlock: null,
+    initiatorTimeout: null,
+    responderTimeout: null,
+    createdAt: legacyNow,
+    updatedAt: legacyNow,
+    makerTokenHash: "0".repeat(64),
+  };
   writeFileSync(
     legacyFile,
     JSON.stringify([
+      { ...legacyBase, id: "00000000000000ab" },
+      // Prelocked row with plenty of runway: must hydrate with the flag.
       {
-        id: "00000000000000ab",
-        direction: "eth->qrl",
-        fromAmount: ONE_ETH.toString(),
-        toAmount: TWO_QRL.toString(),
-        makerEthAccount: ETH_A,
-        makerQrlAccount: QRL_A,
-        status: "open",
-        takerEthAccount: null,
-        takerQrlAccount: null,
-        hashlock: null,
-        initiatorTimeout: null,
-        responderTimeout: null,
-        createdAt: legacyNow,
-        updatedAt: legacyNow,
-        makerTokenHash: "0".repeat(64),
+        ...legacyBase,
+        id: "00000000000000ac",
+        prelocked: true,
+        hashlock: `0x${"7".repeat(64)}`,
+        initiatorTimeout: legacyNow + 48 * 3600,
       },
+      // Prelocked row under the takeable-runway floor: hidden and untakeable.
+      {
+        ...legacyBase,
+        id: "00000000000000ad",
+        prelocked: true,
+        hashlock: `0x${"8".repeat(64)}`,
+        initiatorTimeout: legacyNow + 3600,
+      },
+      // Mangled row: prelocked flag without its anchors hydrates as classic.
+      { ...legacyBase, id: "00000000000000ae", prelocked: true },
     ]),
   );
   child2 = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
@@ -706,6 +816,32 @@ try {
   const legacyRow = legacyList.orders.find((o) => o.id === "00000000000000ab");
   check("legacy asset-less row still listed", legacyRow !== undefined);
   check("legacy row hydrates as ETH", legacyRow !== undefined && legacyRow.asset === "ETH");
+  check(
+    "classic row carries no prelocked key after restart",
+    legacyRow !== undefined && !("prelocked" in legacyRow),
+  );
+  const preSurvivor = legacyList.orders.find((o) => o.id === "00000000000000ac");
+  check(
+    "prelocked row survives restart with flag and anchors",
+    preSurvivor !== undefined &&
+      preSurvivor.prelocked === true &&
+      preSurvivor.hashlock === `0x${"7".repeat(64)}`,
+  );
+  check(
+    "low-runway prelocked row hidden from the list",
+    !legacyList.orders.some((o) => o.id === "00000000000000ad"),
+  );
+  const lowAccept = await fetch(`${BASE2}/orders/00000000000000ad/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Forwarded-For": "203.0.113.62" },
+    body: JSON.stringify({ takerEthAccount: ETH_B, takerQrlAccount: QRL_B }),
+  });
+  check("accept under the runway floor rejected", lowAccept.status === 409);
+  const mangled = legacyList.orders.find((o) => o.id === "00000000000000ae");
+  check(
+    "prelocked flag without anchors hydrates as classic",
+    mangled !== undefined && !("prelocked" in mangled),
+  );
 } catch (err) {
   failures += 1;
   console.error("smoke run crashed:", err);
