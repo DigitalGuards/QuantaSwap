@@ -467,6 +467,121 @@ describe("refunds", () => {
   });
 });
 
+describe("prelocked swaps: assign step, awaiting-assign, release", () => {
+  const ZERO_ADDR = `0x${"0".repeat(40)}`;
+  const prelockSwap: Partial<ActiveSwap> = { prelocked: true };
+  /** The maker's pre-funded escrow: open, recipient still unset. */
+  const iOpenUnassigned = (overrides: Partial<LegState> = {}): LegState =>
+    iOpen({ recipient: ZERO_ADDR, ...overrides });
+
+  it("replaces the lock step with assign-initiator only when prelocked", () => {
+    const pre = derive("maker", { eth: none(), qrl: none() }, {}, { swap: prelockSwap });
+    expect(pre.steps[0].key).toBe("assign-initiator");
+    const classic = derive("maker", { eth: none(), qrl: none() }, {});
+    expect(classic.steps[0].key).toBe("lock-initiator");
+  });
+
+  it("assign runs only on an open unassigned escrow with a clean responder leg", () => {
+    const legs = { eth: iOpenUnassigned(), qrl: none() };
+    const m = derive("maker", legs, {}, { swap: prelockSwap });
+    expect(m.steps[0].canRun).toBe(true);
+    expect(m.steps[0].done).toBe(false);
+    // Responder chain state unknown: fail closed, assign is irreversible.
+    const unknown = derive("maker", { eth: iOpenUnassigned() }, {}, { swap: prelockSwap });
+    expect(unknown.steps[0].canRun).toBe(false);
+  });
+
+  it("refuses to assign while the hashlock is squatted on the responder chain", () => {
+    // A dust lock under the shared hashlock over there would make the
+    // taker's future lock revert; assigning would also kill release and
+    // strand the escrow until T1. The gate must catch it.
+    const legs = { eth: iOpenUnassigned(), qrl: rOpen({ amount: 1n }) };
+    const m = derive("maker", legs, {}, { swap: prelockSwap });
+    expect(m.steps[0].canRun).toBe(false);
+    expect(m.steps[0].issue).toBe(
+      "the hashlock is already used on the responder chain; release your escrow and relist",
+    );
+  });
+
+  it("judges assign done at depth, surfacing awaiting-depth in between", () => {
+    const assignedHead = { eth: iOpen(), qrl: none() }; // recipient set at head
+    const shallow = derive(
+      "maker",
+      assignedHead,
+      { eth: iOpenUnassigned(), qrl: none() },
+      { swap: prelockSwap },
+    );
+    expect(shallow.steps[0].done).toBe(false);
+    expect(shallow.steps[0].awaitingDepth).toBe(true);
+    const deep = derive("maker", assignedHead, assignedHead, { swap: prelockSwap });
+    expect(deep.steps[0].done).toBe(true);
+    expect(deep.steps[0].awaitingDepth).toBe(false);
+  });
+
+  it("treats an unassigned-at-depth escrow as awaiting assign, not a taker issue", () => {
+    const legs = { eth: iOpenUnassigned(), qrl: none() };
+    const m = derive("taker", legs, legs, { swap: prelockSwap });
+    expect(m.awaitingAssign).toBe(true);
+    expect(m.steps[1].issue).toBeNull();
+    expect(m.steps[1].canRun).toBe(false);
+  });
+
+  it("keeps assigned-to-someone-else a hard issue for the taker", () => {
+    const bad = iOpen({ recipient: MAKER_ETH });
+    const m = derive("taker", { eth: bad, qrl: none() }, { eth: bad, qrl: none() }, { swap: prelockSwap });
+    expect(m.awaitingAssign).toBe(false);
+    expect(m.steps[1].canRun).toBe(false);
+    expect(m.steps[1].issue).toBe("its recipient is not your address");
+  });
+
+  it("opens the responder lock once the assignment to the taker is at depth", () => {
+    const assigned = { eth: iOpen(), qrl: none() };
+    const m = derive("taker", assigned, assigned, { swap: prelockSwap });
+    expect(m.awaitingAssign).toBe(false);
+    expect(m.steps[1].canRun).toBe(true);
+    expect(m.steps[1].issue).toBeNull();
+  });
+
+  it("never reveals the secret while the maker's own escrow is unassigned", () => {
+    // With the preimage public an unassigned escrow could still be
+    // release()d, taking both sides; the reveal gate must hold even if a
+    // buggy taker locked early.
+    const legs = { eth: iOpenUnassigned(), qrl: rOpen() };
+    const m = derive("maker", legs, legs, { swap: prelockSwap });
+    expect(m.steps[2].canRun).toBe(false);
+    const assigned = { eth: iOpen(), qrl: rOpen() };
+    const ok = derive("maker", assigned, assigned, { swap: prelockSwap });
+    expect(ok.steps[2].canRun).toBe(true);
+  });
+
+  it("offers release only on an own open unassigned escrow, timeout-free", () => {
+    const legs = { eth: iOpenUnassigned(), qrl: none() };
+    const m = derive("maker", legs, legs, { swap: prelockSwap });
+    expect(m.releasableLegs).toEqual(["eth"]);
+    expect(m.refundableLegs).toEqual([]); // before timeout, refund is closed
+    // Assigned: release is gone; refund takes over at the timeout.
+    const assigned = { eth: iOpen(), qrl: none() };
+    const after = derive("maker", assigned, assigned, { swap: prelockSwap });
+    expect(after.releasableLegs).toEqual([]);
+    // Never offered on classic swaps or to the taker.
+    expect(derive("maker", legs, legs).releasableLegs).toEqual([]);
+    expect(derive("taker", legs, legs, { swap: prelockSwap }).releasableLegs).toEqual([]);
+  });
+
+  it("leaves every classic derivation untouched when prelocked is absent", () => {
+    const legs = { eth: iOpen(), qrl: rOpen() };
+    const m = derive("maker", legs, legs);
+    expect(m.awaitingAssign).toBe(false);
+    expect(m.releasableLegs).toEqual([]);
+    expect(m.steps.map((s) => s.key)).toEqual([
+      "lock-initiator",
+      "lock-responder",
+      "claim-responder",
+      "claim-initiator",
+    ]);
+  });
+});
+
 describe("completion and identity", () => {
   it("is complete only when both legs are claimed", () => {
     const done = { eth: claimed(iOpen()), qrl: claimed(rOpen()) };

@@ -14,6 +14,7 @@ import {
   type OrderView,
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
+import { prelockEscrowIssue } from "@/lib/prelock";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
@@ -40,6 +41,12 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // On-chain check of a pre-funded order's escrow claim (the book cannot
+  // prove funding; the hard gate stays the at-depth verification).
+  const [escrow, setEscrow] = useState<{
+    status: "checking" | "verified" | "unverified";
+    issue: string | null;
+  } | null>(null);
 
   useEffect(() => {
     if (!id || !shareToken) return;
@@ -61,6 +68,31 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
       clearInterval(t);
     };
   }, [id, shareToken]);
+
+  const orderIsPrelocked = order?.prelocked === true && order.status === "open";
+  const orderAssetRaw = order?.asset ?? "ETH";
+  useEffect(() => {
+    if (!order || !orderIsPrelocked) {
+      setEscrow(null);
+      return undefined;
+    }
+    const symbol = ethAssetSymbolOrNull(orderAssetRaw);
+    if (symbol === null) return undefined;
+    let stale = false;
+    setEscrow({ status: "checking", issue: null });
+    void prelockEscrowIssue(order, symbol)
+      .then((issue) => {
+        if (!stale) setEscrow({ status: "verified", issue });
+      })
+      .catch(() => {
+        if (!stale) setEscrow({ status: "unverified", issue: null });
+      });
+    return () => {
+      stale = true;
+    };
+    // Re-check when the order identity or its escrow anchors move, not on
+    // every poll echo of the same object.
+  }, [order?.id, orderIsPrelocked, order?.hashlock, orderAssetRaw]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // An active swap always wins: the home route forwards to the waiting
   // room or the canonical /swap/<hashlock> flow.
@@ -93,6 +125,8 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           orderId: accepted.id,
           takerToken,
           shareToken,
+          // Rendering hint only; fund-moving gates verify on-chain.
+          ...(accepted.prelocked === true ? { prelocked: true } : {}),
           direction: accepted.direction,
           // The asset the taker agreed to is what this page displayed,
           // resolved against the local registry; on-chain token
@@ -198,7 +232,37 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
               </span>
             </div>
           ) : null}
+          {order.prelocked === true ? (
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Pre-funded escrow</span>
+              <span
+                className={
+                  escrow === null || escrow.status === "checking"
+                    ? "text-muted-foreground"
+                    : escrow.issue !== null
+                      ? "text-destructive"
+                      : escrow.status === "unverified"
+                        ? "text-amber-400"
+                        : "text-success"
+                }
+              >
+                {escrow === null || escrow.status === "checking"
+                  ? "verifying…"
+                  : escrow.issue !== null
+                    ? "check failed"
+                    : escrow.status === "unverified"
+                      ? "unverified"
+                      : "verified on-chain"}
+              </span>
+            </div>
+          ) : null}
         </div>
+        {order.prelocked === true && escrow?.issue ? (
+          <p className="text-xs text-destructive">
+            The escrow this order claims does not check out on-chain: {escrow.issue}. Do not take
+            it; ask your counterparty to relist.
+          </p>
+        ) : null}
         {order.makerSeen === false ? (
           <p className="text-xs text-amber-400">
             The maker&apos;s wallet is not online right now. You can still take the order, but the
@@ -208,7 +272,12 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
         <Button
           className="w-full"
           size="lg"
-          disabled={!eth.account || !qrl.account || busy}
+          disabled={
+            !eth.account ||
+            !qrl.account ||
+            busy ||
+            (order.prelocked === true && escrow?.issue !== null && escrow?.issue !== undefined)
+          }
           onClick={take}
         >
           {!eth.account || !qrl.account
@@ -218,8 +287,9 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
               : "Take this swap"}
         </Button>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then
-          lock yours. The HTLCs settle the swap atomically or refund after the timelocks.
+          {order.prelocked === true
+            ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
+            : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}
         </p>
       </div>
     );

@@ -6,10 +6,12 @@ import { Check } from "lucide-react";
 import { ETH_ASSETS, legByKey } from "@/config";
 import type { LegKey } from "@/config";
 import {
+  buildAssignData,
   buildClaimData,
   buildLockNativeData,
   buildLockTokenData,
   buildRefundData,
+  buildReleaseData,
   getConfirmedLegState,
   getLegState,
   getSwapEvents,
@@ -213,15 +215,27 @@ export function SwapFlow({
     return null;
   }
 
-  const { steps, complete, revealedPreimage, refundableLegs, ownLockedLegs, ownEth, ownQrl, legPlan } =
-    machine;
+  const {
+    steps,
+    complete,
+    revealedPreimage,
+    refundableLegs,
+    releasableLegs,
+    awaitingAssign,
+    ownLockedLegs,
+    ownEth,
+    ownQrl,
+    legPlan,
+  } = machine;
 
-  // The taker released their take before we (the maker) locked: our own leg
-  // has nothing on chain yet, so do not lock into a walked-away swap.
+  // The taker released their take before we (the maker) committed to
+  // them: classic flow, nothing of ours on chain; prelocked flow, escrow
+  // on chain but still unassigned (assigning now would strand it until
+  // T1 for a taker who already left; release instead).
   const takerWalkedAway =
     swap.role === "maker" &&
-    ownLockedLegs.length === 0 &&
-    (order?.released === true || order?.status === "cancelled");
+    (order?.released === true || order?.status === "cancelled") &&
+    (swap.prelocked === true ? releasableLegs.length > 0 : ownLockedLegs.length === 0);
   const iCfg = legByKey(iLeg);
   const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
@@ -269,6 +283,23 @@ export function SwapFlow({
       await sendOnLeg(leg, buildRefundData(hashlock), 0n);
     });
 
+  // Prelocked swaps only: one-time recipient assignment on the maker's
+  // pre-funded escrow, and the on-demand escrow reclaim (the abort path
+  // while unassigned).
+  const assignLeg = (leg: LegKey) =>
+    runAction(`assign-${leg}`, async () => {
+      await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
+    });
+
+  const releaseLeg = (leg: LegKey) =>
+    runAction(`release-${leg}`, async () => {
+      await sendOnLeg(leg, buildReleaseData(hashlock), 0n);
+    });
+
+  /** Busy-state key for a step's own action button. */
+  const actionKey = (key: StepModel["key"], leg: LegKey): string =>
+    `${key.startsWith("lock") ? "lock" : key.startsWith("assign") ? "assign" : "claim"}-${leg}`;
+
   const who = (ownStep: boolean) => (ownStep ? "You" : "The counterparty");
 
   // Presentation for each machine step: copy, action wiring, pending text.
@@ -294,6 +325,14 @@ export function SwapFlow({
       action: () => lockLeg(iLeg),
       pendingText: null,
       waitingText: `The maker published the hashlock and is broadcasting their lock on ${iCfg.name}; blocks there confirm in about a minute.`,
+    },
+    "assign-initiator": {
+      title: `Assign the taker on ${iCfg.name}`,
+      desc: `${who(steps[0].own)} pre-funded ${fmtLeg(iPlan)} at post time; ${steps[0].own ? "you now fix" : "they now fix"} the taker as its recipient with a one-time on-chain assignment. Until that lands, the escrow stays releasable on demand.`,
+      label: "Assign taker",
+      action: () => assignLeg(iLeg),
+      pendingText: `Assignment detected on ${iCfg.name}; ${depthWait(iCfg.confirmations)} before it is safe to respond.`,
+      waitingText: "Waiting for the maker to assign your address to the pre-funded escrow…",
     },
     "lock-responder": {
       title: `Lock ${rPlan.symbol} on ${rCfg.name}`,
@@ -369,7 +408,13 @@ export function SwapFlow({
           const view = presentation[step.key];
           const stepTxHash =
             legEvents[step.leg].find(
-              (e) => e.kind === (step.key.startsWith("lock") ? "locked" : "claimed"),
+              (e) =>
+                e.kind ===
+                (step.key.startsWith("lock")
+                  ? "locked"
+                  : step.key.startsWith("assign")
+                    ? "assigned"
+                    : "claimed"),
             )?.txHash ?? null;
           return (
             <div
@@ -414,10 +459,12 @@ export function SwapFlow({
                 {!step.done &&
                   (step.own ? (
                     <div className="space-y-1">
-                      {step.key === "lock-initiator" && takerWalkedAway ? (
+                      {(step.key === "lock-initiator" || step.key === "assign-initiator") &&
+                      takerWalkedAway ? (
                         <p className="text-xs text-amber-400">
-                          The taker walked away before you locked. Do not lock; discard this swap
-                          below.
+                          {step.key === "assign-initiator"
+                            ? "The taker walked away. Do not assign (it would commit your escrow to them until the timeout); release your escrow below."
+                            : "The taker walked away before you locked. Do not lock; discard this swap below."}
                         </p>
                       ) : null}
                       <Button
@@ -426,11 +473,12 @@ export function SwapFlow({
                         disabled={
                           !step.canRun ||
                           busy !== null ||
-                          (step.key === "lock-initiator" && takerWalkedAway)
+                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
+                            takerWalkedAway)
                         }
                         onClick={view.action}
                       >
-                        {busy === `${step.key.startsWith("lock") ? "lock" : "claim"}-${step.leg}`
+                        {busy === actionKey(step.key, step.leg)
                           ? lockStage !== null
                             ? `${lockStage}…`
                             : "Waiting for wallet…"
@@ -439,6 +487,10 @@ export function SwapFlow({
                     </div>
                   ) : step.canRun ? (
                     <p className="text-xs text-blue-accent">{view.waitingText}</p>
+                  ) : step.key === "lock-responder" && awaitingAssign ? (
+                    <p className="text-xs text-blue-accent">
+                      {presentation["assign-initiator"].waitingText}
+                    </p>
                   ) : null)}
               </div>
             </div>
@@ -458,6 +510,30 @@ export function SwapFlow({
                 Refund {legPlan[leg].symbol} leg
               </Button>
             ))}
+          </div>
+        ) : null}
+
+        {releasableLegs.length > 0 && !complete && swap.role !== "taker" ? (
+          <div className="space-y-1.5 pt-3">
+            <div className="flex gap-2">
+              {releasableLegs.map((leg) => (
+                <Button
+                  key={leg}
+                  variant="destructive"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => releaseLeg(leg)}
+                >
+                  {busy === `release-${leg}`
+                    ? "Waiting for wallet…"
+                    : `Release ${legPlan[leg].symbol} escrow`}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Your pre-funded escrow is still unassigned: releasing returns it to your wallet
+              immediately and abandons this swap.
+            </p>
           </div>
         ) : null}
 
@@ -483,8 +559,10 @@ export function SwapFlow({
           ) : ownLockedLegs.length > 0 ? (
             <span className="max-w-[60%] text-right text-xs text-amber-400">
               Your {ownLockedLegs.map((leg) => legPlan[leg].symbol).join(" and ")} is locked
-              on-chain. Refund it below once the timeout opens before discarding: discarding now
-              deletes the hashlock this swap needs to refund.
+              on-chain.{" "}
+              {releasableLegs.length > 0
+                ? "Release it below before discarding: discarding deletes the hashlock the escrow needs."
+                : "Refund it below once the timeout opens before discarding: discarding now deletes the hashlock this swap needs to refund."}
             </span>
           ) : (
             <Button

@@ -42,6 +42,10 @@ export interface ActiveSwap {
   hashlock: string | null;
   initiatorTimeout: number | null;
   responderTimeout: number | null;
+  /** The initiator leg was pre-funded with an open-recipient lock at post
+   *  time: the maker's match step is assign() instead of a lock, and the
+   *  escrow is releasable on demand until then. Absent means classic. */
+  prelocked?: boolean;
   createdAt: number;
 }
 
@@ -125,6 +129,18 @@ export function clearActiveSwap(): void {
   localStorage.removeItem(KEY);
 }
 
+/** A pre-funded order's escrow anchors, persisted BEFORE the lock
+ *  transaction is broadcast: losing the preimage after funds are on-chain
+ *  would strand them until T1's permissionless refund. */
+export interface PrelockRef {
+  hashlock: string;
+  preimage: string;
+  /** The open lock's fixed on-chain T1 (unix seconds). */
+  initiatorTimeout: number;
+  /** The leg the escrow sits on (the order's initiator leg). */
+  leg: LegKey;
+}
+
 /** The maker's open-order handle; the token authorizes cancel + hashlock.
  *  The asset AND both amounts are anchored locally at post time (like the
  *  maker's payout addresses) so a hostile book cannot re-label or resize
@@ -141,6 +157,10 @@ export interface MyOrderRef {
   /** Share token when the order is private (null for public orders):
    *  builds the /o/<id> link and authorizes the maker's own reads. */
   shareToken: string | null;
+  /** Pre-funded escrow anchors; null for classic (unfunded) listings. At
+   *  match the stored secret and T1 are reused verbatim, never
+   *  regenerated (the on-chain lock is immutable). */
+  prelock: PrelockRef | null;
 }
 
 const ORDER_KEY = "quantaswap.myorder.v1";
@@ -156,6 +176,8 @@ export function loadMyOrder(): MyOrderRef | null {
     ref.fromAmount ??= null;
     ref.toAmount ??= null;
     ref.shareToken ??= null;
+    // Handles stored before pre-funded orders existed.
+    ref.prelock ??= null;
     return ref;
   } catch {
     return null;
@@ -168,4 +190,41 @@ export function saveMyOrder(ref: MyOrderRef): void {
 
 export function clearMyOrder(): void {
   localStorage.removeItem(ORDER_KEY);
+}
+
+/** Staging record for an in-flight pre-funded post: written before the
+ *  escrow transaction, deleted only once the order exists and the handle
+ *  above holds the anchors. A crash in between leaves this record + an
+ *  on-chain open lock and no order id; the reconcile UI offers finishing
+ *  the post or releasing the escrow. Carries the full order terms so a
+ *  resumed post is byte-identical to the interrupted one. */
+export interface PrelockStage extends PrelockRef {
+  direction: Direction;
+  asset: EthAssetSymbol;
+  fromAmount: string;
+  toAmount: string;
+  visibility: "public" | "private";
+  allowedTakerEth: string | null;
+  allowedTakerQrl: string | null;
+  createdAt: number;
+}
+
+const STAGE_KEY = "quantaswap.prelockstage.v1";
+
+export function loadPrelockStage(): PrelockStage | null {
+  try {
+    const raw = localStorage.getItem(STAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as PrelockStage;
+  } catch {
+    return null;
+  }
+}
+
+export function savePrelockStage(stage: PrelockStage): void {
+  localStorage.setItem(STAGE_KEY, JSON.stringify(stage));
+}
+
+export function clearPrelockStage(): void {
+  localStorage.removeItem(STAGE_KEY);
 }

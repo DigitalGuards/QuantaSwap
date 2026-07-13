@@ -16,7 +16,12 @@ export type LegStates = Partial<Record<LegKey, LegState>>;
 export const sameAddr = (a: string, b: string): boolean =>
   qToHex(a).toLowerCase() === qToHex(b).toLowerCase();
 
-export type StepKey = "lock-initiator" | "lock-responder" | "claim-responder" | "claim-initiator";
+export type StepKey =
+  | "lock-initiator"
+  | "assign-initiator"
+  | "lock-responder"
+  | "claim-responder"
+  | "claim-initiator";
 
 export interface StepModel {
   key: StepKey;
@@ -54,6 +59,14 @@ export interface SwapMachine {
   revealedPreimage: string | null;
   /** Legs this role initiated that are Open and past their timeout. */
   refundableLegs: LegKey[];
+  /** Prelocked swaps only: own open escrow whose recipient is still
+   *  unset, reclaimable on demand via release() (assign kills this exit;
+   *  the timeout-gated refund then takes over). */
+  releasableLegs: LegKey[];
+  /** Prelocked swaps only: the initiator escrow is confirmed but its
+   *  recipient is not yet assigned at depth. Not a verification failure,
+   *  but it blocks the responder lock exactly like one. */
+  awaitingAssign: boolean;
   /** Legs this role has escrowed (Open) on-chain right now, refundable or
    *  not; discarding while any are here would strand funds. */
   ownLockedLegs: LegKey[];
@@ -141,13 +154,26 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       : `it escrows the wrong token contract, not the agreed ${plan.symbol}`;
   };
 
+  // Prelocked swaps: the initiator escrow exists before a recipient does.
+  const prelocked = swap.prelocked === true;
+  const ZERO_ADDR = `0x${"0".repeat(40)}`;
+  const unassigned = (st: LegState): boolean => sameAddr(st.recipient, ZERO_ADDR);
+
+  // An unassigned-at-depth escrow is "waiting for the maker's assign",
+  // not a verification failure; but it must block the responder lock
+  // exactly like one (the taker only ever commits against a lock whose
+  // recipient is themselves, at depth).
+  const awaitingAssign =
+    prelocked &&
+    Boolean(iConfirmed && iConfirmed.status === SwapStatus.Open && unassigned(iConfirmed));
+
   // Taker-side verification of the maker's lock before responding with
   // funds. The order book announced the parameters; the chain confirms
   // them. Checked against the confirmation-depth snapshot, not the head:
   // a shallow lock could still be reorged into a different one.
   const iPlan = legPlan[iLeg];
   let initiatorLockIssue: string | null = null;
-  if (iConfirmed && iConfirmed.status === SwapStatus.Open) {
+  if (iConfirmed && iConfirmed.status === SwapStatus.Open && !awaitingAssign) {
     const badToken = tokenIssue(iConfirmed.token, iPlan);
     if (badToken !== null) initiatorLockIssue = badToken;
     else if (!sameAddr(iConfirmed.recipient, iPlan.recipient))
@@ -181,16 +207,60 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
 
   const revealedPreimage = rState && rState.preimage !== ZERO32 ? rState.preimage : null;
 
+  // For a prelocked swap the initiator escrow predates the match: the
+  // maker's only match-time transaction on this leg is the one-time
+  // assign(). Its `done` is judged at confirmation depth like every fact
+  // the taker acts on irreversibly (a shallow assign can still reorg
+  // into a different recipient; write-once holds per canonical chain).
+  const assignStep: StepModel = {
+    key: "assign-initiator",
+    leg: iLeg,
+    own: mySteps[0],
+    done: Boolean(
+      iConfirmed && iConfirmed.status !== SwapStatus.None && !unassigned(iConfirmed),
+    ),
+    // Assigning while the shared hashlock is already used on the
+    // responder chain would trade the maker's on-demand release for a
+    // forced wait until T1 (release dies with assign, and a dust squat
+    // over there costs an attacker almost nothing), so the gate requires
+    // a clean responder leg and fails closed while it is unknown.
+    canRun: Boolean(
+      iState &&
+        iState.status === SwapStatus.Open &&
+        unassigned(iState) &&
+        rState &&
+        rState.status === SwapStatus.None &&
+        nowS < responderTimeout,
+    ),
+    issue:
+      mySteps[0] &&
+      iState &&
+      iState.status === SwapStatus.Open &&
+      unassigned(iState) &&
+      rState &&
+      rState.status !== SwapStatus.None
+        ? "the hashlock is already used on the responder chain; release your escrow and relist"
+        : null,
+    awaitingDepth: Boolean(
+      iState &&
+        iState.status === SwapStatus.Open &&
+        !unassigned(iState) &&
+        !(iConfirmed && iConfirmed.status === SwapStatus.Open && !unassigned(iConfirmed)),
+    ),
+  };
+
   const steps: [StepModel, StepModel, StepModel, StepModel] = [
-    {
-      key: "lock-initiator",
-      leg: iLeg,
-      own: mySteps[0],
-      done: Boolean(iState && iState.status !== SwapStatus.None),
-      canRun: Boolean(iState && iState.status === SwapStatus.None),
-      issue: null,
-      awaitingDepth: false,
-    },
+    prelocked
+      ? assignStep
+      : {
+          key: "lock-initiator",
+          leg: iLeg,
+          own: mySteps[0],
+          done: Boolean(iState && iState.status !== SwapStatus.None),
+          canRun: Boolean(iState && iState.status === SwapStatus.None),
+          issue: null,
+          awaitingDepth: false,
+        },
     {
       key: "lock-responder",
       leg: rLeg,
@@ -200,6 +270,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         iConfirmed &&
           iConfirmed.status === SwapStatus.Open &&
           !initiatorLockIssue &&
+          !awaitingAssign &&
           rState &&
           rState.status === SwapStatus.None &&
           nowS < responderTimeout,
@@ -217,11 +288,16 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       // Never reveal the secret before our own leg is locked (iState Open)
       // and never without a real claim margin on the taker's on-chain
       // timeout (folded into responderLockIssue). responderTimeout is kept
-      // only as a secondary cap.
+      // only as a secondary cap. On a prelocked swap, additionally never
+      // reveal while our escrow is unassigned: with the preimage public,
+      // an unassigned lock could still be release()d, which would take
+      // both sides (the taker's gate makes this unreachable for an honest
+      // taker; this closes it for buggy counterclients too).
       canRun: Boolean(
         swap.preimage &&
           iState &&
           iState.status === SwapStatus.Open &&
+          (!prelocked || !unassigned(iState)) &&
           rConfirmed &&
           rConfirmed.status === SwapStatus.Open &&
           !responderLockIssue &&
@@ -242,10 +318,13 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       // but lock a near-term one, and claim() reverts TimeoutPassed once the
       // real deadline passes, so trusting the announced value would tell the
       // taker a closed claim window is still open after the secret is public.
+      // An unassigned prelocked escrow has no claim target yet (the
+      // contract reverts NotAssigned), so nothing to offer either.
       canRun: Boolean(
         revealedPreimage &&
           iState &&
           iState.status === SwapStatus.Open &&
+          (!prelocked || !unassigned(iState)) &&
           nowS < iState.timeout,
       ),
       issue: null,
@@ -266,6 +345,13 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     const state = legs[leg];
     return state !== undefined && nowS >= state.timeout;
   });
+  // Release needs no timeout, only an own open escrow still unassigned.
+  const releasableLegs = !prelocked
+    ? []
+    : ownLockedLegs.filter((leg) => {
+        const state = legs[leg];
+        return state !== undefined && unassigned(state);
+      });
 
   return {
     iLeg,
@@ -274,6 +360,8 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     complete,
     revealedPreimage,
     refundableLegs,
+    releasableLegs,
+    awaitingAssign,
     /** My legs currently Open (escrowed) on-chain: discarding the swap
      *  while any are here strands funds, since discard deletes the hashlock
      *  and preimage the refund/claim path needs. */

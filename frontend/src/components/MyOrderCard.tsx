@@ -1,6 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatUnits } from "ethers";
-import { ETH_ASSETS, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "@/config";
+import type { BrowserProvider } from "ethers";
+import {
+  ETH_ASSETS,
+  INITIATOR_TIMEOUT_S,
+  MIN_TAKEABLE_RUNWAY_S,
+  QRL_LEG,
+  RESPONDER_TIMEOUT_S,
+} from "@/config";
 import {
   clearMyOrder,
   loadActiveSwap,
@@ -11,6 +18,9 @@ import {
 import { generateSecret } from "@/lib/secrets";
 import { announceHashlock, getOrder, OrderGoneError, shareFragment, type OrderView } from "@/lib/orderbook";
 import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
+import { SwapStatus, buildReleaseData, getLegState } from "@/lib/htlc";
+import { makeLegSender } from "@/lib/legSender";
+import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
@@ -23,20 +33,46 @@ interface Props {
    *  with the taker, whose addresses come from its wallet too). */
   ethAccount: string | null;
   qrlAccount: string | null;
+  /** Wallet plumbing for the pre-funded escrow's release transaction. */
+  browserProvider: BrowserProvider | null;
+  ensureSepolia: () => Promise<void>;
+  qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  qrlTransport: QrlTransport | null;
   onMatched: (swap: ActiveSwap) => void;
   onClosed: () => void;
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** The maker's listed order: waits for a taker, then generates the swap
  *  secret, announces the hashlock and hands over to the swap flow. The
  *  secret is persisted locally before the announcement so a mid-flight
  *  crash can never orphan locked funds. */
-export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClosed }: Props) {
+export function MyOrderCard({
+  myOrder,
+  ethAccount,
+  qrlAccount,
+  browserProvider,
+  ensureSepolia,
+  qrlRequest,
+  qrlTransport,
+  onMatched,
+  onClosed,
+}: Props) {
   const [order, setOrder] = useState<OrderView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  /** The listing is gone (cancelled or swept) but this is a pre-funded
+   *  order: the escrow may still sit on-chain, so the handle must not be
+   *  cleared until the funds are released. */
+  const [orphaned, setOrphaned] = useState(false);
   const matching = useRef(false);
+
+  const sendOnLeg = useMemo(
+    () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+    [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
+  );
 
   // Private orders live behind their share link; the maker's own reads
   // carry the token too (the listing 404s without it).
@@ -74,6 +110,39 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         let swap: ActiveSwap;
         if (stored && stored.role === "maker" && stored.orderId === current.id && stored.hashlock) {
           swap = stored;
+        } else if (myOrder.prelock !== null) {
+          // Pre-funded order: the secret and T1 were fixed (and persisted)
+          // before the escrow transaction; regenerating either would
+          // desync us from the immutable on-chain lock. Only T2 is fresh:
+          // the taker's window starts at match.
+          const pre = myOrder.prelock;
+          const now = Math.floor(Date.now() / 1000);
+          if (pre.initiatorTimeout - now < MIN_TAKEABLE_RUNWAY_S) {
+            throw new Error(
+              "too little time remains on the pre-funded escrow to swap safely; release it and relist",
+            );
+          }
+          swap = {
+            role: "maker",
+            orderId: current.id,
+            takerToken: null,
+            shareToken: myOrder.shareToken,
+            direction: current.direction,
+            ethAsset: myOrder.asset,
+            fromAmount: myOrder.fromAmount ?? current.fromAmount,
+            toAmount: myOrder.toAmount ?? current.toAmount,
+            makerEthAccount: ethAccount,
+            makerQrlAccount: qrlAccount,
+            takerEthAccount: current.takerEthAccount,
+            takerQrlAccount: current.takerQrlAccount,
+            preimage: pre.preimage,
+            hashlock: pre.hashlock,
+            initiatorTimeout: pre.initiatorTimeout,
+            responderTimeout: now + RESPONDER_TIMEOUT_S,
+            prelocked: true,
+            createdAt: now,
+          };
+          saveActiveSwap(swap);
         } else {
           const secret = await generateSecret();
           const now = Math.floor(Date.now() / 1000);
@@ -154,9 +223,17 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         if (stop) return;
         setOrder(current);
         if (current.status === "accepted") void startSwap(current);
-        if (current.status === "cancelled") close();
+        if (current.status === "cancelled") {
+          // A pre-funded handle must survive its listing: clearing it here
+          // would delete the preimage while the escrow still sits on-chain.
+          if (myOrder.prelock !== null) setOrphaned(true);
+          else close();
+        }
       } catch (err) {
-        if (!stop && err instanceof OrderGoneError) close();
+        if (!stop && err instanceof OrderGoneError) {
+          if (myOrder.prelock !== null) setOrphaned(true);
+          else close();
+        }
       }
     };
     void poll();
@@ -192,6 +269,39 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
       .finally(() => setBusy(false));
   };
 
+  /** Pre-funded orders: pull the listing AND reclaim the escrow, clearing
+   *  the local handle only once the funds have provably left the lock.
+   *  Book cancel goes first so no taker reserves a dying listing; a
+   *  racing accept is safe because release stays legal until assign. */
+  const releaseEscrow = () => {
+    const pre = myOrder.prelock;
+    if (pre === null) return;
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      try {
+        await cancelOrder(myOrder.id, myOrder.token);
+      } catch (err) {
+        if (!(err instanceof OrderGoneError)) throw err;
+      }
+      const state = await getLegState(pre.leg, pre.hashlock);
+      if (state.status === SwapStatus.Open) {
+        await sendOnLeg(pre.leg, buildReleaseData(pre.hashlock), 0n);
+        for (let i = 0; ; i += 1) {
+          const cur = await getLegState(pre.leg, pre.hashlock).catch(() => null);
+          if (cur && cur.status !== SwapStatus.Open) break;
+          if (i >= 39) throw new Error("release broadcast but not confirmed yet; retry shortly");
+          await sleep(3000);
+        }
+      }
+      close();
+    })()
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Release failed");
+      })
+      .finally(() => setBusy(false));
+  };
+
   // Amount formatting follows the order's ETH-leg asset (anchored locally
   // in myOrder.asset); the QRL side is always native 18-decimal QRL.
   const asset = ETH_ASSETS[myOrder.asset];
@@ -219,7 +329,18 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
         ) : (
           <p className="text-sm text-muted-foreground">Loading order…</p>
         )}
-        {order?.status === "accepted" ? (
+        {orphaned ? (
+          <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
+            <p className="text-xs leading-relaxed text-amber-400">
+              The listing is gone from the book, but your pre-funded escrow may still sit
+              on-chain. Release it to reclaim your funds; this handle keeps the swap secret until
+              then.
+            </p>
+            <Button size="sm" variant="outline" disabled={busy} onClick={releaseEscrow}>
+              {busy ? "Releasing…" : "Release escrow"}
+            </Button>
+          </div>
+        ) : order?.status === "accepted" ? (
           <p className="text-sm text-blue-accent">
             {busy ? "Taker found: preparing the swap…" : "Taker found."}
           </p>
@@ -230,9 +351,13 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
               className="glow-dot mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
             />
             <span>
-              {shareUrl
-                ? "Private order: hidden from the book. Keep this page open: when your counterparty accepts, you lock first."
-                : "Listed on the order book, waiting for a taker. Keep this page open: when someone accepts, you lock first."}
+              {myOrder.prelock !== null
+                ? shareUrl
+                  ? "Private pre-funded order: hidden from the book, escrow already on-chain. When your counterparty accepts, you assign them with one transaction."
+                  : "Listed pre-funded: your escrow is already on-chain. Keep this page open: when someone accepts, you assign them with one transaction."
+                : shareUrl
+                  ? "Private order: hidden from the book. Keep this page open: when your counterparty accepts, you lock first."
+                  : "Listed on the order book, waiting for a taker. Keep this page open: when someone accepts, you lock first."}
             </span>
           </p>
         )}
@@ -283,10 +408,16 @@ export function MyOrderCard({ myOrder, ethAccount, qrlAccount, onMatched, onClos
             ) : null}
           </div>
         ) : null}
-        {order?.status !== "accepted" ? (
-          <Button variant="outline" size="sm" disabled={busy} onClick={cancel}>
-            Cancel order
-          </Button>
+        {order?.status !== "accepted" && !orphaned ? (
+          myOrder.prelock !== null ? (
+            <Button variant="outline" size="sm" disabled={busy} onClick={releaseEscrow}>
+              {busy ? "Releasing…" : "Release escrow & cancel"}
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" disabled={busy} onClick={cancel}>
+              Cancel order
+            </Button>
+          )
         ) : null}
       </CardContent>
     </Card>

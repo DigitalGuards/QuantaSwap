@@ -8,10 +8,18 @@ import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
   "function lockToken(bytes32 hashlock, address recipient, address token, uint256 amount, uint256 timeout)",
+  // HTLCv2 open-recipient locks (prelock): escrow with the recipient
+  // unset, fix it later with one-time assign(), or reclaim on demand with
+  // release() while still unassigned (release emits Refunded).
+  "function lockNativeOpen(bytes32 hashlock, uint256 timeout) payable",
+  "function lockTokenOpen(bytes32 hashlock, address token, uint256 amount, uint256 timeout)",
+  "function assign(bytes32 hashlock, address recipient)",
+  "function release(bytes32 hashlock)",
   "function claim(bytes32 hashlock, bytes32 preimage)",
   "function refund(bytes32 hashlock)",
   "function getSwap(bytes32 hashlock) view returns (tuple(address initiator, address recipient, address token, uint256 amount, uint256 timeout, uint8 status, bytes32 preimage))",
   "event Locked(bytes32 indexed hashlock, address indexed initiator, address indexed recipient, address token, uint256 amount, uint256 timeout)",
+  "event Assigned(bytes32 indexed hashlock, address indexed recipient)",
   "event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller)",
   "event Refunded(bytes32 indexed hashlock)",
 ];
@@ -133,7 +141,7 @@ export async function getBlockNumber(leg: LegKey): Promise<number> {
   return Number(BigInt((await fn(method, [])) as string));
 }
 
-export type SwapEventKind = "locked" | "claimed" | "refunded";
+export type SwapEventKind = "locked" | "assigned" | "claimed" | "refunded";
 
 export interface SwapEvent {
   kind: SwapEventKind;
@@ -148,6 +156,7 @@ function eventTopic(name: string): string {
 
 const TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
   [eventTopic("Locked"), "locked"],
+  [eventTopic("Assigned"), "assigned"],
   [eventTopic("Claimed"), "claimed"],
   [eventTopic("Refunded"), "refunded"],
 ]);
@@ -215,6 +224,26 @@ export const buildClaimData = (hashlock: string, preimage: string): string =>
 
 export const buildRefundData = (hashlock: string): string =>
   htlcInterface.encodeFunctionData("refund", [hashlock]);
+
+/** Open-recipient (prelock) escrow: no recipient in the calldata; it is
+ *  fixed later by assign(). */
+export const buildLockNativeOpenData = (hashlock: string, timeout: number): string =>
+  htlcInterface.encodeFunctionData("lockNativeOpen", [hashlock, timeout]);
+
+export const buildLockTokenOpenData = (
+  hashlock: string,
+  token: string,
+  amount: bigint,
+  timeout: number,
+): string => htlcInterface.encodeFunctionData("lockTokenOpen", [hashlock, token, amount, timeout]);
+
+/** One-time, initiator-only recipient assignment on an open lock. */
+export const buildAssignData = (hashlock: string, recipient: string): string =>
+  htlcInterface.encodeFunctionData("assign", [hashlock, qToHex(recipient)]);
+
+/** On-demand escrow reclaim, valid only while the lock is unassigned. */
+export const buildReleaseData = (hashlock: string): string =>
+  htlcInterface.encodeFunctionData("release", [hashlock]);
 
 export const shortAddr = (addr: string): string =>
   addr.length > 12 ? `${addr.slice(0, 8)}…${addr.slice(-4)}` : addr;

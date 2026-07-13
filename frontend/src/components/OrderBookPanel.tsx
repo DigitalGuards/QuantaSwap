@@ -26,6 +26,7 @@ import {
   type EthAssetSymbol,
 } from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
+import { prelockEscrowIssue } from "@/lib/prelock";
 import type { OrderDraft } from "@/components/PostOrderCard";
 import {
   acceptOrder,
@@ -147,8 +148,36 @@ export function OrderBookPanel({
   // Set when the server refuses further takes (per-IP caps reached); blocks
   // the whole book until the caps free rather than 429-ing click by click.
   const [capBlocked, setCapBlocked] = useState(false);
+  // On-chain check of a pending pre-funded order's escrow claim. The book
+  // cannot prove funding; this reads the lock at the head before the taker
+  // burns a take slot (the hard gate stays the at-depth verification).
+  const [escrow, setEscrow] = useState<{
+    id: string;
+    status: "checking" | "verified" | "unverified";
+    issue: string | null;
+  } | null>(null);
 
   const asset = ETH_ASSETS[pair];
+
+  useEffect(() => {
+    if (!pending || pending.prelocked !== true) {
+      setEscrow(null);
+      return undefined;
+    }
+    const target = pending;
+    let stale = false;
+    setEscrow({ id: target.id, status: "checking", issue: null });
+    void prelockEscrowIssue(target, pair)
+      .then((issue) => {
+        if (!stale) setEscrow({ id: target.id, status: "verified", issue });
+      })
+      .catch(() => {
+        if (!stale) setEscrow({ id: target.id, status: "unverified", issue: null });
+      });
+    return () => {
+      stale = true;
+    };
+  }, [pending, pair]);
 
   const refresh = useCallback(async () => {
     try {
@@ -212,6 +241,10 @@ export function OrderBookPanel({
           orderId: accepted.id,
           takerToken,
           shareToken: null,
+          // Book's word only; the machine treats it as a rendering hint
+          // (assign step instead of a lock step) and every fund-moving
+          // gate still verifies the escrow on-chain at depth.
+          ...(accepted.prelocked === true ? { prelocked: true } : {}),
           direction: accepted.direction,
           // The asset the taker agreed to is the displayed pair, anchored
           // client-side; on-chain token verification runs against this,
@@ -332,6 +365,14 @@ export function OrderBookPanel({
               yours
             </span>
           ) : null}
+          {row.order.prelocked === true ? (
+            <span
+              className="ml-1.5 rounded-sm bg-success/15 px-1 py-px text-[10px] font-medium text-success"
+              title="The maker escrowed funds at post time; verified on-chain before you commit"
+            >
+              funded
+            </span>
+          ) : null}
         </span>
         <span className="relative text-foreground/90">{fmtAmount(row.totalQrl, 18)}</span>
         <span className="relative text-muted-foreground">
@@ -380,8 +421,8 @@ export function OrderBookPanel({
       <CardContent className="space-y-0 px-3 pb-3">
         {capBlocked ? (
           <div className="mx-2 mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-xs text-amber-400">
-            You have reached the per-visitor take limit (2 swaps at once, 6 per day). Finish or let
-            your current swaps expire before taking another.
+            You have reached the per-visitor take limit (4 swaps at once, 24 per day). Finish or
+            let your current swaps expire before taking another.
           </div>
         ) : null}
 
@@ -403,12 +444,43 @@ export function OrderBookPanel({
                 </p>
               );
             })()}
+            {pending.prelocked === true && escrow?.id === pending.id ? (
+              escrow.status === "checking" ? (
+                <p className="text-xs text-muted-foreground">
+                  Verifying the pre-funded escrow on-chain…
+                </p>
+              ) : escrow.issue !== null ? (
+                <p className="text-xs text-destructive">
+                  Pre-funded escrow check failed: {escrow.issue}. Taking is blocked; the listing
+                  is not what it claims.
+                </p>
+              ) : escrow.status === "unverified" ? (
+                <p className="text-xs text-amber-400">
+                  Could not verify the pre-funded escrow right now. You can still take: nothing
+                  moves from your side before your client re-verifies it on-chain.
+                </p>
+              ) : (
+                <p className="text-xs text-success">
+                  Pre-funded escrow verified on-chain: the maker&apos;s funds are already locked.
+                </p>
+              )
+            ) : null}
             <p className="text-xs text-muted-foreground">
-              Confirming reserves this order and the maker starts locking their leg. It counts
-              toward your daily take allowance whether or not you complete it.
+              {pending.prelocked === true
+                ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
+                : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" disabled={!canTake} onClick={confirmTake}>
+              <Button
+                size="sm"
+                disabled={
+                  !canTake ||
+                  (pending.prelocked === true &&
+                    escrow?.id === pending.id &&
+                    escrow.issue !== null)
+                }
+                onClick={confirmTake}
+              >
                 Confirm take
               </Button>
               {onPrefill ? (
