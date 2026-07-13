@@ -83,14 +83,6 @@ const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// A getLegState read of `None` cannot distinguish "the lock never
-// broadcast" from "the lock is broadcast but not yet mined" (an eth_call
-// at head sees no mempool). QRL inclusion runs up to ~a minute; until a
-// staged record is at least this old, a None reading must NOT be treated
-// as proof the escrow is dead, or a discard could delete the only copy of
-// the hashlock while the lock is still landing into a 48h open escrow.
-const PENDING_LOCK_HORIZON_S = 5 * 60;
-
 /** Poll until the escrow is visible Open at the head. Sepolia includes in
  *  ~12s, QRL in up to about a minute; two minutes of patience covers both
  *  with slack, and a timeout is recoverable (the staging record survives). */
@@ -132,6 +124,11 @@ export function PostOrderCard({
   const [stageLabel, setStageLabel] = useState<string | null>(null);
   /** Interrupted pre-funded post (escrow possibly on-chain, no order). */
   const [staged, setStaged] = useState<PrelockStage | null>(() => loadPrelockStage());
+  /** A chain read for the staged record just returned None (no escrow yet).
+   *  Reveals the explicit discard override: the record can only be dropped
+   *  here by a warned user, never automatically, since a None reading
+   *  cannot distinguish a rejected lock from one still confirming. */
+  const [noEscrowSeen, setNoEscrowSeen] = useState(false);
 
   const sendOnLeg = useMemo(
     () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
@@ -270,6 +267,7 @@ export function PostOrderCard({
         };
         savePrelockStage(stage);
         setStaged(stage);
+        setNoEscrowSeen(false);
         if (leg === "eth" && asset.address !== null) {
           await sendEthTokenLock({
             send: sendOnLeg,
@@ -346,14 +344,12 @@ export function PostOrderCard({
     try {
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.None) {
-        // Could be a still-pending lock (head reads cannot see the
-        // mempool). Never suggest discarding within the inclusion window.
-        const stillPending =
-          Math.floor(Date.now() / 1000) - staged.createdAt < PENDING_LOCK_HORIZON_S;
+        // A None reading cannot see the mempool, so it cannot tell a
+        // rejected lock from one still confirming. Never clear the record
+        // here; reveal the explicit discard override instead.
+        setNoEscrowSeen(true);
         throw new Error(
-          stillPending
-            ? "the escrow is not on-chain yet; if you just posted, wait a minute for it to confirm, then retry"
-            : "no escrow confirmed on-chain for this record; if you approved the lock in your wallet, wait for it to mine before retrying",
+          "no escrow is on-chain under this record yet: if you approved the lock, wait for it to confirm and retry; if you rejected it, use Discard record below",
         );
       }
       if (state.status !== SwapStatus.Open) {
@@ -386,19 +382,23 @@ export function PostOrderCard({
           if (i === 39) throw new Error("release not confirmed yet; try again shortly");
           await sleep(3000);
         }
-      } else if (state.status === SwapStatus.None) {
-        // A None reading is not proof the lock is dead: a broadcast lock
-        // sits pending, invisible to a head read, and would mine into an
-        // untracked 48h escrow if we deleted the record now. Refuse to
-        // discard until the inclusion window has safely passed.
-        if (Math.floor(Date.now() / 1000) - staged.createdAt < PENDING_LOCK_HORIZON_S) {
-          throw new Error(
-            "the escrow may still be confirming: if you approved the lock, wait a minute so it cannot mine after this record is gone, then retry",
-          );
-        }
+        // Escrow provably released (funds back in the wallet): record dead.
+        clearPrelockStage();
+        setStaged(null);
+        return;
       }
-      // Released above, already settled, or a None old enough that no lock
-      // can still be in flight: the record is safe to discard.
+      if (state.status === SwapStatus.None) {
+        // The lock is not on-chain. It may be rejected/never-sent, or it
+        // may be broadcast and still confirming (a head read cannot see
+        // the mempool, and a pending tx has no inclusion deadline). We
+        // cannot tell, so we must NOT delete the record here: reveal the
+        // explicit, warned discard override instead.
+        setNoEscrowSeen(true);
+        throw new Error(
+          "no escrow is on-chain under this record: if you approved the lock, it may still be confirming, so wait and retry; if you rejected it, use Discard record below",
+        );
+      }
+      // Already settled (Claimed/Refunded): nothing at stake, record dead.
       clearPrelockStage();
       setStaged(null);
     } catch (err) {
@@ -407,6 +407,42 @@ export function PostOrderCard({
       setBusy(false);
       setStageLabel(null);
     }
+  };
+
+  /** Explicit override: drop a staging record whose escrow reads None.
+   *  Re-checks the chain first and refuses if an escrow has since appeared
+   *  (use Release then); otherwise the warned user consciously accepts the
+   *  residual risk that a still-pending lock could mine after the record is
+   *  gone. This is the ONLY path that clears a record on a None reading. */
+  const discardStagedRecord = () => {
+    if (!staged) return;
+    if (
+      !window.confirm(
+        "Discard this record? Only do this if you rejected or never sent the lock transaction. " +
+          "If a lock is still confirming, discarding now strands those funds until the 48h timeout " +
+          "and you would have to recover the hashlock from your wallet history. Discard anyway?",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      const state = await getLegState(staged.leg, staged.hashlock);
+      if (state.status === SwapStatus.Open) {
+        setNoEscrowSeen(false);
+        throw new Error(
+          "an escrow is on-chain after all: use Release escrow to reclaim it, do not discard",
+        );
+      }
+      clearPrelockStage();
+      setStaged(null);
+      setNoEscrowSeen(false);
+    })()
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to discard the record");
+      })
+      .finally(() => setBusy(false));
   };
 
   const assetPicker = (
@@ -503,6 +539,16 @@ export function PostOrderCard({
               <Button size="sm" variant="outline" disabled={busy} onClick={() => void releaseStaged()}>
                 {busy && stageLabel !== null ? `${stageLabel}…` : "Release escrow"}
               </Button>
+              {noEscrowSeen ? (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={busy}
+                  onClick={() => discardStagedRecord()}
+                >
+                  Discard record
+                </Button>
+              ) : null}
             </div>
           </div>
         ) : null}
