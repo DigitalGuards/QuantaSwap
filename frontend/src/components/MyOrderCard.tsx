@@ -9,6 +9,7 @@ import {
   RESPONDER_TIMEOUT_S,
 } from "@/config";
 import {
+  clearActiveSwap,
   clearMyOrder,
   loadActiveSwap,
   saveActiveSwap,
@@ -185,7 +186,12 @@ export function MyOrderCard({
           const after = await getOrder(current.id, myOrder.shareToken ?? undefined);
           if (after.status === "open") {
             // The taker released before we announced; nothing published,
-            // the listing is back on the book. Keep waiting.
+            // the listing is back on the book. Drop the provisional swap
+            // record (its responder window would be stale by the time the
+            // next taker arrives; nothing on-chain references it, and a
+            // pre-funded order's secret lives in the order handle) and
+            // keep waiting.
+            clearActiveSwap();
             matching.current = false;
             return;
           }
