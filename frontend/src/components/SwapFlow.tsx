@@ -240,6 +240,14 @@ export function SwapFlow({
   const rCfg = legByKey(rLeg);
   const iState = legs[iLeg];
   const rState = legs[rLeg];
+  // A prelocked maker's escrow is Open from the first render, but `legs`
+  // starts empty and stays empty through an RPC outage (refresh swallows
+  // errors). Until a successful read proves otherwise, treat the initiator
+  // leg as possibly-live and refuse to discard: an unknown state must fail
+  // closed, or the maker could delete the only copy of the hashlock while
+  // the escrow is still Open. Once loaded, an Open escrow flows into
+  // ownLockedLegs (warning + release) and a settled one frees the discard.
+  const prelockChainUnknown = swap.prelocked === true && swap.role === "maker" && iState === undefined;
   const ethAsset = ETH_ASSETS[swap.ethAsset];
   const iPlan = legPlan[iLeg];
   const rPlan = legPlan[rLeg];
@@ -563,6 +571,11 @@ export function SwapFlow({
               {releasableLegs.length > 0
                 ? "Release it below before discarding: discarding deletes the hashlock the escrow needs."
                 : "Refund it below once the timeout opens before discarding: discarding now deletes the hashlock this swap needs to refund."}
+            </span>
+          ) : prelockChainUnknown ? (
+            <span className="max-w-[60%] text-right text-xs text-amber-400">
+              Checking your pre-funded escrow on-chain before allowing discard. If your funds are
+              still locked, a Release button appears here.
             </span>
           ) : (
             <Button

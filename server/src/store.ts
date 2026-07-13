@@ -106,6 +106,12 @@ const DEFAULT_PRESENCE_TTL_S = 90;
 const MAX_CONCURRENT_TAKES_PER_IP = 4;
 const MAX_TAKES_PER_IP_PER_DAY = 24;
 const TAKE_WINDOW_S = 24 * 3600;
+// How long a locking-phase take holds a concurrency slot, measured from
+// accept. A swap can only be in flight for the responder window (1h) plus
+// claim margins; 2h matches the classic T1 (announce + 2h) so classic
+// behavior is unchanged, while a prelocked order's fixed multi-day T1 no
+// longer pins the slot long after the swap settled.
+const LOCKING_SLOT_HORIZON_S = 2 * 3600;
 
 // Pre-funded (prelocked) listings: the T1 window accepted at create, and
 // the remaining-runway floor under which they stop being takeable. The
@@ -450,18 +456,23 @@ export class OrderStore {
     const ipHash = sha256Hex(takerIp);
     const mine = [...this.orders.values()].filter((o) => o.acceptorIpHash === ipHash);
     // A take counts as "in progress" while the taker can still act: the whole
-    // accepted phase, and the locking phase only until the initiator timeout.
-    // Past T1 every claim window has closed and the swap is decided on-chain
-    // (refund-only), but the coordination-only book never learns the outcome,
-    // so counting those (they linger ~24h for audit) would eat a concurrency
-    // slot for a day even after a SUCCESSFUL swap. Released takes (the taker
-    // walked away and said so) never count.
+    // accepted phase, and the locking phase only within the swap horizon.
+    // For a classic order T1 = announce + 2h already bounds that; a prelocked
+    // order's T1 is fixed at post (up to 72h out), so counting until T1 would
+    // pin a slot for days after a completed-but-unreleased prelocked take.
+    // Cap the locking horizon at min(T1, acceptedAt + LOCKING_SLOT_HORIZON_S):
+    // classic orders are unaffected (that min is essentially T1), prelocked
+    // orders free the slot once the swap can no longer be in flight. Past the
+    // horizon the swap is decided on-chain (refund-only) and the coordination
+    // book never learns the outcome. Released takes never count.
+    const lockingSlotActive = (o: Order): boolean => {
+      if (o.status !== "locking") return false;
+      const t1 = o.initiatorTimeout ?? Number.POSITIVE_INFINITY;
+      const horizon = Math.min(t1, (o.acceptedAt ?? now) + LOCKING_SLOT_HORIZON_S);
+      return now <= horizon;
+    };
     const concurrent = mine.filter(
-      (o) =>
-        o.releasedAt === undefined &&
-        (o.status === "accepted" ||
-          (o.status === "locking" &&
-            (o.initiatorTimeout === null || now <= o.initiatorTimeout))),
+      (o) => o.releasedAt === undefined && (o.status === "accepted" || lockingSlotActive(o)),
     ).length;
     if (concurrent >= MAX_CONCURRENT_TAKES_PER_IP) {
       throw new ApiError(429, "you already have swaps in progress; finish or let them expire");

@@ -285,11 +285,12 @@ export function MyOrderCard({
     setBusy(true);
     setError(null);
     void (async () => {
-      try {
-        await cancelOrder(myOrder.id, myOrder.token);
-      } catch (err) {
-        if (!(err instanceof OrderGoneError)) throw err;
-      }
+      // Best-effort delist. release() needs nothing from the book, so a
+      // book outage (or a hostile 5xx) must not block the on-chain reclaim:
+      // swallow every cancel error and proceed. A stale listing is harmless
+      // (takers re-verify the escrow on-chain; a released lock can never be
+      // assigned).
+      await cancelOrder(myOrder.id, myOrder.token).catch(() => undefined);
       const state = await getLegState(pre.leg, pre.hashlock);
       if (state.status === SwapStatus.Open) {
         await sendOnLeg(pre.leg, buildReleaseData(pre.hashlock), 0n);
@@ -401,16 +402,28 @@ export function MyOrderCard({
           <div className="space-y-2">
             <p className="text-sm text-destructive">{error}</p>
             {order?.status === "accepted" ? (
-              <Button
-                size="sm"
-                disabled={busy}
-                onClick={() => {
-                  matching.current = false;
-                  void startSwap(order);
-                }}
-              >
-                Retry
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => {
+                    matching.current = false;
+                    void startSwap(order);
+                  }}
+                >
+                  Retry
+                </Button>
+                {/* A prelocked match can wedge here (e.g. the runway floor
+                    was crossed between accept and this poll, so startSwap
+                    throws every time). Release stays legal until assign, so
+                    give the maker the escape the error tells them to use
+                    even though the accepted state hides the normal one. */}
+                {myOrder.prelock !== null ? (
+                  <Button size="sm" variant="outline" disabled={busy} onClick={releaseEscrow}>
+                    Release escrow &amp; cancel
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}

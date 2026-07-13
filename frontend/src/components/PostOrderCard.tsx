@@ -83,6 +83,14 @@ const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// A getLegState read of `None` cannot distinguish "the lock never
+// broadcast" from "the lock is broadcast but not yet mined" (an eth_call
+// at head sees no mempool). QRL inclusion runs up to ~a minute; until a
+// staged record is at least this old, a None reading must NOT be treated
+// as proof the escrow is dead, or a discard could delete the only copy of
+// the hashlock while the lock is still landing into a 48h open escrow.
+const PENDING_LOCK_HORIZON_S = 5 * 60;
+
 /** Poll until the escrow is visible Open at the head. Sepolia includes in
  *  ~12s, QRL in up to about a minute; two minutes of patience covers both
  *  with slack, and a timeout is recoverable (the staging record survives). */
@@ -229,7 +237,12 @@ export function PostOrderCard({
       }
 
       if (prefund) {
-        if (staged) {
+        // Re-read from storage, not just in-memory state: another tab may
+        // have staged a pre-funded post since this card mounted, and its
+        // record holds an escrow's only preimage. Never overwrite it.
+        const existing = staged ?? loadPrelockStage();
+        if (existing) {
+          setStaged(existing);
           throw new Error(
             "an earlier pre-funded post is still unresolved; finish or release it first (banner above)",
           );
@@ -333,8 +346,14 @@ export function PostOrderCard({
     try {
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.None) {
+        // Could be a still-pending lock (head reads cannot see the
+        // mempool). Never suggest discarding within the inclusion window.
+        const stillPending =
+          Math.floor(Date.now() / 1000) - staged.createdAt < PENDING_LOCK_HORIZON_S;
         throw new Error(
-          "no escrow found on-chain for this record (the lock never confirmed); release below discards it",
+          stillPending
+            ? "the escrow is not on-chain yet; if you just posted, wait a minute for it to confirm, then retry"
+            : "no escrow confirmed on-chain for this record; if you approved the lock in your wallet, wait for it to mine before retrying",
         );
       }
       if (state.status !== SwapStatus.Open) {
@@ -367,8 +386,19 @@ export function PostOrderCard({
           if (i === 39) throw new Error("release not confirmed yet; try again shortly");
           await sleep(3000);
         }
+      } else if (state.status === SwapStatus.None) {
+        // A None reading is not proof the lock is dead: a broadcast lock
+        // sits pending, invisible to a head read, and would mine into an
+        // untracked 48h escrow if we deleted the record now. Refuse to
+        // discard until the inclusion window has safely passed.
+        if (Math.floor(Date.now() / 1000) - staged.createdAt < PENDING_LOCK_HORIZON_S) {
+          throw new Error(
+            "the escrow may still be confirming: if you approved the lock, wait a minute so it cannot mine after this record is gone, then retry",
+          );
+        }
       }
-      // None (never landed) or settled either way: the record is dead.
+      // Released above, already settled, or a None old enough that no lock
+      // can still be in flight: the record is safe to discard.
       clearPrelockStage();
       setStaged(null);
     } catch (err) {
@@ -460,7 +490,14 @@ export function PostOrderCard({
               wallet. This record holds the swap secret; it is kept until you do one of the two.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" disabled={busy || !ready} onClick={() => void resumeStagedPost()}>
+              {/* Resume lists from the staged record's own terms, not the
+                  form, so it gates on the wallets alone: the form is empty
+                  after a crash and would otherwise disable the button. */}
+              <Button
+                size="sm"
+                disabled={busy || !ethAccount || !qrlAccount}
+                onClick={() => void resumeStagedPost()}
+              >
                 Finish posting
               </Button>
               <Button size="sm" variant="outline" disabled={busy} onClick={() => void releaseStaged()}>
@@ -525,8 +562,9 @@ export function PostOrderCard({
             <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-xs leading-relaxed text-muted-foreground">
               Your {fromSymbol} goes into the HTLC escrow immediately (recipient unset), so the
               listing is provably funded and your only step at match time is one cheap assignment
-              transaction. Until a taker is assigned you can reclaim the escrow on demand; if you
-              lose this browser&apos;s storage, the chain refunds it automatically after 48h.
+              transaction. Until a taker is assigned you can reclaim the escrow on demand; even if
+              you lose this browser&apos;s data, the escrow stays yours and becomes reclaimable
+              on-chain after the 48h timeout (from the lock transaction in your wallet history).
             </p>
           ) : null}
           <label className="flex cursor-pointer items-center gap-2 text-sm">
