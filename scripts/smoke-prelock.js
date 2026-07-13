@@ -96,7 +96,11 @@ async function makeDriver() {
 async function main() {
   const drv = await makeDriver();
   const dust = 1000n;
-  const ZERO = `0x${"0".repeat(40)}`;
+  // The two legs' web3 stacks return an `address` field with different
+  // prefixes (ethers 0x-hex, @theqrl/web3 Q/Z-prefixed), so compare on the
+  // bare 40 hex chars only.
+  const bare = (a) => a.replace(/^(0x|0z|Q|Z)/i, "").toLowerCase();
+  const ZERO = "0".repeat(40);
   console.log(`[smoke-prelock] leg ${leg}, account ${drv.address}, htlc ${htlcAddress}`);
 
   // Round trip: open lock -> assign(self) -> claim.
@@ -106,14 +110,15 @@ async function main() {
   await drv.send("lockNativeOpen", [a.hashlock, timeout], dust);
   let swap = await drv.getSwap(a.hashlock);
   if (swap.status !== 1n) throw new Error(`expected Open(1), got ${swap.status}`);
-  if (swap.recipient.toLowerCase() !== ZERO) throw new Error("recipient not unset");
+  if (bare(swap.recipient) !== ZERO) throw new Error(`recipient not unset: ${swap.recipient}`);
 
   console.log("[smoke-prelock] assign self");
-  // The QRL leg stores hex addresses; Q-prefix strips to hex for calldata.
-  const selfHex = drv.address.startsWith("Q") ? `0x${drv.address.slice(1)}` : drv.address;
-  await drv.send("assign", [a.hashlock, selfHex]);
+  // Pass the wallet's native address form: @theqrl/web3 validates `address`
+  // params as Q/Z-prefixed and rejects 0x-hex; ethers wants 0x. drv.address
+  // is already the right form for each leg.
+  await drv.send("assign", [a.hashlock, drv.address]);
   swap = await drv.getSwap(a.hashlock);
-  if (swap.recipient.toLowerCase() !== selfHex.toLowerCase()) throw new Error("assign did not set recipient");
+  if (bare(swap.recipient) !== bare(drv.address)) throw new Error("assign did not set recipient");
 
   console.log("[smoke-prelock] claim with preimage");
   await drv.send("claim", [a.hashlock, a.preimage]);
