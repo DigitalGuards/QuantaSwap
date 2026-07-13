@@ -35,6 +35,7 @@ import {
 } from "@/lib/htlc";
 import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
+import { errorMessage, isUserRejection } from "@/utils/errorMessage";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
@@ -268,29 +269,41 @@ export function PostOrderCard({
         savePrelockStage(stage);
         setStaged(stage);
         setNoEscrowSeen(false);
-        if (leg === "eth" && asset.address !== null) {
-          await sendEthTokenLock({
-            send: sendOnLeg,
-            ethAccount,
-            token: asset.address,
-            symbol: asset.symbol,
-            amount: fromUnits,
-            approvalRace: asset.quirks.approvalRace,
-            lockData: buildLockTokenOpenData(
-              secret.hashlock,
-              asset.address,
+        try {
+          if (leg === "eth" && asset.address !== null) {
+            await sendEthTokenLock({
+              send: sendOnLeg,
+              ethAccount,
+              token: asset.address,
+              symbol: asset.symbol,
+              amount: fromUnits,
+              approvalRace: asset.quirks.approvalRace,
+              lockData: buildLockTokenOpenData(
+                secret.hashlock,
+                asset.address,
+                fromUnits,
+                stage.initiatorTimeout,
+              ),
+              onStage: setStageLabel,
+            });
+          } else {
+            setStageLabel(`Lock ${fromSymbol}`);
+            await sendOnLeg(
+              leg,
+              buildLockNativeOpenData(secret.hashlock, stage.initiatorTimeout),
               fromUnits,
-              stage.initiatorTimeout,
-            ),
-            onStage: setStageLabel,
-          });
-        } else {
-          setStageLabel(`Lock ${fromSymbol}`);
-          await sendOnLeg(
-            leg,
-            buildLockNativeOpenData(secret.hashlock, stage.initiatorTimeout),
-            fromUnits,
-          );
+            );
+          }
+        } catch (lockErr) {
+          // A declined wallet signature (ACTION_REJECTED / 4001) provably
+          // never broadcast, so nothing can land on-chain: drop the staging
+          // record so the maker can simply try again, no recovery banner.
+          // Any other failure keeps the record (a broadcast may be pending).
+          if (isUserRejection(lockErr)) {
+            clearPrelockStage();
+            setStaged(null);
+          }
+          throw lockErr;
         }
         setStageLabel("Confirming the escrow on-chain");
         await waitForEscrow(leg, secret.hashlock);
@@ -328,7 +341,7 @@ export function PostOrderCard({
       saveMyOrder(ref);
       onPosted(ref);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to post order");
+      setError(errorMessage(err));
     } finally {
       setBusy(false);
       setStageLabel(null);
@@ -359,7 +372,7 @@ export function PostOrderCard({
       }
       await listStagedOrder(staged, ethAccount, qrlAccount);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to resume the post");
+      setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
@@ -402,7 +415,7 @@ export function PostOrderCard({
       clearPrelockStage();
       setStaged(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to release the escrow");
+      setError(errorMessage(err));
     } finally {
       setBusy(false);
       setStageLabel(null);
@@ -440,7 +453,7 @@ export function PostOrderCard({
       setNoEscrowSeen(false);
     })()
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "Failed to discard the record");
+        setError(errorMessage(err));
       })
       .finally(() => setBusy(false));
   };

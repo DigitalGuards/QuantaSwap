@@ -21,6 +21,7 @@ import { announceHashlock, getOrder, OrderGoneError, shareFragment, type OrderVi
 import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
 import { SwapStatus, buildReleaseData, getLegState } from "@/lib/htlc";
 import { makeLegSender } from "@/lib/legSender";
+import { errorMessage } from "@/utils/errorMessage";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
@@ -213,7 +214,7 @@ export function MyOrderCard({
         onMatched(swap);
       } catch (err) {
         matching.current = false;
-        setError(err instanceof Error ? err.message : "Failed to start the swap");
+        setError(errorMessage(err));
       } finally {
         setBusy(false);
       }
@@ -270,7 +271,7 @@ export function MyOrderCard({
           close();
           return;
         }
-        setError(err instanceof Error ? err.message : "Cancel failed");
+        setError(errorMessage(err));
       })
       .finally(() => setBusy(false));
   };
@@ -304,7 +305,7 @@ export function MyOrderCard({
       close();
     })()
       .catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : "Release failed");
+        setError(errorMessage(err));
       })
       .finally(() => setBusy(false));
   };
