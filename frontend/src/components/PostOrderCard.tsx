@@ -179,10 +179,15 @@ export function PostOrderCard({
 
   const stagedKey = staged ? `${staged.leg}:${staged.hashlock}` : null;
   useEffect(() => {
-    if (!staged) return;
+    // Probe only when the recovery banner is (about to be) visible, i.e.
+    // NOT during an active post: at post start the lock has not mined yet,
+    // so a probe would read None and leave a stale "absent" that surfaces
+    // if the post then fails after the escrow confirmed. Re-runs when the
+    // record appears or when activePost flips false (a post ended).
+    if (!staged || activePost) return;
     void probeStaged(staged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stagedKey, probeStaged]);
+  }, [stagedKey, activePost, probeStaged]);
 
   // Load an explicit draft over whatever is in the form (each request is
   // a fresh object, so the same row can be loaded twice).
@@ -410,6 +415,7 @@ export function PostOrderCard({
         // A None reading cannot see the mempool, so it cannot tell a
         // rejected lock from one still confirming. Never clear the record
         // here; reveal the explicit discard override instead.
+        setStagedChain("absent");
         setNoEscrowSeen(true);
         throw new Error(
           "no escrow is on-chain under this record yet: if you approved the lock, wait for it to confirm and retry; if you rejected it, use Discard record below",
@@ -420,6 +426,7 @@ export function PostOrderCard({
         setStaged(null);
         throw new Error("the escrow already settled; the stale record was discarded");
       }
+      setStagedChain("open");
       await listStagedOrder(staged, ethAccount, qrlAccount);
     } catch (err) {
       setError(errorMessage(err));
@@ -456,6 +463,7 @@ export function PostOrderCard({
         // the mempool, and a pending tx has no inclusion deadline). We
         // cannot tell, so we must NOT delete the record here: reveal the
         // explicit, warned discard override instead.
+        setStagedChain("absent");
         setNoEscrowSeen(true);
         throw new Error(
           "no escrow is on-chain under this record: if you approved the lock, it may still be confirming, so wait and retry; if you rejected it, use Discard record below",
@@ -493,6 +501,10 @@ export function PostOrderCard({
     void (async () => {
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.Open) {
+        // The lock mined since the banner said absent: switch the banner to
+        // the escrow-present state so the Release button the error names is
+        // actually rendered.
+        setStagedChain("open");
         setNoEscrowSeen(false);
         throw new Error(
           "an escrow is on-chain after all: use Release escrow to reclaim it, do not discard",
@@ -619,7 +631,7 @@ export function PostOrderCard({
                   {busy && stageLabel !== null ? `${stageLabel}…` : "Release escrow"}
                 </Button>
               ) : null}
-              {stagedChain === "absent" ? (
+              {stagedChain === "absent" || stagedChain === "unknown" ? (
                 <Button
                   size="sm"
                   variant="outline"
