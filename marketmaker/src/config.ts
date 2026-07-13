@@ -169,10 +169,11 @@ export function loadConfig(): Config {
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
     ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
     qrlRpcUrl: env("MM_QRL_RPC_URL", "http://127.0.0.1:8545"),
-    // 2026-07-12 redeploy: lockToken enforces received == amount on both
-    // legs (docs/DEPLOYMENTS.md).
-    ethHtlc: env("MM_ETH_HTLC", "0x31993bB91ECeD6141a1667c072f214C8DF20f7DB"),
-    qrlHtlc: env("MM_QRL_HTLC", "Qde1f2a65b0889bcb3f2ce271e8c6d1711425cf13"),
+    // 2026-07-13 redeploy: HTLCv2 open-recipient locks (assign + release) on
+    // both legs (docs/DEPLOYMENTS.md). The MM does not prelock, so its own
+    // flow is unchanged; it just points at the new addresses.
+    ethHtlc: env("MM_ETH_HTLC", "0x910D5d4a7f2037c01F3B4C835167357e89909281"),
+    qrlHtlc: env("MM_QRL_HTLC", "Q238322ad2e8f935b4481fcc379779c31b84decb0"),
     ethPrivateKey: required("MM_ETH_PRIVATE_KEY"),
     qrlHexseed: required("MM_QRL_HEXSEED"),
     ordersPerDirection,

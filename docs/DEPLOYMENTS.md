@@ -1,6 +1,45 @@
 # Deployments
 
-## Testnet, 2026-07-12 (stablecoin artifact, CURRENT)
+## Testnet, 2026-07-13 (HTLCv2 open-recipient locks / prelock, CURRENT)
+
+One hypc-compiled artifact deployed to both chains, byte-identical runtime (4136 bytes).
+Adds open-recipient locks over the 2026-07-12 artifact: `lockNativeOpen` / `lockTokenOpen`
+(escrow with the recipient unset), one-time initiator-only `assign(hashlock, recipient)`, and
+initiator-only `release(hashlock)` while unassigned; `claim` now reverts `NotAssigned` on an
+unassigned lock. Classic entrypoints and settled-swap semantics are byte-for-byte unchanged.
+
+| Leg | Chain | Contract | Address | Deploy tx |
+|---|---|---|---|---|
+| QRL | QRL v2 testnet (1337) | HTLC | `Q238322ad2e8f935b4481fcc379779c31b84decb0` | `0x4f670352c0651362dfafe49786f27dc981175579739dddf83c2cb2411218e6e4` |
+| Ethereum | Sepolia (11155111) | HTLC | `0x910D5d4a7f2037c01F3B4C835167357e89909281` | `0x04d80973404a491c6bb883179f56012423ccd92bda9874a4812e6fa6904211a9` |
+
+The tUSDT faucet (`0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0`, Sepolia) is a separate contract,
+unchanged by this redeploy and carried forward. Deployers unchanged:
+`Q6153d37Fa4DA7193E6219DCBd2bBe62Fa12905b1` (QRL leg),
+`0x035F07bCb487E51547417dEC7664b013a11Ef234` (Sepolia leg).
+
+### Post-deploy smokes, 2026-07-13
+
+Native lock -> claim on both legs, plus the v2 surface (open-lock -> assign -> claim, and
+open-lock -> release), status/preimage/balances verified on-chain.
+
+| Path | Tx |
+|---|---|
+| QRL native claim (0.001 QRL) | `0x14c2d2b9fe0ac104cb904d975a6c73d04c27781112be49dc9d3a7298297b081f` |
+| Sepolia native claim (1000 wei) | `0x84e20696b860e55e701941d31082a6fdb2ea6f32552bbf5ae10fd388dc57bebb` |
+| QRL prelock: assign -> claim | `0x65b4ef7ecca81412737fc65c5df9bdab68629e9fd3e69736b7d5934e7a1df988` |
+| QRL prelock: open -> release | `0x2b526c371dd9af3f588478f2da528e6a77fd7692eda076801bd438df65ecb705` |
+| Sepolia prelock: open -> release | `0x009d8459d5e7f8bd8d78ae499f7bd670c7b156578093e776c0f5a663b114e66f` |
+
+```bash
+node scripts/smoke-qrl.js Q238322ad2e8f935b4481fcc379779c31b84decb0
+node scripts/smoke-eth.js 0x910D5d4a7f2037c01F3B4C835167357e89909281
+node scripts/smoke-prelock.js qrl Q238322ad2e8f935b4481fcc379779c31b84decb0
+node scripts/smoke-prelock.js eth 0x910D5d4a7f2037c01F3B4C835167357e89909281
+node scripts/smoke-eth-erc20.js 0x910D5d4a7f2037c01F3B4C835167357e89909281 0x027847Dc41C7a3198a28B9c7B27B5a0BC5bD23A0  # tUSDT
+```
+
+## Testnet, 2026-07-12 (stablecoin artifact, superseded 2026-07-13; HTLC only)
 
 One hypc-compiled artifact deployed to both chains, byte-identical runtime (3088 bytes).
 Compiler: native `hypc` 0.2.0-develop.2026.4.13+commit.d5d1b977, optimizer enabled, 200 runs.
