@@ -81,6 +81,33 @@ A taker can also walk away: pre-lock their release relists your order
 untouched; post-lock the order shows `released: true`, meaning commit no
 further funds and take the refund path if you already locked.
 
+## Pre-funded listings (prelock)
+
+Instead of locking at match time, a maker may escrow up front with the HTLC's
+open-recipient lock (`lockNativeOpen`/`lockTokenOpen`, recipient unset) and
+list with `prelock: { hashlock, initiatorTimeout }` (see
+[ORDERBOOK_API.md](ORDERBOOK_API.md#pre-funded-prelocked-orders)). The browser
+flow is the *Pre-fund* checkbox on the post card. What changes:
+
+- your listing is provably funded (takers verify the escrow on-chain before
+  reserving), and your only match-time transaction is a one-time
+  `assign(hashlock, taker)`;
+- you can reclaim the escrow **on demand** with `release(hashlock)` at any
+  moment before assigning; after assign, the escrow behaves exactly like a
+  classic lock (refund only at T1);
+- the escrow's T1 is fixed at post (the frontend uses 48 h, matching the
+  listing TTL), and the book stops offering the order once less than 2 h 30 m
+  of runway remains: release and relist at that point;
+- order of operations at match is announce first, assign second, and **never
+  assign while the shared hashlock already exists on the responder chain**
+  (a dust-cost squat there would strand your escrow until T1: release and
+  relist with a fresh secret instead). Never reveal the secret while your own
+  escrow is unassigned.
+
+The reference market maker intentionally does **not** prelock: it is always
+online, so lock-at-match costs its takers nothing, and unfunded listings keep
+its inventory fungible across the whole ladder instead of parked per rung.
+
 ## Safety rules (non-negotiable)
 
 These mirror the repo's core invariants; a maker that skips them is the one at
@@ -101,7 +128,7 @@ risk:
 
 ## Operational notes
 
-- **Rate limits** (per IP): 720 reads + 120 mutations per minute; heartbeats
+- **Rate limits** (per IP): 1440 reads + 120 mutations per minute; heartbeats
   count as reads. Budget roughly two reads per open listing per tick when
   sizing a ladder. Full numbers in
   [ORDERBOOK_API.md](ORDERBOOK_API.md#rate-limits).
