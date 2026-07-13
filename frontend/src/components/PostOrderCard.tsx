@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatUnits, parseUnits } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { ArrowDownUp, BookPlus } from "lucide-react";
@@ -130,11 +130,59 @@ export function PostOrderCard({
    *  here by a warned user, never automatically, since a None reading
    *  cannot distinguish a rejected lock from one still confirming. */
   const [noEscrowSeen, setNoEscrowSeen] = useState(false);
+  /** On-chain status of the staged escrow, probed when the recovery banner
+   *  appears so it can lead with the RIGHT action (release a real escrow vs
+   *  discard a rejected one) instead of making the maker click Release to
+   *  discover there is nothing there. `absent` == None (not proof the lock
+   *  is dead; a pending broadcast also reads None). */
+  const [stagedChain, setStagedChain] = useState<
+    "checking" | "open" | "absent" | "unknown"
+  >("checking");
+  /** True while a fresh pre-fund post is actively running (lock + confirm +
+   *  list). Suppresses the recovery banner so an in-flight post does not
+   *  flash a "no escrow, discard?" prompt while its own lock is still
+   *  landing; the banner is a recovery affordance for an INTERRUPTED post. */
+  const [activePost, setActivePost] = useState(false);
 
   const sendOnLeg = useMemo(
     () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
+
+  // Probe the staged escrow when a recovery record is present. A settled
+  // escrow (already released/refunded) is safe to auto-clear; Open means
+  // real funds to finish or release; None (absent) leads with discard but
+  // never auto-clears (a pending lock also reads None). Re-runs when the
+  // record identity changes, and on the banner's Re-check button.
+  const probeStaged = useCallback(
+    async (rec: PrelockStage) => {
+      setStagedChain("checking");
+      try {
+        const s = await getLegState(rec.leg, rec.hashlock);
+        if (s.status === SwapStatus.Open) setStagedChain("open");
+        else if (s.status === SwapStatus.None) {
+          setStagedChain("absent");
+          setNoEscrowSeen(true);
+        } else {
+          // Claimed/Refunded: an unassigned staged escrow can only reach a
+          // terminal state by release/refund, so the funds are already
+          // back with the maker. Safe to drop the record.
+          clearPrelockStage();
+          setStaged(null);
+        }
+      } catch {
+        setStagedChain("unknown");
+      }
+    },
+    [],
+  );
+
+  const stagedKey = staged ? `${staged.leg}:${staged.hashlock}` : null;
+  useEffect(() => {
+    if (!staged) return;
+    void probeStaged(staged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagedKey, probeStaged]);
 
   // Load an explicit draft over whatever is in the form (each request is
   // a fresh object, so the same row can be loaded twice).
@@ -269,6 +317,7 @@ export function PostOrderCard({
         savePrelockStage(stage);
         setStaged(stage);
         setNoEscrowSeen(false);
+        setActivePost(true);
         try {
           if (leg === "eth" && asset.address !== null) {
             await sendEthTokenLock({
@@ -345,6 +394,7 @@ export function PostOrderCard({
     } finally {
       setBusy(false);
       setStageLabel(null);
+      setActivePost(false);
     }
   };
 
@@ -531,28 +581,55 @@ export function PostOrderCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {staged ? (
+        {staged && !activePost ? (
           <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
             <p className="text-xs leading-relaxed text-amber-400">
-              An earlier pre-funded post was interrupted with {stagedAmount ?? "funds"} escrowed
-              (or escrowing) on-chain. Finish listing it, or release the escrow back to your
-              wallet. This record holds the swap secret; it is kept until you do one of the two.
+              {stagedChain === "checking"
+                ? "Checking a pre-funded post that did not finish…"
+                : stagedChain === "open"
+                  ? `A pre-funded post did not finish, but your ${stagedAmount ?? "funds"} is escrowed on-chain. Finish listing it, or release the escrow back to your wallet.`
+                  : stagedChain === "absent"
+                    ? "A pre-funded post did not finish and no escrow is on-chain. If you rejected or never sent the lock, discard this record. If you just approved it, it may still be confirming: re-check in a moment."
+                    : `A pre-funded post did not finish (${stagedAmount ?? "funds"}). Re-check the escrow on-chain, then finish listing it or release it.`}{" "}
+              This record holds the swap secret; it is kept until you resolve it.
             </p>
             <div className="flex flex-wrap gap-2">
-              {/* Resume lists from the staged record's own terms, not the
-                  form, so it gates on the wallets alone: the form is empty
-                  after a crash and would otherwise disable the button. */}
-              <Button
-                size="sm"
-                disabled={busy || !ethAccount || !qrlAccount}
-                onClick={() => void resumeStagedPost()}
-              >
-                Finish posting
-              </Button>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => void releaseStaged()}>
-                {busy && stageLabel !== null ? `${stageLabel}…` : "Release escrow"}
-              </Button>
-              {noEscrowSeen ? (
+              {/* Adapt to the probed chain state: lead with Release only when
+                  an escrow really exists, and with Discard when the lock is
+                  absent, instead of making the maker click Release to find
+                  out there is nothing there. Resume lists from the staged
+                  record's own terms (not the emptied form), so it gates on
+                  the wallets alone. */}
+              {stagedChain === "open" || stagedChain === "unknown" ? (
+                <Button
+                  size="sm"
+                  disabled={busy || !ethAccount || !qrlAccount}
+                  onClick={() => void resumeStagedPost()}
+                >
+                  Finish posting
+                </Button>
+              ) : null}
+              {stagedChain === "open" || stagedChain === "unknown" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void releaseStaged()}
+                >
+                  {busy && stageLabel !== null ? `${stageLabel}…` : "Release escrow"}
+                </Button>
+              ) : null}
+              {stagedChain === "absent" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => staged && void probeStaged(staged)}
+                >
+                  Re-check
+                </Button>
+              ) : null}
+              {noEscrowSeen && stagedChain !== "open" ? (
                 <Button
                   size="sm"
                   variant="destructive"
