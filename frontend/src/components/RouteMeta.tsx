@@ -10,6 +10,7 @@ const TITLES: Record<string, string> = {
   "/": DEFAULT_TITLE,
   "/how-it-works": "How it works | QuantaSwap",
   "/sandbox": "Sandbox | QuantaSwap",
+  "/legal": "Legal notice | QuantaSwap",
 };
 
 export function RouteMeta() {
