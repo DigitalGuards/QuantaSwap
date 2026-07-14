@@ -16,6 +16,7 @@ import { WalletPickerModal } from "@/components/WalletPickerModal";
 import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
+import { LegalPage } from "@/pages/LegalPage";
 import { SwapStatusPage } from "@/pages/SwapStatusPage";
 import { PrivateOrderPage } from "@/pages/PrivateOrderPage";
 
@@ -53,6 +54,7 @@ export default function App() {
             element={<SandboxPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
           />
           <Route path="/how-it-works" element={<HowItWorksPage />} />
+          <Route path="/legal" element={<LegalPage />} />
           <Route
             path="/swap/:hashlock"
             element={<SwapStatusPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}

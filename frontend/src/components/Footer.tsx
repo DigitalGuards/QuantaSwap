@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { GITHUB_URL } from "@/config";
 
 export function Footer() {
@@ -18,6 +19,9 @@ export function Footer() {
           <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="hover:text-foreground">
             GitHub
           </a>
+          <Link to="/legal" className="hover:text-foreground">
+            Legal
+          </Link>
         </div>
       </div>
     </footer>
