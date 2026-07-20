@@ -74,7 +74,7 @@ function LegCard({
     // render as any known asset: it shows raw base units plus the
     // truncated token address instead.
     if (sameAddr(snapshot.token, NATIVE_TOKEN)) {
-      rows.push(["Amount", `${formatUnits(snapshot.amount, 18)} ${cfg.asset}`]);
+      rows.push(["Amount", `${formatUnits(snapshot.amount, 18)} ${cfg.display}`]);
     } else {
       const known = leg === "eth" ? ethAssetByAddress(snapshot.token) : null;
       if (known !== null) {

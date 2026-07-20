@@ -93,9 +93,9 @@ function describeTake(
   const sellsAsset = order.direction === "eth->qrl";
   return {
     send: fmtAmount(BigInt(order.toAmount), sellsAsset ? 18 : asset.decimals),
-    sendAsset: sellsAsset ? QRL_LEG.asset : asset.symbol,
+    sendAsset: sellsAsset ? QRL_LEG.display : asset.symbol,
     recv: fmtAmount(BigInt(order.fromAmount), sellsAsset ? asset.decimals : 18),
-    recvAsset: sellsAsset ? asset.symbol : QRL_LEG.asset,
+    recvAsset: sellsAsset ? asset.symbol : QRL_LEG.display,
   };
 }
 
@@ -325,8 +325,8 @@ export function OrderBookPanel({
     const depth = maxCum > 0n ? Number((row.cumUnits * 1000n) / maxCum) / 10 : 0;
     // Taking an ask buys QRL: the taker sends the quote asset. Taking a
     // bid sells QRL: the taker sends QRL.
-    const give = side === "ask" ? asset.symbol : QRL_LEG.asset;
-    const get = side === "ask" ? QRL_LEG.asset : asset.symbol;
+    const give = side === "ask" ? asset.symbol : QRL_LEG.display;
+    const get = side === "ask" ? QRL_LEG.display : asset.symbol;
     const offline = row.order.makerSeen === false;
     const own = row.order.id === ownOrderId;
     // Selecting a row is harmless (it only opens the banner); wallet
@@ -514,7 +514,7 @@ export function OrderBookPanel({
 
         <div className="grid grid-cols-3 gap-2 px-2 pb-1.5 text-right text-[11px] text-muted-foreground">
           <span className="text-left">Price ({pair})</span>
-          <span>Amount (QRL)</span>
+          <span>Amount (Quanta)</span>
           <span>Total ({pair})</span>
         </div>
 

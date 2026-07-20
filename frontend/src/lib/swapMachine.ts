@@ -135,7 +135,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
           symbol: ethAsset.symbol,
           decimals: ethAsset.decimals,
         }
-      : { expectedToken: NATIVE_TOKEN, symbol: QRL_LEG.asset, decimals: 18 };
+      : { expectedToken: NATIVE_TOKEN, symbol: QRL_LEG.display, decimals: 18 };
 
   const legPlan = {
     [iLeg]: { recipient: addrOn(iLeg, "taker"), amount: BigInt(swap.fromAmount), ...assetOn(iLeg) },

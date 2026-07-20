@@ -187,11 +187,11 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     const takerPaysEthLeg = order.direction === "qrl->eth";
     const pay = {
       amount: formatUnits(BigInt(order.toAmount), takerPaysEthLeg ? asset.decimals : 18),
-      symbol: takerPaysEthLeg ? asset.symbol : QRL_LEG.asset,
+      symbol: takerPaysEthLeg ? asset.symbol : QRL_LEG.display,
     };
     const recv = {
       amount: formatUnits(BigInt(order.fromAmount), takerPaysEthLeg ? 18 : asset.decimals),
-      symbol: takerPaysEthLeg ? QRL_LEG.asset : asset.symbol,
+      symbol: takerPaysEthLeg ? QRL_LEG.display : asset.symbol,
     };
     const reserved = order.allowedTakerEth ?? order.allowedTakerQrl;
 

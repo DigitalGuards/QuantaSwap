@@ -88,7 +88,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
           className="font-data h-12 pr-16 text-lg"
         />
         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
-          {leg.asset}
+          {leg.display}
         </span>
       </div>
     </div>
@@ -144,9 +144,9 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
           {!ethAccount || !qrlAccount
             ? "Connect both wallets to swap"
             : !(Number(fromAmount) > 0)
-              ? `Enter the ${fromLeg.asset} amount`
+              ? `Enter the ${fromLeg.display} amount`
               : !(Number(toAmount) > 0)
-                ? `Enter the ${toLeg.asset} amount`
+                ? `Enter the ${toLeg.display} amount`
                 : "Start atomic swap"}
         </Button>
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
