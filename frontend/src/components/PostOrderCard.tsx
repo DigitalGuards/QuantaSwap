@@ -202,8 +202,8 @@ export function PostOrderCard({
 
   const asset = ETH_ASSETS[assetSymbol];
   // The ETH-leg side gives `asset`; the QRL side is always native QRL.
-  const fromSymbol = direction === "eth->qrl" ? asset.symbol : QRL_LEG.asset;
-  const toSymbol = direction === "eth->qrl" ? QRL_LEG.asset : asset.symbol;
+  const fromSymbol = direction === "eth->qrl" ? asset.symbol : QRL_LEG.display;
+  const toSymbol = direction === "eth->qrl" ? QRL_LEG.display : asset.symbol;
 
   const ready = Boolean(ethAccount && qrlAccount && Number(fromAmount) > 0 && Number(toAmount) > 0);
 
@@ -265,14 +265,14 @@ export function PostOrderCard({
       const ethSide = direction === "eth->qrl" ? fromAmount : toAmount;
       const qrlSide = direction === "eth->qrl" ? toAmount : fromAmount;
       const ethUnits = parseAmount(ethSide, asset.decimals, asset.symbol);
-      const qrlWei = parseAmount(qrlSide, 18, QRL_LEG.asset);
+      const qrlWei = parseAmount(qrlSide, 18, QRL_LEG.display);
       if (ethUnits < asset.minBaseUnits) {
         throw new Error(
           `${asset.symbol} amount must be at least ${trimAmount(asset.minBaseUnits, asset.decimals)}`,
         );
       }
       if (qrlWei < MIN_QRL_AMOUNT_WEI) {
-        throw new Error(`QRL amount must be at least ${trimAmount(MIN_QRL_AMOUNT_WEI, 18)}`);
+        throw new Error(`Quanta amount must be at least ${trimAmount(MIN_QRL_AMOUNT_WEI, 18)}`);
       }
       const fromUnits = direction === "eth->qrl" ? ethUnits : qrlWei;
       const toUnits = direction === "eth->qrl" ? qrlWei : ethUnits;
@@ -569,7 +569,7 @@ export function PostOrderCard({
           assetPicker
         ) : (
           <span className="absolute top-1/2 right-3 -translate-y-1/2 text-sm font-medium text-muted-foreground">
-            {QRL_LEG.asset}
+            {QRL_LEG.display}
           </span>
         )}
       </div>
@@ -581,7 +581,7 @@ export function PostOrderCard({
     staged && stagedAsset
       ? staged.leg === "eth"
         ? `${trimAmount(BigInt(staged.fromAmount), stagedAsset.decimals)} ${stagedAsset.symbol}`
-        : `${trimAmount(BigInt(staged.fromAmount), 18)} ${QRL_LEG.asset}`
+        : `${trimAmount(BigInt(staged.fromAmount), 18)} ${QRL_LEG.display}`
       : null;
 
   return (

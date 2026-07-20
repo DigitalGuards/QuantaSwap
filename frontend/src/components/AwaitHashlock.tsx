@@ -79,11 +79,11 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
   const sellsAsset = swap.direction === "eth->qrl";
   const send = {
     amount: formatUnits(BigInt(swap.toAmount), sellsAsset ? 18 : asset.decimals),
-    symbol: sellsAsset ? QRL_LEG.asset : asset.symbol,
+    symbol: sellsAsset ? QRL_LEG.display : asset.symbol,
   };
   const recv = {
     amount: formatUnits(BigInt(swap.fromAmount), sellsAsset ? asset.decimals : 18),
-    symbol: sellsAsset ? asset.symbol : QRL_LEG.asset,
+    symbol: sellsAsset ? asset.symbol : QRL_LEG.display,
   };
 
   return (

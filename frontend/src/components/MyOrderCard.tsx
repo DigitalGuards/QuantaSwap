@@ -316,7 +316,7 @@ export function MyOrderCard({
   const sideOf = (leg: "eth" | "qrl") =>
     leg === "eth"
       ? { symbol: asset.symbol, decimals: asset.decimals }
-      : { symbol: QRL_LEG.asset, decimals: 18 };
+      : { symbol: QRL_LEG.display, decimals: 18 };
   const fromSide = order ? sideOf(order.direction === "eth->qrl" ? "eth" : "qrl") : null;
   const toSide = order ? sideOf(order.direction === "eth->qrl" ? "qrl" : "eth") : null;
 

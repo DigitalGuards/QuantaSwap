@@ -247,7 +247,7 @@ describe("step 3: secret reveal (maker's irreversible commit)", () => {
     const bad = rOpen({ token: SCAM_TOKEN });
     const m = derive("maker", { eth: iOpen(), qrl: bad }, { eth: iOpen(), qrl: bad });
     expect(m.steps[2].canRun).toBe(false);
-    expect(m.steps[2].issue).toBe("it escrows a token, not native QRL");
+    expect(m.steps[2].issue).toBe("it escrows a token, not native Quanta");
   });
 
   it("rejects a confirmed responder lock paying someone else", () => {

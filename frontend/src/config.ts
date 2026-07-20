@@ -10,6 +10,10 @@ export const QRL_LEG = {
   key: "qrl" as const,
   name: "QRL v2 testnet",
   asset: "QRL",
+  // Unit label for amount displays. Ecosystem convention: amounts show as
+  // "Quanta"; "QRL" stays the ticker in pair labels (QRL/USDC) and the
+  // protocol-level `asset` identifier above.
+  display: "Quanta",
   chainIdHex: "0x539",
   // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
   htlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
@@ -25,6 +29,7 @@ export const ETH_LEG = {
   // The chain's native coin; ERC-20 legs carry their asset on the order
   // and the persisted swap (see lib/assetRegistry.ts).
   asset: "ETH",
+  display: "ETH",
   chainIdHex: "0xaa36a7",
   // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
   htlc: "0x910D5d4a7f2037c01F3B4C835167357e89909281",
