@@ -10,6 +10,7 @@ coverage/
 # Local operating notes; never tracked (private infrastructure detail)
 CLAUDE.md
 docs/OPS.md
+docs/decentralization.md
 *.log
 .DS_Store
 server/data/
