@@ -18,6 +18,7 @@ import {
 import { getAuthorizedQrlAccount, requireQrlAccount } from "@/lib/qrlAddress";
 import {
   activateExtensionAfterRelayRetirement,
+  ChannelTaskGuard,
   ConnectionAttemptGuard,
   RelayResetGuard,
   shouldIgnoreRelayResetEvent,
@@ -59,7 +60,7 @@ export function useQrlWallet() {
   const kindRef = useRef<QrlTransport | null>(null);
   const userDisconnectedRef = useRef(false);
   const wasConnectedRef = useRef(false);
-  const authorizationRef = useRef<Promise<void> | null>(null);
+  const authorizationGuardRef = useRef(new ChannelTaskGuard());
   const disconnectInFlightRef = useRef<Promise<unknown | null> | null>(null);
   const relayResetGuardRef = useRef(new RelayResetGuard());
   const connectionAttemptGuardRef = useRef(new ConnectionAttemptGuard());
@@ -125,9 +126,8 @@ export function useQrlWallet() {
 
   const authorizeRelay = useCallback(
     (qrl: QRLConnect): Promise<void> => {
-      if (authorizationRef.current) return authorizationRef.current;
       const channelId = qrl.getChannelId();
-      const authorization = (async () => {
+      return authorizationGuardRef.current.run(channelId, async () => {
         try {
           const next = await getAuthorizedQrlAccount(qrl);
           if (
@@ -163,13 +163,7 @@ export function useQrlWallet() {
           setError(message);
           if (retirementError !== null) setStatusDetail(message);
         }
-      })();
-      let tracked: Promise<void>;
-      tracked = authorization.finally(() => {
-        if (authorizationRef.current === tracked) authorizationRef.current = null;
       });
-      authorizationRef.current = tracked;
-      return tracked;
     },
     [retireRelay],
   );

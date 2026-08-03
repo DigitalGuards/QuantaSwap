@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   activateExtensionAfterRelayRetirement,
+  ChannelTaskGuard,
   ConnectionAttemptGuard,
   RelayResetGuard,
   shouldIgnoreRelayResetEvent,
@@ -117,5 +118,44 @@ describe("relay reset event generation", () => {
       ),
     ).rejects.toThrow("user rejected");
     expect(order).toEqual(["retire relay", "request approval"]);
+  });
+
+  it("deduplicates authorization per channel without blocking a replacement", async () => {
+    const guard = new ChannelTaskGuard();
+    let resolveOld!: () => void;
+    let resolveNew!: () => void;
+    let starts = 0;
+    const oldTask = guard.run(
+      "old-channel",
+      () =>
+        new Promise<void>((resolve) => {
+          starts += 1;
+          resolveOld = resolve;
+        }),
+    );
+    expect(
+      guard.run("old-channel", async () => {
+        starts += 1;
+      }),
+    ).toBe(oldTask);
+
+    const newTask = guard.run(
+      "new-channel",
+      () =>
+        new Promise<void>((resolve) => {
+          starts += 1;
+          resolveNew = resolve;
+        }),
+    );
+    expect(newTask).not.toBe(oldTask);
+    expect(starts).toBe(2);
+    expect(guard.isPending("new-channel")).toBe(true);
+
+    resolveOld();
+    await oldTask;
+    expect(guard.isPending("new-channel")).toBe(true);
+    resolveNew();
+    await newTask;
+    expect(guard.isPending()).toBe(false);
   });
 });
