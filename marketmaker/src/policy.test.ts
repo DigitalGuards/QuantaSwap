@@ -4,6 +4,7 @@
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { makeDeploymentIdentity } from "./deployment.js";
 import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc.js";
 import { decide, levelQuote, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
 
@@ -14,10 +15,17 @@ const MY_QRL = "Qcccccccccccccccccccccccccccccccccccccccc";
 const TAKER_ETH = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const AMOUNT = 2n * 10n ** 18n;
 const ZERO32 = `0x${"0".repeat(64)}`;
+const DEPLOYMENT = makeDeploymentIdentity({
+  ethChainId: "11155111",
+  qrlChainId: "1337",
+  ethHtlc: `0x${"1".repeat(40)}`,
+  qrlHtlc: `Q${"2".repeat(40)}`,
+});
 
 function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
   return {
     id: "abcdef0123456789",
+    deployment: DEPLOYMENT,
     token: "t",
     direction: "eth->qrl",
     asset: "ETH",
