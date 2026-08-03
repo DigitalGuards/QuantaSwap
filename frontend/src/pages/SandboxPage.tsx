@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
 import type { ActiveSwap } from "@/lib/activeSwap";
@@ -29,7 +29,6 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
 
       <section className="mx-auto max-w-md space-y-4">
         {eth.error ? <p className="text-sm text-destructive">{eth.error}</p> : null}
-        {qrl.error ? <p className="text-sm text-destructive">{qrl.error}</p> : null}
 
         {swap ? (
           swap.role === "sandbox" ? (

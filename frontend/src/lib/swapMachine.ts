@@ -13,8 +13,13 @@ export const ZERO32 = `0x${"0".repeat(64)}`;
 
 export type LegStates = Partial<Record<LegKey, LegState>>;
 
-export const sameAddr = (a: string, b: string): boolean =>
-  qToHex(a).toLowerCase() === qToHex(b).toLowerCase();
+export const sameAddr = (a: string, b: string): boolean => {
+  try {
+    return qToHex(a).toLowerCase() === qToHex(b).toLowerCase();
+  } catch {
+    return false;
+  }
+};
 
 export type StepKey =
   | "lock-initiator"

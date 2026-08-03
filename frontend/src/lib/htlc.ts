@@ -4,6 +4,9 @@
 
 import { Interface } from "ethers";
 import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
+import { qToHex } from "./qrlAddress";
+
+export { hexToQ, qToHex } from "./qrlAddress";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
@@ -58,13 +61,6 @@ export interface LegState {
 
 /** The native-coin sentinel in the HTLC's `token` field (address(0)). */
 export const NATIVE_TOKEN = `0x${"0".repeat(40)}`;
-
-/** QRL v2 uses Q-prefixed 20-byte addresses; calldata wants raw hex. */
-export const qToHex = (addr: string): string =>
-  addr.startsWith("Q") || addr.startsWith("Z") ? `0x${addr.slice(1)}` : addr;
-
-export const hexToQ = (addr: string): string =>
-  addr.startsWith("0x") ? `Q${addr.slice(2)}` : addr;
 
 async function rpc(url: string, method: string, params: unknown[]): Promise<unknown> {
   const res = await fetch(url, {

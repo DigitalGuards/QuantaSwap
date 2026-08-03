@@ -25,16 +25,30 @@ const AMOUNT = 25_000_000n; // 25 USDC in 6-decimal base units
 const TIMEOUT = 1_800_007_200;
 
 describe("address prefix bridging", () => {
-  it("qToHex strips Q and Z prefixes, passes hex through", () => {
-    expect(qToHex("Qabc123")).toBe("0xabc123");
-    expect(qToHex("Zabc123")).toBe("0xabc123");
-    expect(qToHex("0xabc123")).toBe("0xabc123");
+  const qAddress = `Q${"ab".repeat(20)}`;
+  const hexAddress = `0x${"ab".repeat(20)}`;
+
+  it("qToHex converts exact current QRL addresses and passes exact hex through", () => {
+    expect(qToHex(qAddress)).toBe(hexAddress);
+    expect(qToHex(hexAddress)).toBe(hexAddress);
   });
 
   it("hexToQ is the inverse for hex input", () => {
-    expect(hexToQ("0xabc123")).toBe("Qabc123");
-    expect(hexToQ("Qabc123")).toBe("Qabc123");
-    expect(hexToQ(qToHex("Qabc123"))).toBe("Qabc123");
+    expect(hexToQ(hexAddress)).toBe(qAddress);
+    expect(hexToQ(qAddress)).toBe(qAddress);
+    expect(hexToQ(qToHex(qAddress))).toBe(qAddress);
+  });
+
+  it.each([
+    `Z${"ab".repeat(20)}`,
+    "Qabc123",
+    "0xabc123",
+    `Q${"ab".repeat(19)}`,
+    `Q${"ab".repeat(21)}`,
+    `Q${"gg".repeat(20)}`,
+  ])("rejects obsolete or malformed address %s", (address) => {
+    expect(() => qToHex(address)).toThrow(/20-byte address/);
+    expect(() => hexToQ(address)).toThrow(/20-byte address/);
   });
 });
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router";
 import { formatUnits } from "ethers";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { cn } from "@/utils/cn";

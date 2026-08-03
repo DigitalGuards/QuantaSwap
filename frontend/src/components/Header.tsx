@@ -1,4 +1,4 @@
-import { NavLink, Link } from "react-router-dom";
+import { NavLink, Link } from "react-router";
 import { Wallet, LogOut } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/UI/Button";

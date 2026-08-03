@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
 import {
@@ -45,6 +45,15 @@ export default function App() {
         onConnectQrl={qrl.connect}
         onDisconnectQrl={() => void qrl.disconnect()}
       />
+
+      {qrl.error ? (
+        <div
+          role="alert"
+          className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-center text-sm text-destructive"
+        >
+          {qrl.error}
+        </div>
+      ) : null}
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-4">
         <Routes>
