@@ -30,6 +30,7 @@ import { prelockEscrowIssue } from "@/lib/prelock";
 import type { OrderDraft } from "@/components/PostOrderCard";
 import {
   acceptOrder,
+  acceptedOrderTerms,
   listOrders,
   openBookStream,
   releaseOrder,
@@ -212,8 +213,9 @@ export function OrderBookPanel({
     // QRL/ETH order whose raw amounts happen to satisfy the bounds.
     // Offline-maker rows are excluded from matching, so those go by
     // explicit id.
+    const byId = order.makerSeen === false;
     const request =
-      order.makerSeen === false
+      byId
         ? acceptOrder(order.id, taker)
         : takeOrder({
             direction: order.direction,
@@ -229,29 +231,43 @@ export function OrderBookPanel({
         // still the untrusted book's word, so re-check it before the
         // amounts are persisted as what this client will escrow and
         // verify against.
-        if (
-          BigInt(accepted.toAmount) > BigInt(order.toAmount) ||
-          BigInt(accepted.fromAmount) < BigInt(order.fromAmount)
-        ) {
-          void releaseOrder(accepted.id, takerToken).catch(() => undefined);
-          throw new Error("The order book returned worse terms than displayed; the take was abandoned.");
+        let terms: ReturnType<typeof acceptedOrderTerms>;
+        try {
+          terms = acceptedOrderTerms(
+            order,
+            accepted,
+            pair,
+            byId ? "same-order" : "same-or-better",
+            taker,
+          );
+        } catch (err) {
+          // Accept-by-id reserved the displayed id even if a hostile
+          // response substituted another one. Take-by-terms legitimately
+          // reserves the accepted id.
+          const reservedId = byId ? order.id : accepted.id;
+          void releaseOrder(reservedId, takerToken).catch(() => undefined);
+          throw err;
         }
         const swap: ActiveSwap = {
           role: "taker",
+          termsBindingVersion: 1,
           orderId: accepted.id,
           takerToken,
           shareToken: null,
           // Book's word only; the machine treats it as a rendering hint
           // (assign step instead of a lock step) and every fund-moving
           // gate still verifies the escrow on-chain at depth.
-          ...(accepted.prelocked === true ? { prelocked: true } : {}),
-          direction: accepted.direction,
+          ...(terms.prelocked ? { prelocked: true } : {}),
+          acceptedPrelock: terms.prelocked
+            ? { hashlock: terms.hashlock, initiatorTimeout: terms.initiatorTimeout }
+            : null,
+          direction: terms.direction,
           // The asset the taker agreed to is the displayed pair, anchored
           // client-side; on-chain token verification runs against this,
           // never against a book-provided value.
           ethAsset: pair,
-          fromAmount: accepted.fromAmount,
-          toAmount: accepted.toAmount,
+          fromAmount: terms.fromAmount,
+          toAmount: terms.toAmount,
           makerEthAccount: accepted.makerEthAccount,
           makerQrlAccount: accepted.makerQrlAccount,
           takerEthAccount: ethAccount,

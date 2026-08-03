@@ -240,6 +240,7 @@ export function PostOrderCard({
     const ref: MyOrderRef = {
       id: order.id,
       token: makerToken,
+      direction: stage.direction,
       asset: stage.asset,
       fromAmount: stage.fromAmount,
       toAmount: stage.toAmount,
@@ -386,6 +387,7 @@ export function PostOrderCard({
       const ref: MyOrderRef = {
         id: order.id,
         token: makerToken,
+        direction,
         asset: asset.symbol,
         fromAmount: fromUnits.toString(),
         toAmount: toUnits.toString(),

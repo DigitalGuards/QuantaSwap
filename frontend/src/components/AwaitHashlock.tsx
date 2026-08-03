@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { formatUnits } from "ethers";
-import { CLAIM_MARGIN_S, ETH_ASSETS, QRL_LEG } from "@/config";
+import { ETH_ASSETS, QRL_LEG } from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
-import { getOrder, OrderGoneError } from "@/lib/orderbook";
+import { announcedOrderTerms, getOrder, OrderGoneError } from "@/lib/orderbook";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 
@@ -11,8 +11,6 @@ interface Props {
   onReady: (swap: ActiveSwap) => void;
   onAbort: (reason: string | null) => void;
 }
-
-const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
 
 /** Taker-side waiting room: the order is accepted, the maker has not yet
  *  announced the hashlock. Nothing is locked on either chain, so walking
@@ -37,21 +35,18 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
         }
         if (order.status !== "locking" || order.hashlock === null) return;
         const now = Math.floor(Date.now() / 1000);
-        if (
-          !HASHLOCK_RE.test(order.hashlock) ||
-          order.initiatorTimeout === null ||
-          order.responderTimeout === null ||
-          order.responderTimeout <= now + 600 ||
-          order.initiatorTimeout < order.responderTimeout + CLAIM_MARGIN_S
-        ) {
+        let announced: ReturnType<typeof announcedOrderTerms>;
+        try {
+          announced = announcedOrderTerms(swap, order, now);
+        } catch {
           onAbort("The maker announced unsafe swap parameters. Nothing was at risk.");
           return;
         }
         const updated: ActiveSwap = {
           ...swap,
-          hashlock: order.hashlock,
-          initiatorTimeout: order.initiatorTimeout,
-          responderTimeout: order.responderTimeout,
+          hashlock: announced.hashlock,
+          initiatorTimeout: announced.initiatorTimeout,
+          responderTimeout: announced.responderTimeout,
         };
         saveActiveSwap(updated);
         onReady(updated);
