@@ -44,6 +44,17 @@ function assertEq(actual, expected, msg) {
   if (a !== e) throw new Error(`${msg}: expected ${e}, got ${a}`);
 }
 
+// Expect a tx to revert for any reason (string requires from mock tokens).
+async function expectAnyRevert(promise, what) {
+  try {
+    const tx = await promise;
+    if (tx && tx.wait) await tx.wait();
+  } catch {
+    return;
+  }
+  throw new Error(`expected revert (${what}), but call succeeded`);
+}
+
 // Expect a tx (or estimate) to revert with the named custom error.
 async function expectRevert(promise, errorName) {
   const selector = ethers.id(`${errorName}()`).slice(0, 10);
@@ -72,8 +83,18 @@ async function main() {
   const artifacts = compileDirs([
     path.join(repoRoot, "contracts", "hyperion"),
     path.join(repoRoot, "contracts", "test"),
+    path.join(repoRoot, "contracts", "testnet"),
   ]);
-  for (const required of ["HTLC", "MockERC20", "NoReturnToken", "FalseToken"]) {
+  for (const required of [
+    "HTLC",
+    "MockERC20",
+    "NoReturnToken",
+    "FalseToken",
+    "ApprovalRaceToken",
+    "BlocklistToken",
+    "FeeToken",
+    "TestStable",
+  ]) {
     if (!artifacts[required]) throw new Error(`missing artifact ${required}`);
   }
 
@@ -269,6 +290,98 @@ async function main() {
     );
   });
 
+  await withTest("USDT approval race: nonzero allowance must be reset to 0 first", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const usdt = await deploy("ApprovalRaceToken", alice);
+    const amount = 250n * 10n ** 6n; // 250 USDT, 6 decimals
+    await (await usdt.mint(alice.address, amount)).wait();
+
+    // A stale nonzero allowance (e.g. from an aborted earlier swap) cannot
+    // be changed directly; the client must reset it to zero first.
+    await (await usdt.approve(htlc.target, 1n)).wait();
+    await expectAnyRevert(usdt.approve(htlc.target, amount), "nonzero -> nonzero approve");
+    await (await usdt.approve(htlc.target, 0n)).wait();
+    await (await usdt.approve(htlc.target, amount)).wait();
+
+    const { preimage, hashlock } = newSecret();
+    await (await htlc.lockToken(hashlock, bob.address, usdt.target, amount, (await now()) + HOUR)).wait();
+    await (await htlc.claim(hashlock, preimage)).wait();
+    assertEq(await usdt.balanceOf(bob.address), amount, "bob USDT balance");
+  });
+
+  await withTest("fee-on-transfer tokens are rejected at lock", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const token = await deploy("FeeToken", alice);
+    const amount = 1000n * 10n ** 6n;
+    await (await token.mint(alice.address, amount)).wait();
+    await (await token.approve(htlc.target, amount)).wait();
+    const { hashlock } = newSecret();
+    await expectRevert(
+      htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR),
+      "UnsupportedToken"
+    );
+    assertEq(await token.balanceOf(htlc.target), 0n, "nothing escrowed");
+  });
+
+  await withTest("issuer blocklist: blocked recipient cannot claim, refund recovers", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const usdc = await deploy("BlocklistToken", alice);
+    const amount = 500n * 10n ** 6n;
+    await (await usdc.mint(alice.address, amount)).wait();
+    await (await usdc.approve(htlc.target, amount)).wait();
+    const { preimage, hashlock } = newSecret();
+    const timeout = (await now()) + 2 * HOUR;
+    await (await htlc.lockToken(hashlock, bob.address, usdc.target, amount, timeout)).wait();
+
+    // Issuer blocks the recipient after lock: claim cannot pay out.
+    await (await usdc.setBlocked(bob.address, true)).wait();
+    await expectRevert(htlc.claim(hashlock, preimage), "TransferFailed");
+
+    // Funds are not stranded: the refund path still pays the initiator.
+    await warpTo(timeout);
+    await (await htlc.refund(hashlock)).wait();
+    assertEq(await usdc.balanceOf(alice.address), amount, "alice refunded");
+
+    // Documented residual risk: a blocked INITIATOR strands the refund
+    // until the issuer unblocks them (see ARCHITECTURE.md).
+    const second = newSecret();
+    await (await usdc.approve(htlc.target, amount)).wait();
+    const timeout2 = (await now()) + HOUR;
+    await (await htlc.lockToken(second.hashlock, bob.address, usdc.target, amount, timeout2)).wait();
+    await (await usdc.setBlocked(alice.address, true)).wait();
+    await warpTo(timeout2);
+    await expectRevert(htlc.refund(second.hashlock), "TransferFailed");
+    await (await usdc.setBlocked(alice.address, false)).wait();
+    await (await htlc.refund(second.hashlock)).wait();
+    assertEq(await usdc.balanceOf(alice.address), amount, "alice refunded after unblock");
+  });
+
+  await withTest("config/tokens.json registry is well-formed", async () => {
+    const registry = JSON.parse(
+      require("fs").readFileSync(path.join(repoRoot, "config", "tokens.json"), "utf8")
+    );
+    for (const chainId of ["1", "11155111", "1337"]) {
+      assert(registry.chains[chainId], `chain ${chainId} present`);
+    }
+    for (const [chainId, chain] of Object.entries(registry.chains)) {
+      assert(chain.leg === "ethereum" || chain.leg === "qrl", `chain ${chainId} leg`);
+      const entries = [...chain.tokens, ...(chain.native ? [chain.native] : [])];
+      for (const t of entries) {
+        assert(Number.isInteger(t.decimals) && t.decimals >= 0 && t.decimals <= 18, `${t.symbol} decimals`);
+        ethers.parseUnits(t.minLockAmount, t.decimals); // throws if malformed
+        if ("address" in t && t.address !== null) {
+          assertEq(ethers.getAddress(t.address), t.address, `${t.symbol} checksummed address`);
+        }
+      }
+    }
+    // Ethereum mainnet launch set is exactly WETH + USDC + USDT.
+    assertEq(
+      registry.chains["1"].tokens.map((t) => t.symbol).join(","),
+      "WETH,USDC,USDT",
+      "mainnet asset set"
+    );
+  });
+
   await withTest("lockToken rejects the zero address and EOAs as token", async () => {
     const htlc = await deploy("HTLC", alice);
     const { hashlock } = newSecret();
@@ -324,6 +437,45 @@ async function main() {
     assertEq(await weth.balanceOf(bob.address), wethAmount, "bob got WETH");
   });
 
+  await withTest("full cross-chain stable swap: tUSDT (USDT semantics, 6 decimals) vs native QRL", async () => {
+    // Runs the deployable TestStable artifact through the whole protocol
+    // path, exercising the USDT-hard case: 6 decimals, no return values,
+    // approval race guard.
+    const ethLeg = await deploy("HTLC", carol);
+    const qrlLeg = await deploy("HTLC", carol);
+    const usdt = await deploy("TestStable", carol);
+
+    const usdtAmount = 2_500n * 10n ** 6n; // 2,500 tUSDT
+    const qrlAmount = ethers.parseEther("3000");
+    await (await usdt.connect(alice).faucet()).wait();
+
+    const { preimage, hashlock } = newSecret();
+    const t0 = await now();
+    const T1 = t0 + 4 * HOUR;
+    const T2 = t0 + 2 * HOUR;
+
+    // 1. Alice locks tUSDT for Bob on the Ethereum leg (exact approval).
+    await (await usdt.connect(alice).approve(ethLeg.target, usdtAmount)).wait();
+    await (await ethLeg.connect(alice).lockToken(hashlock, bob.address, usdt.target, usdtAmount, T1)).wait();
+    assertEq(await usdt.balanceOf(ethLeg.target), usdtAmount, "escrowed");
+    // transferFrom consumed the exact allowance, so no reset is needed
+    // before the next swap's approve.
+    assertEq(await usdt.allowance(alice.address, ethLeg.target), 0n, "allowance consumed");
+
+    // 2. Bob responds with native QRL.
+    await (await qrlLeg.connect(bob).lockNative(hashlock, alice.address, T2, { value: qrlAmount })).wait();
+
+    // 3. Alice claims the QRL leg (sponsored), revealing the preimage.
+    const aliceBefore = await provider.getBalance(alice.address);
+    await (await qrlLeg.connect(relayer).claim(hashlock, preimage)).wait();
+    assertEq((await provider.getBalance(alice.address)) - aliceBefore, qrlAmount, "alice got QRL");
+
+    // 4. Bob claims the tUSDT with the now-public preimage.
+    const revealed = (await qrlLeg.getSwap(hashlock)).preimage;
+    await (await ethLeg.connect(bob).claim(hashlock, revealed)).wait();
+    assertEq(await usdt.balanceOf(bob.address), usdtAmount, "bob got tUSDT");
+  });
+
   await withTest("abandoned swap: both legs refund cleanly (free option outcome)", async () => {
     const ethLeg = await deploy("HTLC", carol);
     const qrlLeg = await deploy("HTLC", carol);
@@ -349,6 +501,234 @@ async function main() {
     await warpTo(T1);
     await (await ethLeg.connect(relayer).refund(hashlock)).wait();
     assertEq(await weth.balanceOf(alice.address), wethAmount, "alice refunded");
+  });
+
+  // ---- HTLCv2: open-recipient locks (prelock), assign, release ----
+
+  const parseAssigned = (htlc, receipt) =>
+    receipt.logs
+      .map((l) => {
+        try {
+          return htlc.interface.parseLog(l);
+        } catch {
+          return null;
+        }
+      })
+      .find((p) => p && p.name === "Assigned");
+
+  await withTest("lockNativeOpen stores recipient 0 and holds the funds", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    const amount = ethers.parseEther("1");
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: amount })).wait();
+    const s = await htlc.getSwap(hashlock);
+    assertEq(s.initiator, alice.address, "initiator");
+    assertEq(s.recipient, ethers.ZeroAddress, "recipient unset");
+    assertEq(s.amount, amount, "amount");
+    assertEq(s.timeout, BigInt(timeout), "timeout");
+    assertEq(s.status, Status.Open, "status");
+    assertEq(await provider.getBalance(htlc.target), amount, "contract balance");
+  });
+
+  await withTest("lockNativeOpen rejects invalid parameters and reused hashlocks", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    await expectRevert(htlc.lockNativeOpen(hashlock, timeout, { value: 0 }), "InvalidParams");
+    await expectRevert(htlc.lockNativeOpen(ethers.ZeroHash, timeout, { value: 1n }), "InvalidParams");
+    await expectRevert(htlc.lockNativeOpen(hashlock, (await now()) - 1, { value: 1n }), "InvalidParams");
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: 1n })).wait();
+    await expectRevert(htlc.lockNativeOpen(hashlock, timeout, { value: 1n }), "HashlockAlreadyUsed");
+  });
+
+  await withTest("lockTokenOpen escrows; fee-on-transfer and bad token addresses still rejected", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const token = await deploy("MockERC20", alice);
+    const amount = 1000n;
+    await (await token.mint(alice.address, amount)).wait();
+    await (await token.approve(htlc.target, amount)).wait();
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    await (await htlc.lockTokenOpen(hashlock, token.target, amount, timeout)).wait();
+    assertEq(await token.balanceOf(htlc.target), amount, "escrowed");
+    assertEq((await htlc.getSwap(hashlock)).recipient, ethers.ZeroAddress, "recipient unset");
+
+    const fee = await deploy("FeeToken", alice);
+    const feeAmount = 1000n * 10n ** 6n;
+    await (await fee.mint(alice.address, feeAmount)).wait();
+    await (await fee.approve(htlc.target, feeAmount)).wait();
+    const second = newSecret();
+    await expectRevert(htlc.lockTokenOpen(second.hashlock, fee.target, feeAmount, timeout), "UnsupportedToken");
+    await expectRevert(htlc.lockTokenOpen(second.hashlock, ethers.ZeroAddress, 1n, timeout), "InvalidParams");
+    await expectRevert(htlc.lockTokenOpen(second.hashlock, carol.address, 1n, timeout), "InvalidParams");
+  });
+
+  await withTest("claim on an unassigned open lock reverts NotAssigned (burn guard)", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { preimage, hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: ethers.parseEther("1") })).wait();
+    // Correct preimage, permissionless caller: still no payout target.
+    await expectRevert(htlc.connect(relayer).claim(hashlock, preimage), "NotAssigned");
+
+    const token = await deploy("MockERC20", alice);
+    await (await token.mint(alice.address, 10n)).wait();
+    await (await token.approve(htlc.target, 10n)).wait();
+    const second = newSecret();
+    await (await htlc.lockTokenOpen(second.hashlock, token.target, 10n, timeout)).wait();
+    await expectRevert(htlc.claim(second.hashlock, second.preimage), "NotAssigned");
+  });
+
+  await withTest("assign is initiator-only, write-once, validated, and closes at timeout", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + 2 * HOUR;
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: 1n })).wait();
+
+    await expectRevert(htlc.connect(bob).assign(hashlock, bob.address), "NotInitiator");
+    await expectRevert(htlc.assign(hashlock, ethers.ZeroAddress), "InvalidParams");
+    await expectRevert(htlc.assign(newSecret().hashlock, bob.address), "SwapNotOpen");
+
+    const receipt = await (await htlc.assign(hashlock, bob.address)).wait();
+    const assigned = parseAssigned(htlc, receipt);
+    assert(assigned, "Assigned event emitted");
+    assertEq(assigned.args.recipient, bob.address, "event recipient");
+    assertEq((await htlc.getSwap(hashlock)).recipient, bob.address, "recipient set");
+
+    // Write-once: a second assign reverts even for the initiator.
+    await expectRevert(htlc.assign(hashlock, carol.address), "AlreadyAssigned");
+    // Classic locks are born assigned.
+    const classic = newSecret();
+    await (await htlc.lockNative(classic.hashlock, bob.address, timeout, { value: 1n })).wait();
+    await expectRevert(htlc.assign(classic.hashlock, carol.address), "AlreadyAssigned");
+
+    // Past T1 the claim window is closed and refund is open: no assign.
+    const late = newSecret();
+    const lateTimeout = (await now()) + HOUR;
+    await (await htlc.lockNativeOpen(late.hashlock, lateTimeout, { value: 1n })).wait();
+    await warpTo(lateTimeout);
+    await expectRevert(htlc.assign(late.hashlock, bob.address), "TimeoutPassed");
+  });
+
+  await withTest("assign then sponsored claim pays the assigned recipient", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { preimage, hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    const amount = ethers.parseEther("1");
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: amount })).wait();
+    await (await htlc.assign(hashlock, bob.address)).wait();
+    const bobBefore = await provider.getBalance(bob.address);
+    await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
+    assertEq((await provider.getBalance(bob.address)) - bobBefore, amount, "bob received");
+    assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, "status");
+  });
+
+  await withTest("release: initiator-only, immediate, blocked once assigned, hashlock burned", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + 4 * HOUR;
+    const amount = ethers.parseEther("1");
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: amount })).wait();
+
+    await expectRevert(htlc.connect(bob).release(hashlock), "NotInitiator");
+    await expectRevert(htlc.connect(relayer).release(hashlock), "NotInitiator");
+    const before = await provider.getBalance(alice.address);
+    const receipt = await (await htlc.release(hashlock)).wait();
+    const gas = receipt.gasUsed * receipt.gasPrice;
+    assertEq((await provider.getBalance(alice.address)) - before + gas, amount, "alice repaid in full");
+    assertEq((await htlc.getSwap(hashlock)).status, Status.Refunded, "status Refunded");
+    await expectRevert(htlc.release(hashlock), "SwapNotOpen");
+    // The hashlock stays burned forever, exactly like any settled swap.
+    await expectRevert(htlc.lockNativeOpen(hashlock, timeout, { value: 1n }), "HashlockAlreadyUsed");
+    await expectRevert(htlc.lockNative(hashlock, bob.address, timeout, { value: 1n }), "HashlockAlreadyUsed");
+
+    // Once assigned, release is gone: refund at timeout is the only way back.
+    const second = newSecret();
+    await (await htlc.lockNativeOpen(second.hashlock, timeout, { value: 1n })).wait();
+    await (await htlc.assign(second.hashlock, bob.address)).wait();
+    await expectRevert(htlc.release(second.hashlock), "AlreadyAssigned");
+    await expectRevert(htlc.refund(second.hashlock), "TimeoutNotReached");
+    // Classic locks (born assigned) can never be released either.
+    const classic = newSecret();
+    await (await htlc.lockNative(classic.hashlock, bob.address, timeout, { value: 1n })).wait();
+    await expectRevert(htlc.release(classic.hashlock), "AlreadyAssigned");
+  });
+
+  await withTest("release also works post-timeout while unassigned; refund stays permissionless", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const token = await deploy("MockERC20", alice);
+    const amount = 500n;
+    await (await token.mint(alice.address, amount * 2n)).wait();
+    await (await token.approve(htlc.target, amount * 2n)).wait();
+    const first = newSecret();
+    const second = newSecret();
+    const timeout = (await now()) + HOUR;
+    await (await htlc.lockTokenOpen(first.hashlock, token.target, amount, timeout)).wait();
+    await (await htlc.lockTokenOpen(second.hashlock, token.target, amount, timeout)).wait();
+    await warpTo(timeout);
+    await (await htlc.release(first.hashlock)).wait();
+    await (await htlc.connect(relayer).refund(second.hashlock)).wait();
+    assertEq(await token.balanceOf(alice.address), amount * 2n, "alice repaid both ways");
+  });
+
+  await withTest("refund after assign is unchanged: timeout-gated, pays the initiator", async () => {
+    const htlc = await deploy("HTLC", alice);
+    const { hashlock } = newSecret();
+    const timeout = (await now()) + HOUR;
+    const amount = ethers.parseEther("1");
+    await (await htlc.lockNativeOpen(hashlock, timeout, { value: amount })).wait();
+    await (await htlc.assign(hashlock, bob.address)).wait();
+    await expectRevert(htlc.refund(hashlock), "TimeoutNotReached");
+    await warpTo(timeout);
+    const before = await provider.getBalance(alice.address);
+    await (await htlc.connect(relayer).refund(hashlock)).wait();
+    assertEq((await provider.getBalance(alice.address)) - before, amount, "alice refunded");
+  });
+
+  await withTest("full prelocked cross-chain swap: open lock at post, assign at match", async () => {
+    const ethLeg = await deploy("HTLC", carol);
+    const qrlLeg = await deploy("HTLC", carol);
+    const weth = await deploy("MockERC20", carol);
+
+    const wethAmount = 10_000n;
+    const qrlAmount = ethers.parseEther("2");
+    await (await weth.mint(alice.address, wethAmount)).wait();
+
+    // Alice (maker, has WETH, wants QRL) pre-funds her listing before any
+    // taker exists: open lock with the long prelock T1.
+    const { preimage, hashlock } = newSecret();
+    const T1 = (await now()) + 48 * HOUR;
+    await (await weth.connect(alice).approve(ethLeg.target, wethAmount)).wait();
+    await (await ethLeg.connect(alice).lockTokenOpen(hashlock, weth.target, wethAmount, T1)).wait();
+
+    // Bob takes the order later; the maker's only match step is assign.
+    await (await ethLeg.connect(alice).assign(hashlock, bob.address)).wait();
+
+    // Bob verifies the assigned lock and responds with native QRL.
+    const T2 = (await now()) + 2 * HOUR;
+    await (await qrlLeg.connect(bob).lockNative(hashlock, alice.address, T2, { value: qrlAmount })).wait();
+
+    // Alice claims the QRL leg (revealing the preimage); Bob claims the WETH.
+    const aliceBefore = await provider.getBalance(alice.address);
+    await (await qrlLeg.connect(relayer).claim(hashlock, preimage)).wait();
+    assertEq((await provider.getBalance(alice.address)) - aliceBefore, qrlAmount, "alice got QRL");
+    const revealed = (await qrlLeg.getSwap(hashlock)).preimage;
+    await (await ethLeg.connect(bob).claim(hashlock, revealed)).wait();
+    assertEq(await weth.balanceOf(bob.address), wethAmount, "bob got WETH");
+  });
+
+  await withTest("abandoned prelock: maker releases on demand, no timeout wait", async () => {
+    const htlc = await deploy("HTLC", carol);
+    const { hashlock } = newSecret();
+    const T1 = (await now()) + 48 * HOUR;
+    const amount = ethers.parseEther("5");
+    await (await htlc.connect(alice).lockNativeOpen(hashlock, T1, { value: amount })).wait();
+    // No taker showed up; alice takes her funds back NOW, not at T1.
+    const before = await provider.getBalance(alice.address);
+    const receipt = await (await htlc.connect(alice).release(hashlock)).wait();
+    const gas = receipt.gasUsed * receipt.gasPrice;
+    assertEq((await provider.getBalance(alice.address)) - before + gas, amount, "released immediately");
   });
 
   stopAnvil();

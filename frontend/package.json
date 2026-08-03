@@ -1,0 +1,45 @@
+{
+  "name": "quantaswap-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/instrument-sans": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/sora": "^5.2.8",
+    "@qrlwallet/connect": "4.0.0",
+    "@qrlwallet/connect-ui": "0.2.0",
+    "@radix-ui/react-slot": "^1.1.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "ethers": "^6.13.4",
+    "lucide-react": "^0.562.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-router": "8.3.0",
+    "tailwind-merge": "^2.6.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.2",
+    "tailwindcss": "^4.1.18",
+    "typescript": "~5.8.3",
+    "vite": "^7.3.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "overrides": {
+    "postcss": "8.5.25"
+  }
+}

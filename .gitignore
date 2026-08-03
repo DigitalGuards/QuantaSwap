@@ -7,9 +7,11 @@ coverage/
 .env
 .env.*
 !.env.example
-*.log
-.DS_Store
-
 # Local operating notes; never tracked (private infrastructure detail)
 CLAUDE.md
 docs/OPS.md
+docs/decentralization.md
+*.log
+.DS_Store
+server/data/
+marketmaker/data/
