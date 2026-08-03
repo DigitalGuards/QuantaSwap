@@ -8,9 +8,23 @@ import { ethAssetSymbolOrNull, type EthAssetSymbol } from "./assetRegistry";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type SwapRole = "maker" | "taker" | "sandbox";
+export const TERMS_BINDING_VERSION = 1 as const;
+
+/** Terms already visible on a pre-funded listing when the taker accepts.
+ *  They are kept separately from the live swap hashlock so the UI still
+ *  waits for the maker's locking announcement while retaining the exact
+ *  immutable escrow anchor it approved. */
+export interface AcceptedPrelockAnchor {
+  hashlock: string;
+  initiatorTimeout: number;
+}
 
 export interface ActiveSwap {
   role: SwapRole;
+  /** Present on order-book swaps created after full local term binding.
+   *  Older unmarked records remain readable for refund/release recovery
+   *  but cannot start or advance a swap. Sandbox records are exempt. */
+  termsBindingVersion?: typeof TERMS_BINDING_VERSION;
   /** Order book id; null in the sandbox. */
   orderId: string | null;
   /** Authorizes the taker's release (walk-away) on the order book; null
@@ -46,6 +60,9 @@ export interface ActiveSwap {
    *  time: the maker's match step is assign() instead of a lock, and the
    *  escrow is releasable on demand until then. Absent means classic. */
   prelocked?: boolean;
+  /** Taker-side copy of the pre-funded listing's immutable H/T1 terms.
+   *  Null/absent for classic swaps and maker records. */
+  acceptedPrelock?: AcceptedPrelockAnchor | null;
   createdAt: number;
 }
 
@@ -125,6 +142,9 @@ export function saveActiveSwap(swap: ActiveSwap): void {
   localStorage.setItem(KEY, JSON.stringify(swap));
 }
 
+export const hasCurrentTermBinding = (swap: ActiveSwap): boolean =>
+  swap.role === "sandbox" || swap.termsBindingVersion === TERMS_BINDING_VERSION;
+
 export function clearActiveSwap(): void {
   localStorage.removeItem(KEY);
 }
@@ -148,11 +168,15 @@ export interface PrelockRef {
 export interface MyOrderRef {
   id: string;
   token: string;
+  /** Maker-authored direction, anchored locally at post time. Null only
+   *  for legacy handles, which may be cancelled/released but must never
+   *  start a swap from the order book's copy of the terms. */
+  direction: Direction | null;
   asset: EthAssetSymbol;
-  /** Base units the maker escrows, decimal string; null on handles stored
-   *  before amount anchoring existed (those fall back to the book copy). */
+  /** Base units the maker escrows, decimal string; null only on legacy
+   *  handles, which fail closed at matching time. */
   fromAmount: string | null;
-  /** Base units the maker expects, decimal string; null pre-anchoring. */
+  /** Base units the maker expects, decimal string; null only on legacy. */
   toAmount: string | null;
   /** Share token when the order is private (null for public orders):
    *  builds the /o/<id> link and authorizes the maker's own reads. */
@@ -170,6 +194,10 @@ export function loadMyOrder(): MyOrderRef | null {
     const raw = localStorage.getItem(ORDER_KEY);
     if (!raw) return null;
     const ref = JSON.parse(raw) as MyOrderRef;
+    // Handles stored before semantic term binding existed may still be
+    // used to cancel or release an escrow, but matching fails closed.
+    ref.direction =
+      ref.direction === "eth->qrl" || ref.direction === "qrl->eth" ? ref.direction : null;
     // Handles stored before the ETH-leg asset existed mean native ETH.
     ref.asset = ethAssetSymbolOrNull(ref.asset) ?? "ETH";
     // Handles stored before amount anchoring / private orders existed.

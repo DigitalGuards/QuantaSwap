@@ -24,6 +24,8 @@ export type LegSender = (
   ethTo?: string,
 ) => Promise<void>;
 
+export type ClaimSender = (leg: LegKey, data: string, valueWei: bigint) => Promise<void>;
+
 // `ethTo` overrides the ETH-leg target for ERC-20 approve transactions
 // (which go to the token contract); everything else goes to the HTLC.
 // The QRL leg always targets its HTLC. Return data is never decoded
@@ -72,6 +74,85 @@ export const makeLegSender =
         };
       }
       await h.qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
+    }
+  };
+
+/** Send secret-bearing claim calldata only after an exact call from the
+ *  actual sender succeeds against the same HTLC. The simulation and send
+ *  share one signer/account within this operation. It prevents publishing
+ *  a secret when the current payout would revert, while a token issuer or
+ *  recipient can still change state between simulation and mining. */
+export const makePreflightedClaimSender =
+  (h: LegSenderHandles): ClaimSender =>
+  async (leg, data, valueWei) => {
+    if (leg === "eth") {
+      if (!h.browserProvider) throw new Error("Ethereum wallet not connected");
+      await h.ensureSepolia();
+      const signer = await h.browserProvider.getSigner();
+      const from = await signer.getAddress();
+      const tx = { to: ETH_LEG.htlc, data, value: valueWei };
+      try {
+        const result = await h.browserProvider.send("eth_call", [
+          { from, to: ETH_LEG.htlc, data, value: `0x${valueWei.toString(16)}` },
+          "latest",
+        ]);
+        if (typeof result !== "string" || !/^0x[0-9a-fA-F]*$/.test(result)) {
+          throw new Error("malformed simulation result");
+        }
+      } catch {
+        throw new Error("Ethereum claim preflight rejected; the secret was not submitted");
+      }
+      try {
+        const sent = await signer.sendTransaction(tx);
+        await sent.wait();
+      } catch {
+        throw new Error("Ethereum claim submission failed; check chain state before retrying");
+      }
+      return;
+    }
+
+    if (!h.qrlAccount) throw new Error("QRL wallet not connected");
+    const callTx: Record<string, unknown> = {
+      from: h.qrlAccount,
+      to: QRL_LEG.htlc,
+      data,
+      ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
+    };
+    try {
+      await qrlRpc("qrl_call", [callTx, "latest"]);
+    } catch {
+      throw new Error("QRL claim preflight rejected; the secret was not submitted");
+    }
+
+    let sendTx = callTx;
+    if (h.qrlTransport === "extension") {
+      // Claims fail closed if strict estimation is unavailable. Falling
+      // back after a successful call could still publish a secret in a
+      // transaction whose extension-selected gas context cannot execute.
+      let estimated: string;
+      try {
+        estimated = (await qrlRpc("qrl_estimateGas", [callTx])) as string;
+      } catch {
+        throw new Error("QRL claim gas estimation failed; the secret was not submitted");
+      }
+      const gasLimit = Number((BigInt(estimated) * 130n) / 100n);
+      if (!Number.isSafeInteger(gasLimit) || gasLimit <= 0) {
+        throw new Error("QRL claim gas estimate was invalid");
+      }
+      sendTx = {
+        from: h.qrlAccount,
+        to: QRL_LEG.htlc,
+        value: valueWei.toString(),
+        data,
+        gas: gasLimit,
+        gasLimit,
+        type: "0x2",
+      };
+    }
+    try {
+      await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] });
+    } catch {
+      throw new Error("QRL claim submission failed; check chain state before retrying");
     }
   };
 

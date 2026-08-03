@@ -18,8 +18,17 @@ import {
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
-import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
-import { initiatorLeg, responderLeg, type ActiveSwap } from "@/lib/activeSwap";
+import {
+  makeLegSender,
+  makePreflightedClaimSender,
+  sendEthTokenLock,
+} from "@/lib/legSender";
+import {
+  hasCurrentTermBinding,
+  initiatorLeg,
+  responderLeg,
+  type ActiveSwap,
+} from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
 import {
   deriveSwapMachine,
@@ -198,6 +207,17 @@ export function SwapFlow({
     () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
+  const sendClaimOnLeg = useMemo(
+    () =>
+      makePreflightedClaimSender({
+        browserProvider,
+        ensureSepolia,
+        qrlAccount,
+        qrlTransport,
+        qrlRequest,
+      }),
+    [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
+  );
 
   const runAction = (key: string, fn: () => Promise<void>) => {
     setError(null);
@@ -252,9 +272,18 @@ export function SwapFlow({
   const iPlan = legPlan[iLeg];
   const rPlan = legPlan[rLeg];
   const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
+  const termsBound = hasCurrentTermBinding(swap);
+  const requireBoundTerms = () => {
+    if (!termsBound) {
+      throw new Error(
+        "This swap predates local term binding. Only refund or release recovery is allowed.",
+      );
+    }
+  };
 
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
+      requireBoundTerms();
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
       if (leg === "eth" && ethAsset.address !== null) {
@@ -283,7 +312,17 @@ export function SwapFlow({
 
   const claimLeg = (leg: LegKey, preimage: string) =>
     runAction(`claim-${leg}`, async () => {
-      await sendOnLeg(leg, buildClaimData(hashlock, preimage), 0n);
+      // An unmarked taker may recover the initiator payout only after the
+      // maker's responder-chain claim made the secret public. This reveals
+      // nothing new and is the only safe advancement for a legacy record.
+      const legacyPublicSecretRecovery =
+        !termsBound &&
+        swap.role === "taker" &&
+        leg === iLeg &&
+        revealedPreimage !== null &&
+        preimage === revealedPreimage;
+      if (!legacyPublicSecretRecovery) requireBoundTerms();
+      await sendClaimOnLeg(leg, buildClaimData(hashlock, preimage), 0n);
     });
 
   const refundLeg = (leg: LegKey) =>
@@ -296,6 +335,7 @@ export function SwapFlow({
   // while unassigned).
   const assignLeg = (leg: LegKey) =>
     runAction(`assign-${leg}`, async () => {
+      requireBoundTerms();
       await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
     });
 
@@ -398,6 +438,13 @@ export function SwapFlow({
         </div>
       </CardHeader>
       <CardContent className="space-y-1">
+        {!termsBound ? (
+          <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
+            This saved swap predates local term binding. New locks, assignments, and secret-revealing
+            claims are disabled. Keep this record for refund, release, or a taker's public-secret
+            claim recovery.
+          </p>
+        ) : null}
         {complete ? (
           <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
             Atomic swap complete on both chains
@@ -479,6 +526,12 @@ export function SwapFlow({
                         size="sm"
                         className="mt-1"
                         disabled={
+                          (!termsBound &&
+                            !(
+                              swap.role === "taker" &&
+                              step.key === "claim-initiator" &&
+                              revealedPreimage !== null
+                            )) ||
                           !step.canRun ||
                           busy !== null ||
                           ((step.key === "lock-initiator" || step.key === "assign-initiator") &&

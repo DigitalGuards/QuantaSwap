@@ -323,7 +323,7 @@ async function main() {
     assertEq(await token.balanceOf(htlc.target), 0n, "nothing escrowed");
   });
 
-  await withTest("issuer blocklist: blocked recipient cannot claim, refund recovers", async () => {
+  await withTest("claim preflight catches issuer blocklist revert before broadcast", async () => {
     const htlc = await deploy("HTLC", alice);
     const usdc = await deploy("BlocklistToken", alice);
     const amount = 500n * 10n ** 6n;
@@ -335,6 +335,17 @@ async function main() {
 
     // Issuer blocks the recipient after lock: claim cannot pay out.
     await (await usdc.setBlocked(bob.address, true)).wait();
+    const claimData = htlc.interface.encodeFunctionData("claim", [hashlock, preimage]);
+    await expectRevert(
+      provider.send("eth_call", [
+        { from: relayer.address, to: htlc.target, data: claimData, value: "0x0" },
+        "latest",
+      ]),
+      "TransferFailed"
+    );
+    const afterPreflight = await htlc.getSwap(hashlock);
+    assertEq(afterPreflight.status, Status.Open, "simulation leaves token swap open");
+    assertEq(afterPreflight.preimage, ethers.ZeroHash, "simulation never persists preimage");
     await expectRevert(htlc.claim(hashlock, preimage), "TransferFailed");
 
     // Funds are not stranded: the refund path still pays the initiator.
@@ -390,12 +401,23 @@ async function main() {
     await expectRevert(htlc.lockToken(hashlock, bob.address, carol.address, 1n, timeout), "InvalidParams");
   });
 
-  await withTest("native claim to a non-payable recipient reverts, refund still works", async () => {
+  await withTest("claim preflight catches native payout revert before broadcast", async () => {
     const htlc = await deploy("HTLC", alice);
     const sink = await deploy("FalseToken", alice); // no receive function
     const { preimage, hashlock } = newSecret();
     const timeout = (await now()) + 2 * HOUR;
     await (await htlc.lockNative(hashlock, sink.target, timeout, { value: 1n })).wait();
+    const claimData = htlc.interface.encodeFunctionData("claim", [hashlock, preimage]);
+    await expectRevert(
+      provider.send("eth_call", [
+        { from: relayer.address, to: htlc.target, data: claimData, value: "0x0" },
+        "latest",
+      ]),
+      "TransferFailed"
+    );
+    const afterPreflight = await htlc.getSwap(hashlock);
+    assertEq(afterPreflight.status, Status.Open, "simulation leaves native swap open");
+    assertEq(afterPreflight.preimage, ethers.ZeroHash, "simulation never persists preimage");
     await expectRevert(htlc.claim(hashlock, preimage), "TransferFailed");
     await warpTo(timeout);
     await (await htlc.refund(hashlock)).wait(); // funds are not stranded

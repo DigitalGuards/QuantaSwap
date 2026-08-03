@@ -12,6 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { assetInfo, type AssetSymbol } from "./assets.js";
 import { loadConfig, type Config } from "./config.js";
 import { EthLeg, QrlLeg } from "./chains.js";
+import { assertRuntimeChainIds, makeDeploymentIdentity } from "./deployment.js";
 import {
   NATIVE_TOKEN,
   encodeApprove,
@@ -21,8 +22,10 @@ import {
   encodeRefund,
   erc20Allowance,
   erc20BalanceOf,
+  getChainId,
   getConfirmedSwapState,
   getSwapState,
+  submitPreflightedClaim,
   type LegKey,
   type LegRpc,
   type LegState,
@@ -40,8 +43,9 @@ import {
 import { StateFile } from "./state.js";
 
 const cfg: Config = loadConfig();
+const deployment = makeDeploymentIdentity(cfg);
 const book = new OrderBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
-const state = new StateFile(cfg.stateFile);
+const state = new StateFile(cfg.stateFile, deployment);
 const eth = new EthLeg(cfg);
 const qrl = new QrlLeg(cfg);
 
@@ -253,9 +257,23 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
     case "claim": {
       if (managed.hashlock === null || managed.preimage === null) break;
-      managed.claimSentAt = nowS();
-      state.upsert(managed);
-      const hash = await sender(rLeg).send(encodeClaim(managed.hashlock, managed.preimage), 0n);
+      const claimData = encodeClaim(managed.hashlock, managed.preimage);
+      // A reverted claim rolls the HTLC state back to Open while calldata
+      // may expose the preimage. Simulate the exact transaction from the
+      // actual sender against latest state immediately before submission,
+      // and fail closed on every RPC/EVM error. Issuer policy or other
+      // chain state can still change between this check and mining, so the
+      // timeout safety margin remains required.
+      const hash = await submitPreflightedClaim(
+        legRpc[rLeg],
+        myAddress(rLeg),
+        claimData,
+        async () => {
+          managed.claimSentAt = nowS();
+          state.upsert(managed);
+          return sender(rLeg).send(claimData, 0n);
+        },
+      );
       log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
       break;
     }
@@ -394,6 +412,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       });
       state.upsert({
         id: order.id,
+        deployment,
         token: makerToken,
         direction,
         asset,
@@ -444,7 +463,17 @@ async function tick(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const [ethRpcChainId, qrlRpcChainId] = await Promise.all([
+    getChainId(legRpc.eth),
+    getChainId(legRpc.qrl),
+  ]);
+  assertRuntimeChainIds(deployment, ethRpcChainId, qrlRpcChainId);
   log(`maker eth=${eth.address} qrl=${qrl.address}`);
+  log(
+    `deployment ${deployment.configFingerprint} | ` +
+      `chains ${deployment.ethChainId}/${deployment.qrlChainId} | ` +
+      `HTLCs ${deployment.ethHtlc}/${deployment.qrlHtlc}`,
+  );
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
       `max inflight ${cfg.maxInflight}, ${cfg.ordersPerLevel} listing(s)/rung, ` +

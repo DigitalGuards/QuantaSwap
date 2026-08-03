@@ -4,12 +4,15 @@
 // executes the decisions.
 
 import type { AssetSymbol } from "./assets.js";
+import type { DeploymentIdentity } from "./deployment.js";
 import { SwapStatus, sameAddr, type LegState } from "./htlc.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 
 export interface ManagedOrder {
   id: string;
+  /** Exact chain and HTLC deployment where this order was created. */
+  deployment: DeploymentIdentity;
   /** Order book bearer AUTH token for this listing; NOT an asset. */
   token: string;
   direction: Direction;

@@ -2,8 +2,13 @@
 // this API is trusted for fund movement: recipients, amounts and timeouts
 // are always re-verified against on-chain HTLC state before acting.
 
-import { ORDERBOOK_API, type EthAssetSymbol } from "../config";
-import type { ActiveSwap, Direction } from "./activeSwap";
+import {
+  CLAIM_MARGIN_S,
+  ORDERBOOK_API,
+  ethAssetSymbolOrNull,
+  type EthAssetSymbol,
+} from "../config";
+import type { ActiveSwap, Direction, MyOrderRef } from "./activeSwap";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 
@@ -48,6 +53,315 @@ export interface OrderView {
   prelocked?: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+interface BaseOrderTerms {
+  direction: Direction;
+  asset: EthAssetSymbol;
+  fromAmount: string;
+  toAmount: string;
+}
+
+export type BoundOrderTerms = BaseOrderTerms &
+  (
+    | {
+        prelocked: false;
+        hashlock: null;
+        initiatorTimeout: null;
+      }
+    | {
+        prelocked: true;
+        hashlock: string;
+        initiatorTimeout: number;
+      }
+  );
+
+export interface ExpectedTakerAccounts {
+  takerEthAccount: string;
+  takerQrlAccount: string;
+}
+
+export interface AnnouncedOrderTerms {
+  hashlock: string;
+  initiatorTimeout: number;
+  responderTimeout: number;
+}
+
+const AMOUNT_RE = /^(0|[1-9][0-9]{0,29})$/;
+const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
+const TERMS_CHANGED = "The order book returned different swap semantics; the take was abandoned.";
+
+const sameAccount = (left: string | null, right: string): boolean =>
+  typeof left === "string" && left.toLowerCase() === right.toLowerCase();
+
+/** Parse the untrusted book's economic terms into a bounded runtime shape. */
+function baseOrderTerms(order: OrderView): BaseOrderTerms {
+  if (order.direction !== "eth->qrl" && order.direction !== "qrl->eth") {
+    throw new Error(TERMS_CHANGED);
+  }
+  const asset = ethAssetSymbolOrNull(order.asset ?? "ETH");
+  if (
+    asset === null ||
+    !AMOUNT_RE.test(order.fromAmount) ||
+    !AMOUNT_RE.test(order.toAmount) ||
+    BigInt(order.fromAmount) === 0n ||
+    BigInt(order.toAmount) === 0n
+  ) {
+    throw new Error(TERMS_CHANGED);
+  }
+  return {
+    direction: order.direction,
+    asset,
+    fromAmount: order.fromAmount,
+    toAmount: order.toAmount,
+  };
+}
+
+/** Parse an open/accepted row, including its exact prelock field shape. */
+function boundOrderTerms(order: OrderView): BoundOrderTerms {
+  const base = baseOrderTerms(order);
+  const prelocked = order.prelocked === true;
+  if (prelocked) {
+    if (
+      typeof order.hashlock !== "string" ||
+      !HASHLOCK_RE.test(order.hashlock) ||
+      typeof order.initiatorTimeout !== "number" ||
+      !Number.isSafeInteger(order.initiatorTimeout) ||
+      order.responderTimeout !== null
+    ) {
+      throw new Error(TERMS_CHANGED);
+    }
+    return {
+      ...base,
+      prelocked: true,
+      hashlock: order.hashlock,
+      initiatorTimeout: order.initiatorTimeout,
+    };
+  }
+
+  // Classic rows have no H/T1/T2 until the maker announces. Silently
+  // discarding unexpected values here would let a response smuggle in a
+  // different protocol mode while still passing the economic checks.
+  if (
+    order.hashlock !== null ||
+    order.initiatorTimeout !== null ||
+    order.responderTimeout !== null
+  ) {
+    throw new Error(TERMS_CHANGED);
+  }
+  return {
+    ...base,
+    prelocked: false,
+    hashlock: null,
+    initiatorTimeout: null,
+  };
+}
+
+/**
+ * Re-check an accept/take response against the exact row the user approved.
+ * A take-by-terms response may improve the two numeric bounds and may name a
+ * different maker, but it may never change direction, asset, or prelock
+ * semantics. An accept-by-id response must preserve the entire displayed row.
+ */
+export function acceptedOrderTerms(
+  displayed: OrderView,
+  accepted: OrderView,
+  expectedAsset: EthAssetSymbol,
+  mode: "same-order" | "same-or-better",
+  expectedTaker: ExpectedTakerAccounts,
+): BoundOrderTerms {
+  const shown = boundOrderTerms(displayed);
+  const filled = boundOrderTerms(accepted);
+  const sameSemantics =
+    shown.asset === expectedAsset &&
+    filled.asset === expectedAsset &&
+    filled.direction === shown.direction &&
+    filled.prelocked === shown.prelocked &&
+    (!shown.prelocked ||
+      (filled.hashlock === shown.hashlock &&
+        filled.initiatorTimeout === shown.initiatorTimeout));
+  const sameOrder =
+    accepted.id === displayed.id &&
+    accepted.makerEthAccount.toLowerCase() === displayed.makerEthAccount.toLowerCase() &&
+    accepted.makerQrlAccount.toLowerCase() === displayed.makerQrlAccount.toLowerCase();
+  const sameTaker =
+    sameAccount(accepted.takerEthAccount, expectedTaker.takerEthAccount) &&
+    sameAccount(accepted.takerQrlAccount, expectedTaker.takerQrlAccount);
+  const validAmounts =
+    mode === "same-order"
+      ? filled.fromAmount === shown.fromAmount && filled.toAmount === shown.toAmount
+      : BigInt(filled.fromAmount) >= BigInt(shown.fromAmount) &&
+        BigInt(filled.toAmount) <= BigInt(shown.toAmount);
+
+  if (
+    displayed.status !== "open" ||
+    accepted.status !== "accepted" ||
+    !sameSemantics ||
+    !sameTaker ||
+    !validAmounts ||
+    (mode === "same-order" && !sameOrder)
+  ) {
+    throw new Error(TERMS_CHANGED);
+  }
+  return { ...filled, direction: shown.direction, asset: expectedAsset };
+}
+
+/**
+ * The maker's capability is not enough to authenticate economic terms. Those
+ * terms must match the local handle written when the maker posted the order.
+ */
+export function assertMakerOrderTerms(
+  local: MyOrderRef,
+  current: OrderView,
+): asserts local is MyOrderRef & {
+  direction: Direction;
+  fromAmount: string;
+  toAmount: string;
+} {
+  if (local.direction === null || local.fromAmount === null || local.toAmount === null) {
+    throw new Error("This saved order predates local term binding; cancel or release it and relist.");
+  }
+  const terms = baseOrderTerms(current);
+  const expectedPrelocked = local.prelock !== null;
+  const expectedLeg = local.direction === "eth->qrl" ? "eth" : "qrl";
+  const accepted = current.status === "accepted";
+  const locking = current.status === "locking";
+  const validLockingTimes =
+    typeof current.hashlock === "string" &&
+    HASHLOCK_RE.test(current.hashlock) &&
+    typeof current.initiatorTimeout === "number" &&
+    Number.isSafeInteger(current.initiatorTimeout) &&
+    typeof current.responderTimeout === "number" &&
+    Number.isSafeInteger(current.responderTimeout);
+  const validClassicShape =
+    (accepted &&
+      current.hashlock === null &&
+      current.initiatorTimeout === null &&
+      current.responderTimeout === null) ||
+    (locking && validLockingTimes);
+  const validPrelockShape =
+    current.prelocked === true &&
+    typeof current.hashlock === "string" &&
+    HASHLOCK_RE.test(current.hashlock) &&
+    typeof current.initiatorTimeout === "number" &&
+    Number.isSafeInteger(current.initiatorTimeout) &&
+    ((accepted && current.responderTimeout === null) ||
+      (locking &&
+        typeof current.responderTimeout === "number" &&
+        Number.isSafeInteger(current.responderTimeout)));
+  if (
+    (!accepted && !locking) ||
+    current.id !== local.id ||
+    terms.direction !== local.direction ||
+    terms.asset !== local.asset ||
+    terms.fromAmount !== local.fromAmount ||
+    terms.toAmount !== local.toAmount ||
+    (current.prelocked === true) !== expectedPrelocked ||
+    (expectedPrelocked ? !validPrelockShape : !validClassicShape) ||
+    (local.prelock !== null &&
+      (local.prelock.leg !== expectedLeg ||
+        current.hashlock !== local.prelock.hashlock ||
+        current.initiatorTimeout !== local.prelock.initiatorTimeout))
+  ) {
+    throw new Error("The order book changed your locally anchored swap terms; refusing to match.");
+  }
+}
+
+/** Reusing a persisted preimage is safe only for the locally bound order. */
+export function assertStoredMakerSwapTerms(local: MyOrderRef, stored: ActiveSwap): void {
+  if (
+    local.direction === null ||
+    local.fromAmount === null ||
+    local.toAmount === null ||
+    stored.role !== "maker" ||
+    stored.termsBindingVersion !== 1 ||
+    stored.orderId !== local.id ||
+    stored.direction !== local.direction ||
+    stored.ethAsset !== local.asset ||
+    stored.fromAmount !== local.fromAmount ||
+    stored.toAmount !== local.toAmount ||
+    Boolean(stored.prelocked) !== (local.prelock !== null) ||
+    (local.prelock !== null &&
+      (stored.hashlock !== local.prelock.hashlock ||
+        stored.initiatorTimeout !== local.prelock.initiatorTimeout))
+  ) {
+    throw new Error("The saved swap does not match your locally anchored order; refusing to continue.");
+  }
+}
+
+/** Bind every order-book field used during maker announce or recovery to
+ *  the locally persisted order and swap before any capability is used. */
+export function assertMakerOrderProgress(
+  local: MyOrderRef,
+  stored: ActiveSwap,
+  current: OrderView,
+): void {
+  assertStoredMakerSwapTerms(local, stored);
+  assertMakerOrderTerms(local, current);
+  const accountsMatch =
+    current.makerEthAccount.toLowerCase() === stored.makerEthAccount.toLowerCase() &&
+    current.makerQrlAccount.toLowerCase() === stored.makerQrlAccount.toLowerCase() &&
+    sameAccount(current.takerEthAccount, stored.takerEthAccount) &&
+    sameAccount(current.takerQrlAccount, stored.takerQrlAccount);
+  const announcementMatches =
+    current.status !== "locking" ||
+    (current.hashlock === stored.hashlock &&
+      current.initiatorTimeout === stored.initiatorTimeout &&
+      current.responderTimeout === stored.responderTimeout);
+  if (!accountsMatch || !announcementMatches) {
+    throw new Error("The order book changed the matched parties or announcement; refusing to continue.");
+  }
+}
+
+/** Validate the maker's locking announcement against the taker's accepted
+ *  snapshot before copying H/T1/T2 into active swap state. */
+export function announcedOrderTerms(
+  stored: ActiveSwap,
+  current: OrderView,
+  now: number,
+): AnnouncedOrderTerms {
+  const terms = baseOrderTerms(current);
+  const anchor = stored.acceptedPrelock;
+  const prelockMatches =
+    stored.prelocked === true
+      ? current.prelocked === true &&
+        anchor !== null &&
+        anchor !== undefined &&
+        current.hashlock === anchor.hashlock &&
+        current.initiatorTimeout === anchor.initiatorTimeout
+      : current.prelocked !== true && (anchor === null || anchor === undefined);
+  const accountsMatch =
+    current.makerEthAccount.toLowerCase() === stored.makerEthAccount.toLowerCase() &&
+    current.makerQrlAccount.toLowerCase() === stored.makerQrlAccount.toLowerCase() &&
+    sameAccount(current.takerEthAccount, stored.takerEthAccount) &&
+    sameAccount(current.takerQrlAccount, stored.takerQrlAccount);
+  if (
+    stored.termsBindingVersion !== 1 ||
+    stored.orderId === null ||
+    current.id !== stored.orderId ||
+    current.status !== "locking" ||
+    terms.direction !== stored.direction ||
+    terms.asset !== stored.ethAsset ||
+    terms.fromAmount !== stored.fromAmount ||
+    terms.toAmount !== stored.toAmount ||
+    !accountsMatch ||
+    !prelockMatches ||
+    typeof current.hashlock !== "string" ||
+    !HASHLOCK_RE.test(current.hashlock) ||
+    typeof current.initiatorTimeout !== "number" ||
+    !Number.isSafeInteger(current.initiatorTimeout) ||
+    typeof current.responderTimeout !== "number" ||
+    !Number.isSafeInteger(current.responderTimeout) ||
+    current.responderTimeout <= now + 600 ||
+    current.initiatorTimeout < current.responderTimeout + CLAIM_MARGIN_S
+  ) {
+    throw new Error("The maker announced unsafe or changed swap parameters.");
+  }
+  return {
+    hashlock: current.hashlock,
+    initiatorTimeout: current.initiatorTimeout,
+    responderTimeout: current.responderTimeout,
+  };
 }
 
 export class OrderGoneError extends Error {}
