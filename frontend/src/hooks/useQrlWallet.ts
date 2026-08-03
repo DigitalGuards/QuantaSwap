@@ -15,8 +15,8 @@ import {
   getAppStoreUrl,
   type ConnectionStatus,
 } from "@qrlwallet/connect";
+import { getAuthorizedQrlAccount, requireQrlAccount } from "@/lib/qrlAddress";
 import { errorMessage } from "@/utils/errorMessage";
-
 
 export type QrlStatus = "disconnected" | "pairing" | "connected";
 /** Which transport is active; drives the qrl_sendTransaction param shape. */
@@ -49,9 +49,12 @@ export function useQrlWallet() {
   const sdkRef = useRef<QRLConnect | null>(null);
   const detailMapRef = useRef(new Map<string, Eip6963Detail>());
   const extensionRef = useRef<QrlProvider | null>(null);
+  const wiredExtensionProvidersRef = useRef(new WeakSet<QrlProvider>());
   const kindRef = useRef<QrlTransport | null>(null);
   const userDisconnectedRef = useRef(false);
   const wasConnectedRef = useRef(false);
+  const authorizationRef = useRef<Promise<void> | null>(null);
+  const disconnectInFlightRef = useRef<Promise<unknown | null> | null>(null);
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kind, setKind] = useState<QrlTransport | null>(null);
@@ -81,6 +84,82 @@ export function useQrlWallet() {
     }
     return sdkRef.current;
   }, []);
+
+  /** Returns the retirement error, keeping UI state intact until confirmation. */
+  const retireRelay = useCallback((): Promise<unknown | null> => {
+    if (disconnectInFlightRef.current) return disconnectInFlightRef.current;
+    userDisconnectedRef.current = true;
+
+    const retirement = (async (): Promise<unknown | null> => {
+      try {
+        await sdk().disconnect();
+        userDisconnectedRef.current = false;
+        wasConnectedRef.current = false;
+        setTransport(null);
+        setStatus("disconnected");
+        setStatusDetail("");
+        setAccount(null);
+        setUri(null);
+        return null;
+      } catch (err) {
+        userDisconnectedRef.current = false;
+        return err;
+      }
+    })();
+    let tracked: Promise<unknown | null>;
+    tracked = retirement.finally(() => {
+      if (disconnectInFlightRef.current === tracked) disconnectInFlightRef.current = null;
+    });
+    disconnectInFlightRef.current = tracked;
+    return tracked;
+  }, [sdk, setTransport]);
+
+  const authorizeRelay = useCallback(
+    (qrl: QRLConnect): Promise<void> => {
+      if (authorizationRef.current) return authorizationRef.current;
+      const channelId = qrl.getChannelId();
+      const authorization = (async () => {
+        try {
+          const next = await getAuthorizedQrlAccount(qrl);
+          if (
+            kindRef.current !== "relay" ||
+            qrl.getChannelId() !== channelId ||
+            userDisconnectedRef.current
+          ) {
+            return;
+          }
+          wasConnectedRef.current = true;
+          setAccount(next);
+          setStatus("connected");
+          setUri(null);
+          setError(null);
+        } catch (err) {
+          if (
+            kindRef.current !== "relay" ||
+            qrl.getChannelId() !== channelId ||
+            userDisconnectedRef.current
+          ) {
+            return;
+          }
+          const authorizationError = errorMessage(err);
+          const retirementError = await retireRelay();
+          const message =
+            retirementError === null
+              ? `Could not authorize wallet account: ${authorizationError}`
+              : `Could not authorize wallet account: ${authorizationError}. Could not retire pairing: ${errorMessage(retirementError)}`;
+          setError(message);
+          if (retirementError !== null) setStatusDetail(message);
+        }
+      })();
+      let tracked: Promise<void>;
+      tracked = authorization.finally(() => {
+        if (authorizationRef.current === tracked) authorizationRef.current = null;
+      });
+      authorizationRef.current = tracked;
+      return tracked;
+    },
+    [retireRelay],
+  );
 
   // EIP-6963 discovery: surface only QRL-capable wallets (the QRL extension
   // and the relay SDK's own announcement); MetaMask-style providers cannot
@@ -137,23 +216,42 @@ export function useQrlWallet() {
   useEffect(() => {
     const qrl = sdk();
     const onConnect = () => {
-      if (kindRef.current === "extension") return;
+      if (kindRef.current === "extension" || userDisconnectedRef.current) return;
       setTransport("relay");
-      wasConnectedRef.current = true;
-      userDisconnectedRef.current = false;
-      setStatus("connected");
-      setUri(null);
-      void qrl
-        .request({ method: "qrl_requestAccounts" })
-        .then((accounts) => {
-          const list = accounts as string[];
-          setAccount(list[0] ?? null);
-        })
-        .catch(() => setAccount(null));
+      if (qrl.getAccounts().length === 0) setStatus("pairing");
+      void authorizeRelay(qrl);
     };
-    const onAccounts = (accounts: string[]) => {
-      if (kindRef.current === "extension") return;
-      setAccount(accounts[0] ?? null);
+    const onAccounts = (accounts: unknown) => {
+      if (kindRef.current === "extension" || userDisconnectedRef.current) return;
+      if (Array.isArray(accounts) && accounts.length === 0) {
+        void retireRelay().then((retirementError) => {
+          if (retirementError !== null) {
+            const message = `Could not retire pairing: ${errorMessage(retirementError)}`;
+            setError(message);
+            setStatusDetail(message);
+          }
+        });
+        return;
+      }
+      try {
+        const next = requireQrlAccount(accounts);
+        setTransport("relay");
+        wasConnectedRef.current = true;
+        setAccount(next);
+        setStatus("connected");
+        setUri(null);
+        setError(null);
+      } catch (err) {
+        void retireRelay().then((retirementError) => {
+          const accountError = errorMessage(err);
+          const message =
+            retirementError === null
+              ? accountError
+              : `${accountError}. Could not retire pairing: ${errorMessage(retirementError)}`;
+          setError(message);
+          if (retirementError !== null) setStatusDetail(message);
+        });
+      }
     };
     const onStatus = (s: ConnectionStatus) => setStatusDetail(String(s));
     const onDisconnect = () => {
@@ -189,7 +287,7 @@ export function useQrlWallet() {
       qrl.off("statusChanged", onStatus);
       qrl.off("disconnect", onDisconnect);
     };
-  }, [sdk, showPairing, setTransport]);
+  }, [authorizeRelay, retireRelay, sdk, showPairing, setTransport]);
 
   /** Header button: open the wallet picker (re-poll announcements first). */
   const connect = useCallback(() => {
@@ -217,20 +315,42 @@ export function useQrlWallet() {
         return;
       }
       try {
-        const accounts = (await detail.provider.request({
+        const accounts = await detail.provider.request({
           method: "qrl_requestAccounts",
-        })) as string[];
-        const first = accounts[0];
-        if (!first) throw new Error("The extension returned no accounts");
+        });
+        const first = requireQrlAccount(accounts);
         extensionRef.current = detail.provider;
         setTransport("extension");
         setAccount(first);
         setStatus("connected");
-        detail.provider.on?.("accountsChanged", (accs) => {
-          if (kindRef.current !== "extension") return;
-          const list = accs as string[];
-          setAccount(list[0] ?? null);
-        });
+        setError(null);
+        if (!wiredExtensionProvidersRef.current.has(detail.provider)) {
+          wiredExtensionProvidersRef.current.add(detail.provider);
+          detail.provider.on?.("accountsChanged", (accs) => {
+            if (
+              kindRef.current !== "extension" ||
+              extensionRef.current !== detail.provider
+            ) {
+              return;
+            }
+            if (Array.isArray(accs) && accs.length === 0) {
+              extensionRef.current = null;
+              setTransport(null);
+              setAccount(null);
+              setStatus("disconnected");
+              return;
+            }
+            try {
+              setAccount(requireQrlAccount(accs));
+            } catch (err) {
+              extensionRef.current = null;
+              setTransport(null);
+              setAccount(null);
+              setStatus("disconnected");
+              setError(errorMessage(err));
+            }
+          });
+        }
       } catch (err) {
         setError(errorMessage(err));
       }
@@ -248,25 +368,46 @@ export function useQrlWallet() {
     }
   }, [showPairing]);
 
-  const cancelPairing = useCallback(() => {
-    setUri(null);
-    if (status === "pairing") setStatus("disconnected");
-  }, [status]);
+  const cancelPairing = useCallback(async () => {
+    if (kindRef.current !== "relay") {
+      setUri(null);
+      setStatus("disconnected");
+      return;
+    }
+    setError(null);
+    setStatusDetail("cancelling...");
+    const retirementError = await retireRelay();
+    if (retirementError !== null) {
+      const message = `Could not cancel pairing: ${errorMessage(retirementError)}`;
+      setError(message);
+      setStatusDetail(message);
+    }
+  }, [retireRelay]);
 
   const disconnect = useCallback(async () => {
-    userDisconnectedRef.current = true;
-    wasConnectedRef.current = false;
     if (kindRef.current === "extension") {
       // No standard revoke call for injected providers; forget the local
       // selection, same convention as the ETH leg.
       extensionRef.current = null;
-    } else {
-      await sdk().disconnect();
+      userDisconnectedRef.current = false;
+      wasConnectedRef.current = false;
+      setTransport(null);
+      setStatus("disconnected");
+      setAccount(null);
+      return;
     }
-    setTransport(null);
-    setStatus("disconnected");
-    setAccount(null);
-  }, [sdk, setTransport]);
+    if (kindRef.current !== "relay") {
+      setTransport(null);
+      setStatus("disconnected");
+      setAccount(null);
+      return;
+    }
+    setError(null);
+    const retirementError = await retireRelay();
+    if (retirementError !== null) {
+      setError(`Could not disconnect wallet: ${errorMessage(retirementError)}`);
+    }
+  }, [retireRelay, setTransport]);
 
   const request = useCallback(
     (args: { method: string; params?: unknown[] }) => {

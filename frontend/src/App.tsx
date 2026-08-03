@@ -46,6 +46,15 @@ export default function App() {
         onDisconnectQrl={() => void qrl.disconnect()}
       />
 
+      {qrl.error ? (
+        <div
+          role="alert"
+          className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-center text-sm text-destructive"
+        >
+          {qrl.error}
+        </div>
+      ) : null}
+
       <main className="mx-auto w-full max-w-5xl flex-1 px-4">
         <Routes>
           <Route path="/" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />

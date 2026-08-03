@@ -23,7 +23,7 @@ export function PairingModal({ uri, statusDetail, onNewConnection, onCancel }: P
     defineQrlPairingModal();
     const el = new QrlPairingModal();
     const onNew = () => handlers.current.onNewConnection();
-    const onDismiss = () => handlers.current.onCancel();
+    const onDismiss = () => void handlers.current.onCancel();
     el.addEventListener("qrl-new-connection", onNew);
     el.addEventListener("qrl-cancel", onDismiss);
     hostRef.current?.append(el);

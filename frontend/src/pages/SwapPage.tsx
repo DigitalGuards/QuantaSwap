@@ -50,10 +50,9 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
       </section>
 
       <section className={swap ? "mx-auto max-w-md" : "mx-auto max-w-md lg:max-w-5xl"}>
-        {eth.error || qrl.error || notice ? (
+        {eth.error || notice ? (
           <div className="mb-4 space-y-4">
             {eth.error ? <p className="text-sm text-destructive">{eth.error}</p> : null}
-            {qrl.error ? <p className="text-sm text-destructive">{qrl.error}</p> : null}
             {notice ? (
               <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
                 {notice}
