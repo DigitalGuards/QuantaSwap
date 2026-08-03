@@ -1,6 +1,11 @@
 import { useEffect, useRef } from "react";
 import { clearMyOrder, loadMyOrder, type ActiveSwap } from "@/lib/activeSwap";
-import { announceHashlock, getOrder, OrderGoneError } from "@/lib/orderbook";
+import {
+  announceHashlock,
+  assertMakerOrderProgress,
+  getOrder,
+  OrderGoneError,
+} from "@/lib/orderbook";
 
 /** Crash recovery for a maker whose tab died between persisting the swap
  *  (the preimage is saved first) and the hashlock reaching the order
@@ -20,13 +25,18 @@ export function useAnnounceReconcile(swap: ActiveSwap | null): void {
     reconciled.current = true;
     getOrder(myOrder.id, myOrder.shareToken ?? undefined)
       .then(async (order) => {
+        // Both the saved swap and the current book row must still match
+        // the locally authored handle. On mismatch the handle is retained
+        // for an explicit cancel/release recovery instead of announcing.
+        assertMakerOrderProgress(myOrder, swap, order);
         if (order.status === "accepted") {
-          await announceHashlock(myOrder.id, {
+          const announced = await announceHashlock(myOrder.id, {
             token: myOrder.token,
             hashlock: swap.hashlock ?? "",
             initiatorTimeout: swap.initiatorTimeout ?? 0,
             responderTimeout: swap.responderTimeout ?? 0,
           });
+          assertMakerOrderProgress(myOrder, swap, announced);
         }
         clearMyOrder();
       })

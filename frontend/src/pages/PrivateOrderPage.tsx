@@ -7,6 +7,7 @@ import { ETH_ASSETS, QRL_LEG, ethAssetSymbolOrNull } from "@/config";
 import type { ActiveSwap } from "@/lib/activeSwap";
 import {
   acceptOrder,
+  acceptedOrderTerms,
   getOrder,
   OrderGoneError,
   parseShareToken,
@@ -116,24 +117,36 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
         // Accept-by-id returns the same order; still re-check the terms
         // before persisting what this client will escrow (the book's
         // response is untrusted, like everywhere else).
-        if (accepted.fromAmount !== order.fromAmount || accepted.toAmount !== order.toAmount) {
-          void releaseOrder(accepted.id, takerToken).catch(() => undefined);
-          throw new Error("The order book returned different terms than displayed; the take was abandoned.");
+        let terms: ReturnType<typeof acceptedOrderTerms>;
+        try {
+          terms = acceptedOrderTerms(order, accepted, assetSymbol, "same-order", {
+            takerEthAccount: ethAccount,
+            takerQrlAccount: qrlAccount,
+          });
+        } catch (err) {
+          // This endpoint reserved the id in the request, regardless of
+          // what an untrusted response claims its id was.
+          void releaseOrder(order.id, takerToken).catch(() => undefined);
+          throw err;
         }
         const taken: ActiveSwap = {
           role: "taker",
+          termsBindingVersion: 1,
           orderId: accepted.id,
           takerToken,
           shareToken,
           // Rendering hint only; fund-moving gates verify on-chain.
-          ...(accepted.prelocked === true ? { prelocked: true } : {}),
-          direction: accepted.direction,
+          ...(terms.prelocked ? { prelocked: true } : {}),
+          acceptedPrelock: terms.prelocked
+            ? { hashlock: terms.hashlock, initiatorTimeout: terms.initiatorTimeout }
+            : null,
+          direction: terms.direction,
           // The asset the taker agreed to is what this page displayed,
           // resolved against the local registry; on-chain token
           // verification runs against this, never the book's word.
-          ethAsset: assetSymbol,
-          fromAmount: accepted.fromAmount,
-          toAmount: accepted.toAmount,
+          ethAsset: terms.asset,
+          fromAmount: terms.fromAmount,
+          toAmount: terms.toAmount,
           makerEthAccount: accepted.makerEthAccount,
           makerQrlAccount: accepted.makerQrlAccount,
           takerEthAccount: ethAccount,

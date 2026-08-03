@@ -17,7 +17,16 @@ import {
   type MyOrderRef,
 } from "@/lib/activeSwap";
 import { generateSecret } from "@/lib/secrets";
-import { announceHashlock, getOrder, OrderGoneError, shareFragment, type OrderView } from "@/lib/orderbook";
+import {
+  announceHashlock,
+  assertMakerOrderProgress,
+  assertMakerOrderTerms,
+  assertStoredMakerSwapTerms,
+  getOrder,
+  OrderGoneError,
+  shareFragment,
+  type OrderView,
+} from "@/lib/orderbook";
 import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
 import { SwapStatus, buildReleaseData, getLegState } from "@/lib/htlc";
 import { makeLegSender } from "@/lib/legSender";
@@ -95,6 +104,7 @@ export function MyOrderCard({
       setBusy(true);
       setError(null);
       try {
+        assertMakerOrderTerms(myOrder, current);
         if (!current.takerEthAccount || !current.takerQrlAccount) {
           throw new Error("taker addresses missing from the accepted order");
         }
@@ -111,6 +121,7 @@ export function MyOrderCard({
         const stored = loadActiveSwap();
         let swap: ActiveSwap;
         if (stored && stored.role === "maker" && stored.orderId === current.id && stored.hashlock) {
+          assertStoredMakerSwapTerms(myOrder, stored);
           swap = stored;
         } else if (myOrder.prelock !== null) {
           // Pre-funded order: the secret and T1 were fixed (and persisted)
@@ -126,13 +137,14 @@ export function MyOrderCard({
           }
           swap = {
             role: "maker",
+            termsBindingVersion: 1,
             orderId: current.id,
             takerToken: null,
             shareToken: myOrder.shareToken,
-            direction: current.direction,
+            direction: myOrder.direction,
             ethAsset: myOrder.asset,
-            fromAmount: myOrder.fromAmount ?? current.fromAmount,
-            toAmount: myOrder.toAmount ?? current.toAmount,
+            fromAmount: myOrder.fromAmount,
+            toAmount: myOrder.toAmount,
             makerEthAccount: ethAccount,
             makerQrlAccount: qrlAccount,
             takerEthAccount: current.takerEthAccount,
@@ -150,17 +162,16 @@ export function MyOrderCard({
           const now = Math.floor(Date.now() / 1000);
           swap = {
             role: "maker",
+            termsBindingVersion: 1,
             orderId: current.id,
             takerToken: null,
             shareToken: myOrder.shareToken,
-            direction: current.direction,
-            // Anchored locally at post time, like the payout addresses:
-            // the book's copy of the asset and amount fields is never
-            // trusted (the book copy is only a fallback for handles
-            // stored before amount anchoring existed).
+            direction: myOrder.direction,
+            // Anchored locally at post time, like the payout addresses.
+            // Legacy handles without every economic term fail closed.
             ethAsset: myOrder.asset,
-            fromAmount: myOrder.fromAmount ?? current.fromAmount,
-            toAmount: myOrder.toAmount ?? current.toAmount,
+            fromAmount: myOrder.fromAmount,
+            toAmount: myOrder.toAmount,
             makerEthAccount: ethAccount,
             makerQrlAccount: qrlAccount,
             takerEthAccount: current.takerEthAccount,
@@ -173,6 +184,9 @@ export function MyOrderCard({
           };
           saveActiveSwap(swap);
         }
+        // Consume the maker capability only after the accepted row's
+        // parties and terms match both local records.
+        assertMakerOrderProgress(myOrder, swap, current);
         let announced: OrderView;
         try {
           announced = await announceHashlock(current.id, {
@@ -199,17 +213,10 @@ export function MyOrderCard({
           if (!(after.status === "locking" && after.hashlock === swap.hashlock)) throw err;
           announced = after;
         }
-        // The taker pairing is only frozen once the order is locking; a
-        // release + re-accept between our poll and the announce could have
-        // swapped takers, so the announce response is the authority.
-        if (announced.takerEthAccount && announced.takerQrlAccount) {
-          swap = {
-            ...swap,
-            takerEthAccount: announced.takerEthAccount,
-            takerQrlAccount: announced.takerQrlAccount,
-          };
-          saveActiveSwap(swap);
-        }
+        // A release + re-accept between poll and announce must not replace
+        // the parties already persisted with the secret. The response is
+        // untrusted and has to match the local order, swap, and H/T values.
+        assertMakerOrderProgress(myOrder, swap, announced);
         clearMyOrder();
         onMatched(swap);
       } catch (err) {
@@ -219,7 +226,7 @@ export function MyOrderCard({
         setBusy(false);
       }
     },
-    [myOrder.token, myOrder.asset, myOrder.fromAmount, myOrder.toAmount, myOrder.shareToken, ethAccount, qrlAccount, onMatched],
+    [myOrder, ethAccount, qrlAccount, onMatched],
   );
 
   useEffect(() => {
@@ -317,8 +324,12 @@ export function MyOrderCard({
     leg === "eth"
       ? { symbol: asset.symbol, decimals: asset.decimals }
       : { symbol: QRL_LEG.display, decimals: 18 };
-  const fromSide = order ? sideOf(order.direction === "eth->qrl" ? "eth" : "qrl") : null;
-  const toSide = order ? sideOf(order.direction === "eth->qrl" ? "qrl" : "eth") : null;
+  const fromSide = myOrder.direction
+    ? sideOf(myOrder.direction === "eth->qrl" ? "eth" : "qrl")
+    : null;
+  const toSide = myOrder.direction
+    ? sideOf(myOrder.direction === "eth->qrl" ? "qrl" : "eth")
+    : null;
 
   return (
     <Card className="surface-ember">
@@ -329,10 +340,14 @@ export function MyOrderCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {order && fromSide && toSide ? (
+        {order && fromSide && toSide && myOrder.fromAmount && myOrder.toAmount ? (
           <p className="text-sm">
-            Give <span className="font-data font-medium">{formatUnits(BigInt(order.fromAmount), fromSide.decimals)} {fromSide.symbol}</span>{" "}
-            for <span className="font-data font-medium">{formatUnits(BigInt(order.toAmount), toSide.decimals)} {toSide.symbol}</span>
+            Give <span className="font-data font-medium">{formatUnits(BigInt(myOrder.fromAmount), fromSide.decimals)} {fromSide.symbol}</span>{" "}
+            for <span className="font-data font-medium">{formatUnits(BigInt(myOrder.toAmount), toSide.decimals)} {toSide.symbol}</span>
+          </p>
+        ) : order && myOrder.direction === null ? (
+          <p className="text-sm text-destructive">
+            This saved order predates local term binding. Cancel or release it and relist.
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">Loading order…</p>

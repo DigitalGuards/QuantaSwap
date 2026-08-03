@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearActiveSwap,
   clearPrelockStage,
+  hasCurrentTermBinding,
   loadActiveSwap,
   loadMyOrder,
   loadPrelockStage,
@@ -33,6 +34,7 @@ function stubStorage(): void {
 
 const swap: ActiveSwap = {
   role: "maker",
+  termsBindingVersion: 1,
   orderId: "order-1",
   takerToken: null,
   direction: "eth->qrl",
@@ -103,6 +105,13 @@ describe("active swap persistence", () => {
     saveActiveSwap(swap);
     expect(loadActiveSwap()?.prelocked).toBeUndefined();
   });
+
+  it("distinguishes current order-book records from legacy recovery state", () => {
+    const { termsBindingVersion: _version, ...legacy } = swap;
+    expect(hasCurrentTermBinding(swap)).toBe(true);
+    expect(hasCurrentTermBinding(legacy)).toBe(false);
+    expect(hasCurrentTermBinding({ ...legacy, role: "sandbox" })).toBe(true);
+  });
 });
 
 describe("legacy demo.v1 migration", () => {
@@ -152,6 +161,7 @@ describe("my-order handle", () => {
     const ref = {
       id: "o1",
       token: "t1",
+      direction: "qrl->eth" as const,
       asset: "USDC" as const,
       fromAmount: "5000000",
       toAmount: "6000000000000000000",
@@ -168,6 +178,7 @@ describe("my-order handle", () => {
     const ref = {
       id: "o1",
       token: "t1",
+      direction: "eth->qrl" as const,
       asset: "ETH" as const,
       fromAmount: "1000000000000000000",
       toAmount: "5000000000000000000",
@@ -190,6 +201,7 @@ describe("my-order handle", () => {
     expect(loadMyOrder()).toEqual({
       id: "o1",
       token: "t1",
+      direction: null,
       asset: "ETH",
       fromAmount: null,
       toAmount: null,
@@ -206,6 +218,7 @@ describe("my-order handle", () => {
     expect(loadMyOrder()).toEqual({
       id: "o1",
       token: "t1",
+      direction: null,
       asset: "USDC",
       fromAmount: null,
       toAmount: null,

@@ -125,6 +125,12 @@ risk:
 - **Token resolution**: orders carry symbols, not addresses. Resolve symbols
   against your own registry (`config/tokens.json`) and verify the escrowed
   token on-chain.
+- **Claim preflight**: simulate the exact claim calldata from the actual
+  sender at `latest` immediately before submission, and never broadcast if
+  it fails. This prevents publishing a secret for an already-reverting
+  token or native payout. Issuer state can still change before mining, and
+  the RPC sees the secret, so centrally controlled assets and the configured
+  RPC remain explicit trust boundaries.
 
 ## Operational notes
 
@@ -137,5 +143,10 @@ risk:
   reference maker refuses to list below its configured floors.
 - **Book capacity**: 200 open orders globally; listings expire after 48 h
   without updates, so long-lived makers repost rather than rely on stale rows.
+- **State recovery identity**: the reference maker binds its state envelope
+  and every order to both chain IDs and both HTLC addresses. It refuses a
+  nonempty legacy or mismatched file without changing it. Recover those
+  orders with their original configuration; never delete or reset the file
+  merely to make the daemon start.
 - **Testnet only for now**: real-value production waits on QRL v2 mainnet.
   Current contract addresses and faucet notes: [DEPLOYMENTS.md](DEPLOYMENTS.md).

@@ -86,6 +86,67 @@ export interface LegRpc {
   timeoutMs?: number;
 }
 
+export async function getChainId(leg: LegRpc): Promise<string> {
+  const result = await rpc(leg.url, `${leg.ns}_chainId`, [], leg.timeoutMs);
+  if (typeof result !== "string" || result.length === 0) {
+    throw new Error(`${leg.ns} RPC returned a malformed chain ID`);
+  }
+  return result;
+}
+
+/** Simulate exact HTLC calldata from the real transaction sender against
+ * latest state. Claim callers must treat any RPC or EVM error as fatal and
+ * must not broadcast the secret-bearing calldata. The deliberately generic
+ * error prevents a hostile RPC response from reflecting the preimage into
+ * daemon logs. */
+export async function simulateHtlcCall(
+  leg: LegRpc,
+  from: string,
+  data: string,
+  valueWei = 0n,
+): Promise<void> {
+  try {
+    const result = await rpc(
+      leg.url,
+      `${leg.ns}_call`,
+      [
+        {
+          from,
+          to: leg.htlc,
+          data,
+          value: `0x${valueWei.toString(16)}`,
+        },
+        "latest",
+      ],
+      leg.timeoutMs,
+    );
+    if (typeof result !== "string" || !/^0x[0-9a-fA-F]*$/.test(result)) {
+      throw new Error("malformed result");
+    }
+  } catch {
+    throw new Error(`${leg.ns} HTLC preflight rejected; claim was not broadcast`);
+  }
+}
+
+/** Choke point for claim submission. The callback may persist the attempt
+ * marker and broadcast only after preflight succeeds. It is never invoked
+ * on a failed simulation, and its errors are sanitized before logging. */
+export async function submitPreflightedClaim(
+  leg: LegRpc,
+  from: string,
+  data: string,
+  submit: () => Promise<string>,
+): Promise<string> {
+  await simulateHtlcCall(leg, from, data, 0n);
+  try {
+    return await submit();
+  } catch {
+    // Provider errors can reflect transaction calldata. Never pass a
+    // secret-bearing RPC error through the daemon logger.
+    throw new Error(`${leg.ns} claim submission failed; reconcile chain state before retry`);
+  }
+}
+
 export async function getBlockNumber(leg: LegRpc): Promise<number> {
   return Number(BigInt((await rpc(leg.url, `${leg.ns}_blockNumber`, [], leg.timeoutMs)) as string));
 }

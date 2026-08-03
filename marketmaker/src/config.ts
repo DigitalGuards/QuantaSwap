@@ -25,6 +25,9 @@ export interface Config {
   orderbookUrl: string;
   ethRpcUrl: string;
   qrlRpcUrl: string;
+  /** Expected deployment chain IDs, persisted with every managed order. */
+  ethChainId: string;
+  qrlChainId: string;
   ethHtlc: string;
   qrlHtlc: string;
   ethPrivateKey: string;
@@ -91,6 +94,14 @@ function envWei(name: string, fallback: bigint): bigint {
   const raw = env(name, fallback.toString());
   if (!/^[0-9]{1,30}$/.test(raw)) throw new Error(`${name} must be a decimal wei string`);
   return BigInt(raw);
+}
+
+function envChainId(name: string, fallback: string): string {
+  const raw = env(name, fallback);
+  if (!/^[0-9]+$/.test(raw) || BigInt(raw) <= 0n) {
+    throw new Error(`${name} must be a positive decimal chain ID`);
+  }
+  return BigInt(raw).toString(10);
 }
 
 function required(name: string): string {
@@ -169,6 +180,8 @@ export function loadConfig(): Config {
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
     ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
     qrlRpcUrl: env("MM_QRL_RPC_URL", "http://127.0.0.1:8545"),
+    ethChainId: envChainId("MM_ETH_CHAIN_ID", "11155111"),
+    qrlChainId: envChainId("MM_QRL_CHAIN_ID", "1337"),
     // 2026-07-13 redeploy: HTLCv2 open-recipient locks (assign + release) on
     // both legs (docs/DEPLOYMENTS.md). The MM does not prelock, so its own
     // flow is unchanged; it just points at the new addresses.
