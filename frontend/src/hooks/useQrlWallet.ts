@@ -16,6 +16,12 @@ import {
   type ConnectionStatus,
 } from "@qrlwallet/connect";
 import { getAuthorizedQrlAccount, requireQrlAccount } from "@/lib/qrlAddress";
+import {
+  activateExtensionAfterRelayRetirement,
+  ConnectionAttemptGuard,
+  RelayResetGuard,
+  shouldIgnoreRelayResetEvent,
+} from "@/lib/relayReset";
 import { errorMessage } from "@/utils/errorMessage";
 
 export type QrlStatus = "disconnected" | "pairing" | "connected";
@@ -55,6 +61,8 @@ export function useQrlWallet() {
   const wasConnectedRef = useRef(false);
   const authorizationRef = useRef<Promise<void> | null>(null);
   const disconnectInFlightRef = useRef<Promise<unknown | null> | null>(null);
+  const relayResetGuardRef = useRef(new RelayResetGuard());
+  const connectionAttemptGuardRef = useRef(new ConnectionAttemptGuard());
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kind, setKind] = useState<QrlTransport | null>(null);
@@ -93,6 +101,7 @@ export function useQrlWallet() {
     const retirement = (async (): Promise<unknown | null> => {
       try {
         await sdk().disconnect();
+        extensionRef.current = null;
         userDisconnectedRef.current = false;
         wasConnectedRef.current = false;
         setTransport(null);
@@ -124,7 +133,9 @@ export function useQrlWallet() {
           if (
             kindRef.current !== "relay" ||
             qrl.getChannelId() !== channelId ||
-            userDisconnectedRef.current
+            userDisconnectedRef.current ||
+            relayResetGuardRef.current.active ||
+            connectionAttemptGuardRef.current.isPending("extension")
           ) {
             return;
           }
@@ -137,7 +148,9 @@ export function useQrlWallet() {
           if (
             kindRef.current !== "relay" ||
             qrl.getChannelId() !== channelId ||
-            userDisconnectedRef.current
+            userDisconnectedRef.current ||
+            relayResetGuardRef.current.active ||
+            connectionAttemptGuardRef.current.isPending("extension")
           ) {
             return;
           }
@@ -190,23 +203,63 @@ export function useQrlWallet() {
   }, [sdk]);
 
   const showPairing = useCallback(
-    async (fresh: boolean) => {
+    async (fresh: boolean, attemptGeneration?: number) => {
+      const attemptIsCurrent = () =>
+        attemptGeneration === undefined ||
+        connectionAttemptGuardRef.current.isCurrent(attemptGeneration);
+      if (!attemptIsCurrent() || relayResetGuardRef.current.active) return;
       setError(null);
-      setTransport("relay");
       const qrl = sdk();
-      const connectionUri = fresh ? await qrl.newConnection() : await qrl.getConnectionURI();
+      const previousChannelId = qrl.getChannelId();
+      const resetGeneration = relayResetGuardRef.current.begin();
+      setStatusDetail(fresh ? "rotating connection..." : "preparing connection...");
+      let connectionUri: string;
+      try {
+        connectionUri = fresh ? await qrl.newConnection() : await qrl.getConnectionURI();
+        if (
+          !attemptIsCurrent() ||
+          !relayResetGuardRef.current.isCurrent(resetGeneration)
+        ) {
+          return;
+        }
+        extensionRef.current = null;
+        setTransport("relay");
+        userDisconnectedRef.current = false;
+        wasConnectedRef.current = false;
+        setAccount(null);
+        setUri(null);
+      } catch (err) {
+        if (
+          attemptIsCurrent() &&
+          relayResetGuardRef.current.isCurrent(resetGeneration) &&
+          qrl.getChannelId() !== previousChannelId &&
+          kindRef.current !== "extension"
+        ) {
+          wasConnectedRef.current = false;
+          setTransport(null);
+          setAccount(null);
+          setStatus("disconnected");
+          setUri(null);
+        }
+        throw err;
+      } finally {
+        relayResetGuardRef.current.finish(resetGeneration);
+      }
+
+      if (!attemptIsCurrent()) return;
+      setUri(connectionUri);
+      setStatus("pairing");
+      setStatusDetail(String(qrl.getStatus()));
       if (qrl.isMobile()) {
         // Deep-link into the app; if nothing handles the protocol (app not
         // installed, or chooser dismissed) fall back to the pairing modal
         // with copy-code plus an install pointer instead of dead-ending.
-        const opened = await attemptWalletRedirect(connectionUri);
+        const opened = await attemptWalletRedirect(connectionUri).catch(() => false);
         if (opened) return;
         setError(
           `MyQRLWallet app not detected. Install it (${getAppStoreUrl()}) or use the copy-code option with the wallet at qrlwallet.com.`,
         );
       }
-      setUri(connectionUri);
-      setStatus("pairing");
     },
     [sdk, setTransport],
   );
@@ -216,13 +269,22 @@ export function useQrlWallet() {
   useEffect(() => {
     const qrl = sdk();
     const onConnect = () => {
-      if (kindRef.current === "extension" || userDisconnectedRef.current) return;
+      if (
+        kindRef.current === "extension" ||
+        userDisconnectedRef.current ||
+        relayResetGuardRef.current.active ||
+        connectionAttemptGuardRef.current.isPending("extension")
+      ) {
+        return;
+      }
       setTransport("relay");
       if (qrl.getAccounts().length === 0) setStatus("pairing");
       void authorizeRelay(qrl);
     };
     const onAccounts = (accounts: unknown) => {
       if (kindRef.current === "extension" || userDisconnectedRef.current) return;
+      if (connectionAttemptGuardRef.current.isPending("extension")) return;
+      if (shouldIgnoreRelayResetEvent(relayResetGuardRef.current, "accounts")) return;
       if (Array.isArray(accounts) && accounts.length === 0) {
         void retireRelay().then((retirementError) => {
           if (retirementError !== null) {
@@ -253,9 +315,15 @@ export function useQrlWallet() {
         });
       }
     };
-    const onStatus = (s: ConnectionStatus) => setStatusDetail(String(s));
+    const onStatus = (s: ConnectionStatus) => {
+      if (connectionAttemptGuardRef.current.isPending("extension")) return;
+      if (shouldIgnoreRelayResetEvent(relayResetGuardRef.current, "status")) return;
+      setStatusDetail(String(s));
+    };
     const onDisconnect = () => {
       if (kindRef.current === "extension") return;
+      if (connectionAttemptGuardRef.current.isPending("extension")) return;
+      if (shouldIgnoreRelayResetEvent(relayResetGuardRef.current, "disconnect")) return;
       // The SDK also emits 'disconnect' when its reconnect probe gives up on
       // a wallet that is merely backgrounded (routine on mobile: the wallet
       // app loses its socket seconds after backgrounding). The stored
@@ -273,7 +341,16 @@ export function useQrlWallet() {
       // re-pair immediately (reference-example behavior).
       if (wasConnectedRef.current && !userDisconnectedRef.current) {
         wasConnectedRef.current = false;
-        void showPairing(false).catch(() => undefined);
+        void showPairing(false).catch(async (err) => {
+          const retirementError = await retireRelay();
+          const pairingError = errorMessage(err);
+          const message =
+            retirementError === null
+              ? `Could not create replacement pairing: ${pairingError}`
+              : `Could not create replacement pairing: ${pairingError}. Could not retire relay session: ${errorMessage(retirementError)}`;
+          setError(message);
+          setStatusDetail(message);
+        });
       }
     };
     qrl.on("connect", onConnect);
@@ -303,72 +380,125 @@ export function useQrlWallet() {
     async (uuid: string) => {
       const detail = detailMapRef.current.get(uuid);
       if (!detail) return;
+      const selectionKind =
+        detail.info.rdns === QRL_CONNECT_RDNS ? "relay" : "extension";
+      if (relayResetGuardRef.current.active) return;
+      const attemptGeneration = connectionAttemptGuardRef.current.begin(selectionKind);
+      if (attemptGeneration === null) return;
       setPickerOpen(false);
-      if (detail.info.rdns === QRL_CONNECT_RDNS) {
+      if (selectionKind === "relay") {
         try {
-          await showPairing(false);
+          await showPairing(false, attemptGeneration);
         } catch (err) {
-          setError(err instanceof Error ? err.message : "Could not start pairing");
-          setStatus("disconnected");
-          setTransport(null);
+          const retirementError = await retireRelay();
+          if (connectionAttemptGuardRef.current.isCurrent(attemptGeneration)) {
+            const pairingError = errorMessage(err);
+            const message =
+              retirementError === null
+                ? `Could not start pairing: ${pairingError}`
+                : `Could not start pairing: ${pairingError}. Could not retire relay session: ${errorMessage(retirementError)}`;
+            setError(message);
+            if (retirementError !== null) setStatusDetail(message);
+          }
+        } finally {
+          connectionAttemptGuardRef.current.finish(attemptGeneration);
         }
         return;
       }
       try {
-        const accounts = await detail.provider.request({
-          method: "qrl_requestAccounts",
-        });
-        const first = requireQrlAccount(accounts);
-        extensionRef.current = detail.provider;
-        setTransport("extension");
-        setAccount(first);
-        setStatus("connected");
-        setError(null);
-        if (!wiredExtensionProvidersRef.current.has(detail.provider)) {
-          wiredExtensionProvidersRef.current.add(detail.provider);
-          detail.provider.on?.("accountsChanged", (accs) => {
-            if (
-              kindRef.current !== "extension" ||
-              extensionRef.current !== detail.provider
-            ) {
-              return;
+        const activation = await activateExtensionAfterRelayRetirement(
+          retireRelay,
+          async () => {
+            if (!connectionAttemptGuardRef.current.isCurrent(attemptGeneration)) {
+              throw new Error("Wallet connection attempt changed");
             }
-            if (Array.isArray(accs) && accs.length === 0) {
-              extensionRef.current = null;
-              setTransport(null);
-              setAccount(null);
-              setStatus("disconnected");
-              return;
+            return detail.provider.request({
+              method: "qrl_requestAccounts",
+            });
+          },
+          (accounts) => {
+            if (!connectionAttemptGuardRef.current.isCurrent(attemptGeneration)) {
+              throw new Error("Wallet connection attempt changed");
             }
-            try {
-              setAccount(requireQrlAccount(accs));
-            } catch (err) {
-              extensionRef.current = null;
-              setTransport(null);
-              setAccount(null);
-              setStatus("disconnected");
-              setError(errorMessage(err));
+            const first = requireQrlAccount(accounts);
+            extensionRef.current = detail.provider;
+            setTransport("extension");
+            setAccount(first);
+            setStatus("connected");
+            setError(null);
+            if (!wiredExtensionProvidersRef.current.has(detail.provider)) {
+              wiredExtensionProvidersRef.current.add(detail.provider);
+              detail.provider.on?.("accountsChanged", (accs) => {
+                if (
+                  kindRef.current !== "extension" ||
+                  extensionRef.current !== detail.provider
+                ) {
+                  return;
+                }
+                if (Array.isArray(accs) && accs.length === 0) {
+                  extensionRef.current = null;
+                  setTransport(null);
+                  setAccount(null);
+                  setStatus("disconnected");
+                  return;
+                }
+                try {
+                  setAccount(requireQrlAccount(accs));
+                } catch (err) {
+                  extensionRef.current = null;
+                  setTransport(null);
+                  setAccount(null);
+                  setStatus("disconnected");
+                  setError(errorMessage(err));
+                }
+              });
             }
-          });
+          },
+        );
+
+        if (!connectionAttemptGuardRef.current.isCurrent(attemptGeneration)) return;
+        if (!activation.ok) {
+          const message = `Could not retire relay session: ${errorMessage(activation.retirementError)}`;
+          setError(message);
+          setStatusDetail(message);
+          return;
         }
       } catch (err) {
-        setError(errorMessage(err));
+        if (connectionAttemptGuardRef.current.isCurrent(attemptGeneration)) {
+          setError(errorMessage(err));
+        }
+      } finally {
+        connectionAttemptGuardRef.current.finish(attemptGeneration);
       }
     },
-    [showPairing, setTransport],
+    [retireRelay, showPairing, setTransport],
   );
 
   // Explicit reset: tears down the existing relay pairing and rotates
   // channel/keys. Relay-only concept.
   const newConnection = useCallback(async () => {
+    if (
+      relayResetGuardRef.current.active ||
+      connectionAttemptGuardRef.current.isPending()
+    ) {
+      return;
+    }
     try {
       await showPairing(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create a new connection");
+      const message = err instanceof Error ? err.message : "Could not create a new connection";
+      setError(message);
+      setStatusDetail(message);
     }
   }, [showPairing]);
 
   const cancelPairing = useCallback(async () => {
+    if (
+      relayResetGuardRef.current.active ||
+      connectionAttemptGuardRef.current.isPending()
+    ) {
+      return;
+    }
     if (kindRef.current !== "relay") {
       setUri(null);
       setStatus("disconnected");
@@ -385,6 +515,12 @@ export function useQrlWallet() {
   }, [retireRelay]);
 
   const disconnect = useCallback(async () => {
+    if (
+      relayResetGuardRef.current.active ||
+      connectionAttemptGuardRef.current.isPending()
+    ) {
+      return;
+    }
     if (kindRef.current === "extension") {
       // No standard revoke call for injected providers; forget the local
       // selection, same convention as the ETH leg.

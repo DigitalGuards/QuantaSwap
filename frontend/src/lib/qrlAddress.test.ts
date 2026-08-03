@@ -38,8 +38,11 @@ describe("QRL wallet account authorization", () => {
     ).rejects.toThrow(/invalid QRL account/);
   });
 
-  it("validates every account in a provider response", () => {
+  it("requires exactly one valid account in a provider response", () => {
     expect(requireQrlAccount([ACCOUNT])).toBe(ACCOUNT);
+    expect(() => requireQrlAccount([ACCOUNT, `Q${"34".repeat(20)}`])).toThrow(
+      /invalid QRL account/,
+    );
     expect(() => requireQrlAccount([ACCOUNT, "Qshort"])).toThrow(/invalid QRL account/);
     expect(() => requireQrlAccount([])).toThrow(/invalid QRL account/);
   });
