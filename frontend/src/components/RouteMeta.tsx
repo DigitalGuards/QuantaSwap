@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 
 // Per-route document titles for the SPA. The crawler-facing defaults live in
 // index.html; this keeps the tab title (and history entries) in sync as the

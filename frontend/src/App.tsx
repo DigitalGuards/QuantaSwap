@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
 import {

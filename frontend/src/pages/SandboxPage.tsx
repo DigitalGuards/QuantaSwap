@@ -1,4 +1,4 @@
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
 import type { ActiveSwap } from "@/lib/activeSwap";
