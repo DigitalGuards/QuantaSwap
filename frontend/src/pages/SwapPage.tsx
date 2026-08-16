@@ -91,6 +91,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 ensureSepolia={eth.ensureSepolia}
                 qrlRequest={qrl.request}
                 qrlTransport={qrl.kind}
+                qrlWalletRdns={qrl.rdns}
                 onMatched={(matched) => {
                   setMyOrder(null);
                   setSwap(matched);
@@ -115,6 +116,8 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
               <OrderBookPanel
                 ethAccount={eth.account}
                 qrlAccount={qrl.account}
+                qrlRequest={qrl.request}
+                qrlWalletRdns={qrl.rdns}
                 ownOrderId={myOrder?.id ?? null}
                 takeDisabled={Boolean(myOrder)}
                 onTaken={(taken) => {

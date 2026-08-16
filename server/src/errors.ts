@@ -6,6 +6,7 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    public readonly code?: "federation_dependency" | "transient_capacity",
   ) {
     super(message);
   }

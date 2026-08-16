@@ -17,8 +17,10 @@ Wire-level details for every endpoint mentioned here:
 The frontend at [quantaswap.io](https://quantaswap.io) has the full maker flow
 built in: post an order from the *Post order* card with your connected
 Ethereum (EIP-6963) and QRL (MyQRLWallet connect) accounts, and your listing
-card walks you through the swap when a taker arrives (lock, hashlock
-announcement, claim or refund) with secrets generated and held in the browser.
+card walks you through the signed intent, terminal fill, lock, claim, or refund
+flow with secrets generated and held in the browser. MyQRLWallet Extension is
+the recommended portable typed-data signer; the official QRL wallet's
+`qrl_signTypedData_v4` scheme is also verified.
 
 The catch: **maker presence is tied to the open tab.** Your client heartbeats
 the listing while its card is open; close the tab and after 90 seconds the
@@ -34,56 +36,80 @@ Run a client against the order book API. You have two starting points:
   the public book. The [self-hosted LP kit](../marketmaker/README.md) includes a
   digest-pinned container, Compose runtime, independent wallet bootstrap,
   persistent recovery state and a sanitized health endpoint. Hardened
-  TypeScript, deps only `ethers` and QRL's official web3/wallet libraries.
-  It runs the whole maker lifecycle unattended: announce, lock, depth-verified
+  TypeScript with direct QRL signing and verification dependencies. It signs
+  portable orders, independently verifies taker intents, and runs the whole
+  lifecycle unattended: fill, lock, depth-verified
   claim, refund, repost, plus a price ladder tracking a CoinGecko cross rate,
   inventory reserves and reprice-on-drift. Every irreversible action flows
   through the pure decision core in `marketmaker/src/policy.ts` (tested by
   `npm test`). Configuration is documented in `marketmaker/.env.example`; the
   packaged runtime mounts the two signing secrets from untracked mode-0600
   files and never copies them into the image.
-- **Write your own**: the API is small and unauthenticated beyond per-order
-  bearer tokens. `marketmaker/src/orderbook.ts` and
+- **Write your own**: the API is small. Portable authority is ML-DSA-87 signed;
+  bearer capabilities remain only for origin-local presence and private rows.
+  `marketmaker/src/orderbook.ts` and
   `frontend/src/lib/orderbook.ts` are compact client references.
 
 ## The maker lifecycle
 
-The maker is always the **initiator**: after a taker reserves your order, you
-generate the secret, lock first, and your claim of the taker's leg is what
-reveals the secret that lets the taker claim yours.
+The maker is always the **initiator**: after selecting a taker's signed
+proposal, you generate the secret, publish the terminal fill, lock first, and
+your claim of the taker's leg reveals the secret that lets the taker claim
+yours.
 
-1. **Post**: `POST /orders` with direction, asset, both amounts (base units)
-   and your two addresses. Store the returned `makerToken`; it is shown once.
+1. **Create, commit, sign, and stage**: generate a fresh raw 32-byte maker
+   capability. A private browser order also generates a fresh 32-byte share
+   capability. Sign OrderV1 over direction, asset, amounts, both maker accounts,
+   deployment, expiry, a fresh nonce, and the two domain-separated SHA-256
+   capability commitments. Public orders sign a zero share commitment; private
+   orders sign a nonzero one. Persist the exact `{order, auth, makerToken}`
+   request, plus `shareToken` when private, before the first
+   `POST /orders/signed`. The stable cross-mirror id is SHA-256 over the fixed
+   OrderV1 id domain, your raw 20-byte QRL account, and the raw 32-byte nonce.
+   Keep the staged envelope until the origin returns the same authenticated
+   OrderV1. Retry it without changing any field after an uncertain response.
 2. **Heartbeat**: `POST /orders/:id/heartbeat` at least every 90 s per open
-   listing (the reference maker beats every tick). Offline listings are
-   skipped by take-by-terms matching.
-3. **Watch for a take**: poll `GET /orders/:id` or subscribe to
-   `GET /orders/stream`. A take moves the order to `accepted` and fills in the
-   taker's addresses.
-4. **Lock first**: generate a fresh 32-byte CSPRNG secret, compute
-   `hashlock = sha256(secret)`, and lock your leg on-chain with the taker as
-   recipient and the initiator timeout. The contract enforces hashlock
-   freshness, so never reuse a secret across swaps or chains.
-5. **Announce**: `POST /orders/:id/hashlock` with the hashlock and both
-   unix-second timeouts. The book enforces (and the contracts embody) the
-   timelock asymmetry: your initiator window must be at least **2×** the
-   responder window, so the taker can never claim your leg while you can no
-   longer claim theirs.
-6. **Verify the taker's lock, then claim**: wait for the taker's HTLC lock,
+   listing (the reference maker beats every tick). It communicates origin
+   liveness and keeps legacy rows eligible for take-by-terms matching.
+3. **Verify proposals**: poll `GET /orders/:id/intents`. Independently verify
+   every FillIntentV1 signature, deployment, order digest, taker accounts,
+   release commitment, and expiry. Discard future-issued proposals, then select
+   by signed `auth.issuedAt` and semantic `intentDigest`. Never use mirror-local
+   `receivedAt` as a tie-breaker. Persist that exact proposal before making a
+   terminal decision.
+4. **Generate and persist**: generate a fresh 32-byte CSPRNG secret, compute
+   `hashlock = sha256(secret)`, choose safe T1/T2, and persist the secret and
+   terms. Never reuse a secret across swaps or chains.
+5. **Sign the terminal fill**: sign FillV1 over the selected intent digest,
+   taker accounts, release commitment, hashlock, timeouts, deployment, and a
+   short `respondBy`. Persist the exact proof before
+   `POST /orders/:id/fill`. If the response says `released: true`, stop before
+   funding. Authenticate the returned OrderV1, FillV1, selected intent,
+   semantic digests, status, and absence of cancellation or conflict evidence.
+   Persist a separate `fillAcknowledged` flag only after authenticating that
+   exact locking response, and make the acknowledgment durable before changing
+   the live decision state. The reference maker requires this flag before its
+   first lock; the locally persisted FillV1 proof alone is insufficient. A fill
+   never reopens; use a fresh OrderV1 to quote again.
+6. **Lock first**: lock your leg on-chain with the selected taker as recipient
+   and the FillV1 initiator timeout. The contract enforces hashlock freshness.
+7. **Verify the taker's lock, then claim**: wait for the taker's HTLC lock,
    re-read it on-chain **at your confirmation depth** (the reference maker
    re-reads at `head - N`), and verify recipient, amount, token address and
    timeout against your own registry, never against book data. Only then
    claim the taker's leg, which publishes the secret.
-7. **Or refund**: if the taker never locks (or locks wrong), do nothing until
+8. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
-8. **Repost**: a filled or cancelled listing is gone; post a new order to
-   stay in the book. `POST /orders/:id/cancel` pulls a live listing (funds
-   already locked stay governed on-chain).
+9. **Cancel or repost**: before selecting an intent, a maker may sign and
+   persist CancelV1, then `POST /orders/:id/cancel/signed`. A filled or
+   cancelled listing is terminal. Authenticate the exact CancelV1 and digest
+   in the response before deleting local state. Sign a fresh OrderV1 to stay in
+   the book.
 
-A taker can also walk away: pre-lock their release relists your order
-untouched; post-lock the order shows `released: true`, meaning commit no
-further funds and take the refund path if you already locked.
+A taker can reveal the release preimage committed in FillIntentV1. It marks the
+proposal or selected fill released and means commit no further funds. It never
+relists the consumed OrderV1. If you already locked, follow the refund path.
 
 ## Pre-funded listings (prelock)
 
@@ -102,7 +128,7 @@ flow is the *Pre-fund* checkbox on the post card. What changes:
 - the escrow's T1 is fixed at post (the frontend uses 48 h, matching the
   listing TTL), and the book stops offering the order once less than 2 h 30 m
   of runway remains: release and relist at that point;
-- order of operations at match is announce first, assign second, and **never
+- order of operations at match is publish FillV1 first, assign second, and **never
   assign while the shared hashlock already exists on the responder chain**
   (a dust-cost squat there would strand your escrow until T1: release and
   relist with a fresh secret instead). Never reveal the secret while your own
@@ -111,6 +137,13 @@ flow is the *Pre-fund* checkbox on the post card. What changes:
 The reference market maker intentionally does **not** prelock: it is always
 online, so lock-at-match costs its takers nothing, and unfunded listings keep
 its inventory fungible across the whole ladder instead of parked per rung.
+
+Portable timing bounds are enforced by the signer and verifier. FillIntentV1
+lasts at most 120 s. FillV1 `respondBy` is 60 to 900 s after issuance and leaves
+more than 600 s before T2. T2 is at most 2 h after FillV1 issuance. A classic
+T1 is at most 4 h after issuance and provides at least twice the T2 window. A
+signed prelock anchors T1 from 3 h through 72 h after OrderV1 issuance, cannot
+expire before OrderV1, and must retain at least 2 h 30 m when matched.
 
 ## Safety rules (non-negotiable)
 
@@ -147,6 +180,34 @@ risk:
   reference maker refuses to list below its configured floors.
 - **Book capacity**: 200 open orders globally; listings expire after 48 h
   without updates, so long-lived makers repost rather than rely on stale rows.
+  The mirror also retains at most 256 order artifacts, 64 per maker pair, 64
+  per local source, and 8 signed intents per order. Capacity errors are normal
+  backpressure: preserve local signed state and retry or use another mirror.
+- **One active process per state and key set**: the reference maker acquires an
+  exclusive mode-0600 `state.json.lock` lease before reading state. The lease
+  binds the deployment fingerprint and both operator accounts, identifies the
+  Linux boot plus process start time, refuses a live second process, and safely
+  recovers a stale file after a crash or reboot. Distinct LP instances still
+  need distinct state volumes and keys.
+- **Authenticated book responses**: the reference maker checks exact signed
+  order, fill, cancel, selected intent, semantic digests, terminal state, and
+  conflict absence before funding or deleting state. Preserve this gate in
+  custom integrations and treat a contradictory success response as hostile.
+  An authenticated `released: true` observation is persisted and sticky, so a
+  later stale or unavailable response cannot authorize a new lock.
+- **Book-outage continuity**: a portable first lock requires a durably
+  authenticated FillV1 acknowledgment. During a book outage, the reference
+  maker continues chain settlement only when it already has that acknowledgment,
+  a persisted lock attempt, or observed exposure on either HTLC leg. A prior
+  lock attempt is never abandoned merely because an RPC currently reports
+  `None` or the timeout passed. Released records with possible exposure stay
+  managed for claim or refund, and they never re-lock.
+- **Capability recovery**: signed creates are client-authored. The mirror stores
+  the signed commitments and echoes the raw preimages supplied by an exact
+  retry; it cannot reconstruct them. The browser stages one unresolved create
+  in local storage, and the headless kit writes its envelope to mode-0600 state
+  before transport. Never place maker or share preimages in federation payloads,
+  application logs, reverse-proxy logs, or metrics.
 - **State recovery identity**: the reference maker binds its state envelope
   and every order to both chain IDs and both HTLC addresses. It refuses a
   nonempty legacy or mismatched file without changing it. Recover those

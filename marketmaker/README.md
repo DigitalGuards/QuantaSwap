@@ -16,11 +16,42 @@ explicitly closed in the project release notes.
 - independent ETH and QRL wallet generation without printing either secret;
 - read-only secret mounts instead of secrets baked into the image;
 - a persistent, deployment-bound state volume for swap recovery;
+- portable OrderV1 listings plus deterministic verification and selection of
+  short-lived taker FillIntentV1 proofs;
+- crash-safe persistence of the exact FillV1 or CancelV1 terminal proof before
+  publication, with no order reopening after either decision;
+- exact authentication of create, fill, cancel, and recovery responses before
+  funding or deleting state, plus a durable FillV1 acknowledgment and sticky
+  release observation;
+- an exclusive process lease bound to the state path, deployment fingerprint,
+  and operator accounts;
 - a localhost-only health endpoint that reports progress without addresses,
   balances, endpoint URLs, order ids, raw errors, or key material.
 
-The container packages the existing maker. It does not change pricing, reserve,
-confirmation, timeout, or swap decision behavior.
+The portable coordination layer changes no pricing, reserve, confirmation, or
+on-chain swap decision behavior. It replaces mirror-local accept tokens for new
+listings with independently verifiable ML-DSA-87 protocol messages.
+The headless kit publishes public signed orders only. It creates each raw maker
+capability before signing, commits its domain-separated SHA-256 digest inside
+OrderV1, and persists the raw capability with the proof before the first POST.
+An uncertain create can retry the exact request without minting a new order or
+losing administrative access. Private signed orders remain a browser flow until
+the kit has an allowed-taker policy and operator interface.
+
+For raw maker token `m`, serialized as 64 lowercase hex characters without
+`0x`, the signed field is:
+
+```text
+makerTokenCommitment = sha256(
+  UTF8("QuantaSwap Maker capability V1\0") || m as 32 raw bytes
+)
+```
+
+The kit signs the public-order zero value for `shareTokenCommitment`. It writes
+the complete `{order, auth, makerToken}` create envelope to mode-0600 state
+before transport. An exact retry receives the existing authenticated OrderV1
+and the same raw maker token it supplied again. The mirror keeps only the signed
+commitment. The raw token never enters federation or kit logs.
 
 ## QRL network compatibility gate
 
@@ -111,12 +142,48 @@ verification and a clean completed tick. Docker marks the container unhealthy
 after repeated failed checks, but Compose does not restart it merely for being
 unhealthy. Inspect the logs and recovery state before intervening.
 
+Run one active process for each state volume and wallet pair. The maker creates
+a mode-0600 `state.json.lock` lease before it reads recovery state. It records
+the deployment and account identity digest, Linux boot id, PID, process start
+time, and a random lease id. A live holder makes a second process fail closed;
+a stale main lease from a crash or reboot is atomically replaced while a
+separate recovery guard is held. A stale recovery guard causes fail-safe
+refusal for manual inspection. Shutdown removes only the lease id it acquired,
+so it cannot delete a newer holder's file. Use distinct volumes and keys for
+distinct LP instances.
+
 ## State and recovery
 
 The named volume `quantaswap-lp-state` contains `state.json`. That file can hold
-live order bearer tokens and unrevealed swap preimages. Treat it as a secret.
-Every record is bound to both chain ids and both HTLC addresses. A mismatch is
-refused without modifying the file.
+live origin capability preimages, unrevealed swap preimages, selected taker
+proofs, and the exact maker-signed OrderV1, FillV1, or CancelV1 artifacts needed
+for safe retry. Treat it as a secret. Every record is bound to both chain ids
+and both HTLC addresses. Protocol proofs are cryptographically reverified during
+hydration, and a mismatch is refused without modifying the file.
+If an atomic state rename succeeds and the following directory sync fails, the
+state object becomes permanently poisoned and the process exits. This prevents
+the running process from rolling memory back after the new file may have become
+durable.
+
+Order-book responses are also authenticated against this state. The maker
+requires the exact OrderV1, selected FillIntentV1, FillV1 or CancelV1, semantic
+digests, expected terminal status, and no equivocation evidence. A malformed or
+contradictory success response blocks funding and leaves recovery state intact.
+
+For portable fills, the kit persists `fillAcknowledged` only after authenticating
+the exact locking response. The state write completes before the live decision
+object changes, and its first on-chain lock requires that acknowledgment. An
+unacknowledged local FillV1 proof does not grant funding authority. An
+authenticated release observation is persisted as a sticky fact and
+permanently blocks a new or repeated lock for that fill.
+
+If the book becomes unavailable, the kit proceeds with chain settlement only
+after a durable fill acknowledgment, a persisted lock attempt, or observed
+exposure on either HTLC leg. Claim and refund remain driven by verified chain
+state. Once a lock send has been attempted, the record is never automatically
+abandoned because the current read says `None` or a timeout passed. A release
+after possible exposure prevents re-locking while preserving claim and refund
+recovery.
 
 Never delete the volume, replace `state.json`, regenerate wallets, or change the
 chain/HTLC identity while an order may be open, locked, claimable, or refundable.

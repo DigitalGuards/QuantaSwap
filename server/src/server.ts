@@ -6,6 +6,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolveClientIp } from "./client-ip.js";
 import { readConfig } from "./config.js";
+import { corsHeaders, preflightHeaders, type CorsMode } from "./cors.js";
+import { FederationFeed, federationEventId } from "./federation.js";
+import { FederationPeerSync } from "./peer-sync.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
@@ -61,6 +64,13 @@ async function readJsonBody(
   req: IncomingMessage,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
+  const contentType = req.headers["content-type"];
+  if (
+    typeof contentType !== "string" ||
+    contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+  ) {
+    throw new ApiError(415, "content type must be application/json");
+  }
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -82,6 +92,67 @@ async function readJsonBody(
 }
 
 const store = new OrderStore(config.dataFile, { presenceTtlS: config.presenceTtlS });
+const federationFeed = new FederationFeed(config.federationDataFile);
+let federationHealthy = true;
+
+// The order store and relay feed use separate atomic files. Reconcile every
+// currently live public proof before serving so a crash between those writes
+// cannot leave an accepted mutation permanently invisible to existing peers.
+for (const event of store.federationSnapshot()) {
+  if (!federationFeed.has(federationEventId(event))) federationFeed.append(event);
+}
+
+store.subscribeFederation((event) => {
+  try {
+    federationFeed.append(event);
+    federationHealthy = true;
+  } catch (error) {
+    federationHealthy = false;
+    console.error("[orderbook] federation event persistence failed:", error);
+    initiateShutdown("federation storage failure", 1);
+  }
+});
+
+const peerSync = new FederationPeerSync({
+  peers: config.federationPeers,
+  timeoutMs: config.federationRequestTimeoutMs,
+  apply: (event) => {
+    try {
+      store.applyFederationEvent(event);
+      return "applied";
+    } catch (error) {
+      if (error instanceof OrderStorePersistenceError) {
+        console.error("[orderbook] fatal persistence failure during federation sync");
+        initiateShutdown("storage failure", 1);
+        throw error;
+      }
+      if (
+        error instanceof ApiError &&
+        (error.code === "federation_dependency" ||
+          error.code === "transient_capacity")
+      ) {
+        return "deferred";
+      }
+      console.warn(
+        "[orderbook] rejected a federation peer event:",
+        error instanceof Error ? error.message : "unknown validation error",
+      );
+      return "rejected";
+    }
+  },
+  onError: (_peer, error) => {
+    console.warn(
+      "[orderbook] federation peer sync failed:",
+      error instanceof Error ? error.message : "unknown transport error",
+    );
+  },
+});
+const peerSyncTimer =
+  config.federationPeers.length === 0
+    ? undefined
+    : setInterval(() => void peerSync.syncAll(), config.federationSyncMs);
+peerSyncTimer?.unref();
+if (config.federationPeers.length > 0) setImmediate(() => void peerSync.syncAll());
 const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
 function clientIp(req: IncomingMessage): string {
@@ -175,10 +246,51 @@ function openStream(req: IncomingMessage, res: ServerResponse, ip: string): void
 
 // --------------------------------------------------------------------------
 
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const origin = req.headers.origin;
+  return typeof origin === "string" ? origin : undefined;
+}
+
+function corsMode(method: string, path: string): CorsMode {
+  return method === "GET" &&
+    (path === "/api/orders" ||
+      path === "/api/orders/stream" ||
+      path === "/api/federation/v1/events")
+    ? "public-read"
+    : "configured-origin";
+}
+
+function applyHeaders(res: ServerResponse, headers: Record<string, string>): void {
+  for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+}
+
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const method = req.method ?? "GET";
-  const path = (req.url ?? "/").split("?")[0] ?? "/";
+  const url = new URL(req.url ?? "/", "http://orderbook.invalid");
+  const path = url.pathname;
   const ip = clientIp(req);
+
+  if (method === "OPTIONS") {
+    const headers = preflightHeaders(
+      requestOrigin(req),
+      typeof req.headers["access-control-request-method"] === "string"
+        ? req.headers["access-control-request-method"]
+        : undefined,
+      typeof req.headers["access-control-request-headers"] === "string"
+        ? req.headers["access-control-request-headers"]
+        : undefined,
+      config.corsOrigins,
+    );
+    if (headers === null) {
+      sendJson(res, 403, { error: "cross-origin request is not allowed" });
+    } else {
+      applyHeaders(res, headers);
+      res.writeHead(204, { "Cache-Control": "no-store" });
+      res.end();
+    }
+    return;
+  }
+  applyHeaders(res, corsHeaders(requestOrigin(req), corsMode(method, path), config.corsOrigins));
 
   if (shuttingDown && path !== "/api/health") {
     sendJson(res, 503, { error: "order book is shutting down" });
@@ -194,8 +306,34 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
 
   if (method === "GET" && path === "/api/health") {
-    const healthy = !shuttingDown && store.storageReady();
+    const healthy =
+      !shuttingDown &&
+      store.storageReady() &&
+      federationFeed.storageReady() &&
+      federationHealthy;
     sendJson(res, healthy ? 200 : 503, { status: healthy ? "ok" : "degraded" });
+    return;
+  }
+  if (method === "GET" && path === "/api/federation/v1/events") {
+    const unexpected = [...url.searchParams.keys()].some(
+      (key) => key !== "cursor" && key !== "limit",
+    );
+    if (unexpected) throw new ApiError(400, "unsupported federation query parameter");
+    const rawLimit = url.searchParams.get("limit") ?? "256";
+    if (!/^[0-9]+$/.test(rawLimit)) {
+      throw new ApiError(400, "federation limit must be an integer");
+    }
+    const limit = Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      throw new ApiError(400, "federation limit must be between 1 and 256");
+    }
+    sendJson(
+      res,
+      200,
+      federationFeed.page(url.searchParams.get("cursor"), limit, () =>
+        store.federationSnapshot(),
+      ),
+    );
     return;
   }
   if (method === "GET" && path === "/api/orders/stream") {
@@ -213,7 +351,30 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (method === "POST" && path === "/api/orders/signed") {
     const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
     const verified = verifyOrderV1(body["order"], body["auth"]);
-    sendJson(res, 201, store.createVerified(verified, ip));
+    const expectedKeys = verified.terms.visibility === "private"
+      ? ["auth", "makerToken", "order", "shareToken"]
+      : ["auth", "makerToken", "order"];
+    const actualKeys = Object.keys(body).sort();
+    if (
+      actualKeys.length !== expectedKeys.length ||
+      actualKeys.some((key, index) => key !== expectedKeys[index])
+    ) {
+      throw new ApiError(400, "signed create request has unexpected fields");
+    }
+    sendJson(
+      res,
+      201,
+      store.createVerified(
+        verified,
+        {
+          makerToken: body["makerToken"],
+          ...(body["shareToken"] === undefined
+            ? {}
+            : { shareToken: body["shareToken"] }),
+        },
+        ip,
+      ),
+    );
     return;
   }
   if (method === "POST" && path === "/api/orders/take") {
@@ -221,6 +382,66 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // better. Returns the taker token alongside the order, like accept.
     sendJson(res, 200, store.take(await readJsonBody(req), ip));
     return;
+  }
+
+  const signedCancelMatch = /^\/api\/orders\/([^/]+)\/cancel\/signed$/.exec(path);
+  if (signedCancelMatch && method === "POST") {
+    const id = signedCancelMatch[1] ?? "";
+    if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
+    const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+    const headerToken = req.headers["x-maker-token"];
+    const order = store.cancelSigned(
+      id,
+      body["cancel"],
+      body["auth"],
+      typeof headerToken === "string" ? headerToken : body["token"],
+    );
+    sendJson(res, 200, { order });
+    return;
+  }
+
+  const protocolMatch = /^\/api\/orders\/([^/]+)\/(intents|fill)$/.exec(path);
+  if (protocolMatch) {
+    const id = protocolMatch[1] ?? "";
+    const action = protocolMatch[2];
+    if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
+    if (action === "intents" && method === "GET") {
+      const makerToken = req.headers["x-maker-token"];
+      sendJson(res, 200, {
+        intents: store.listFillIntents(
+          id,
+          typeof makerToken === "string" ? makerToken : undefined,
+        ),
+      });
+      return;
+    }
+    if (action === "intents" && method === "POST") {
+      const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+      const shareToken = req.headers["x-share-token"];
+      const intent = store.submitFillIntent(
+        id,
+        body["intent"],
+        body["auth"],
+        ip,
+        typeof shareToken === "string" ? shareToken : body["shareToken"],
+      );
+      sendJson(res, 201, { intent });
+      return;
+    }
+    if (action === "fill" && method === "POST") {
+      const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+      const makerToken = req.headers["x-maker-token"];
+      const order = store.fillOrder(
+        id,
+        body["fill"],
+        body["auth"],
+        body["intent"],
+        body["intentAuth"],
+        typeof makerToken === "string" ? makerToken : body["token"],
+      );
+      sendJson(res, 200, { order });
+      return;
+    }
   }
 
   const match = /^\/api\/orders\/([^/]+)(?:\/(accept|hashlock|cancel|release|heartbeat))?$/.exec(
@@ -294,6 +515,7 @@ function initiateShutdown(reason: string, exitCode = 0): void {
   process.exitCode = exitCode;
   console.log(`[orderbook] stopping (${reason})`);
 
+  if (peerSyncTimer !== undefined) clearInterval(peerSyncTimer);
   for (const writer of [...streamClients.values()]) writer.end();
   server.close((error) => {
     if (shutdownTimer !== undefined) clearTimeout(shutdownTimer);

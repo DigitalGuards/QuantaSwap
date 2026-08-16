@@ -6,15 +6,88 @@
 import type { AssetSymbol } from "./assets.js";
 import type { DeploymentIdentity } from "./deployment.js";
 import { SwapStatus, sameAddr, type LegState } from "./htlc.js";
+import type {
+  CanonicalOrderV1Body,
+  FillIntentV1Body,
+  MakerOrderAuthV1,
+  SignedCancelV1,
+  SignedFillV1,
+} from "./protocol-signing.js";
 
 export type Direction = "eth->qrl" | "qrl->eth";
+
+/** A taker proof can come from MyQRLWallet's native typed-data method or
+ *  the official wallet's EIP-712 method. The protocol verifier checks the
+ *  exact proof before the maker selects it. */
+export interface FillIntentAuthV1 {
+  version: "1";
+  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4";
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+  signature: string;
+  publicKey: string;
+  descriptor: string;
+}
+
+/** Exact mirror artifact selected by the maker. It is retained with the
+ *  locally generated secret before a FillV1 is signed. */
+export interface SelectedFillIntentV1 {
+  intentDigest: string;
+  intent: FillIntentV1Body;
+  auth: FillIntentAuthV1;
+  receivedAt: number;
+}
+
+/** Portable protocol state is optional so deployment-bound unsigned
+ *  records from earlier releases remain recoverable through their legacy
+ *  endpoints. Every present proof is persisted exactly for safe retries. */
+export interface ManagedProtocolV1 {
+  version: 1;
+  orderDigest: string;
+  order: CanonicalOrderV1Body;
+  orderAuth: MakerOrderAuthV1;
+  /** True only after an exact FillV1 book response has authenticated. */
+  fillAcknowledged: boolean;
+  /** Sticky authenticated release observation. */
+  releaseObserved: boolean;
+  selectedIntent?: SelectedFillIntentV1;
+  fillProof?: SignedFillV1;
+  cancelProof?: SignedCancelV1;
+}
+
+/** Select deterministically across mirrors while refusing expired,
+ *  cross-order, or cryptographically invalid proposals. Mirror-local
+ *  receive timestamps are deliberately excluded from ordering. */
+export function earliestValidFillIntent(
+  intents: readonly SelectedFillIntentV1[],
+  orderDigest: string,
+  now: number,
+  verify: (intent: SelectedFillIntentV1) => boolean,
+): SelectedFillIntentV1 | null {
+  const valid = intents.filter(
+    (candidate) =>
+      candidate.intent.orderDigest === orderDigest &&
+      candidate.auth.issuedAt <= now &&
+      candidate.auth.expiresAt > now &&
+      verify(candidate),
+  );
+  valid.sort(
+    (a, b) =>
+      a.auth.issuedAt - b.auth.issuedAt ||
+      a.intentDigest.localeCompare(b.intentDigest),
+  );
+  return valid[0] ?? null;
+}
 
 export interface ManagedOrder {
   id: string;
   /** Exact chain and HTLC deployment where this order was created. */
   deployment: DeploymentIdentity;
   /** Order book bearer AUTH token for this listing; NOT an asset. */
-  token: string;
+  token: string | null;
+  /** Present on portable signed listings. Absent on legacy unsigned rows. */
+  protocol?: ManagedProtocolV1;
   direction: Direction;
   /** ETH-leg asset symbol; the QRL leg is always native. Old persisted
    *  records default to "ETH" on hydration. */
@@ -88,22 +161,46 @@ const retryOk = (sentAt: number | null, nowS: number, resendAfterS: number): boo
 const terminal = (s: LegState | null): boolean =>
   s !== null && (s.status === SwapStatus.Claimed || s.status === SwapStatus.Refunded);
 
+const chainExposed = (s: LegState | null): boolean =>
+  s !== null && s.status !== SwapStatus.None;
+
+/** A coordination outage may be ignored only once durable or on-chain
+ * evidence proves that this lifecycle needs settlement handling. */
+export function canContinueWithoutBook(
+  managed: ManagedOrder,
+  iState: LegState | null,
+): boolean {
+  return (
+    managed.protocol?.fillAcknowledged === true ||
+    managed.lockSentAt !== null ||
+    chainExposed(iState)
+  );
+}
+
 export function decide(x: DecideInput): Decision {
   const { managed, nowS } = x;
   const t1 = managed.initiatorTimeout;
   const t2 = managed.responderTimeout;
+  const released = x.released || managed.protocol?.releaseObserved === true;
 
-  const everLocked =
-    managed.lockSentAt !== null || (x.iState !== null && x.iState.status !== SwapStatus.None);
+  const exposureExcluded =
+    managed.lockSentAt === null &&
+    (managed.hashlock === null ||
+      (x.iState !== null && x.iState.status === SwapStatus.None));
 
   // Order vanished (cancelled, expired, book wiped) before any funds moved.
-  if ((x.bookStatus === "gone" || x.bookStatus === "cancelled") && !everLocked) return "abort";
+  if (
+    (x.bookStatus === "gone" || x.bookStatus === "cancelled") &&
+    exposureExcluded
+  ) {
+    return "abort";
+  }
 
   // The taker walked away (authorized release) and nothing of ours is on
   // chain: cancel the listing instead of locking into the void. The refill
   // loop reposts the rung. Once we locked, chain state governs as usual
   // (refund at t1, or claim if the taker locked and then discarded).
-  if (x.released && !everLocked) return "abort";
+  if (released && exposureExcluded) return "abort";
 
   if (x.bookStatus === "open") return "wait";
   if (x.bookStatus === "accepted") return "announce";
@@ -153,7 +250,8 @@ export function decide(x: DecideInput): Decision {
   if (
     x.iState.status === SwapStatus.None &&
     x.bookStatus === "locking" &&
-    !x.released &&
+    !released &&
+    (managed.protocol === undefined || managed.protocol.fillAcknowledged) &&
     nowS - (managed.announcedAt ?? 0) >= x.lockGraceS &&
     nowS < t2 - x.claimSafetyS &&
     retryOk(managed.lockSentAt, nowS, x.resendAfterS)
@@ -180,15 +278,6 @@ export function decide(x: DecideInput): Decision {
 
   // Never locked and the responder window has closed: nothing will move.
   if (x.iState.status === SwapStatus.None && nowS >= t2 && managed.lockSentAt === null) {
-    return "abort";
-  }
-
-  // Our lock was attempted but never landed on chain (a send that threw, or
-  // an endpoint that dropped it) and t1 has passed: nothing of ours is
-  // escrowed and every window is closed, so stop tracking instead of
-  // waiting forever. A lock that somehow lands afterwards still refunds to
-  // us permissionlessly at its own timeout, no preimage needed.
-  if (x.iState.status === SwapStatus.None && nowS >= t1) {
     return "abort";
   }
 
