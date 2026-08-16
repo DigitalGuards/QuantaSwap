@@ -7,10 +7,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "init:keys": "npm run build && node dist/init-keys.js",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test dist/deployment.test.js dist/htlc.test.js dist/policy.test.js dist/price.test.js dist/state.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
+    "@theqrl/wallet.js": "2.0.2",
     "@theqrl/web3": "^0.4.4",
     "ethers": "^6.13.4"
   },

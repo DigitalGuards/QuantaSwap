@@ -2,6 +2,7 @@
 // knob has a testnet-sized default. Amounts are base-unit bigints (wei
 // for the native coins, token units for ERC-20 assets).
 
+import { readFileSync } from "node:fs";
 import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
 
 /** Ladder policy for one ETH-leg asset. */
@@ -77,6 +78,14 @@ export interface Config {
   initiatorWindowS: number;
   responderWindowS: number;
   stateFile: string;
+  /** Read-only local health endpoint. It never exposes keys, addresses,
+   *  endpoint URLs, balances, order ids, or raw error messages. */
+  healthHost: string;
+  healthPort: number;
+  /** A running or completed tick older than this marks health degraded. */
+  healthStaleS: number;
+  /** Cancel open listings, settle active swaps, and post no replacements. */
+  drain: boolean;
 }
 
 function env(name: string, fallback: string): string {
@@ -88,6 +97,12 @@ function envInt(name: string, fallback: number): number {
   const v = Number(env(name, String(fallback)));
   if (!Number.isFinite(v) || v <= 0) throw new Error(`${name} must be a positive number`);
   return Math.floor(v);
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = env(name, String(fallback)).toLowerCase();
+  if (raw !== "true" && raw !== "false") throw new Error(`${name} must be true or false`);
+  return raw === "true";
 }
 
 function envWei(name: string, fallback: bigint): bigint {
@@ -104,10 +119,29 @@ function envChainId(name: string, fallback: string): string {
   return BigInt(raw).toString(10);
 }
 
-function required(name: string): string {
-  const v = process.env[name];
-  if (v === undefined || v === "") throw new Error(`${name} is required`);
-  return v;
+/** Load a signing secret directly or through Docker/Kubernetes-style
+ *  NAME_FILE indirection. Exactly one source must be configured. */
+export function readRequiredSecret(name: string): string {
+  const direct = process.env[name];
+  const fileName = `${name}_FILE`;
+  const file = process.env[fileName];
+  const hasDirect = direct !== undefined && direct !== "";
+  const hasFile = file !== undefined && file !== "";
+  if (hasDirect && hasFile) {
+    throw new Error(`${name} and ${fileName} are mutually exclusive`);
+  }
+  if (hasDirect) return direct;
+  if (!hasFile) throw new Error(`${name} or ${fileName} is required`);
+
+  let value: string;
+  try {
+    value = readFileSync(file, "utf8").trim();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "unknown read error";
+    throw new Error(`${fileName} could not be read: ${reason}`);
+  }
+  if (value === "") throw new Error(`${fileName} points to an empty secret file`);
+  return value;
 }
 
 /** Human-unit decimal amount (e.g. "5" or "2.5" USDC) to base units. */
@@ -170,6 +204,8 @@ export function loadConfig(): Config {
   const ordersPerDirection = envInt("MM_ORDERS_PER_DIRECTION", 2);
   const ethOrderWei = envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n); // 0.02 ETH base size
   const ethReserveWei = envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n);
+  const healthPort = envInt("MM_HEALTH_PORT", 8092);
+  if (healthPort > 65_535) throw new Error("MM_HEALTH_PORT must be at most 65535");
   return {
     assets,
     assetPolicies: loadAssetPolicies(assets, {
@@ -187,8 +223,8 @@ export function loadConfig(): Config {
     // flow is unchanged; it just points at the new addresses.
     ethHtlc: env("MM_ETH_HTLC", "0x910D5d4a7f2037c01F3B4C835167357e89909281"),
     qrlHtlc: env("MM_QRL_HTLC", "Q238322ad2e8f935b4481fcc379779c31b84decb0"),
-    ethPrivateKey: required("MM_ETH_PRIVATE_KEY"),
-    qrlHexseed: required("MM_QRL_HEXSEED"),
+    ethPrivateKey: readRequiredSecret("MM_ETH_PRIVATE_KEY"),
+    qrlHexseed: readRequiredSecret("MM_QRL_HEXSEED"),
     ordersPerDirection,
     ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
@@ -212,5 +248,9 @@ export function loadConfig(): Config {
     initiatorWindowS: envInt("MM_INITIATOR_WINDOW_S", 7200),
     responderWindowS: envInt("MM_RESPONDER_WINDOW_S", 3600),
     stateFile: env("MM_STATE_FILE", new URL("../data/state.json", import.meta.url).pathname),
+    healthHost: env("MM_HEALTH_HOST", "127.0.0.1"),
+    healthPort,
+    healthStaleS: envInt("MM_HEALTH_STALE_S", 600),
+    drain: envBool("MM_DRAIN", false),
   };
 }
