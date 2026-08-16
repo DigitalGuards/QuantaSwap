@@ -13,6 +13,7 @@ import { assetInfo, type AssetSymbol } from "./assets.js";
 import { loadConfig, type Config } from "./config.js";
 import { EthLeg, QrlLeg } from "./chains.js";
 import { assertRuntimeChainIds, makeDeploymentIdentity } from "./deployment.js";
+import { cancelOpenListing } from "./drain.js";
 import {
   NATIVE_TOKEN,
   encodeApprove,
@@ -41,6 +42,7 @@ import {
   type ManagedOrder,
 } from "./policy.js";
 import { StateFile } from "./state.js";
+import { listenHealthServer, MakerHealth } from "./health.js";
 
 const cfg: Config = loadConfig();
 const deployment = makeDeploymentIdentity(cfg);
@@ -48,6 +50,12 @@ const book = new OrderBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
 const state = new StateFile(cfg.stateFile, deployment);
 const eth = new EthLeg(cfg);
 const qrl = new QrlLeg(cfg);
+const health = new MakerHealth({
+  deploymentFingerprint: deployment.configFingerprint,
+  assets: cfg.assets,
+  draining: cfg.drain,
+  staleAfterMs: cfg.healthStaleS * 1000,
+});
 
 const legRpc: Record<LegKey, LegRpc> = {
   eth: { url: cfg.ethRpcUrl, ns: "eth", htlc: cfg.ethHtlc, timeoutMs: cfg.netTimeoutMs },
@@ -106,6 +114,31 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   const iLeg = initiatorLeg(managed.direction);
   const rLeg = responderLeg(managed.direction);
   const { status: bookStatus, view } = await fetchBook(managed.id);
+
+  // Drain is an explicit operator state: pull unfunded exposure from the
+  // book, but keep every accepted or funded lifecycle under management
+  // until it reaches its normal terminal state.
+  if (cfg.drain) {
+    try {
+      const cancelled = await cancelOpenListing(
+        true,
+        bookStatus,
+        () => book.cancel(managed.id, managed.token),
+        (err) => err instanceof OrderGoneError,
+      );
+      if (cancelled) {
+        state.delete(managed.id);
+        log(`order ${short(managed.id)} cancelled for drain`);
+        return view;
+      }
+    } catch (err) {
+      log(
+        `order ${short(managed.id)} drain cancel failed, keeping to retry:`,
+        err instanceof Error ? err.message : err,
+      );
+      return view;
+    }
+  }
 
   // Reprice a still-open listing when ITS pair's mid drifted past the
   // threshold: cancel it and let refill repost the rung at the current
@@ -313,6 +346,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
+  if (cfg.drain) return;
   const managed = state.all();
   const inflight = managed.filter((m) => {
     const v = views.get(m.id);
@@ -444,6 +478,8 @@ let running = false;
 async function tick(): Promise<void> {
   if (running) return;
   running = true;
+  health.markTickStarted(state.all().length);
+  let errorCount = 0;
   try {
     await feed.maybeRefresh(nowS());
     const views = new Map<string, OrderView | null>();
@@ -451,23 +487,30 @@ async function tick(): Promise<void> {
       try {
         views.set(managed.id, await advance(managed));
       } catch (err) {
+        errorCount += 1;
         log(`order ${short(managed.id)} tick error:`, err instanceof Error ? err.message : err);
       }
     }
     await refill(views);
   } catch (err) {
+    errorCount += 1;
     log("tick error:", err instanceof Error ? err.message : err);
   } finally {
+    health.markTickCompleted(state.all().length, errorCount);
     running = false;
   }
 }
 
 async function main(): Promise<void> {
+  await listenHealthServer(health, cfg.healthHost, cfg.healthPort);
+  log(`health endpoint listening on ${cfg.healthHost}:${cfg.healthPort}`);
   const [ethRpcChainId, qrlRpcChainId] = await Promise.all([
     getChainId(legRpc.eth),
     getChainId(legRpc.qrl),
   ]);
   assertRuntimeChainIds(deployment, ethRpcChainId, qrlRpcChainId);
+  health.markRuntimeVerified();
+  if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
   log(`maker eth=${eth.address} qrl=${qrl.address}`);
   log(
     `deployment ${deployment.configFingerprint} | ` +

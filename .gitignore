@@ -15,3 +15,4 @@ docs/decentralization.md
 .DS_Store
 server/data/
 marketmaker/data/
+marketmaker/secrets/

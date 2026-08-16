@@ -31,13 +31,17 @@ always-on book.
 Run a client against the order book API. You have two starting points:
 
 - **Run or adapt `marketmaker/`**: the reference implementation used to stock
-  the public book. Hardened TypeScript, deps only `ethers` + `@theqrl/web3`.
+  the public book. The [self-hosted LP kit](../marketmaker/README.md) includes a
+  digest-pinned container, Compose runtime, independent wallet bootstrap,
+  persistent recovery state and a sanitized health endpoint. Hardened
+  TypeScript, deps only `ethers` and QRL's official web3/wallet libraries.
   It runs the whole maker lifecycle unattended: announce, lock, depth-verified
   claim, refund, repost, plus a price ladder tracking a CoinGecko cross rate,
   inventory reserves and reprice-on-drift. Every irreversible action flows
   through the pure decision core in `marketmaker/src/policy.ts` (tested by
   `npm test`). Configuration is documented in `marketmaker/.env.example`; the
-  two signing keys live only in your untracked `.env`.
+  packaged runtime mounts the two signing secrets from untracked mode-0600
+  files and never copies them into the image.
 - **Write your own**: the API is small and unauthenticated beyond per-order
   bearer tokens. `marketmaker/src/orderbook.ts` and
   `frontend/src/lib/orderbook.ts` are compact client references.
@@ -148,5 +152,8 @@ risk:
   nonempty legacy or mismatched file without changing it. Recover those
   orders with their original configuration; never delete or reset the file
   merely to make the daemon start.
+- **Operator independence**: each LP needs distinct keys, capital, host, RPC
+  trust choices, policy, monitoring and encrypted backups. Do not clone the
+  original operator's secret files, state volume or server access.
 - **Testnet only for now**: real-value production waits on QRL v2 mainnet.
   Current contract addresses and faucet notes: [DEPLOYMENTS.md](DEPLOYMENTS.md).

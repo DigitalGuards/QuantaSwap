@@ -1,0 +1,54 @@
+name: ${LP_COMPOSE_PROJECT:-quantaswap-lp}
+
+services:
+  marketmaker:
+    image: quantaswap-marketmaker:${LP_KIT_VERSION:-local}
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      # Never pass legacy inline key values through to the container, even
+      # if an older local .env still contains them.
+      MM_ETH_PRIVATE_KEY: ""
+      MM_QRL_HEXSEED: ""
+      MM_ETH_PRIVATE_KEY_FILE: /run/secrets/mm_eth_private_key
+      MM_QRL_HEXSEED_FILE: /run/secrets/mm_qrl_hexseed
+      MM_STATE_FILE: /var/lib/quantaswap-marketmaker/state.json
+      MM_HEALTH_HOST: 0.0.0.0
+      MM_HEALTH_PORT: "8092"
+    secrets:
+      - mm_eth_private_key
+      - mm_qrl_hexseed
+    volumes:
+      - marketmaker-state:/var/lib/quantaswap-marketmaker
+    ports:
+      - "127.0.0.1:${LP_HEALTH_PORT:-8092}:8092"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+secrets:
+  mm_eth_private_key:
+    file: ./secrets/eth-private-key
+  mm_qrl_hexseed:
+    file: ./secrets/qrl-hexseed
+
+volumes:
+  marketmaker-state:
+    name: ${LP_STATE_VOLUME:-quantaswap-lp-state}
