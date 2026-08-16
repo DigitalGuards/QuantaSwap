@@ -183,7 +183,7 @@ fixed interoperability vector is covered by server and browser tests.
 The current server still exposes unsigned `POST /orders` for the local
 headless market-maker compatibility path. Such rows have 16-hex ids and no
 `makerAuth`; the UI labels them as legacy local liquidity. Federation and
-signed cancellation tombstones are later protocol work—this endpoint is the
+signed cancellation tombstones are later protocol work. This endpoint is the
 portable signed-order foundation, not a claim that the book is federated yet.
 
 ### Maker presence
