@@ -16,6 +16,7 @@ import {
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
 import { prelockEscrowIssue } from "@/lib/prelock";
+import { verifyOrderV1Auth } from "@/lib/orderSigning";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
@@ -42,6 +43,9 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [proof, setProof] = useState<"checking" | "valid" | "invalid" | "legacy" | null>(
+    null,
+  );
   // On-chain check of a pre-funded order's escrow claim (the book cannot
   // prove funding; the hard gate stays the at-depth verification).
   const [escrow, setEscrow] = useState<{
@@ -72,6 +76,56 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
 
   const orderIsPrelocked = order?.prelocked === true && order.status === "open";
   const orderAssetRaw = order?.asset ?? "ETH";
+  const orderProofKey =
+    order === null
+      ? null
+      : JSON.stringify([
+          order.id,
+          order.direction,
+          order.asset ?? "ETH",
+          order.fromAmount,
+          order.toAmount,
+          order.makerEthAccount,
+          order.makerQrlAccount,
+          order.visibility ?? "public",
+          order.allowedTakerEth ?? "",
+          order.allowedTakerQrl ?? "",
+          order.prelocked === true,
+          order.hashlock,
+          order.initiatorTimeout,
+          order.makerAuth?.version,
+          order.makerAuth?.scheme,
+          order.makerAuth?.issuedAt,
+          order.makerAuth?.expiresAt,
+          order.makerAuth?.nonce,
+          order.makerAuth?.signature,
+          order.makerAuth?.publicKey,
+          order.makerAuth?.descriptor,
+        ]);
+  useEffect(() => {
+    if (!order) {
+      setProof(null);
+      return undefined;
+    }
+    if (order.makerAuth === undefined) {
+      setProof("legacy");
+      return undefined;
+    }
+    const target = order;
+    let stale = false;
+    setProof("checking");
+    const timer = window.setTimeout(() => {
+      const valid = verifyOrderV1Auth(target);
+      if (!stale) setProof(valid ? "valid" : "invalid");
+    }, 0);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+    // Polling replaces the row object every five seconds. Re-check only if
+    // signed OrderV1 material changed, so the proof badge does not flicker.
+  }, [orderProofKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!order || !orderIsPrelocked) {
       setEscrow(null);
@@ -119,6 +173,12 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
         // response is untrusted, like everywhere else).
         let terms: ReturnType<typeof acceptedOrderTerms>;
         try {
+          if (
+            (accepted.makerAuth !== undefined && !verifyOrderV1Auth(accepted)) ||
+            (order.makerAuth !== undefined && accepted.makerAuth === undefined)
+          ) {
+            throw new Error("The private order does not carry a valid maker signature.");
+          }
           terms = acceptedOrderTerms(order, accepted, assetSymbol, "same-order", {
             takerEthAccount: ethAccount,
             takerQrlAccount: qrlAccount,
@@ -269,6 +329,28 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
               </span>
             </div>
           ) : null}
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Maker proof</span>
+            <span
+              className={
+                proof === "valid"
+                  ? "text-success"
+                  : proof === "invalid"
+                    ? "text-destructive"
+                    : proof === "legacy"
+                      ? "text-amber-400"
+                      : "text-muted-foreground"
+              }
+            >
+              {proof === "valid"
+                ? "ML-DSA-87 verified"
+                : proof === "invalid"
+                  ? "invalid or expired"
+                  : proof === "legacy"
+                    ? "legacy unsigned"
+                    : "verifying…"}
+            </span>
+          </div>
         </div>
         {order.prelocked === true && escrow?.issue ? (
           <p className="text-xs text-destructive">
@@ -289,6 +371,8 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             !eth.account ||
             !qrl.account ||
             busy ||
+            proof === "checking" ||
+            proof === "invalid" ||
             (order.prelocked === true && escrow?.issue !== null && escrow?.issue !== undefined)
           }
           onClick={take}

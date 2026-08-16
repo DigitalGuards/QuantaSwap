@@ -26,7 +26,7 @@ Properties: fee only on success, refund path untouched, both sides see gross amo
 
 Mechanics options: (a) pay-to-post, maker pays a small fee (on-chain payment reference or Lightning-style voucher) before the order is listed; (b) pay-to-match, taker's `accept` requires payment; (c) success fee invoiced off-chain.
 
-All three are conventional, not enforced. The order book is deliberately coordination-only with zero runtime deps (`server/src/store.ts` header comment); clients re-verify everything on-chain and the protocol explicitly degrades to out-of-band coordination if the server disappears (ARCHITECTURE section 3). Two parties who found each other on the book can complete the swap without ever paying the book, and the frontend is GPL so a fee-stripped mirror is a `git clone` away. Any enforcement attempt (withholding the counterparty's address until payment) just pushes users out-of-band and damages the zero-maintenance-floor story. Rejected as a revenue line; keep the book free.
+All three are conventional, not enforced. The order book is deliberately coordination-only; its small lockfile-pinned runtime dependency set verifies portable maker signatures, while clients still re-verify everything on-chain and the protocol explicitly degrades to out-of-band coordination if the server disappears (ARCHITECTURE section 3). Two parties who found each other on the book can complete the swap without ever paying the book, and the frontend is GPL so a fee-stripped mirror is a `git clone` away. Any enforcement attempt (withholding the counterparty's address until payment) just pushes users out-of-band and damages the zero-maintenance-floor story. Rejected as a revenue line; keep the book free.
 
 ### 1.4 Solver spread (quote-embedded pricing)
 

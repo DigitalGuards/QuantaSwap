@@ -53,6 +53,22 @@ export interface OrderView {
   prelocked?: boolean;
   createdAt: number;
   updatedAt: number;
+  /** Portable maker proof on OrderV1 rows. Legacy/local-liquidity rows
+   *  created through the compatibility endpoint do not carry one. */
+  makerAuth?: MakerOrderAuthV1;
+}
+
+export type OrderSigningScheme = "qrl-sign-typed-v1" | "qrl-eip712-v4";
+
+export interface MakerOrderAuthV1 {
+  version: "1";
+  scheme: OrderSigningScheme;
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+  signature: string;
+  publicKey: string;
+  descriptor: string;
 }
 
 interface BaseOrderTerms {
@@ -399,7 +415,7 @@ export const getOrder = async (id: string, shareToken?: string): Promise<OrderVi
     )
   ).order;
 
-export const createOrder = async (body: {
+export interface CreateOrderBody {
   direction: Direction;
   /** ETH-leg asset symbol for the pair this order trades. */
   asset: EthAssetSymbol;
@@ -415,8 +431,20 @@ export const createOrder = async (body: {
   /** Pre-funded listing: the open lock is already on-chain under this
    *  hashlock with this fixed T1; announce later echoes both verbatim. */
   prelock?: { hashlock: string; initiatorTimeout: number };
-}): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
+}
+
+/** Legacy/local-liquidity compatibility path. Interactive makers use
+ *  createSignedOrder so their listing can be authenticated by mirrors. */
+export const createOrder = async (
+  body: CreateOrderBody,
+): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
   api("POST", "/orders", body);
+
+export const createSignedOrder = async (
+  order: CreateOrderBody,
+  auth: MakerOrderAuthV1,
+): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
+  api("POST", "/orders/signed", { order, auth });
 
 export const acceptOrder = async (
   id: string,

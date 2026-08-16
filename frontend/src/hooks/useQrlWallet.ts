@@ -67,15 +67,23 @@ export function useQrlWallet() {
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kind, setKind] = useState<QrlTransport | null>(null);
+  const [rdns, setRdns] = useState<string | null>(null);
   const [status, setStatus] = useState<QrlStatus>("disconnected");
   const [statusDetail, setStatusDetail] = useState<string>("");
   const [account, setAccount] = useState<string | null>(null);
   const [uri, setUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const setTransport = useCallback((next: QrlTransport | null) => {
+  const setTransport = useCallback((next: QrlTransport | null, extensionRdns?: string) => {
     kindRef.current = next;
     setKind(next);
+    setRdns(
+      next === "relay"
+        ? QRL_CONNECT_RDNS
+        : next === "extension"
+          ? (extensionRdns ?? null)
+          : null,
+    );
   }, []);
 
   const sdk = useCallback((): QRLConnect => {
@@ -416,7 +424,7 @@ export function useQrlWallet() {
             }
             const first = requireQrlAccount(accounts);
             extensionRef.current = detail.provider;
-            setTransport("extension");
+            setTransport("extension", detail.info.rdns);
             setAccount(first);
             setStatus("connected");
             setError(null);
@@ -560,6 +568,7 @@ export function useQrlWallet() {
     wallets,
     pickerOpen,
     kind,
+    rdns,
     connect,
     closePicker,
     connectWallet,

@@ -5,9 +5,10 @@ reserves orders but never holds funds, signs transactions, chooses recipients,
 or decides whether an on-chain lock is valid. Every client must continue to
 verify all economic and settlement facts against the HTLCs.
 
-**Testnet only.** This image packages one independent book. Signed order
-federation is a separate protocol milestone; running this package does not by
-itself create a federated venue.
+**Testnet only.** This image packages one independent book. It verifies and
+stores portable maker-signed OrderV1 objects, but mirror federation and signed
+cancellation tombstones are separate milestones; running this package does not
+by itself create a federated venue.
 
 ## What the package provides
 
@@ -18,7 +19,9 @@ itself create a federated venue.
 - bounded SSE backpressure, request deadlines, and graceful shutdown;
 - explicit reverse-proxy trust instead of unconditional forwarded headers;
 - global, per-maker, per-source, rate, take, and stream-connection limits;
-- a storage-aware `/api/health` endpoint.
+- a storage-aware `/api/health` endpoint;
+- dual-scheme ML-DSA-87 OrderV1 verification for MyQRLWallet and the official
+  QRL Web3 Wallet, with browser-side verification before a take.
 
 ## First boot
 

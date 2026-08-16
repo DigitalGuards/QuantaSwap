@@ -23,6 +23,8 @@ import { PrivateOrderPage } from "@/pages/PrivateOrderPage";
 export default function App() {
   const eth = useEthWallet();
   const qrl = useQrlWallet();
+  const developmentDeployment =
+    typeof window !== "undefined" && window.location.hostname === "dev.quantaswap.io";
 
   // One active swap at a time, shared by the market and sandbox pages and
   // persisted across refreshes (the preimage lives inside it).
@@ -45,6 +47,15 @@ export default function App() {
         onConnectQrl={qrl.connect}
         onDisconnectQrl={() => void qrl.disconnect()}
       />
+
+      {developmentDeployment ? (
+        <div
+          role="status"
+          className="border-b border-accent/40 bg-accent/10 px-4 py-2 text-center text-sm text-foreground"
+        >
+          Development deployment · signed OrderV1 experiment · no first-party liquidity
+        </div>
+      ) : null}
 
       {qrl.error ? (
         <div

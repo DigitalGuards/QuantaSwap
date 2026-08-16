@@ -106,6 +106,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 ensureSepolia={eth.ensureSepolia}
                 qrlRequest={qrl.request}
                 qrlTransport={qrl.kind}
+                qrlWalletRdns={qrl.rdns}
                 prefill={prefill}
                 onPosted={setMyOrder}
               />
