@@ -207,9 +207,19 @@ many keys, so the source and global caps remain necessary.
 
 Retained terminal and expiry artifacts have separate bounds: **256 orders
 globally**, **64 per maker pair**, **64 per local source IP**, and **128 total
-from federation**. Each order retains at most **8 FillIntentV1 proposals** and
-**2 conflicting proof artifacts** per conflict class. A full retained store
-rejects new creates rather than discarding active recovery evidence.
+from federation**. Public portable orders have an additional **64-order global
+bound** across local and federated sources, with at most **48 federated public
+portable orders** and **16 first supplied by one direct peer**. These bounds are
+also checked while loading persisted state. Each order retains at most **8
+FillIntentV1 proposals** and **2 conflicting proof artifacts** per conflict
+class. A full retained store rejects new creates while preserving active
+recovery evidence.
+
+These are resource ceilings, not Sybil resistance. A public client with enough
+maker keys and source addresses can occupy available listing slots until the
+orders expire. Testnet operators should monitor capacity and restrict access
+when abused. A real-value permissionless deployment needs an economic or
+identity-based admission policy reviewed separately from this transport.
 
 ### Portable OrderV1 maker proofs
 
@@ -411,6 +421,26 @@ sybil resistance):
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
 
+Federation feed reads use dedicated fixed one-minute windows. They bypass the
+general read counter above, preserving order-view and heartbeat capacity:
+
+| Lane | All feed reads | Reset reads | Concurrent responses |
+|---|---:|---:|---:|
+| Public | 240/source, 3840 global | 4/source, 64 global | 1/source, 4 global |
+| Authenticated peer | 240/source, 3840 global | 4/source, 64 global | 1/source, 16 global |
+
+`source` is the resolved client IP within that lane. A request consumes its
+concurrency slot before either rate counter, and a reset consumes both the feed
+and reset counters. Excess traffic receives `429`.
+
+The feed remains publicly readable. A mirror may set one 32-byte lowercase-hex
+`ORDERBOOK_FEDERATION_READ_TOKEN`; an exact `Authorization: Bearer <token>`
+selects the independent authenticated lane. Pulling mirrors put the remote
+tokens, aligned one-for-one with `ORDERBOOK_FEDERATION_PEERS`, in
+`ORDERBOOK_FEDERATION_PEER_TOKENS`. Setting the outbound variable requires one
+64-character token for every configured peer. Token comparison is constant
+time, and tokens stay out of status, logs, events, and state files.
+
 ## Endpoints
 
 ### `GET /health`
@@ -418,6 +448,58 @@ beyond that the endpoint answers `503` and you should fall back to polling.
 Storage-aware readiness probe. → `200 {"status":"ok"}` while the service is
 accepting work and both order and federation state paths are readable and
 writable; otherwise `503 {"status":"degraded"}`.
+
+Peer availability deliberately does not change this readiness result. A mirror
+can continue serving verified local evidence while one of its pull peers is
+offline.
+
+### `GET /status`
+
+Sanitized operator diagnostics. The response uses `200` while local storage and
+the feed are ready, or `503` for the same local failures as `/health`:
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "status": "ok",
+  "uptimeS": 3600,
+  "feed": {
+    "ready": true,
+    "retainedEvents": 42,
+    "oldestSequence": 1,
+    "latestSequence": 42,
+    "lastEventAt": 1786924800000
+  },
+  "federation": {
+    "enabled": true,
+    "state": "healthy",
+    "running": false,
+    "configuredPeers": 2,
+    "healthyPeers": 2,
+    "deferredEvents": 0,
+    "lastCompletedAt": 1786924800000,
+    "peers": [
+      {
+        "id": "community-1",
+        "state": "healthy",
+        "consecutiveFailures": 0,
+        "resetStreak": 0,
+        "lastAttemptAt": 1786924800000,
+        "lastSuccessAt": 1786924800000,
+        "nextAttemptAt": null
+      }
+    ]
+  }
+}
+```
+
+All `*At` fields are Unix milliseconds. Federation-wide state is `disabled`,
+`starting`, `healthy`, or `degraded`; a peer is `pending`, `syncing`, `healthy`,
+`degraded`, or `stale`. The peer id is the public label at the same position in
+`ORDERBOOK_FEDERATION_PEER_IDS`, or `peer-N` when no labels are configured.
+Status omits peer URLs, raw cursors, feed ids, errors, file paths, orders,
+accounts, and capabilities. `GET /status` allows wildcard read CORS and uses
+`Cache-Control: no-store`.
 
 ### `GET /federation/v1/events`: mirror pull feed
 
@@ -451,11 +533,34 @@ The feed excludes unsigned rows, every private row, all bearer tokens, IP
 metadata, presence, and other mirror-local state.
 
 Transport is deliberately bounded. One event is at most **64 KiB**, a normal
-page contains at most **256 events**, the durable feed ring retains **4096
-events**, and one peer sync reads at most **16 pages**. Reset snapshots contain
-at most **6144 events**. Peer responses must be `application/json`, redirects
-are rejected, and the decompressed body is capped at **64 MiB** even when
-`Content-Length` is absent or compressed.
+page contains at most **256 events** and **4 MiB** of serialized response data,
+the durable feed ring retains **4096 events**, and one peer sync reads at most
+**16 pages**. At most **64 public portable orders** are retained within the
+global **256-order** retained-state bound. Per order, three OrderV1 proofs,
+eight intent/release pairs, three terminal proofs, and one terminal release
+make 23 records. The largest current reset is therefore **1,472 records**.
+Receivers retain a separate hard rejection ceiling of 6,144 snapshot records.
+Every federation response, including a reset, is capped at **32 MiB** after
+decompression and during local serialization. Peer responses must be
+`application/json`, and redirects are rejected. The serving mirror reuses
+identical serialized pages for five seconds in a 128-entry, 64 MiB response
+cache, while every request still consumes its lane limits.
+
+A reset is one atomic page. Incremental pages are applied and their cursor is
+checkpointed one page at a time, so a later timeout resumes after the last
+completed page. The configured request timeout is one total deadline for all
+pages, parsing, and application work for that peer. At most **16 peers** may be
+configured, and a two-worker pool keeps slow peers from serializing the whole
+sync cycle.
+
+Receivers require exact page, record, and event fields; canonical bounded
+cursors; contiguous sequences; event ids matching canonical event content;
+and unique event ids within and across pages. Applied event ids are reused
+only within the current sync cycle. Every record supplied by a later reset is
+revalidated against current store state, allowing valid evidence swept since an
+earlier cycle to be reconstructed. The duplicate checks prevent a peer from
+replaying the same expensive proof through a different page position in one
+sync.
 
 Transport cursors may advance while a child arrives before its prerequisite.
 The receiver keeps up to **4096 dependency-missing events** in memory, with a
@@ -466,13 +571,15 @@ removed and its cursor forced to reset. Shared events remain queued through any
 other peer that supplied them. Encountering the global bound applies the same
 offending-source reset. Deferred retries back off to **60 seconds**. An entry
 expires after **one hour** or **512 attempts**, resetting every associated
-source cursor. Invalid proofs are rejected rather than deferred. A restart
-discards this in-memory queue and requests reset snapshots again.
+source cursor. Invalid proofs are rejected immediately. Fetched and deferred
+rejections share an **8-record per-peer sync budget**; reaching it degrades and
+backs off that peer. A restart discards the in-memory dependency queue and
+requests reset snapshots again.
 
 Peer transport failures and repeated reset churn use independent exponential
 backoff from **10 seconds** through **5 minutes**. The first bootstrap reset is
-normal and does not count as churn; one unhealthy peer does not delay healthy
-peers.
+normal and does not count as churn. Healthy peers continue through the
+two-worker pool while an affected peer waits.
 
 ### `GET /orders`
 
@@ -480,11 +587,22 @@ The open book, newest first. → `200 {"orders": [Order, …]}`. Only `open`
 **public** orders are listed; fetch other statuses (and private orders, with
 their share token) by id.
 
-The reference browser caps each JSON or SSE message at **4 MiB**, accepts at
-most **200 rows** in one snapshot, verifies every signed row locally, and drops
-one malformed mirror without discarding healthy mirrors. A same-id signed
-digest conflict creates a persistent local quarantine so its disappearance
-from one later snapshot cannot silently restore the order.
+The reference browser accepts at most **16 mirrors** including its same-origin
+primary. Configuration permits 15 additional exact `{id, apiBase}` entries and
+rejects duplicate ids or normalized API bases. Each HTTP response is capped at
+**4 MiB** before parsing and each snapshot at **200 rows**. Duplicate ids or any
+malformed signed row invalidate only that source snapshot. The browser opens
+SSE only to its trusted same-origin primary because native `EventSource`
+buffers a complete event before application code can enforce a byte bound.
+Independent mirrors use bounded HTTP polling with one in-flight request per
+source and exponential retry from **10 seconds** through **5 minutes**.
+
+Every signed row is verified locally. Identical signed envelopes share an
+expiry-aware verification cache capped at **1,024 entries**. A same-id signed
+digest conflict creates a persistent local quarantine, capped at 1,024 ids and
+retained for 49 hours, so its disappearance from one later snapshot cannot
+silently restore the order. Per-source generations prevent a slow HTTP result
+from overwriting a newer primary SSE snapshot.
 
 ### `GET /orders/stream`
 
@@ -498,7 +616,8 @@ data: {"orders":[…]}
 
 Comment pings (`: ping`) flow roughly every 15 s to hold idle proxies open.
 `503` (JSON body) when the connection caps are hit; keep a slow `GET /orders`
-poll as fallback. Browser `EventSource` reconnects on its own.
+poll as fallback. The reference browser's same-origin primary `EventSource`
+reconnects on its own.
 
 ### `GET /orders/:id`
 

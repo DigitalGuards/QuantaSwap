@@ -38,7 +38,8 @@ import {
   type VerifiedOrderV1,
 } from "./order-signing.js";
 import { ApiError, OrderStore } from "./store.js";
-import type { FederationEvent } from "./federation.js";
+import { federationEventId, type FederationEvent } from "./federation.js";
+import { FederationPeerSync } from "./peer-sync.js";
 
 const descriptor = new Uint8Array([1, 0, 0]);
 const makerToken = "ab".repeat(32);
@@ -109,6 +110,7 @@ function makeOrder(
     visibility?: "public" | "private";
     issuedAt?: number;
     expiresAt?: number;
+    makerCapability?: string;
   } = {},
 ): VerifiedOrderV1 {
   const orderNonce = nonce(options.nonceByte ?? 41);
@@ -129,7 +131,9 @@ function makeOrder(
     issuedAt: options.issuedAt ?? now - 10,
     expiresAt: options.expiresAt ?? now + 3600,
     nonce: orderNonce,
-    makerTokenCommitment: computeMakerTokenCommitment(makerToken),
+    makerTokenCommitment: computeMakerTokenCommitment(
+      options.makerCapability ?? makerToken,
+    ),
     shareTokenCommitment:
       visibility === "private"
         ? computeShareTokenCommitment(shareToken)
@@ -186,9 +190,10 @@ function makeFill(
     intentExpiresAt?: number;
     fillIssuedAt?: number;
     fillExpiresAt?: number;
+    requestNonceByte?: number;
   } = {},
 ): FillArtifacts {
-  const requestNonce = nonce(43);
+  const requestNonce = nonce(timing.requestNonceByte ?? 43);
   const releaseSecret = nonce(55);
   const releaseCommitment = computeReleaseCommitment(
     order.orderDigest,
@@ -313,6 +318,188 @@ afterEach(() => {
 });
 
 describe("single-use signed order store", () => {
+  it("reconstructs a swept expired parent from a reset with eight intents and a live fill", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const historicalNow = now - 500;
+    const order = makeOrder(historicalNow, {
+      nonceByte: 70,
+      issuedAt: now - 700,
+      expiresAt: now - 300,
+    });
+    const artifacts = Array.from({ length: 8 }, (_value, index) =>
+      makeFill(now, order, 71, 72, {
+        requestNonceByte: 20 + index,
+        intentIssuedAt: now - 450,
+        intentExpiresAt: now - 330,
+        fillIssuedAt: now - 391,
+        fillExpiresAt: now - 301,
+      }),
+    );
+    const selected = artifacts[0]!;
+    const source = new OrderStore(storeFile());
+    source.subscribeFederation(() => {
+      source.federationSnapshot();
+    });
+    source.applyFederationEvent({
+      kind: "order-v1",
+      payload: { order: order.order, auth: order.auth },
+    }, "origin");
+    for (const artifact of artifacts) {
+      source.applyFederationEvent({
+        kind: "fill-intent-v1",
+        payload: {
+          orderId: order.orderId,
+          intent: artifact.intentBody,
+          auth: artifact.intentAuth,
+        },
+      }, "origin");
+    }
+    source.applyFederationEvent({
+      kind: "fill-v1",
+      payload: {
+        orderId: order.orderId,
+        fill: selected.fillBody,
+        auth: selected.fillAuth,
+        intent: selected.intentBody,
+        intentAuth: selected.intentAuth,
+      },
+    }, "origin");
+    assert.equal(source.get(order.orderId).status, "locking");
+
+    const snapshot = source.federationSnapshot();
+    assert.equal(snapshot.filter((event) => event.kind === "fill-intent-v1").length, 8);
+    assert.equal(snapshot[0]?.kind, "order-v1");
+
+    const receiverFile = storeFile();
+    const receiver = new OrderStore(receiverFile);
+    receiver.subscribeFederation(() => {
+      receiver.federationSnapshot();
+    });
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    let clock = originalNow();
+    let cycle = 0;
+    Date.now = () => clock;
+    globalThis.fetch = async () => {
+      const selectedSnapshot = cycle === 0 ? [snapshot[0]!] : snapshot;
+      const feedId = cycle === 0 ? "ab".repeat(16) : "cd".repeat(16);
+      return new Response(
+        JSON.stringify({
+          reset: true,
+          cursor: `${feedId}:0`,
+          hasMore: false,
+          events: [],
+          snapshot: selectedSnapshot.map((event) => ({
+            seq: 0,
+            eventId: federationEventId(event),
+            event,
+          })),
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
+    };
+    try {
+      const sync = new FederationPeerSync({
+        peers: ["https://mirror.example/api"],
+        timeoutMs: 10_000,
+        apply: (event) => {
+          try {
+            receiver.applyFederationEvent(event, "peer-a");
+            return "applied";
+          } catch (error) {
+            if (
+              error instanceof ApiError &&
+              (error.code === "federation_dependency" || error.code === "transient_capacity")
+            ) {
+              return "deferred";
+            }
+            return "rejected";
+          }
+        },
+      });
+      await sync.syncAll();
+      assert.equal(receiver.get(order.orderId).status, "cancelled");
+      clock += 301_000;
+      receiver.federationSnapshot();
+      assert.throws(
+        () => receiver.get(order.orderId),
+        (error) => error instanceof ApiError && error.status === 404,
+      );
+
+      cycle = 1;
+      await sync.syncAll();
+      assert.equal(receiver.get(order.orderId).status, "locking");
+      assert.equal(new OrderStore(receiverFile).get(order.orderId).status, "locking");
+    } finally {
+      globalThis.fetch = originalFetch;
+      Date.now = originalNow;
+    }
+  });
+
+  it("refuses persisted state beyond the portable public-order capacity", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const rows: unknown[] = [];
+    for (let offset = 0; offset < 65; offset += 1) {
+      const sourceFile = storeFile();
+      const source = new OrderStore(sourceFile);
+      const order = makeOrder(now, { nonceByte: 80 + offset });
+      source.createVerified(order, createCapabilities(order), "203.0.113.65");
+      rows.push(...(JSON.parse(readFileSync(sourceFile, "utf8")) as unknown[]));
+    }
+    assert.equal(rows.length, 65);
+    const legacyFile = storeFile();
+    writeFileSync(legacyFile, JSON.stringify(rows));
+    assert.throws(
+      () => new OrderStore(legacyFile),
+      /more than 64 portable public orders/,
+    );
+    assert.equal((JSON.parse(readFileSync(legacyFile, "utf8")) as unknown[]).length, 65);
+  });
+
+  it("caps one federation source while preserving capacity for another peer and local maker", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    for (let offset = 0; offset < 16; offset += 1) {
+      store.importVerifiedOrder(
+        makeOrder(now, { nonceByte: 150 + offset }),
+        "peer-a",
+      );
+    }
+    const restarted = new OrderStore(file);
+    assert.throws(
+      () =>
+        restarted.importVerifiedOrder(
+          makeOrder(now, { nonceByte: 166 }),
+          "peer-a",
+        ),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 429 &&
+        error.code === "transient_capacity",
+    );
+    assert.equal(
+      restarted.importVerifiedOrder(
+        makeOrder(now, { nonceByte: 167 }),
+        "peer-b",
+      ).id.length,
+      64,
+    );
+    const localCapability = "ef".repeat(32);
+    const local = makeOrder(now, {
+      nonceByte: 168,
+      makerCapability: localCapability,
+    });
+    assert.equal(
+      restarted.createVerified(
+        local,
+        { makerToken: localCapability },
+        "203.0.113.168",
+      ).order.id,
+      local.orderId,
+    );
+  });
+
   it("recovers an exact public create after response loss without rotating capabilities", () => {
     const now = Math.floor(Date.now() / 1000);
     const order = makeOrder(now, { nonceByte: 39 });

@@ -3,6 +3,7 @@ import type { MakerOrderAuthV1, OrderView } from "./orderbook";
 import {
   FederatedOrderBook,
   aggregateMirrorOrders,
+  summarizeMirrorAvailability,
   type MirrorSnapshot,
 } from "./mirrorBook";
 import type { EventSourcePort } from "./orderbookClient";
@@ -47,6 +48,61 @@ const verify = (order: OrderView): boolean => order.makerAuth?.signature === "va
 const digest = (order: OrderView): string =>
   order.fromAmount === "1" ? DIGEST_A : DIGEST_B;
 
+const listResponse = (orders: readonly OrderView[]): Response =>
+  new Response(JSON.stringify({ orders }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
+function streamHarness(): {
+  eventSource: (url: string) => EventSourcePort;
+  open: (url: string) => void;
+  error: (url: string) => void;
+  book: (url: string, orders: readonly OrderView[]) => void;
+  invalid: (url: string) => void;
+} {
+  const listeners = new Map<
+    string,
+    Map<string, (event: MessageEvent<string>) => void>
+  >();
+  const states = new Map<string, number>();
+  const emit = (url: string, type: string, data = "") => {
+    listeners.get(url)?.get(type)?.({ data } as MessageEvent<string>);
+  };
+  return {
+    eventSource: (url) => {
+      states.set(url, 0);
+      return {
+        get readyState() {
+          return states.get(url) ?? 2;
+        },
+        addEventListener: (type, listener) => {
+          const byType = listeners.get(url) ?? new Map();
+          byType.set(type, listener);
+          listeners.set(url, byType);
+        },
+        close: () => {
+          states.set(url, 2);
+        },
+      };
+    },
+    open: (url) => {
+      states.set(url, 1);
+      emit(url, "open");
+    },
+    error: (url) => {
+      states.set(url, 0);
+      emit(url, "error");
+    },
+    book: (url, orders) => {
+      emit(url, "book", JSON.stringify({ orders }));
+    },
+    invalid: (url) => {
+      emit(url, "book", "{");
+    },
+  };
+}
+
 describe("mirror snapshot aggregation", () => {
   it("combines authenticated copies and keeps unsigned liquidity primary-only", () => {
     const portable = row({ makerAuth: auth(), orderDigest: DIGEST_A });
@@ -54,19 +110,11 @@ describe("mirror snapshot aggregation", () => {
     const snapshots: MirrorSnapshot[] = [
       {
         bookId: "primary",
-        orders: [
-          portable,
-          unsigned,
-          row({ id: "private", visibility: "private", makerAuth: auth() }),
-        ],
+        orders: [portable, unsigned],
       },
       {
         bookId: "community",
-        orders: [
-          { ...portable, updatedAt: 3 },
-          row({ id: "mirror-unsigned" }),
-          row({ id: "bad-proof", makerAuth: auth("invalid") }),
-        ],
+        orders: [{ ...portable, updatedAt: 3 }],
       },
     ];
 
@@ -77,6 +125,7 @@ describe("mirror snapshot aggregation", () => {
     });
 
     expect(result.quarantinedIds).toEqual([]);
+    expect(result.invalidBookIds).toEqual([]);
     expect(result.orders.map((order) => order.id)).toEqual([
       "order-a",
       "primary-unsigned",
@@ -135,7 +184,7 @@ describe("mirror snapshot aggregation", () => {
     });
   });
 
-  it("ignores malformed mirror rows without suppressing a healthy primary", () => {
+  it("invalidates malformed mirror rows without suppressing a healthy primary", () => {
     const healthy = row({ id: "healthy-primary" });
     const result = aggregateMirrorOrders(
       [
@@ -152,6 +201,7 @@ describe("mirror snapshot aggregation", () => {
       expect.objectContaining({ id: "healthy-primary", bookId: "primary" }),
     ]);
     expect(result.quarantinedIds).toEqual([]);
+    expect(result.invalidBookIds).toEqual(["community"]);
   });
 });
 
@@ -195,19 +245,438 @@ describe("federated snapshot and SSE transport", () => {
 
     const onBook = vi.fn();
     const stream = book.subscribe(onBook);
-    expect([...listeners.keys()]).toEqual([
-      "/api/orders/stream",
-      "https://mirror.test/api/orders/stream",
-    ]);
+    expect([...listeners.keys()]).toEqual(["/api/orders/stream"]);
     listeners.get("/api/orders/stream")?.({
       data: JSON.stringify({ orders: [updatedOrder] }),
     } as MessageEvent<string>);
-    expect(onBook).toHaveBeenLastCalledWith([
-      expect.objectContaining({ id: "primary-two", bookId: "primary" }),
-    ]);
+    expect(onBook).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        orders: [expect.objectContaining({ id: "primary-two", bookId: "primary" })],
+      }),
+    );
     expect(stream.isLive()).toBe(true);
     stream.close();
-    expect(closed).toHaveLength(2);
+    expect(closed).toHaveLength(1);
+  });
+
+  it("does not let a slow poll overwrite a newer SSE snapshot", async () => {
+    const portable = row({ id: "ad".repeat(32), makerAuth: auth() });
+    const streams = streamHarness();
+    let resolvePoll: ((response: Response) => void) | undefined;
+    const book = new FederatedOrderBook(
+      [{ id: "primary", apiBase: "/api" }],
+      () => ({
+        fetch: async () =>
+          new Promise<Response>((resolve) => {
+            resolvePoll = resolve;
+          }),
+        eventSource: streams.eventSource,
+      }),
+      null,
+      { verifyOrder: verify, digestOrder: digest },
+      null,
+    );
+
+    const refresh = book.refresh();
+    const subscription = book.subscribe(vi.fn());
+    streams.open("/api/orders/stream");
+    streams.book("/api/orders/stream", []);
+    resolvePoll?.(listResponse([portable]));
+
+    await refresh;
+    expect(book.current()).toMatchObject({
+      orders: [],
+      mirrors: [
+        expect.objectContaining({
+          bookId: "primary",
+          availability: "available",
+          stream: "open",
+        }),
+      ],
+    });
+    expect(() => book.routeSignedOrder(portable)).toThrow(/No available mirror/);
+    subscription.close();
+  });
+
+  it("starts a fresh poll after a subscription closes during an in-flight refresh", async () => {
+    const portable = row({ id: "strict-mode-order" });
+    const streams = streamHarness();
+    const pending: Array<(response: Response) => void> = [];
+    const book = new FederatedOrderBook(
+      [{ id: "primary", apiBase: "/api" }],
+      () => ({
+        fetch: async () =>
+          new Promise<Response>((resolve) => {
+            pending.push(resolve);
+          }),
+        eventSource: streams.eventSource,
+      }),
+    );
+
+    const firstSubscription = book.subscribe(vi.fn());
+    const firstRefresh = book.refresh();
+    expect(pending).toHaveLength(1);
+    firstSubscription.close();
+
+    const secondSubscription = book.subscribe(vi.fn());
+    const secondRefresh = book.refresh();
+    expect(pending).toHaveLength(2);
+
+    pending[0]?.(listResponse([row({ id: "stale-order" })]));
+    await firstRefresh;
+    expect(book.current().orders).toEqual([]);
+
+    pending[1]?.(listResponse([portable]));
+    await secondRefresh;
+    expect(book.current()).toMatchObject({
+      orders: [expect.objectContaining({ id: portable.id })],
+      mirrors: [expect.objectContaining({ availability: "available" })],
+    });
+    secondSubscription.close();
+  });
+
+  it("marks only an HTTP mirror with an invalid proof unavailable", async () => {
+    const portable = row({ id: "ae".repeat(32), makerAuth: auth() });
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      (mirror) => ({
+        fetch: async () =>
+          listResponse([
+            mirror.id === "primary"
+              ? portable
+              : { ...portable, makerAuth: auth("invalid") },
+          ]),
+      }),
+      null,
+      { verifyOrder: verify, digestOrder: digest },
+      null,
+    );
+
+    await expect(book.refresh()).resolves.toMatchObject({
+      orders: [expect.objectContaining({ bookId: "primary", sources: ["primary"] })],
+      mirrors: [
+        expect.objectContaining({ bookId: "primary", availability: "available" }),
+        expect.objectContaining({ bookId: "community", availability: "unavailable" }),
+      ],
+    });
+  });
+
+  it("caches an identical verified proof across mirrors and recovery polls", async () => {
+    const portable = row({ id: "be".repeat(32), makerAuth: auth() });
+    const verifyCached = vi.fn(verify);
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      () => ({ fetch: async () => listResponse([{ ...portable }]) }),
+      null,
+      { now: 15, verifyOrder: verifyCached, digestOrder: digest },
+      null,
+    );
+
+    await book.refresh();
+    await book.refresh();
+    expect(verifyCached).toHaveBeenCalledTimes(1);
+    expect(book.current().orders).toEqual([
+      expect.objectContaining({ sources: ["primary", "community"] }),
+    ]);
+  });
+
+  it("does not reuse a verified proof for a different advertised order id", async () => {
+    const portable = row({ id: "valid-id", makerAuth: auth() });
+    const verifyBoundId = vi.fn((order: OrderView) => order.id === portable.id);
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      (mirror) => ({
+        fetch: async () =>
+          listResponse([
+            mirror.id === "primary" ? portable : { ...portable, id: "tampered-id" },
+          ]),
+      }),
+      null,
+      { now: 15, verifyOrder: verifyBoundId, digestOrder: digest },
+      null,
+    );
+
+    await expect(book.refresh()).resolves.toMatchObject({
+      orders: [expect.objectContaining({ id: "valid-id", sources: ["primary"] })],
+      mirrors: [
+        expect.objectContaining({ bookId: "primary", availability: "available" }),
+        expect.objectContaining({ bookId: "community", availability: "unavailable" }),
+      ],
+    });
+    expect(verifyBoundId).toHaveBeenCalledTimes(2);
+  });
+
+  it("backs off invalid mirrors and coalesces an overlapping recovery poll", async () => {
+    const invalid = row({ id: "bf".repeat(32), makerAuth: auth("invalid") });
+    const streams = streamHarness();
+    let now = 1_000;
+    let communityCalls = 0;
+    let finishRetry: ((response: Response) => void) | undefined;
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      (mirror) => ({
+        fetch: async () => {
+          if (mirror.id === "primary") return listResponse([]);
+          communityCalls += 1;
+          if (communityCalls === 1) return listResponse([invalid]);
+          return new Promise<Response>((resolve) => {
+            finishRetry = resolve;
+          });
+        },
+        eventSource: streams.eventSource,
+      }),
+      null,
+      { now: 15, verifyOrder: verify, digestOrder: digest },
+      null,
+      () => now,
+    );
+
+    await book.refresh();
+    const subscription = book.subscribe(vi.fn());
+    streams.open("/api/orders/stream");
+    streams.book("/api/orders/stream", []);
+    expect(communityCalls).toBe(1);
+
+    await book.refreshDisconnected();
+    now += 9_999;
+    await book.refreshDisconnected();
+    expect(communityCalls).toBe(1);
+
+    now += 1;
+    const firstRetry = book.refreshDisconnected();
+    const overlappingRetry = book.refreshDisconnected();
+    expect(communityCalls).toBe(2);
+    finishRetry?.(listResponse([invalid]));
+    await Promise.all([firstRetry, overlappingRetry]);
+    expect(communityCalls).toBe(2);
+    expect(book.current().mirrors[1]).toMatchObject({
+      availability: "unavailable",
+      lastSuccessAt: null,
+    });
+    subscription.close();
+  });
+
+  it("drops an invalid primary SSE proof while retaining an HTTP mirror", async () => {
+    const portable = row({ id: "af".repeat(32), makerAuth: auth() });
+    const streams = streamHarness();
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      () => ({
+        fetch: async () => listResponse([portable]),
+        eventSource: streams.eventSource,
+      }),
+      null,
+      { verifyOrder: verify, digestOrder: digest },
+      null,
+    );
+    await book.refresh();
+    const subscription = book.subscribe(vi.fn());
+    streams.open("/api/orders/stream");
+    streams.book("/api/orders/stream", [
+      { ...portable, makerAuth: auth("invalid") },
+    ]);
+
+    expect(book.current()).toMatchObject({
+      orders: [
+        expect.objectContaining({ bookId: "community", sources: ["community"] }),
+      ],
+      mirrors: [
+        expect.objectContaining({ bookId: "primary", availability: "unavailable" }),
+        expect.objectContaining({ bookId: "community", availability: "available" }),
+      ],
+    });
+    subscription.close();
+  });
+
+  it("removes a failed SSE mirror immediately and reroutes its signed row", async () => {
+    const portable = row({ id: "ab".repeat(32), makerAuth: auth() });
+    const streams = streamHarness();
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      () => ({
+        fetch: async () => listResponse([portable]),
+        eventSource: streams.eventSource,
+      }),
+      null,
+      { verifyOrder: verify, digestOrder: digest },
+      null,
+    );
+    const initial = await book.refresh();
+    const selected = initial.orders[0];
+    expect(selected).toMatchObject({
+      bookId: "primary",
+      sources: ["primary", "community"],
+    });
+
+    const onBook = vi.fn();
+    const subscription = book.subscribe(onBook);
+    streams.open("/api/orders/stream");
+    streams.error("/api/orders/stream");
+
+    const latest = onBook.mock.lastCall?.[0];
+    expect(latest).toMatchObject({
+      orders: [
+        expect.objectContaining({
+          id: portable.id,
+          bookId: "community",
+          sources: ["community"],
+        }),
+      ],
+      mirrors: [
+        {
+          bookId: "primary",
+          availability: "unavailable",
+          stream: "closed",
+          lastSuccessAt: expect.any(Number),
+        },
+        {
+          bookId: "community",
+          availability: "available",
+          stream: "closed",
+          lastSuccessAt: expect.any(Number),
+        },
+      ],
+    });
+    expect(subscription.isLive()).toBe(false);
+    expect(book.routeSignedOrder(selected!)).toMatchObject({
+      bookId: "community",
+      sources: ["community"],
+    });
+    subscription.close();
+  });
+
+  it("polls independent mirrors while the primary stream remains open", async () => {
+    const portable = row({ id: "bc".repeat(32), makerAuth: auth() });
+    const streams = streamHarness();
+    const requests = new Map<string, number>();
+    let now = 1_000;
+    const book = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      (mirror) => ({
+        fetch: async () => {
+          requests.set(mirror.id, (requests.get(mirror.id) ?? 0) + 1);
+          return listResponse([portable]);
+        },
+        eventSource: streams.eventSource,
+      }),
+      null,
+      { verifyOrder: verify, digestOrder: digest },
+      null,
+      () => now,
+    );
+    await book.refresh();
+    const subscription = book.subscribe(vi.fn());
+    streams.open("/api/orders/stream");
+
+    const recovered = await book.refreshDisconnected();
+    expect(requests.get("primary")).toBe(1);
+    expect(requests.get("community")).toBe(2);
+    expect(recovered.mirrors).toEqual([
+      expect.objectContaining({
+        bookId: "primary",
+        availability: "available",
+        stream: "open",
+      }),
+      expect.objectContaining({
+        bookId: "community",
+        availability: "available",
+        stream: "closed",
+      }),
+    ]);
+
+    await book.refreshDisconnected();
+    expect(requests.get("primary")).toBe(1);
+    expect(requests.get("community")).toBe(3);
+    expect(book.current().mirrors[1]).toMatchObject({
+      availability: "available",
+      stream: "closed",
+    });
+
+    streams.invalid("/api/orders/stream");
+    expect(book.current().mirrors[0]).toMatchObject({
+      availability: "unavailable",
+      stream: "closed",
+    });
+    now += 10_000;
+    await book.refreshDisconnected();
+    expect(requests.get("primary")).toBe(2);
+    expect(requests.get("community")).toBe(4);
+    subscription.close();
+  });
+
+  it("distinguishes zero liquidity, partial discovery and total outage", async () => {
+    const availableBook = new FederatedOrderBook(
+      [{ id: "primary", apiBase: "/api" }],
+      () => ({ fetch: async () => listResponse([]) }),
+      null,
+      {},
+      null,
+    );
+    const available = await availableBook.refresh();
+    expect(available.orders).toEqual([]);
+    expect(summarizeMirrorAvailability(available.mirrors)).toMatchObject({
+      state: "all",
+      available: 1,
+      total: 1,
+    });
+
+    const partialBook = new FederatedOrderBook(
+      [
+        { id: "primary", apiBase: "/api" },
+        { id: "community", apiBase: "https://mirror.test/api" },
+      ],
+      (mirror) => ({
+        fetch: async () => {
+          if (mirror.id === "community") throw new Error("offline");
+          return listResponse([]);
+        },
+      }),
+      null,
+      {},
+      null,
+    );
+    const partial = await partialBook.refresh();
+    expect(summarizeMirrorAvailability(partial.mirrors)).toMatchObject({
+      state: "partial",
+      available: 1,
+      total: 2,
+    });
+
+    const unavailableBook = new FederatedOrderBook(
+      [{ id: "primary", apiBase: "/api" }],
+      () => ({ fetch: async () => Promise.reject(new Error("offline")) }),
+      null,
+      {},
+      null,
+    );
+    const unavailable = await unavailableBook.refresh();
+    expect(unavailable.orders).toEqual([]);
+    expect(summarizeMirrorAvailability(unavailable.mirrors)).toMatchObject({
+      state: "unavailable",
+      available: 0,
+      total: 1,
+    });
   });
 
   it("retains a signed id quarantine across reload when the conflicting mirror disappears", async () => {
@@ -247,7 +716,7 @@ describe("federated snapshot and SSE transport", () => {
       storage,
       aggregationOptions,
     );
-    await expect(first.refresh()).resolves.toEqual({
+    await expect(first.refresh()).resolves.toMatchObject({
       orders: [],
       quarantinedIds: [conflictId],
     });
@@ -260,7 +729,7 @@ describe("federated snapshot and SSE transport", () => {
       storage,
       aggregationOptions,
     );
-    await expect(afterReload.refresh()).resolves.toEqual({
+    await expect(afterReload.refresh()).resolves.toMatchObject({
       orders: [],
       quarantinedIds: [conflictId],
     });
@@ -315,12 +784,12 @@ describe("federated snapshot and SSE transport", () => {
     const first = conflictingBook(idA);
     const second = conflictingBook(idB);
 
-    await expect(first.refresh()).resolves.toEqual({
+    await expect(first.refresh()).resolves.toMatchObject({
       orders: [],
       quarantinedIds: [idA],
     });
     expect(second.current().quarantinedIds).toEqual([idA]);
-    await expect(second.refresh()).resolves.toEqual({
+    await expect(second.refresh()).resolves.toMatchObject({
       orders: [],
       quarantinedIds: [idA, idB].sort(),
     });

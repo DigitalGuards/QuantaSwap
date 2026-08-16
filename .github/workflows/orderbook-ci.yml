@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'server/**'
+      - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
       - '.github/workflows/orderbook-release.yml'
   push:
@@ -11,6 +12,7 @@ on:
       - dev
     paths:
       - 'server/**'
+      - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
       - '.github/workflows/orderbook-release.yml'
   workflow_dispatch:
@@ -23,6 +25,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  browser:
+    name: Test browser mirror client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Test and build browser client
+        working-directory: frontend
+        run: |
+          npm test
+          npm run build
+
+      - name: Audit dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
   verify:
     name: Test and smoke container
     runs-on: ubuntu-24.04
@@ -53,7 +85,9 @@ jobs:
 
       - name: Validate Compose configuration
         working-directory: server
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.federation-lab.yaml config --quiet
 
       - name: Build runtime image
         working-directory: server
@@ -73,7 +107,7 @@ jobs:
       - name: Smoke Compose persistence and restart
         working-directory: server
         env:
-          ORDERBOOK_KIT_VERSION: ci
+          ORDERBOOK_IMAGE: quantaswap-orderbook:ci
         run: |
           docker compose up -d --no-build
           for attempt in $(seq 1 30); do
@@ -118,9 +152,29 @@ jobs:
           curl --fail --silent http://127.0.0.1:8091/api/orders \
             | jq -e --arg id "$order_id" '.orders | any(.id == $id)'
 
+      - name: Smoke reciprocal container federation
+        working-directory: server
+        env:
+          ORDERBOOK_LAB_IMAGE: quantaswap-orderbook:ci
+        run: |
+          docker compose -f compose.federation-lab.yaml up -d --no-build
+          FEDERATION_SMOKE_BASE_A=http://127.0.0.1:18091/api \
+          FEDERATION_SMOKE_BASE_B=http://127.0.0.1:18092/api \
+            node federation-smoke.js
+
+          for service in mirror-a mirror-b; do
+            test "$(docker compose -f compose.federation-lab.yaml exec -T "$service" \
+              stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
+            test "$(docker compose -f compose.federation-lab.yaml exec -T "$service" \
+              stat -c '%a' /var/lib/quantaswap-orderbook/orders.json.federation)" = 600
+          done
+
       - name: Clean isolated Compose state
         if: always()
         working-directory: server
         env:
-          ORDERBOOK_KIT_VERSION: ci
-        run: docker compose down --volumes --remove-orphans
+          ORDERBOOK_IMAGE: quantaswap-orderbook:ci
+          ORDERBOOK_LAB_IMAGE: quantaswap-orderbook:ci
+        run: |
+          docker compose -f compose.federation-lab.yaml down --volumes --remove-orphans || true
+          docker compose down --volumes --remove-orphans || true

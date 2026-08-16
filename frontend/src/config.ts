@@ -80,8 +80,9 @@ export interface OrderbookMirror {
 export const PRIMARY_ORDERBOOK_ID = "primary";
 
 const MIRROR_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const MAX_ORDERBOOK_MIRRORS = 16;
 
-function configuredMirrors(raw: unknown): OrderbookMirror[] {
+export function parseConfiguredMirrors(raw: unknown): OrderbookMirror[] {
   if (typeof raw !== "string" || raw === "") return [];
   let parsed: unknown;
   try {
@@ -90,11 +91,20 @@ function configuredMirrors(raw: unknown): OrderbookMirror[] {
     throw new Error("VITE_ORDERBOOK_MIRRORS must be valid JSON");
   }
   if (!Array.isArray(parsed)) throw new Error("VITE_ORDERBOOK_MIRRORS must be an array");
-  return parsed.map((entry, index) => {
+  if (parsed.length >= MAX_ORDERBOOK_MIRRORS) {
+    throw new Error(
+      `VITE_ORDERBOOK_MIRRORS cannot contain more than ${MAX_ORDERBOOK_MIRRORS - 1} entries`,
+    );
+  }
+  const mirrors = parsed.map((entry, index) => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
       throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must be an object`);
     }
     const row = entry as Record<string, unknown>;
+    const keys = Object.keys(row).sort();
+    if (keys.length !== 2 || keys[0] !== "apiBase" || keys[1] !== "id") {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has unexpected fields`);
+    }
     if (typeof row["id"] !== "string" || !MIRROR_ID_RE.test(row["id"])) {
       throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid id`);
     }
@@ -121,19 +131,22 @@ function configuredMirrors(raw: unknown): OrderbookMirror[] {
     }
     return {
       id: row["id"],
-      apiBase: url.toString().replace(/\/$/, ""),
+      apiBase: url.toString().replace(/\/+$/, ""),
     };
   });
+  if (new Set(mirrors.map((mirror) => mirror.id)).size !== mirrors.length) {
+    throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate ids");
+  }
+  if (new Set(mirrors.map((mirror) => mirror.apiBase)).size !== mirrors.length) {
+    throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate API bases");
+  }
+  return mirrors;
 }
 
 export const ORDERBOOK_MIRRORS: readonly OrderbookMirror[] = [
   { id: PRIMARY_ORDERBOOK_ID, apiBase: "/api" },
-  ...configuredMirrors(import.meta.env.VITE_ORDERBOOK_MIRRORS),
+  ...parseConfiguredMirrors(import.meta.env.VITE_ORDERBOOK_MIRRORS),
 ];
-
-if (new Set(ORDERBOOK_MIRRORS.map((mirror) => mirror.id)).size !== ORDERBOOK_MIRRORS.length) {
-  throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate ids");
-}
 
 export const ORDERBOOK_API = ORDERBOOK_MIRRORS[0]?.apiBase ?? "/api";
 

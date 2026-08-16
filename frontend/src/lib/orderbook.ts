@@ -9,7 +9,11 @@ import {
   type EthAssetSymbol,
 } from "../config";
 import type { ActiveSwap, Direction, MyOrderRef } from "./activeSwap";
-import { authenticateDirectOrder, federatedOrderBook } from "./mirrorBook";
+import {
+  authenticateDirectOrder,
+  federatedOrderBook,
+  type MirrorBookResult,
+} from "./mirrorBook";
 import {
   OrderGoneError,
   type FillIntentView,
@@ -438,14 +442,32 @@ export interface CreateOrderBody {
 }
 
 export { OrderGoneError };
+export { summarizeMirrorAvailability } from "./mirrorBook";
+export type {
+  MirrorAvailability,
+  MirrorAvailabilitySummary,
+  MirrorBookResult,
+  MirrorDiscoveryState,
+  MirrorStatus,
+  MirrorStreamState,
+} from "./mirrorBook";
 
 const localResult = <T extends { order: OrderView }>(result: T, bookId: string): T => ({
   ...result,
   order: authenticateDirectOrder(result.order, bookId),
 });
 
+export const refreshOrderBook = async (): Promise<MirrorBookResult> =>
+  federatedOrderBook.refresh();
+
+export const refreshDisconnectedOrderBooks = async (): Promise<MirrorBookResult> =>
+  federatedOrderBook.refreshDisconnected();
+
 export const listOrders = async (): Promise<OrderView[]> =>
-  (await federatedOrderBook.refresh()).orders;
+  (await refreshOrderBook()).orders;
+
+export const routeSignedOrder = (order: OrderView): OrderView =>
+  federatedOrderBook.routeSignedOrder(order);
 
 /** Private orders demand the share token (sent as a header so it never
  *  lands in server logs; the browser keeps it in the URL fragment, which
@@ -533,10 +555,9 @@ export const heartbeatOrder = async (
     bookId,
   );
 
-/** Live book subscription (SSE). The server pushes the full open list on
- *  connect and on every change; the browser's EventSource reconnects on
- *  its own. Callers keep a slow poll as fallback via `isLive()`. */
-export function openBookStream(onBook: (orders: OrderView[]) => void): {
+/** Live book subscription (SSE). Each mirror reports its own availability,
+ *  and disconnected mirrors retain an independent polling recovery path. */
+export function openBookStream(onBook: (result: MirrorBookResult) => void): {
   isLive: () => boolean;
   close: () => void;
 } {

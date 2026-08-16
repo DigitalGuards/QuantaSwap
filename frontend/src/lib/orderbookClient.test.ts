@@ -234,7 +234,7 @@ describe("endpoint-bound order book client", () => {
     await expect(client.get("missing")).rejects.toEqual(new OrderGoneError("gone"));
   });
 
-  it("bounds list snapshots and drops malformed rows independently", async () => {
+  it("bounds list snapshots and rejects malformed rows", async () => {
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       {
@@ -249,7 +249,7 @@ describe("endpoint-bound order book client", () => {
           }),
       },
     );
-    await expect(client.list()).resolves.toEqual([order]);
+    await expect(client.list()).rejects.toThrow(/invalid order row/);
 
     const oversized = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
@@ -271,6 +271,12 @@ describe("endpoint-bound order book client", () => {
       { fetch: async () => response({ orders: Array.from({ length: 201 }, () => order) }) },
     );
     await expect(tooMany.list()).rejects.toThrow(/too many orders/);
+
+    const duplicate = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { fetch: async () => response({ orders: [order, { ...order }] }) },
+    );
+    await expect(duplicate.list()).rejects.toThrow(/duplicate order ids/);
   });
 
   it("rejects a successful response with a non-JSON media type", async () => {
@@ -288,12 +294,12 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("parses full-book SSE frames and exposes connection state", () => {
-    let listener: ((event: MessageEvent<string>) => void) | undefined;
+    const listeners = new Map<string, (event: MessageEvent<string>) => void>();
     let closed = false;
     const port: EventSourcePort = {
       readyState: 1,
-      addEventListener: (_type, next) => {
-        listener = next;
+      addEventListener: (type, listener) => {
+        listeners.set(type, listener);
       },
       close: () => {
         closed = true;
@@ -306,14 +312,59 @@ describe("endpoint-bound order book client", () => {
     const onBook = vi.fn();
     const stream = client.openBookStream(onBook);
 
-    listener?.({ data: JSON.stringify({ orders: [order] }) } as MessageEvent<string>);
-    listener?.({ data: JSON.stringify({ orders: [null, { direction: "sideways" }] }) } as MessageEvent<string>);
-    listener?.({ data: "{" } as MessageEvent<string>);
-    expect(onBook).toHaveBeenCalledTimes(2);
+    listeners.get("book")?.({
+      data: JSON.stringify({ orders: [order] }),
+    } as MessageEvent<string>);
+    listeners.get("book")?.({
+      data: JSON.stringify({ orders: [null, { direction: "sideways" }] }),
+    } as MessageEvent<string>);
+    listeners.get("book")?.({
+      data: JSON.stringify({ orders: [order, order] }),
+    } as MessageEvent<string>);
+    listeners.get("book")?.({ data: "{" } as MessageEvent<string>);
+    expect(onBook).toHaveBeenCalledTimes(1);
     expect(onBook).toHaveBeenNthCalledWith(1, [order]);
-    expect(onBook).toHaveBeenNthCalledWith(2, []);
     expect(stream.isLive()).toBe(true);
     stream.close();
     expect(closed).toBe(true);
+  });
+
+  it("reports open, invalid-frame, disconnect and reopen transitions", () => {
+    const listeners = new Map<string, (event: MessageEvent<string>) => void>();
+    let readyState = 0;
+    const port: EventSourcePort = {
+      get readyState() {
+        return readyState;
+      },
+      addEventListener: (type, listener) => {
+        listeners.set(type, listener);
+      },
+      close: () => {
+        readyState = 2;
+      },
+    };
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { eventSource: () => port },
+    );
+    const observer = {
+      onOpen: vi.fn(),
+      onClose: vi.fn(),
+      onInvalid: vi.fn(),
+    };
+    const stream = client.openBookStream(vi.fn(), observer);
+
+    readyState = 1;
+    listeners.get("open")?.({} as MessageEvent<string>);
+    listeners.get("book")?.({ data: "{" } as MessageEvent<string>);
+    readyState = 0;
+    listeners.get("error")?.({} as MessageEvent<string>);
+    readyState = 1;
+    listeners.get("open")?.({} as MessageEvent<string>);
+    stream.close();
+
+    expect(observer.onOpen).toHaveBeenCalledTimes(2);
+    expect(observer.onInvalid).toHaveBeenCalledOnce();
+    expect(observer.onClose).toHaveBeenCalledTimes(2);
   });
 });
