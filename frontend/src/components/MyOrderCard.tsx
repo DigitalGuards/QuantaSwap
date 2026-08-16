@@ -12,7 +12,9 @@ import {
   clearActiveSwap,
   clearMyOrder,
   loadActiveSwap,
+  loadMyOrder,
   saveActiveSwap,
+  saveMyOrder,
   type ActiveSwap,
   type MyOrderRef,
 } from "@/lib/activeSwap";
@@ -22,12 +24,32 @@ import {
   assertMakerOrderProgress,
   assertMakerOrderTerms,
   assertStoredMakerSwapTerms,
+  cancelSignedOrder,
+  fillOrder,
   getOrder,
+  listFillIntents,
   OrderGoneError,
   shareFragment,
   type OrderView,
 } from "@/lib/orderbook";
 import { cancelOrder, heartbeatOrder } from "@/lib/orderbook";
+import {
+  cancelDigest as protocolCancelDigest,
+  fillDigest as protocolFillDigest,
+  intentDigest as protocolIntentDigest,
+  signCancelV1,
+  signFillV1,
+  verifyCancelV1,
+  verifyFillV1,
+  verifyOrderV1Auth,
+  type FillV1Body,
+  type SignedFillIntentV1,
+} from "@/lib/orderSigning";
+import {
+  sameSignedIntent,
+  selectEarliestFillIntent,
+  withOrderSelectionLock,
+} from "@/components/signedOrderFlow";
 import { SwapStatus, buildReleaseData, getLegState } from "@/lib/htlc";
 import { makeLegSender } from "@/lib/legSender";
 import { errorMessage } from "@/utils/errorMessage";
@@ -49,11 +71,64 @@ interface Props {
   ensureSepolia: () => Promise<void>;
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   qrlTransport: QrlTransport | null;
+  qrlWalletRdns: string | null;
   onMatched: (swap: ActiveSwap) => void;
   onClosed: () => void;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const SIGNED_FILL_RESPONSE_S = 5 * 60;
+const SIGNED_PRELOCK_RUNWAY_S = 9_000;
+
+function assertPortableMakerOrder(
+  local: MyOrderRef,
+  current: OrderView,
+): asserts local is MyOrderRef & {
+  direction: NonNullable<MyOrderRef["direction"]>;
+  fromAmount: string;
+  toAmount: string;
+} {
+  const prelockMatches =
+    local.prelock === null
+      ? current.prelocked !== true
+      : current.prelocked === true &&
+        current.hashlock === local.prelock.hashlock &&
+        current.initiatorTimeout === local.prelock.initiatorTimeout;
+  if (
+    local.direction === null ||
+    local.fromAmount === null ||
+    local.toAmount === null ||
+    current.makerAuth === undefined ||
+    current.orderDigest === undefined ||
+    !verifyOrderV1Auth(current, Math.floor(Date.now() / 1000), true) ||
+    current.id !== local.id ||
+    (local.orderDigest !== undefined && current.orderDigest !== local.orderDigest) ||
+    (local.orderAuth !== undefined &&
+      current.makerAuth.nonce !== local.orderAuth.nonce) ||
+    current.direction !== local.direction ||
+    (current.asset ?? "ETH") !== local.asset ||
+    current.fromAmount !== local.fromAmount ||
+    current.toAmount !== local.toAmount ||
+    !prelockMatches
+  ) {
+    throw new Error("The portable order no longer matches its locally saved terms.");
+  }
+}
+
+function fillDraftMatchesIntent(
+  draft: FillV1Body | undefined,
+  orderDigest: string,
+  selected: SignedFillIntentV1,
+): draft is FillV1Body {
+  if (draft === undefined) return false;
+  return (
+    draft.orderDigest === orderDigest &&
+    draft.intentDigest === protocolIntentDigest(selected.intent, selected.auth) &&
+    draft.takerEthAccount === selected.intent.takerEthAccount &&
+    draft.takerQrlAccount === selected.intent.takerQrlAccount &&
+    draft.releaseCommitment === selected.intent.releaseCommitment
+  );
+}
 
 /** The maker's listed order: waits for a taker, then generates the swap
  *  secret, announces the hashlock and hands over to the swap flow. The
@@ -67,6 +142,7 @@ export function MyOrderCard({
   ensureSepolia,
   qrlRequest,
   qrlTransport,
+  qrlWalletRdns,
   onMatched,
   onClosed,
 }: Props) {
@@ -74,6 +150,9 @@ export function MyOrderCard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [terminalProofSaved, setTerminalProofSaved] = useState(
+    myOrder.fill !== undefined,
+  );
   /** The listing is gone (cancelled or swept) but this is a pre-funded
    *  order: the escrow may still sit on-chain, so the handle must not be
    *  cleared until the funds are released. */
@@ -97,7 +176,7 @@ export function MyOrderCard({
     onClosed();
   }, [onClosed]);
 
-  const startSwap = useCallback(
+  const startLegacySwap = useCallback(
     async (current: OrderView) => {
       if (matching.current) return;
       matching.current = true;
@@ -194,11 +273,15 @@ export function MyOrderCard({
             hashlock: swap.hashlock ?? "",
             initiatorTimeout: swap.initiatorTimeout ?? 0,
             responderTimeout: swap.responderTimeout ?? 0,
-          });
+          }, myOrder.bookId);
         } catch (err) {
           // The announce may have applied even though we saw an error
           // (lost response, or a 409 on retry). Converge via the book.
-          const after = await getOrder(current.id, myOrder.shareToken ?? undefined);
+          const after = await getOrder(
+            current.id,
+            myOrder.shareToken ?? undefined,
+            myOrder.bookId,
+          );
           if (after.status === "open") {
             // The taker released before we announced; nothing published,
             // the listing is back on the book. Drop the provisional swap
@@ -229,14 +312,271 @@ export function MyOrderCard({
     [myOrder, ethAccount, qrlAccount, onMatched],
   );
 
+  const startSignedSwap = useCallback(
+    async (snapshot: OrderView) => {
+      if (matching.current) return;
+      matching.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        const matched = await withOrderSelectionLock(snapshot.id, async () => {
+          const saved = loadMyOrder();
+          if (saved === null || saved.id !== snapshot.id) {
+            throw new Error("The local portable-order recovery record is missing.");
+          }
+          if (!ethAccount || !qrlAccount) {
+            throw new Error("Connect both wallets before selecting a fill request.");
+          }
+          const current = await getOrder(
+            saved.id,
+            saved.shareToken ?? undefined,
+            saved.bookId,
+          );
+          setOrder(current);
+          assertPortableMakerOrder(saved, current);
+          const makerAuth = current.makerAuth;
+          const currentOrderDigest = current.orderDigest;
+          if (makerAuth === undefined || currentOrderDigest === undefined) {
+            throw new Error("The portable order proof is incomplete.");
+          }
+          const savedDirection = saved.direction;
+          const savedFromAmount = saved.fromAmount;
+          const savedToAmount = saved.toAmount;
+          if (
+            current.makerEthAccount.toLowerCase() !== ethAccount.toLowerCase() ||
+            current.makerQrlAccount.toLowerCase() !== qrlAccount.toLowerCase()
+          ) {
+            throw new Error("Connect the same maker accounts that authored this OrderV1.");
+          }
+          if (current.equivocated === true || current.cancelProof !== undefined) {
+            throw new Error("Conflicting terminal messages were detected. Funding is blocked.");
+          }
+          if (current.status === "locking" && saved.fill === undefined) {
+            throw new Error(
+              "The book has a terminal FillV1 without the matching local signed proof. Funding is blocked.",
+            );
+          }
+
+          let selected = saved.selectedIntent;
+          if (saved.fill === undefined) {
+            const intents = await listFillIntents(saved.id, saved.bookId, saved.token);
+            const savedStillValid =
+              selected === undefined
+                ? null
+                : selectEarliestFillIntent(current, [selected]);
+            selected =
+              savedStillValid ?? selectEarliestFillIntent(current, intents) ?? undefined;
+          }
+          if (selected === undefined) return null;
+
+          const selectedSigned: SignedFillIntentV1 = {
+            intent: selected.intent,
+            auth: selected.auth,
+          };
+          const selectedDigest = protocolIntentDigest(
+            selectedSigned.intent,
+            selectedSigned.auth,
+          );
+          if (selected.intentDigest !== selectedDigest) {
+            throw new Error("The selected FillIntentV1 digest is invalid.");
+          }
+
+          const now = Math.floor(Date.now() / 1000);
+          let preimage = saved.fillPreimage;
+          let draft = saved.fillDraft;
+          let respondBy = saved.fillRespondBy;
+          const canReuseDraft =
+            fillDraftMatchesIntent(draft, currentOrderDigest, selectedSigned) &&
+            preimage !== undefined &&
+            respondBy !== undefined &&
+            Number.isSafeInteger(respondBy) &&
+            (saved.fill !== undefined || respondBy - now >= 60);
+          if (!canReuseDraft) {
+            const secret =
+              saved.prelock === null ? await generateSecret() : {
+                preimage: saved.prelock.preimage,
+                hashlock: saved.prelock.hashlock,
+              };
+            preimage = secret.preimage;
+            const initiatorTimeout =
+              saved.prelock === null
+                ? now + INITIATOR_TIMEOUT_S
+                : saved.prelock.initiatorTimeout;
+            if (
+              saved.prelock !== null &&
+              initiatorTimeout - now < SIGNED_PRELOCK_RUNWAY_S
+            ) {
+              throw new Error(
+                "Too little time remains on the pre-funded escrow for a signed fill.",
+              );
+            }
+            respondBy = Math.min(
+              now + SIGNED_FILL_RESPONSE_S,
+              makerAuth.expiresAt,
+            );
+            if (respondBy - now < 60) {
+              throw new Error("This OrderV1 expires too soon to publish a safe FillV1.");
+            }
+            draft = {
+              orderDigest: currentOrderDigest,
+              intentDigest: selectedDigest,
+              takerEthAccount: selected.intent.takerEthAccount,
+              takerQrlAccount: selected.intent.takerQrlAccount,
+              releaseCommitment: selected.intent.releaseCommitment,
+              hashlock: secret.hashlock,
+              initiatorTimeout,
+              responderTimeout: now + RESPONDER_TIMEOUT_S,
+            };
+          }
+          if (draft === undefined || respondBy === undefined || preimage === undefined) {
+            throw new Error("The FillV1 recovery draft is incomplete.");
+          }
+
+          const staged: MyOrderRef = {
+            ...saved,
+            orderAuth: makerAuth,
+            orderDigest: currentOrderDigest,
+            selectedIntent: selected,
+            fillDraft: draft,
+            fillRespondBy: respondBy,
+            fillPreimage: preimage,
+          };
+          saveMyOrder(staged);
+
+          const signed =
+            staged.fill ??
+            (await signFillV1({
+              body: draft,
+              order: current,
+              walletRdns: qrlWalletRdns,
+              request: qrlRequest,
+              respondBy,
+            }));
+          const digest = protocolFillDigest(
+            signed.fill,
+            makerAuth,
+            signed.auth,
+          );
+          if (staged.fillDigest !== undefined && staged.fillDigest !== digest) {
+            throw new Error("The saved FillV1 digest does not match its proof.");
+          }
+          const signedHandle: MyOrderRef = {
+            ...staged,
+            fill: signed,
+            fillDigest: digest,
+          };
+          saveMyOrder(signedHandle);
+          setTerminalProofSaved(true);
+
+          let terminal = current;
+          const terminalMatches =
+            terminal.status === "locking" &&
+            terminal.fill !== undefined &&
+            terminal.fillAuth !== undefined &&
+            terminal.fillDigest === digest;
+          if (!terminalMatches) {
+            terminal = await fillOrder(
+              signedHandle.id,
+              signed,
+              selectedSigned,
+              signedHandle.bookId,
+              signedHandle.token,
+            );
+            setOrder(terminal);
+          }
+          if (terminal.released === true) {
+            throw new Error(
+              "The taker released this fill before funding. This OrderV1 is finished; publish a fresh order.",
+            );
+          }
+          if (
+            terminal.status !== "locking" ||
+            terminal.equivocated === true ||
+            terminal.cancelProof !== undefined ||
+            terminal.fill === undefined ||
+            terminal.fillAuth === undefined ||
+            terminal.selectedIntent === undefined ||
+            terminal.fillDigest !== digest ||
+            terminal.selectedIntent.intentDigest !== selectedDigest ||
+            !sameSignedIntent(terminal.selectedIntent, selectedSigned) ||
+            !verifyFillV1(
+              terminal.fill,
+              terminal.fillAuth,
+              terminal,
+              selectedSigned,
+              { now: Math.floor(Date.now() / 1000), allowExpired: true },
+            ) ||
+            Math.floor(Date.now() / 1000) >= terminal.fillAuth.expiresAt
+          ) {
+            throw new Error("The terminal FillV1 response failed local verification.");
+          }
+
+          const swap: ActiveSwap = {
+            role: "maker",
+            termsBindingVersion: 1,
+            orderId: terminal.id,
+            ...(signedHandle.bookId === undefined
+              ? {}
+              : { bookId: signedHandle.bookId }),
+            orderDigest: currentOrderDigest,
+            intent: selectedSigned,
+            intentDigest: selectedDigest,
+            fill: signed,
+            fillDigest: digest,
+            takerToken: null,
+            shareToken: signedHandle.shareToken,
+            direction: savedDirection,
+            ethAsset: signedHandle.asset,
+            fromAmount: savedFromAmount,
+            toAmount: savedToAmount,
+            makerEthAccount: ethAccount,
+            makerQrlAccount: qrlAccount,
+            takerEthAccount: selected.intent.takerEthAccount,
+            takerQrlAccount: selected.intent.takerQrlAccount,
+            preimage,
+            hashlock: signed.fill.hashlock,
+            initiatorTimeout: signed.fill.initiatorTimeout,
+            responderTimeout: signed.fill.responderTimeout,
+            ...(signedHandle.prelock === null ? {} : { prelocked: true }),
+            createdAt: signed.auth.issuedAt,
+          };
+          saveActiveSwap(swap);
+          return swap;
+        });
+        if (matched === null) {
+          matching.current = false;
+          return;
+        }
+        clearMyOrder();
+        onMatched(matched);
+      } catch (err) {
+        matching.current = false;
+        setError(errorMessage(err));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [ethAccount, qrlAccount, qrlRequest, qrlWalletRdns, onMatched],
+  );
+
   useEffect(() => {
     let stop = false;
     const poll = async () => {
       try {
-        const current = await getOrder(myOrder.id, myOrder.shareToken ?? undefined);
+        const current = await getOrder(
+          myOrder.id,
+          myOrder.shareToken ?? undefined,
+          myOrder.bookId,
+        );
         if (stop) return;
         setOrder(current);
-        if (current.status === "accepted") void startSwap(current);
+        if (current.makerAuth !== undefined) {
+          if (current.status === "open" || current.status === "locking") {
+            void startSignedSwap(current);
+          }
+        } else if (current.status === "accepted") {
+          void startLegacySwap(current);
+        }
         if (current.status === "cancelled") {
           // A pre-funded handle must survive its listing: clearing it here
           // would delete the preimage while the escrow still sits on-chain.
@@ -256,22 +596,95 @@ export function MyOrderCard({
       stop = true;
       clearInterval(t);
     };
-  }, [myOrder.id, myOrder.shareToken, startSwap, close]);
+  }, [
+    myOrder.id,
+    myOrder.shareToken,
+    myOrder.bookId,
+    startLegacySwap,
+    startSignedSwap,
+    close,
+  ]);
 
   // Maker liveness: while this card is mounted the listing stays in the
   // takeable set; a closed tab ages out after the book's presence TTL, so
   // takers stop reserving orders whose maker cannot respond.
   useEffect(() => {
-    const beat = () => void heartbeatOrder(myOrder.id, myOrder.token).catch(() => undefined);
+    const beat = () =>
+      void heartbeatOrder(myOrder.id, myOrder.token, myOrder.bookId).catch(
+        () => undefined,
+      );
     beat();
     const t = setInterval(beat, 30_000);
     return () => clearInterval(t);
-  }, [myOrder.id, myOrder.token]);
+  }, [myOrder.id, myOrder.token, myOrder.bookId]);
+
+  const cancelListing = useCallback(
+    async (current?: OrderView): Promise<void> => {
+      const saved = loadMyOrder() ?? myOrder;
+      const view =
+        current ??
+        (await getOrder(
+          saved.id,
+          saved.shareToken ?? undefined,
+          saved.bookId,
+        ));
+      if (view.makerAuth === undefined) {
+        await cancelOrder(saved.id, saved.token, saved.bookId);
+        return;
+      }
+      assertPortableMakerOrder(saved, view);
+      const makerAuth = view.makerAuth;
+      const currentOrderDigest = view.orderDigest;
+      if (makerAuth === undefined || currentOrderDigest === undefined) {
+        throw new Error("The portable order proof is incomplete.");
+      }
+      if (saved.fill !== undefined || view.fill !== undefined) {
+        throw new Error("A signed FillV1 already exists. This OrderV1 cannot be cancelled.");
+      }
+      const signed =
+        saved.cancel ??
+        (await signCancelV1({
+          body: { orderDigest: currentOrderDigest, reasonCode: 0 },
+          order: view,
+          walletRdns: qrlWalletRdns,
+          request: qrlRequest,
+        }));
+      const digest = protocolCancelDigest(
+        signed.cancel,
+        makerAuth,
+        signed.auth,
+      );
+      if (saved.cancelDigest !== undefined && saved.cancelDigest !== digest) {
+        throw new Error("The saved CancelV1 digest does not match its proof.");
+      }
+      saveMyOrder({ ...saved, cancel: signed, cancelDigest: digest });
+      const cancelled = await cancelSignedOrder(
+        saved.id,
+        signed,
+        saved.bookId,
+        saved.token,
+      );
+      if (
+        cancelled.cancelDigest !== digest ||
+        cancelled.cancelProof === undefined ||
+        cancelled.cancelAuth === undefined ||
+        !verifyCancelV1(
+          cancelled.cancelProof,
+          cancelled.cancelAuth,
+          cancelled,
+          { allowExpired: true },
+        )
+      ) {
+        throw new Error("The CancelV1 response failed local verification.");
+      }
+    },
+    [myOrder, qrlRequest, qrlWalletRdns],
+  );
 
   const cancel = () => {
     setBusy(true);
     setError(null);
-    cancelOrder(myOrder.id, myOrder.token)
+    cancelListing(order ?? undefined)
       .then(close)
       .catch((err: unknown) => {
         if (err instanceof OrderGoneError) {
@@ -298,7 +711,9 @@ export function MyOrderCard({
       // swallow every cancel error and proceed. A stale listing is harmless
       // (takers re-verify the escrow on-chain; a released lock can never be
       // assigned).
-      await cancelOrder(myOrder.id, myOrder.token).catch(() => undefined);
+      if (order?.fill === undefined) {
+        await cancelListing(order ?? undefined).catch(() => undefined);
+      }
       const state = await getLegState(pre.leg, pre.hashlock);
       if (state.status === SwapStatus.Open) {
         await sendOnLeg(pre.leg, buildReleaseData(pre.hashlock), 0n);
@@ -363,6 +778,25 @@ export function MyOrderCard({
               {busy ? "Releasing…" : "Release escrow"}
             </Button>
           </div>
+        ) : order?.makerAuth !== undefined && order.status === "locking" && order.released ? (
+          <p className="rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-400">
+            The selected taker released this terminal fill. Do not fund it. Reclaim any unassigned
+            pre-funded escrow, then publish a fresh OrderV1.
+          </p>
+        ) : order?.makerAuth !== undefined ? (
+          <p className="flex items-start gap-2 text-sm text-muted-foreground">
+            <span
+              aria-hidden
+              className="glow-dot mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
+            />
+            <span>
+              {order.status === "locking"
+                ? "FillV1 published and verified. Preparing the atomic swap."
+                : busy
+                  ? "Reviewing signed FillIntentV1 requests. Your exact selection is saved before the wallet prompt."
+                  : "Portable OrderV1 is live. This browser selects the earliest valid signed request and publishes one terminal FillV1."}
+            </span>
+          </p>
         ) : order?.status === "accepted" ? (
           <p className="text-sm text-blue-accent">
             {busy ? "Taker found: preparing the swap…" : "Taker found."}
@@ -417,14 +851,16 @@ export function MyOrderCard({
         {error ? (
           <div className="space-y-2">
             <p className="text-sm text-destructive">{error}</p>
-            {order?.status === "accepted" ? (
+            {order?.status === "accepted" ||
+            (order?.makerAuth !== undefined && order.released !== true) ? (
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   disabled={busy}
                   onClick={() => {
                     matching.current = false;
-                    void startSwap(order);
+                    if (order.makerAuth !== undefined) void startSignedSwap(order);
+                    else void startLegacySwap(order);
                   }}
                 >
                   Retry
@@ -443,7 +879,20 @@ export function MyOrderCard({
             ) : null}
           </div>
         ) : null}
-        {order?.status !== "accepted" && !orphaned ? (
+        {!orphaned &&
+        order?.makerAuth !== undefined &&
+        order.status === "locking" &&
+        order.released ? (
+          myOrder.prelock !== null ? (
+            <Button variant="outline" size="sm" disabled={busy} onClick={releaseEscrow}>
+              {busy ? "Releasing…" : "Release escrow"}
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" disabled={busy} onClick={close}>
+              Close finished order
+            </Button>
+          )
+        ) : !orphaned && order?.status === "open" && !terminalProofSaved ? (
           myOrder.prelock !== null ? (
             <Button variant="outline" size="sm" disabled={busy} onClick={releaseEscrow}>
               {busy ? "Releasing…" : "Release escrow & cancel"}

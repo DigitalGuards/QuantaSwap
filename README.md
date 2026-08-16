@@ -37,13 +37,32 @@ The WETH in the diagram stands for any supported Ethereum-leg asset: the same `l
 
 Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Order book wire reference: [docs/ORDERBOOK_API.md](docs/ORDERBOOK_API.md). Running the maker side yourself: [docs/LIQUIDITY_PROVIDERS.md](docs/LIQUIDITY_PROVIDERS.md).
 
+Protocol-mode discovery is portable and mirrorable. Makers sign complete
+OrderV1 terms with ML-DSA-87, takers sign short-lived FillIntentV1 proposals,
+and each order terminates in one maker-signed FillV1 or CancelV1. Browsers
+verify and aggregate configured mirrors locally. Private and unsigned legacy
+orders remain on their origin, and every funding decision still depends on
+verified HTLC state rather than an orderbook response.
+
+Portable order ids bind the maker QRL account and nonce under a fixed SHA-256
+domain, so independent mirrors converge on the same identity without allowing
+another signer to claim a copied nonce. Federation is replicated discovery,
+not consensus: observed equivocation is quarantined, and HTLC state remains the
+authority for funds.
+
+Signed makers generate per-order capabilities before wallet authorization and
+commit their domain-separated SHA-256 digests inside OrderV1. The browser and
+headless LP stage the exact signed create envelope before its first POST, so an
+uncertain result can be retried without changing the order or losing access.
+Raw capabilities stay on the origin path and never enter federation events.
+
 ## Wallet integration
 
 - **QRL side**: MyQRLWallet via [`@qrlwallet/connect`](https://github.com/DigitalGuards/myqrlwallet-connect), the MyQRLWallet extension, or the official QRL Web3 Wallet. Interactive makers sign the complete OrderV1 terms with ML-DSA-87 (`qrl_signTypedData` for MyQRLWallet, `qrl_signTypedData_v4` for the official wallet). Users keep their own keys; the connected account auto-fills the recipient address.
 - **Ethereum side**: any EIP-6963 injected wallet (MetaMask, Rabby, etc.).
 - **No generated custodial wallets.** HTLC claims are permissionless with a fixed recipient, so the QRL leg can be claim-sponsored: a WETH-to-QRL swapper does not need a funded QRL gas wallet.
 
-## Repo layout (planned)
+## Repo layout
 
 ```
 contracts/
@@ -53,8 +72,8 @@ contracts/
 config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
-server/        Self-hostable signed order book (coordination only, never custody)
-marketmaker/   Always-online protocol-mode maker (reference liquidity provider)
+server/        Self-hostable federated signed mirror (coordination only)
+marketmaker/   Reproducible self-hosted protocol-mode LP kit
 solver/        Solver service for solver mode (Phala TEE target), planned
 docs/          Architecture, deployments, order book API, LP guide
 ```
@@ -69,7 +88,7 @@ Phase 1 complete (July 2026): the HTLC is deployed and live smoke-tested on both
 |---|---|---|
 | 0 | Repo bootstrap, architecture | done |
 | 1 | HTLC on both chains, local test gate, testnet deploys + smokes | done |
-| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration | done: sandbox + two-party order book |
+| 2 | Protocol UI, signed mirror federation, and self-hosted LP kit | implemented; testnet rollout and independent operator network pending |
 | 3 | Solver service + Phala TEE attestation, single-sided UX | planned |
 | 4 | Audit pass, mainnet readiness (waits on QRL v2 mainnet) | planned |
 

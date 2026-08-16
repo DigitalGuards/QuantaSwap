@@ -6,7 +6,16 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { makeDeploymentIdentity } from "./deployment.js";
 import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc.js";
-import { decide, levelQuote, shouldPost, type DecideInput, type ManagedOrder } from "./policy.js";
+import {
+  canContinueWithoutBook,
+  decide,
+  earliestValidFillIntent,
+  levelQuote,
+  shouldPost,
+  type DecideInput,
+  type ManagedOrder,
+  type SelectedFillIntentV1,
+} from "./policy.js";
 
 const NOW = 1_800_000_000;
 const T1 = NOW + 7200;
@@ -48,6 +57,20 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
   };
 }
 
+function portableManaged(options: {
+  fillAcknowledged: boolean;
+  releaseObserved?: boolean;
+  lockSentAt?: number | null;
+}): ManagedOrder {
+  return managed({
+    lockSentAt: options.lockSentAt ?? null,
+    protocol: {
+      fillAcknowledged: options.fillAcknowledged,
+      releaseObserved: options.releaseObserved ?? false,
+    } as NonNullable<ManagedOrder["protocol"]>,
+  });
+}
+
 const leg = (status: number, overrides: Partial<LegState> = {}): LegState => ({
   status: status as LegState["status"],
   initiator: TAKER_ETH,
@@ -80,6 +103,86 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
   };
 }
 
+function fillIntent(
+  digestByte: string,
+  receivedAt: number,
+  overrides: Partial<SelectedFillIntentV1> = {},
+): SelectedFillIntentV1 {
+  return {
+    intentDigest: `0x${digestByte.repeat(64)}`,
+    intent: {
+      orderDigest: `0x${"a".repeat(64)}`,
+      takerEthAccount: TAKER_ETH,
+      takerQrlAccount: `Q${"d".repeat(40)}`,
+      releaseCommitment: `0x${"b".repeat(64)}`,
+    },
+    auth: {
+      version: "1",
+      scheme: "qrl-eip712-v4",
+      issuedAt: NOW - 10,
+      expiresAt: NOW + 100,
+      nonce: `0x${"c".repeat(64)}`,
+      signature: "0x01",
+      publicKey: "0x02",
+      descriptor: "0x010000",
+    },
+    receivedAt,
+    ...overrides,
+  };
+}
+
+describe("portable fill intent selection", () => {
+  const orderDigest = `0x${"a".repeat(64)}`;
+
+  it("selects by signed issue time regardless of mirror-local receive order", () => {
+    const later = fillIntent("2", NOW + 1, {
+      auth: { ...fillIntent("2", NOW + 1).auth, issuedAt: NOW - 5 },
+    });
+    const earliest = fillIntent("1", NOW + 2, {
+      auth: { ...fillIntent("1", NOW + 2).auth, issuedAt: NOW - 10 },
+    });
+    assert.equal(
+      earliestValidFillIntent([later, earliest], orderDigest, NOW, () => true)?.intentDigest,
+      earliest.intentDigest,
+    );
+  });
+
+  it("uses the semantic digest as the cross-mirror tie breaker", () => {
+    const highDigestReceivedFirst = fillIntent("2", NOW);
+    const lowDigestReceivedLater = fillIntent("1", NOW + 20);
+    assert.equal(
+      earliestValidFillIntent(
+        [highDigestReceivedFirst, lowDigestReceivedLater],
+        orderDigest,
+        NOW,
+        () => true,
+      )?.intentDigest,
+      lowDigestReceivedLater.intentDigest,
+    );
+  });
+
+  it("skips invalid, expired, future, and cross-order proposals", () => {
+    const invalid = fillIntent("1", NOW);
+    const expired = fillIntent("2", NOW + 1, {
+      auth: { ...fillIntent("2", NOW + 1).auth, expiresAt: NOW },
+    });
+    const future = fillIntent("3", NOW + 2, {
+      auth: { ...fillIntent("3", NOW + 2).auth, issuedAt: NOW + 1 },
+    });
+    const crossOrder = fillIntent("4", NOW + 3, {
+      intent: { ...fillIntent("4", NOW + 3).intent, orderDigest: `0x${"f".repeat(64)}` },
+    });
+    const valid = fillIntent("5", NOW + 4);
+    const selected = earliestValidFillIntent(
+      [invalid, expired, future, crossOrder, valid],
+      orderDigest,
+      NOW,
+      (candidate) => candidate !== invalid,
+    );
+    assert.equal(selected?.intentDigest, valid.intentDigest);
+  });
+});
+
 describe("listing lifecycle", () => {
   it("waits while listed and announces when taken", () => {
     assert.equal(decide(input({ bookStatus: "open" })), "wait");
@@ -95,11 +198,60 @@ describe("listing lifecycle", () => {
     const x = input({ bookStatus: "gone", iState: leg(SwapStatus.Open) });
     assert.notEqual(decide(x), "abort");
   });
+
+  it("keeps an uncertain vanished record when the initiator RPC is unavailable", () => {
+    assert.equal(decide(input({ bookStatus: "gone", iState: null })), "wait");
+  });
+
+  it("forgets a vanished listing that never prepared a hashlock", () => {
+    const neverSelected = managed({
+      preimage: null,
+      hashlock: null,
+      initiatorTimeout: null,
+      responderTimeout: null,
+    });
+    assert.equal(decide(input({ bookStatus: "gone", managed: neverSelected, iState: null })), "abort");
+  });
+});
+
+describe("coordination outage continuity", () => {
+  it("requires durable or on-chain exposure before ignoring a book outage", () => {
+    assert.equal(
+      canContinueWithoutBook(managed(), leg(SwapStatus.None)),
+      false,
+    );
+    assert.equal(
+      canContinueWithoutBook(
+        portableManaged({ fillAcknowledged: true }),
+        leg(SwapStatus.None),
+      ),
+      true,
+    );
+    assert.equal(
+      canContinueWithoutBook(managed({ lockSentAt: NOW - 10 }), null),
+      true,
+    );
+    assert.equal(
+      canContinueWithoutBook(managed(), leg(SwapStatus.Open)),
+      true,
+    );
+  });
 });
 
 describe("locking our leg", () => {
   it("locks after announcing", () => {
     assert.equal(decide(input()), "lock");
+  });
+
+  it("requires an authenticated FillV1 acknowledgment for a portable lock", () => {
+    assert.equal(
+      decide(input({ managed: portableManaged({ fillAcknowledged: false }) })),
+      "wait",
+    );
+    assert.equal(
+      decide(input({ managed: portableManaged({ fillAcknowledged: true }) })),
+      "lock",
+    );
   });
 
   it("does not lock when the responder window is nearly gone, and drops at expiry", () => {
@@ -125,12 +277,10 @@ describe("locking our leg", () => {
     assert.equal(decide(input({ iState: null })), "wait");
   });
 
-  it("stops tracking a lock that was attempted but never landed once t1 passes", () => {
+  it("retains a lock attempt past t1 while its chain inclusion remains uncertain", () => {
     const zombie = managed({ lockSentAt: NOW - 6000 });
-    // Between t2 and t1 it keeps waiting in case the tx merely lags.
     assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T2 + 100 })), "wait");
-    // Past t1 nothing of ours is on chain and every window is closed: drop it.
-    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T1 + 100 })), "abort");
+    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T1 + 100 })), "wait");
   });
 });
 
@@ -142,6 +292,23 @@ describe("taker release", () => {
   it("never re-locks a released take even after a stale lock attempt", () => {
     const x = input({ released: true, managed: managed({ lockSentAt: NOW - 600 }) });
     assert.equal(decide(x), "wait");
+  });
+
+  it("treats a persisted release observation as sticky", () => {
+    const released = portableManaged({ fillAcknowledged: true, releaseObserved: true });
+    assert.equal(decide(input({ managed: released })), "abort");
+
+    const attempted = portableManaged({
+      fillAcknowledged: true,
+      releaseObserved: true,
+      lockSentAt: NOW - 600,
+    });
+    assert.equal(decide(input({ managed: attempted, nowS: T1 + 100 })), "wait");
+  });
+
+  it("retains a released record while RPC cannot exclude initiator exposure", () => {
+    const released = portableManaged({ fillAcknowledged: true, releaseObserved: true });
+    assert.equal(decide(input({ managed: released, iState: null })), "wait");
   });
 
   it("still refunds our locked leg at t1 after a release", () => {

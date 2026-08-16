@@ -1,11 +1,72 @@
 import { useEffect, useRef } from "react";
-import { clearMyOrder, loadMyOrder, type ActiveSwap } from "@/lib/activeSwap";
+import {
+  clearMyOrder,
+  loadMyOrder,
+  type ActiveSwap,
+  type MyOrderRef,
+} from "@/lib/activeSwap";
 import {
   announceHashlock,
   assertMakerOrderProgress,
   getOrder,
   OrderGoneError,
+  type OrderView,
 } from "@/lib/orderbook";
+
+interface AnnounceReconcileDependencies {
+  getOrder: (
+    id: string,
+    shareToken: string | undefined,
+    bookId: string,
+  ) => Promise<OrderView>;
+  announceHashlock: (
+    id: string,
+    body: {
+      token: string;
+      hashlock: string;
+      initiatorTimeout: number;
+      responderTimeout: number;
+    },
+    bookId: string,
+  ) => Promise<OrderView>;
+  assertMakerOrderProgress: (
+    local: MyOrderRef,
+    stored: ActiveSwap,
+    current: OrderView,
+  ) => void;
+}
+
+const defaultDependencies: AnnounceReconcileDependencies = {
+  getOrder,
+  announceHashlock,
+  assertMakerOrderProgress,
+};
+
+export async function reconcileMakerAnnouncement(
+  swap: ActiveSwap,
+  myOrder: MyOrderRef,
+  dependencies: AnnounceReconcileDependencies = defaultDependencies,
+): Promise<void> {
+  const bookId = myOrder.bookId ?? swap.bookId ?? "primary";
+  const order = await dependencies.getOrder(
+    myOrder.id,
+    myOrder.shareToken ?? undefined,
+    bookId,
+  );
+  dependencies.assertMakerOrderProgress(myOrder, swap, order);
+  if (order.status !== "accepted") return;
+  const announced = await dependencies.announceHashlock(
+    myOrder.id,
+    {
+      token: myOrder.token,
+      hashlock: swap.hashlock ?? "",
+      initiatorTimeout: swap.initiatorTimeout ?? 0,
+      responderTimeout: swap.responderTimeout ?? 0,
+    },
+    bookId,
+  );
+  dependencies.assertMakerOrderProgress(myOrder, swap, announced);
+}
 
 /** Crash recovery for a maker whose tab died between persisting the swap
  *  (the preimage is saved first) and the hashlock reaching the order
@@ -23,21 +84,8 @@ export function useAnnounceReconcile(swap: ActiveSwap | null): void {
     const myOrder = loadMyOrder();
     if (!myOrder || swap.orderId !== myOrder.id) return;
     reconciled.current = true;
-    getOrder(myOrder.id, myOrder.shareToken ?? undefined)
-      .then(async (order) => {
-        // Both the saved swap and the current book row must still match
-        // the locally authored handle. On mismatch the handle is retained
-        // for an explicit cancel/release recovery instead of announcing.
-        assertMakerOrderProgress(myOrder, swap, order);
-        if (order.status === "accepted") {
-          const announced = await announceHashlock(myOrder.id, {
-            token: myOrder.token,
-            hashlock: swap.hashlock ?? "",
-            initiatorTimeout: swap.initiatorTimeout ?? 0,
-            responderTimeout: swap.responderTimeout ?? 0,
-          });
-          assertMakerOrderProgress(myOrder, swap, announced);
-        }
+    reconcileMakerAnnouncement(swap, myOrder)
+      .then(() => {
         clearMyOrder();
       })
       .catch((err: unknown) => {

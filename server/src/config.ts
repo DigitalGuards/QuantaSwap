@@ -4,6 +4,11 @@ export interface ServerConfig {
   host: string;
   port: number;
   dataFile: string;
+  federationDataFile: string;
+  federationPeers: string[];
+  federationSyncMs: number;
+  federationRequestTimeoutMs: number;
+  corsOrigins: string[];
   presenceTtlS: number;
   proxyTrust: ProxyTrust;
   requestTimeoutMs: number;
@@ -36,20 +41,93 @@ function nonEmptyEnv(env: NodeJS.ProcessEnv, name: string, fallback: string): st
   return value;
 }
 
+function csvEnv(env: NodeJS.ProcessEnv, name: string): string[] {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return [];
+  const values = raw.split(",").map((value) => value.trim());
+  if (values.some((value) => value.length === 0)) {
+    throw new Error(`${name} must be a comma-separated list without empty entries`);
+  }
+  if (new Set(values).size !== values.length) throw new Error(`${name} contains duplicates`);
+  return values;
+}
+
+function federationPeers(env: NodeJS.ProcessEnv): string[] {
+  const peers = csvEnv(env, "ORDERBOOK_FEDERATION_PEERS").map((raw) => {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error("ORDERBOOK_FEDERATION_PEERS contains an invalid URL");
+    }
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      throw new Error("ORDERBOOK_FEDERATION_PEERS URLs must be plain HTTP(S) base URLs");
+    }
+    url.pathname = url.pathname.replace(/\/$/, "");
+    return url.toString().replace(/\/$/, "");
+  });
+  if (new Set(peers).size !== peers.length) {
+    throw new Error("ORDERBOOK_FEDERATION_PEERS contains equivalent duplicate URLs");
+  }
+  return peers;
+}
+
+function corsOrigins(env: NodeJS.ProcessEnv): string[] {
+  return csvEnv(env, "ORDERBOOK_CORS_ORIGINS").map((raw) => {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error("ORDERBOOK_CORS_ORIGINS contains an invalid origin");
+    }
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.origin !== raw ||
+      url.username !== "" ||
+      url.password !== ""
+    ) {
+      throw new Error("ORDERBOOK_CORS_ORIGINS entries must be exact HTTP(S) origins");
+    }
+    return raw;
+  });
+}
+
 export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const rawProxyTrust = env["ORDERBOOK_TRUST_PROXY"] ?? "loopback";
   if (rawProxyTrust !== "none" && rawProxyTrust !== "loopback" && rawProxyTrust !== "all") {
     throw new Error("ORDERBOOK_TRUST_PROXY must be none, loopback, or all");
   }
 
+  const dataFile = nonEmptyEnv(
+    env,
+    "ORDERBOOK_DATA",
+    new URL("../data/orders.json", import.meta.url).pathname,
+  );
   return {
     host: nonEmptyEnv(env, "ORDERBOOK_HOST", "127.0.0.1"),
     port: integerEnv(env, "PORT", 8091, 1, 65_535),
-    dataFile: nonEmptyEnv(
+    dataFile,
+    federationDataFile: nonEmptyEnv(
       env,
-      "ORDERBOOK_DATA",
-      new URL("../data/orders.json", import.meta.url).pathname,
+      "ORDERBOOK_FEDERATION_DATA",
+      `${dataFile}.federation`,
     ),
+    federationPeers: federationPeers(env),
+    federationSyncMs: integerEnv(env, "ORDERBOOK_FEDERATION_SYNC_MS", 5000, 1000, 300_000),
+    federationRequestTimeoutMs: integerEnv(
+      env,
+      "ORDERBOOK_FEDERATION_REQUEST_TIMEOUT_MS",
+      10_000,
+      1000,
+      120_000,
+    ),
+    corsOrigins: corsOrigins(env),
     presenceTtlS: integerEnv(env, "PRESENCE_TTL_S", 90, 1, 3600),
     proxyTrust: rawProxyTrust,
     requestTimeoutMs: integerEnv(env, "ORDERBOOK_REQUEST_TIMEOUT_MS", 15_000, 1000, 120_000),

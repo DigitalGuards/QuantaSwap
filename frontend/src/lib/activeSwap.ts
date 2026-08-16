@@ -3,8 +3,16 @@
 // refund path, so it stays in localStorage until the swap reaches a
 // terminal state on both legs. The taker never holds the preimage.
 
-import type { LegKey } from "../config";
+import { PRIMARY_ORDERBOOK_ID, type LegKey } from "../config";
 import { ethAssetSymbolOrNull, type EthAssetSymbol } from "./assetRegistry";
+import type { CreateOrderBody, MakerOrderAuthV1 } from "./orderbook";
+import type { FillIntentView } from "./orderbookClient";
+import type {
+  FillV1Body,
+  SignedCancelV1,
+  SignedFillIntentV1,
+  SignedFillV1,
+} from "./orderSigning";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type SwapRole = "maker" | "taker" | "sandbox";
@@ -27,6 +35,17 @@ export interface ActiveSwap {
   termsBindingVersion?: typeof TERMS_BINDING_VERSION;
   /** Order book id; null in the sandbox. */
   orderId: string | null;
+  /** Origin selected for every operation on this order. Records saved
+   *  before federation omit it and hydrate to the same-origin primary. */
+  bookId?: string;
+  /** Portable OrderV1 identity and signed selection artifacts. These are
+   *  retained so a refresh resumes the exact proposal and terminal fill. */
+  orderDigest?: string;
+  releaseSecret?: string;
+  intent?: SignedFillIntentV1;
+  intentDigest?: string;
+  fill?: SignedFillV1;
+  fillDigest?: string;
   /** Authorizes the taker's release (walk-away) on the order book; null
    *  for maker/sandbox roles and for swaps stored before it existed. */
   takerToken: string | null;
@@ -68,6 +87,13 @@ export interface ActiveSwap {
 
 const KEY = "quantaswap.swap.v2";
 const LEGACY_KEY = "quantaswap.demo.v1";
+const BOOK_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+function persistedBookId(value: unknown): string {
+  return typeof value === "string" && BOOK_ID_RE.test(value)
+    ? value
+    : PRIMARY_ORDERBOOK_ID;
+}
 
 export const initiatorLeg = (direction: Direction): LegKey =>
   direction === "eth->qrl" ? "eth" : "qrl";
@@ -95,6 +121,7 @@ function migrateLegacy(): ActiveSwap | null {
     const swap: ActiveSwap = {
       role: "sandbox",
       orderId: null,
+      bookId: PRIMARY_ORDERBOOK_ID,
       takerToken: null,
       direction: old.direction,
       // The demo predates ERC-20 legs: always native ETH.
@@ -124,6 +151,7 @@ export function loadActiveSwap(): ActiveSwap | null {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const swap = JSON.parse(raw) as ActiveSwap;
+      swap.bookId = persistedBookId(swap.bookId);
       // Swaps stored before the taker token existed.
       swap.takerToken ??= null;
       // Swaps stored before the ETH-leg asset existed mean native ETH;
@@ -139,7 +167,10 @@ export function loadActiveSwap(): ActiveSwap | null {
 }
 
 export function saveActiveSwap(swap: ActiveSwap): void {
-  localStorage.setItem(KEY, JSON.stringify(swap));
+  localStorage.setItem(
+    KEY,
+    JSON.stringify({ ...swap, bookId: persistedBookId(swap.bookId) }),
+  );
 }
 
 export const hasCurrentTermBinding = (swap: ActiveSwap): boolean =>
@@ -167,6 +198,21 @@ export interface PrelockRef {
  *  the maker's own order at match time. */
 export interface MyOrderRef {
   id: string;
+  /** Origin that accepted this order. Legacy handles hydrate to primary. */
+  bookId?: string;
+  /** Portable proof and exact terminal-selection artifacts. A maker saves
+   *  the draft before requesting a wallet signature, then saves the signed
+   *  fill before submitting it to its selected origin. */
+  orderAuth?: MakerOrderAuthV1;
+  orderDigest?: string;
+  selectedIntent?: FillIntentView;
+  fillPreimage?: string;
+  fillDraft?: FillV1Body;
+  fillRespondBy?: number;
+  fill?: SignedFillV1;
+  fillDigest?: string;
+  cancel?: SignedCancelV1;
+  cancelDigest?: string;
   token: string;
   /** Maker-authored direction, anchored locally at post time. Null only
    *  for legacy handles, which may be cancelled/released but must never
@@ -194,6 +240,7 @@ export function loadMyOrder(): MyOrderRef | null {
     const raw = localStorage.getItem(ORDER_KEY);
     if (!raw) return null;
     const ref = JSON.parse(raw) as MyOrderRef;
+    ref.bookId = persistedBookId(ref.bookId);
     // Handles stored before semantic term binding existed may still be
     // used to cancel or release an escrow, but matching fails closed.
     ref.direction =
@@ -213,11 +260,57 @@ export function loadMyOrder(): MyOrderRef | null {
 }
 
 export function saveMyOrder(ref: MyOrderRef): void {
-  localStorage.setItem(ORDER_KEY, JSON.stringify(ref));
+  localStorage.setItem(
+    ORDER_KEY,
+    JSON.stringify({ ...ref, bookId: persistedBookId(ref.bookId) }),
+  );
 }
 
 export function clearMyOrder(): void {
   localStorage.removeItem(ORDER_KEY);
+}
+
+/** Exact portable create envelope retained until its origin returns the
+ *  same authenticated OrderV1. Raw capabilities stay local and are never
+ *  exposed by imported public proofs. */
+export interface SignedOrderStage {
+  order: CreateOrderBody;
+  auth: MakerOrderAuthV1;
+  makerToken: string;
+  shareToken?: string;
+  orderDigest: string;
+  bookId: string;
+  createdAt: number;
+}
+
+const SIGNED_ORDER_STAGE_KEY = "quantaswap.signedorderstage.v1";
+
+export function loadSignedOrderStage(): SignedOrderStage | null {
+  try {
+    const raw = localStorage.getItem(SIGNED_ORDER_STAGE_KEY);
+    if (!raw) return null;
+    const stage = JSON.parse(raw) as SignedOrderStage;
+    stage.bookId = persistedBookId(stage.bookId);
+    return stage;
+  } catch {
+    return null;
+  }
+}
+
+/** Stage once before transport. An exact replay is idempotent; a different
+ *  create cannot replace unresolved capabilities from an earlier attempt. */
+export function saveSignedOrderStage(stage: SignedOrderStage): void {
+  const canonical = JSON.stringify({ ...stage, bookId: persistedBookId(stage.bookId) });
+  const existing = localStorage.getItem(SIGNED_ORDER_STAGE_KEY);
+  if (existing !== null) {
+    if (existing === canonical) return;
+    throw new Error("An earlier signed order is still awaiting publication recovery");
+  }
+  localStorage.setItem(SIGNED_ORDER_STAGE_KEY, canonical);
+}
+
+export function clearSignedOrderStage(): void {
+  localStorage.removeItem(SIGNED_ORDER_STAGE_KEY);
 }
 
 /** Staging record for an in-flight pre-funded post: written before the

@@ -30,6 +30,7 @@ import {
   type ActiveSwap,
 } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
+import { verifyTakerFill } from "@/components/signedOrderFlow";
 import {
   deriveSwapMachine,
   sameAddr,
@@ -187,7 +188,11 @@ export function SwapFlow({
     let stop = false;
     const poll = async () => {
       try {
-        const view = await getOrder(orderId);
+        const view = await getOrder(
+          orderId,
+          swap.shareToken ?? undefined,
+          swap.bookId,
+        );
         if (!stop) setOrder(view);
       } catch {
         // transient or gone; ignore, the chain governs the funds
@@ -199,7 +204,7 @@ export function SwapFlow({
       stop = true;
       clearInterval(t);
     };
-  }, [orderId]);
+  }, [orderId, swap.shareToken, swap.bookId]);
 
   // Shared with the prelock post flow; see lib/legSender.ts for the
   // transport quirks (extension gas shape, approve targeting).
@@ -273,6 +278,41 @@ export function SwapFlow({
   const rPlan = legPlan[rLeg];
   const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
   const termsBound = hasCurrentTermBinding(swap);
+  let signedFillIssue: string | null = null;
+  if (swap.role !== "sandbox" && swap.intent !== undefined) {
+    if (
+      order === null ||
+      swap.orderDigest === undefined ||
+      swap.intentDigest === undefined ||
+      swap.fill === undefined ||
+      swap.fillDigest === undefined
+    ) {
+      signedFillIssue = "Checking the signed FillV1 before funding.";
+    } else if (order.released === true) {
+      signedFillIssue = "This signed fill was released. Funding is blocked.";
+    } else {
+      try {
+        const verified = verifyTakerFill(
+          order,
+          {
+            orderDigest: swap.orderDigest,
+            intent: swap.intent,
+            intentDigest: swap.intentDigest,
+          },
+          { now: nowS },
+        );
+        if (
+          verified === null ||
+          verified.digest !== swap.fillDigest ||
+          verified.signed.fill.hashlock !== swap.fill.fill.hashlock
+        ) {
+          signedFillIssue = "The live FillV1 no longer matches local recovery data.";
+        }
+      } catch (err) {
+        signedFillIssue = err instanceof Error ? err.message : "FillV1 verification failed.";
+      }
+    }
+  }
   const requireBoundTerms = () => {
     if (!termsBound) {
       throw new Error(
@@ -284,6 +324,13 @@ export function SwapFlow({
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
       requireBoundTerms();
+      if (
+        swap.intent !== undefined &&
+        ((swap.role === "taker" && leg === rLeg) ||
+          (swap.role === "maker" && leg === iLeg))
+      ) {
+        if (signedFillIssue !== null) throw new Error(signedFillIssue);
+      }
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
       if (leg === "eth" && ethAsset.address !== null) {
@@ -336,6 +383,9 @@ export function SwapFlow({
   const assignLeg = (leg: LegKey) =>
     runAction(`assign-${leg}`, async () => {
       requireBoundTerms();
+      if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
+        throw new Error(signedFillIssue);
+      }
       await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
     });
 
@@ -445,6 +495,11 @@ export function SwapFlow({
             claim recovery.
           </p>
         ) : null}
+        {signedFillIssue !== null ? (
+          <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
+            {signedFillIssue}
+          </p>
+        ) : null}
         {complete ? (
           <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
             Atomic swap complete on both chains
@@ -534,6 +589,13 @@ export function SwapFlow({
                             )) ||
                           !step.canRun ||
                           busy !== null ||
+                          (step.key === "lock-responder" &&
+                            swap.role === "taker" &&
+                            signedFillIssue !== null) ||
+                          ((step.key === "lock-initiator" ||
+                            step.key === "assign-initiator") &&
+                            swap.role === "maker" &&
+                            signedFillIssue !== null) ||
                           ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
                             takerWalkedAway)
                         }

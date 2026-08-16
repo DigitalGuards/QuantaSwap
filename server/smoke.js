@@ -13,7 +13,13 @@ const dataFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-")), "orders.jso
 
 // PRESENCE_TTL_S=1 so maker-presence expiry is testable with a short sleep.
 const child = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
-  env: { ...process.env, PORT: String(PORT), ORDERBOOK_DATA: dataFile, PRESENCE_TTL_S: "1" },
+  env: {
+    ...process.env,
+    PORT: String(PORT),
+    ORDERBOOK_DATA: dataFile,
+    ORDERBOOK_CORS_ORIGINS: "https://dev.quantaswap.io",
+    PRESENCE_TTL_S: "1",
+  },
   stdio: ["ignore", "inherit", "inherit"],
 });
 
@@ -64,6 +70,40 @@ const ONE_ETH = 10n ** 18n;
 try {
   await waitForHealth();
   console.log("lifecycle:");
+
+  const publicCors = await fetch(`${BASE}/orders`, {
+    headers: { Origin: "https://mirror-reader.example" },
+  });
+  check(
+    "public mirror reads allow wildcard CORS",
+    publicCors.headers.get("access-control-allow-origin") === "*",
+  );
+  const preflight = await fetch(`${BASE}/orders/signed`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://dev.quantaswap.io",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  check(
+    "configured frontend passes mutation preflight",
+    preflight.status === 204 &&
+      preflight.headers.get("access-control-allow-origin") === "https://dev.quantaswap.io",
+  );
+  const simpleCrossOrigin = await fetch(`${BASE}/orders`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain", Origin: "https://untrusted.example" },
+    body: "{}",
+  });
+  check("simple cross-origin mutation body is rejected", simpleCrossOrigin.status === 415);
+  const federationReset = await api("GET", "/federation/v1/events?limit=16");
+  check(
+    "federation feed starts with a reset snapshot",
+    federationReset.status === 200 &&
+      federationReset.body.reset === true &&
+      Array.isArray(federationReset.body.snapshot),
+  );
 
   const dust = await api("POST", "/orders", {
     direction: "eth->qrl",
@@ -465,6 +505,10 @@ try {
     },
     makerHdr,
   );
+  check(
+    "overlapping ETH order created",
+    ethOverlap.status === 201 && ethOverlap.body.order.asset === "ETH",
+  );
   const usdcTerms = {
     direction: "eth->qrl",
     asset: "USDC",
@@ -514,7 +558,9 @@ try {
   const ethTake = await api("POST", "/orders/take", ethTerms, stableTaker);
   check(
     "asset-less take defaults to ETH and leaves USDC alone",
-    ethTake.status === 200 && ethTake.body.order.id === ethOverlap.body.order.id,
+    ethTake.status === 200 &&
+      ethTake.body.order.asset === "ETH" &&
+      ethTake.body.order.id !== usdcCreated.body.order.id,
   );
 
   console.log("private orders:");

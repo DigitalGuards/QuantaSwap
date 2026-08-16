@@ -12,11 +12,22 @@ import {
   OrderGoneError,
   parseShareToken,
   releaseOrder,
+  submitFillIntent,
   type OrderView,
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
 import { prelockEscrowIssue } from "@/lib/prelock";
-import { verifyOrderV1Auth } from "@/lib/orderSigning";
+import {
+  intentDigest,
+  orderSigningSchemeForWallet,
+  signFillIntentV1,
+  verifyOrderV1Auth,
+} from "@/lib/orderSigning";
+import { generateSecret } from "@/lib/secrets";
+import {
+  buildSignedTakerSwap,
+  sameSignedIntent,
+} from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
@@ -155,6 +166,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
 
   const invalid = !id || !shareToken;
   const assetSymbol = order ? ethAssetSymbolOrNull(order.asset ?? "ETH") : null;
+  const signingScheme = orderSigningSchemeForWallet(qrl.rdns);
 
   const take = () => {
     if (!order || !eth.account || !qrl.account || !shareToken || assetSymbol === null) return;
@@ -162,6 +174,63 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     const qrlAccount = qrl.account;
     setError(null);
     setBusy(true);
+    if (order.makerAuth !== undefined) {
+      let recovery: ActiveSwap | null = null;
+      void (async () => {
+        if (signingScheme === null || order.orderDigest === undefined) {
+          throw new Error(
+            "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
+          );
+        }
+        const releaseSecret = (await generateSecret()).preimage;
+        const signed = await signFillIntentV1({
+          body: {
+            orderDigest: order.orderDigest,
+            takerEthAccount: ethAccount,
+            takerQrlAccount: qrlAccount,
+          },
+          order,
+          releaseSecret,
+          walletRdns: qrl.rdns,
+          request: qrl.request,
+        });
+        const digest = intentDigest(signed.intent, signed.auth);
+        recovery = buildSignedTakerSwap({
+          order,
+          asset: assetSymbol,
+          accounts: {
+            takerEthAccount: ethAccount,
+            takerQrlAccount: qrlAccount,
+          },
+          signedIntent: signed,
+          intentDigestHex: digest,
+          releaseSecret,
+          shareToken,
+        });
+        setSwap(recovery);
+        const submitted = await submitFillIntent(
+          order.id,
+          signed,
+          order.bookId,
+          shareToken,
+        );
+        if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
+          throw new Error("The order book did not preserve the signed FillIntentV1 request.");
+        }
+      })()
+        .then(() => {
+          void navigate("/");
+        })
+        .catch((err: unknown) => {
+          if (recovery !== null) {
+            void navigate("/");
+            return;
+          }
+          setError(err instanceof Error ? err.message : "Failed to request the order");
+        })
+        .finally(() => setBusy(false));
+      return;
+    }
     acceptOrder(order.id, {
       takerEthAccount: ethAccount,
       takerQrlAccount: qrlAccount,
@@ -373,6 +442,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             busy ||
             proof === "checking" ||
             proof === "invalid" ||
+            (order.makerAuth !== undefined && signingScheme === null) ||
             (order.prelocked === true && escrow?.issue !== null && escrow?.issue !== undefined)
           }
           onClick={take}
@@ -380,13 +450,25 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           {!eth.account || !qrl.account
             ? "Connect both wallets to take this swap"
             : busy
-              ? "Taking…"
-              : "Take this swap"}
+              ? order.makerAuth !== undefined
+                ? "Requesting…"
+                : "Taking…"
+              : order.makerAuth !== undefined
+                ? "Sign fill request"
+                : "Take this swap"}
         </Button>
+        {order.makerAuth !== undefined && signingScheme === null ? (
+          <p className="text-xs text-amber-400">
+            Install and connect MyQRLWallet Extension for the recommended portable-order flow.
+            The official QRL Web3 Wallet is also compatible through qrl_signTypedData_v4.
+          </p>
+        ) : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          {order.prelocked === true
-            ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
-            : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}
+          {order.makerAuth !== undefined
+            ? "Your signed request holds no funds. The maker must publish a valid FillV1 before its response deadline; your browser verifies it before enabling any lock."
+            : order.prelocked === true
+              ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
+              : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}
         </p>
       </div>
     );

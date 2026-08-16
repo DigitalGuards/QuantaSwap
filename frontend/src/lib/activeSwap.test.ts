@@ -6,13 +6,16 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearActiveSwap,
   clearPrelockStage,
+  clearSignedOrderStage,
   hasCurrentTermBinding,
   loadActiveSwap,
   loadMyOrder,
   loadPrelockStage,
+  loadSignedOrderStage,
   saveActiveSwap,
   saveMyOrder,
   savePrelockStage,
+  saveSignedOrderStage,
   type ActiveSwap,
   type PrelockStage,
 } from "./activeSwap";
@@ -36,6 +39,7 @@ const swap: ActiveSwap = {
   role: "maker",
   termsBindingVersion: 1,
   orderId: "order-1",
+  bookId: "primary",
   takerToken: null,
   direction: "eth->qrl",
   ethAsset: "ETH",
@@ -99,6 +103,16 @@ describe("active swap persistence", () => {
     expect(loadActiveSwap()?.ethAsset).toBe("ETH");
   });
 
+  it("persists a selected mirror and defaults an invalid legacy id to primary", () => {
+    saveActiveSwap({ ...swap, bookId: "community" });
+    expect(loadActiveSwap()?.bookId).toBe("community");
+    localStorage.setItem(
+      "quantaswap.swap.v2",
+      JSON.stringify({ ...swap, bookId: "../not-an-origin" }),
+    );
+    expect(loadActiveSwap()?.bookId).toBe("primary");
+  });
+
   it("roundtrips the prelocked flag and leaves classic swaps without it", () => {
     saveActiveSwap({ ...swap, prelocked: true });
     expect(loadActiveSwap()?.prelocked).toBe(true);
@@ -160,6 +174,7 @@ describe("my-order handle", () => {
   it("roundtrips and survives corruption", () => {
     const ref = {
       id: "o1",
+      bookId: "community",
       token: "t1",
       direction: "qrl->eth" as const,
       asset: "USDC" as const,
@@ -177,6 +192,7 @@ describe("my-order handle", () => {
   it("roundtrips a pre-funded handle's escrow anchors, preimage included", () => {
     const ref = {
       id: "o1",
+      bookId: "primary",
       token: "t1",
       direction: "eth->qrl" as const,
       asset: "ETH" as const,
@@ -200,6 +216,7 @@ describe("my-order handle", () => {
     // and the match flow falls back to the book copy for those.
     expect(loadMyOrder()).toEqual({
       id: "o1",
+      bookId: "primary",
       token: "t1",
       direction: null,
       asset: "ETH",
@@ -217,6 +234,7 @@ describe("my-order handle", () => {
     );
     expect(loadMyOrder()).toEqual({
       id: "o1",
+      bookId: "primary",
       token: "t1",
       direction: null,
       asset: "USDC",
@@ -252,5 +270,55 @@ describe("prelock staging record", () => {
     expect(loadPrelockStage()).toBeNull();
     localStorage.setItem("quantaswap.prelockstage.v1", "{nope");
     expect(loadPrelockStage()).toBeNull();
+  });
+});
+
+describe("signed order publication staging", () => {
+  const stage = {
+    order: {
+      direction: "eth->qrl" as const,
+      asset: "ETH" as const,
+      fromAmount: "1000000000000000000",
+      toAmount: "5000000000000000000",
+      makerEthAccount: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      makerQrlAccount: "Qcccccccccccccccccccccccccccccccccccccccc",
+      visibility: "private" as const,
+    },
+    auth: {
+      version: "1" as const,
+      scheme: "qrl-sign-typed-v1" as const,
+      issuedAt: 1_800_000_000,
+      expiresAt: 1_800_003_600,
+      nonce: `0x${"11".repeat(32)}`,
+      makerTokenCommitment: `0x${"22".repeat(32)}`,
+      shareTokenCommitment: `0x${"33".repeat(32)}`,
+      signature: "0x44",
+      publicKey: "0x55",
+      descriptor: "0x010000",
+    },
+    makerToken: "66".repeat(32),
+    shareToken: "77".repeat(32),
+    orderDigest: `0x${"88".repeat(32)}`,
+    bookId: "community",
+    createdAt: 1_800_000_000,
+  };
+
+  it("roundtrips the exact signed envelope and both raw capabilities", () => {
+    saveSignedOrderStage(stage);
+    expect(loadSignedOrderStage()).toEqual(stage);
+    clearSignedOrderStage();
+    expect(loadSignedOrderStage()).toBeNull();
+  });
+
+  it("allows an exact retry and blocks overwrite by a different order", () => {
+    saveSignedOrderStage(stage);
+    expect(() => saveSignedOrderStage(stage)).not.toThrow();
+    expect(() =>
+      saveSignedOrderStage({
+        ...stage,
+        makerToken: "99".repeat(32),
+      }),
+    ).toThrow(/earlier signed order/);
+    expect(loadSignedOrderStage()).toEqual(stage);
   });
 });

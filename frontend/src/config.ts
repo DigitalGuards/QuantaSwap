@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 // `confirmations`: extra block depth a counterparty lock must reach
 // before this client acts on it irreversibly (taker locking, maker
 // revealing the secret). 0 acts as soon as the lock is included at the
@@ -66,8 +68,74 @@ export const legByKey = (key: LegKey) => (key === "qrl" ? QRL_LEG : ETH_LEG);
 export const INITIATOR_TIMEOUT_S = 2 * 3600;
 export const RESPONDER_TIMEOUT_S = 1 * 3600;
 
-// Order book service, same-origin (nginx in prod, Vite proxy in dev).
-export const ORDERBOOK_API = "/api";
+// Order-book mirrors. The primary stays same-origin (nginx in deployments,
+// Vite proxy in development). Additional public mirrors are an optional JSON
+// build variable, for example:
+// VITE_ORDERBOOK_MIRRORS='[{"id":"community","apiBase":"https://book.example/api"}]'
+export interface OrderbookMirror {
+  id: string;
+  apiBase: string;
+}
+
+export const PRIMARY_ORDERBOOK_ID = "primary";
+
+const MIRROR_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+function configuredMirrors(raw: unknown): OrderbookMirror[] {
+  if (typeof raw !== "string" || raw === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("VITE_ORDERBOOK_MIRRORS must be valid JSON");
+  }
+  if (!Array.isArray(parsed)) throw new Error("VITE_ORDERBOOK_MIRRORS must be an array");
+  return parsed.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must be an object`);
+    }
+    const row = entry as Record<string, unknown>;
+    if (typeof row["id"] !== "string" || !MIRROR_ID_RE.test(row["id"])) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid id`);
+    }
+    if (row["id"] === PRIMARY_ORDERBOOK_ID) {
+      throw new Error("VITE_ORDERBOOK_MIRRORS cannot replace the primary mirror");
+    }
+    if (typeof row["apiBase"] !== "string") {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid apiBase`);
+    }
+    let url: URL;
+    try {
+      url = new URL(row["apiBase"]);
+    } catch {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid apiBase`);
+    }
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must use a plain HTTP(S) URL`);
+    }
+    return {
+      id: row["id"],
+      apiBase: url.toString().replace(/\/$/, ""),
+    };
+  });
+}
+
+export const ORDERBOOK_MIRRORS: readonly OrderbookMirror[] = [
+  { id: PRIMARY_ORDERBOOK_ID, apiBase: "/api" },
+  ...configuredMirrors(import.meta.env.VITE_ORDERBOOK_MIRRORS),
+];
+
+if (new Set(ORDERBOOK_MIRRORS.map((mirror) => mirror.id)).size !== ORDERBOOK_MIRRORS.length) {
+  throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate ids");
+}
+
+export const ORDERBOOK_API = ORDERBOOK_MIRRORS[0]?.apiBase ?? "/api";
 
 // Dust guard for the QRL side of orders (0.001 QRL); mirrored server-side
 // in server/src/store.ts. The ETH-leg floor is per asset: see

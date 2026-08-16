@@ -34,11 +34,22 @@ import {
   listOrders,
   openBookStream,
   releaseOrder,
+  submitFillIntent,
   takeOrder,
   type OrderView,
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
-import { verifyOrderV1Auth } from "@/lib/orderSigning";
+import {
+  intentDigest,
+  orderSigningSchemeForWallet,
+  signFillIntentV1,
+  verifyOrderV1Auth,
+} from "@/lib/orderSigning";
+import { generateSecret } from "@/lib/secrets";
+import {
+  buildSignedTakerSwap,
+  sameSignedIntent,
+} from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
@@ -46,6 +57,8 @@ import { cn } from "@/utils/cn";
 interface Props {
   ethAccount: string | null;
   qrlAccount: string | null;
+  qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  qrlWalletRdns: string | null;
   /** The maker's own listing renders marked ("yours") and untakeable. */
   ownOrderId: string | null;
   /** Taking is disabled while you have an order or swap of your own. */
@@ -134,6 +147,8 @@ function cumulate(rows: Omit<BookRow, "cumUnits">[]): BookRow[] {
 export function OrderBookPanel({
   ethAccount,
   qrlAccount,
+  qrlRequest,
+  qrlWalletRdns,
   ownOrderId,
   takeDisabled,
   onTaken,
@@ -164,6 +179,7 @@ export function OrderBookPanel({
   } | null>(null);
 
   const asset = ETH_ASSETS[pair];
+  const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
 
   useEffect(() => {
     if (!pending) {
@@ -234,6 +250,59 @@ export function OrderBookPanel({
     setError(null);
     setBusyId(order.id);
     const taker = { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount };
+    if (order.makerAuth !== undefined) {
+      let recovery: ActiveSwap | null = null;
+      void (async () => {
+        if (signingScheme === null || order.orderDigest === undefined) {
+          throw new Error(
+            "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
+          );
+        }
+        const releaseSecret = (await generateSecret()).preimage;
+        const signed = await signFillIntentV1({
+          body: {
+            orderDigest: order.orderDigest,
+            ...taker,
+          },
+          order,
+          releaseSecret,
+          walletRdns: qrlWalletRdns,
+          request: qrlRequest,
+        });
+        const digest = intentDigest(signed.intent, signed.auth);
+        recovery = buildSignedTakerSwap({
+          order,
+          asset: pair,
+          accounts: taker,
+          signedIntent: signed,
+          intentDigestHex: digest,
+          releaseSecret,
+        });
+        saveActiveSwap(recovery);
+        const submitted = await submitFillIntent(
+          order.id,
+          signed,
+          order.bookId,
+        );
+        if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
+          throw new Error("The order book did not preserve the signed FillIntentV1 request.");
+        }
+        return recovery;
+      })()
+        .then((swap) => onTaken(swap))
+        .catch((err: unknown) => {
+          if (recovery !== null) {
+            onTaken(recovery);
+            return;
+          }
+          const message = err instanceof Error ? err.message : "Failed to request the order";
+          setError(message);
+          if (CAP_ERROR_RE.test(message)) setCapBlocked(true);
+          void refresh();
+        })
+        .finally(() => setBusyId(null));
+      return;
+    }
     // Take by terms: if this exact row was just sniped, fill the next
     // order at the same terms or better instead of failing. The request
     // carries the active pair's asset so a QRL/USDC take can never fill a
@@ -408,7 +477,7 @@ export function OrderBookPanel({
           style={{ width: `${depth}%` }}
         />
         <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
-          {busyId === row.order.id ? "taking…" : fmtPrice(row.price, asset.decimals)}
+          {busyId === row.order.id ? "requesting…" : fmtPrice(row.price, asset.decimals)}
           {own ? (
             <span className="ml-1.5 rounded-sm bg-blue-accent/15 px-1 py-px text-[10px] font-medium text-blue-accent">
               yours
@@ -542,10 +611,19 @@ export function OrderBookPanel({
               )
             ) : null}
             <p className="text-xs text-muted-foreground">
-              {pending.prelocked === true
-                ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
-                : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
+              {pending.makerAuth !== undefined
+                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV1. The maker selects one request and publishes a signed FillV1 before you can fund. No funds move during either signature."
+                : pending.prelocked === true
+                  ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
+                  : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
             </p>
+            {pending.makerAuth !== undefined && signingScheme === null ? (
+              <p className="text-xs text-amber-400">
+                Install and connect MyQRLWallet Extension for the recommended portable-order
+                flow. The official QRL Web3 Wallet is also compatible through
+                qrl_signTypedData_v4.
+              </p>
+            ) : null}
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
@@ -555,11 +633,12 @@ export function OrderBookPanel({
                     escrow?.id === pending.id &&
                     escrow.issue !== null) ||
                   (proof?.id === pending.id &&
-                    (proof.status === "checking" || proof.status === "invalid"))
+                    (proof.status === "checking" || proof.status === "invalid")) ||
+                  (pending.makerAuth !== undefined && signingScheme === null)
                 }
                 onClick={confirmTake}
               >
-                Confirm take
+                {pending.makerAuth !== undefined ? "Sign fill request" : "Confirm take"}
               </Button>
               {onPrefill ? (
                 <Button

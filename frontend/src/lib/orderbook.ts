@@ -4,11 +4,24 @@
 
 import {
   CLAIM_MARGIN_S,
-  ORDERBOOK_API,
+  PRIMARY_ORDERBOOK_ID,
   ethAssetSymbolOrNull,
   type EthAssetSymbol,
 } from "../config";
 import type { ActiveSwap, Direction, MyOrderRef } from "./activeSwap";
+import { authenticateDirectOrder, federatedOrderBook } from "./mirrorBook";
+import {
+  OrderGoneError,
+  type FillIntentView,
+  type PortableReleaseRequest,
+  type SignedOrderCreateRequest,
+} from "./orderbookClient";
+import type {
+  ProtocolAuthV1,
+  SignedCancelV1,
+  SignedFillIntentV1,
+  SignedFillV1,
+} from "./orderSigning";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 
@@ -56,6 +69,22 @@ export interface OrderView {
   /** Portable maker proof on OrderV1 rows. Legacy/local-liquidity rows
    *  created through the compatibility endpoint do not carry one. */
   makerAuth?: MakerOrderAuthV1;
+  /** Scheme-independent digest of the portable OrderV1. The browser
+   *  recomputes this value from the maker proof. */
+  orderDigest?: string;
+  /** Browser-local origin selected for operations on this row. */
+  bookId?: string;
+  /** Browser-local origins that supplied the same authenticated OrderV1. */
+  sources?: string[];
+  fill?: SignedFillV1["fill"];
+  fillAuth?: ProtocolAuthV1;
+  fillDigest?: string;
+  selectedIntent?: FillIntentView;
+  cancelProof?: SignedCancelV1["cancel"];
+  cancelAuth?: ProtocolAuthV1;
+  cancelDigest?: string;
+  equivocated?: boolean;
+  conflictDigests?: string[];
 }
 
 export type OrderSigningScheme = "qrl-sign-typed-v1" | "qrl-eip712-v4";
@@ -66,6 +95,8 @@ export interface MakerOrderAuthV1 {
   issuedAt: number;
   expiresAt: number;
   nonce: string;
+  makerTokenCommitment: string;
+  shareTokenCommitment: string;
   signature: string;
   publicKey: string;
   descriptor: string;
@@ -109,6 +140,9 @@ const TERMS_CHANGED = "The order book returned different swap semantics; the tak
 
 const sameAccount = (left: string | null, right: string): boolean =>
   typeof left === "string" && left.toLowerCase() === right.toLowerCase();
+
+const bookIdOf = (value: { bookId?: string }): string =>
+  value.bookId ?? PRIMARY_ORDERBOOK_ID;
 
 /** Parse the untrusted book's economic terms into a bounded runtime shape. */
 function baseOrderTerms(order: OrderView): BaseOrderTerms {
@@ -200,6 +234,7 @@ export function acceptedOrderTerms(
     accepted.id === displayed.id &&
     accepted.makerEthAccount.toLowerCase() === displayed.makerEthAccount.toLowerCase() &&
     accepted.makerQrlAccount.toLowerCase() === displayed.makerQrlAccount.toLowerCase();
+  const sameOrigin = bookIdOf(accepted) === bookIdOf(displayed);
   const sameTaker =
     sameAccount(accepted.takerEthAccount, expectedTaker.takerEthAccount) &&
     sameAccount(accepted.takerQrlAccount, expectedTaker.takerQrlAccount);
@@ -213,6 +248,7 @@ export function acceptedOrderTerms(
     displayed.status !== "open" ||
     accepted.status !== "accepted" ||
     !sameSemantics ||
+    !sameOrigin ||
     !sameTaker ||
     !validAmounts ||
     (mode === "same-order" && !sameOrder)
@@ -268,6 +304,7 @@ export function assertMakerOrderTerms(
   if (
     (!accepted && !locking) ||
     current.id !== local.id ||
+    bookIdOf(current) !== bookIdOf(local) ||
     terms.direction !== local.direction ||
     terms.asset !== local.asset ||
     terms.fromAmount !== local.fromAmount ||
@@ -292,6 +329,7 @@ export function assertStoredMakerSwapTerms(local: MyOrderRef, stored: ActiveSwap
     stored.role !== "maker" ||
     stored.termsBindingVersion !== 1 ||
     stored.orderId !== local.id ||
+    bookIdOf(stored) !== bookIdOf(local) ||
     stored.direction !== local.direction ||
     stored.ethAsset !== local.asset ||
     stored.fromAmount !== local.fromAmount ||
@@ -355,6 +393,7 @@ export function announcedOrderTerms(
     stored.termsBindingVersion !== 1 ||
     stored.orderId === null ||
     current.id !== stored.orderId ||
+    bookIdOf(current) !== bookIdOf(stored) ||
     current.status !== "locking" ||
     terms.direction !== stored.direction ||
     terms.asset !== stored.ethAsset ||
@@ -380,41 +419,6 @@ export function announcedOrderTerms(
   };
 }
 
-export class OrderGoneError extends Error {}
-
-async function api<T>(
-  method: string,
-  path: string,
-  body?: unknown,
-  headers?: Record<string, string>,
-): Promise<T> {
-  const res = await fetch(`${ORDERBOOK_API}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", ...headers },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const payload = (await res.json().catch(() => ({}))) as { error?: string };
-  if (res.status === 404) throw new OrderGoneError(payload.error ?? "order not found");
-  if (!res.ok) throw new Error(payload.error ?? `order book request failed (HTTP ${res.status})`);
-  return payload as T;
-}
-
-export const listOrders = async (): Promise<OrderView[]> =>
-  (await api<{ orders: OrderView[] }>("GET", "/orders")).orders;
-
-/** Private orders demand the share token (sent as a header so it never
- *  lands in server logs; the browser keeps it in the URL fragment, which
- *  never leaves the page) and 404 without it. */
-export const getOrder = async (id: string, shareToken?: string): Promise<OrderView> =>
-  (
-    await api<{ order: OrderView }>(
-      "GET",
-      `/orders/${id}`,
-      undefined,
-      shareToken === undefined ? undefined : { "X-Share-Token": shareToken },
-    )
-  ).order;
-
 export interface CreateOrderBody {
   direction: Direction;
   /** ETH-leg asset symbol for the pair this order trades. */
@@ -433,24 +437,56 @@ export interface CreateOrderBody {
   prelock?: { hashlock: string; initiatorTimeout: number };
 }
 
+export { OrderGoneError };
+
+const localResult = <T extends { order: OrderView }>(result: T, bookId: string): T => ({
+  ...result,
+  order: authenticateDirectOrder(result.order, bookId),
+});
+
+export const listOrders = async (): Promise<OrderView[]> =>
+  (await federatedOrderBook.refresh()).orders;
+
+/** Private orders demand the share token (sent as a header so it never
+ *  lands in server logs; the browser keeps it in the URL fragment, which
+ *  never leaves the page) and 404 without it. The explicit book id keeps
+ *  the capability and every later mutation on its origin. */
+export const getOrder = async (
+  id: string,
+  shareToken?: string,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).get(id, shareToken),
+    bookId,
+  );
+
 /** Legacy/local-liquidity compatibility path. Interactive makers use
  *  createSignedOrder so their listing can be authenticated by mirrors. */
 export const createOrder = async (
   body: CreateOrderBody,
-): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
-  api("POST", "/orders", body);
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> => {
+  if (bookId !== PRIMARY_ORDERBOOK_ID && body.visibility !== "private") {
+    throw new Error("unsigned public orders can be posted to the primary book only");
+  }
+  return localResult(await federatedOrderBook.client(bookId).create(body), bookId);
+};
 
 export const createSignedOrder = async (
-  order: CreateOrderBody,
-  auth: MakerOrderAuthV1,
-): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> =>
-  api("POST", "/orders/signed", { order, auth });
+  request: SignedOrderCreateRequest,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<{ order: OrderView }> => {
+  const created = await federatedOrderBook.client(bookId).createSigned(request);
+  return { order: authenticateDirectOrder(created.order, bookId) };
+};
 
 export const acceptOrder = async (
   id: string,
   body: { takerEthAccount: string; takerQrlAccount: string; shareToken?: string },
+  bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<{ order: OrderView; takerToken: string }> =>
-  api("POST", `/orders/${id}/accept`, body);
+  localResult(await federatedOrderBook.client(bookId).accept(id, body), bookId);
 
 /** Fragment carrying a private order's share token on /o/<id> links. In
  *  the fragment (never the query string) so it stays out of every access
@@ -467,20 +503,35 @@ export const parseShareToken = (hash: string): string | null => {
  *  receives at least `minReceive` (the order's fromAmount). Two takers
  *  racing for the same row both fill while depth exists, and a stale
  *  click can only fill at the terms the taker saw or better. */
-export const takeOrder = async (body: {
-  direction: Direction;
-  /** ETH-leg asset of the pair to match; orders of other assets never
-   *  fill this request even when their raw amounts satisfy the bounds. */
-  asset: EthAssetSymbol;
-  maxPay: string;
-  minReceive: string;
-  takerEthAccount: string;
-  takerQrlAccount: string;
-}): Promise<{ order: OrderView; takerToken: string }> => api("POST", "/orders/take", body);
+export const takeOrder = async (
+  body: {
+    direction: Direction;
+    /** ETH-leg asset of the pair to match; orders of other assets never
+     *  fill this request even when their raw amounts satisfy the bounds. */
+    asset: EthAssetSymbol;
+    maxPay: string;
+    minReceive: string;
+    takerEthAccount: string;
+    takerQrlAccount: string;
+  },
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<{ order: OrderView; takerToken: string }> => {
+  if (bookId !== PRIMARY_ORDERBOOK_ID) {
+    throw new Error("unsigned take-by-terms is available on the primary book only");
+  }
+  return localResult(await federatedOrderBook.client(bookId).take(body), bookId);
+};
 
 /** Maker liveness ping; keeps the listing visible as takeable. */
-export const heartbeatOrder = async (id: string, token: string): Promise<OrderView> =>
-  (await api<{ order: OrderView }>("POST", `/orders/${id}/heartbeat`, { token })).order;
+export const heartbeatOrder = async (
+  id: string,
+  token: string,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).heartbeat(id, token),
+    bookId,
+  );
 
 /** Live book subscription (SSE). The server pushes the full open list on
  *  connect and on every change; the browser's EventSource reconnects on
@@ -489,40 +540,121 @@ export function openBookStream(onBook: (orders: OrderView[]) => void): {
   isLive: () => boolean;
   close: () => void;
 } {
-  const es = new EventSource(`${ORDERBOOK_API}/orders/stream`);
-  es.addEventListener("book", (event) => {
-    try {
-      onBook((JSON.parse((event as MessageEvent<string>).data) as { orders: OrderView[] }).orders);
-    } catch {
-      // malformed frame; the next push or the poll fallback recovers
-    }
-  });
-  return {
-    isLive: () => es.readyState === EventSource.OPEN,
-    close: () => es.close(),
-  };
+  return federatedOrderBook.subscribe(onBook);
 }
 
 /** Taker walk-away. Before the maker locks, the order returns to the book;
  *  after, it only stops counting against the taker's per-IP take slots.
  *  Purely book-keeping either way, so callers may fire and forget. */
-export const releaseOrder = async (id: string, token: string): Promise<OrderView> =>
-  (await api<{ order: OrderView }>("POST", `/orders/${id}/release`, { token })).order;
+export const releaseOrder = async (
+  id: string,
+  token: string,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).release(id, token),
+    bookId,
+  );
+
+export const releaseSignedOrder = async (
+  id: string,
+  request: PortableReleaseRequest,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).releasePortable(id, request),
+    bookId,
+  );
 
 /** Fire-and-forget release of a taker's reservation when they abandon or
  *  finish a swap; no-op for makers/sandbox. Funds are always governed
  *  on-chain, so failures are fine to ignore. */
 export const releaseTake = (s: ActiveSwap | null): void => {
-  if (s && s.role === "taker" && s.orderId && s.takerToken) {
-    void releaseOrder(s.orderId, s.takerToken).catch(() => undefined);
+  if (s && s.role === "taker" && s.orderId) {
+    if (s.releaseSecret !== undefined && s.fillDigest !== undefined) {
+      void releaseSignedOrder(
+        s.orderId,
+        {
+          releaseSecret: s.releaseSecret,
+          fillDigest: s.fillDigest,
+          ...(s.shareToken === undefined || s.shareToken === null
+            ? {}
+            : { shareToken: s.shareToken }),
+        },
+        s.bookId,
+      ).catch(() => undefined);
+    } else if (s.releaseSecret !== undefined && s.intentDigest !== undefined) {
+      void releaseSignedOrder(
+        s.orderId,
+        {
+          releaseSecret: s.releaseSecret,
+          intentDigest: s.intentDigest,
+          ...(s.shareToken === undefined || s.shareToken === null
+            ? {}
+            : { shareToken: s.shareToken }),
+        },
+        s.bookId,
+      ).catch(() => undefined);
+    } else if (s.takerToken !== null) {
+      void releaseOrder(s.orderId, s.takerToken, s.bookId).catch(() => undefined);
+    }
   }
 };
+
+export const submitFillIntent = async (
+  id: string,
+  signed: SignedFillIntentV1,
+  bookId = PRIMARY_ORDERBOOK_ID,
+  shareToken?: string,
+): Promise<FillIntentView> =>
+  federatedOrderBook.client(bookId).submitIntent(id, signed, shareToken);
+
+export const listFillIntents = async (
+  id: string,
+  bookId = PRIMARY_ORDERBOOK_ID,
+  makerToken?: string,
+): Promise<FillIntentView[]> =>
+  federatedOrderBook.client(bookId).intents(id, makerToken);
+
+export const fillOrder = async (
+  id: string,
+  signed: SignedFillV1,
+  selected: SignedFillIntentV1,
+  bookId = PRIMARY_ORDERBOOK_ID,
+  makerToken?: string,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).fill(id, signed, selected, makerToken),
+    bookId,
+  );
+
+export const cancelSignedOrder = async (
+  id: string,
+  signed: SignedCancelV1,
+  bookId = PRIMARY_ORDERBOOK_ID,
+  makerToken?: string,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).cancelSigned(id, signed, makerToken),
+    bookId,
+  );
 
 export const announceHashlock = async (
   id: string,
   body: { token: string; hashlock: string; initiatorTimeout: number; responderTimeout: number },
+  bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<OrderView> =>
-  (await api<{ order: OrderView }>("POST", `/orders/${id}/hashlock`, body)).order;
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).announceHashlock(id, body),
+    bookId,
+  );
 
-export const cancelOrder = async (id: string, token: string): Promise<OrderView> =>
-  (await api<{ order: OrderView }>("POST", `/orders/${id}/cancel`, { token })).order;
+export const cancelOrder = async (
+  id: string,
+  token: string,
+  bookId = PRIMARY_ORDERBOOK_ID,
+): Promise<OrderView> =>
+  authenticateDirectOrder(
+    await federatedOrderBook.client(bookId).cancel(id, token),
+    bookId,
+  );

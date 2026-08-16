@@ -28,41 +28,68 @@ Consequences for integrators:
 
 ## Transport
 
-- Base URL: `https://quantaswap.io/api` (same-origin `/api` proxy in front of
-  the service).
-- JSON over HTTP. Request bodies must be JSON objects; anything else is a
-  `400 body must be a JSON object`. Ordinary bodies are capped at **4096
-  bytes**; the ML-DSA-87 proof on `POST /orders/signed` raises that endpoint's
-  cap to **32 KiB** (`413 body too large`).
+- Primary base URL: `https://quantaswap.io/api` (same-origin `/api` proxy in
+  front of the service). Independent mirrors expose the same API and are
+  configured by clients with stable local ids.
+- JSON over HTTP. Every POST requires `Content-Type: application/json`; other
+  content types receive `415`. Request bodies must be JSON objects. Ordinary
+  bodies are capped at **4096 bytes**; endpoints carrying ML-DSA-87 proofs use
+  a **32 KiB** cap (`413 body too large`).
 - Every error response is `{ "error": "<message>" }` with an appropriate HTTP
   status. Success shapes are given per endpoint below.
 - Responses are `Cache-Control: no-store`.
+- `GET /orders`, `GET /orders/stream`, and the federation feed allow wildcard
+  CORS because they contain public data. Mutations and capability-gated reads
+  echo only exact origins configured in `ORDERBOOK_CORS_ORIGINS`. Cookies and
+  credentialed CORS are not used.
 
-## Authentication: per-order bearer tokens
+## Authentication and capabilities
 
-There is no registration, no accounts, no API keys. Authorization is by
-per-order capability tokens (64 hex chars, 32 CSPRNG bytes):
+There is no registration, no accounts, no API keys. Authorization uses
+per-order capability tokens serialized as 64 lowercase hex characters without
+`0x`, representing exactly 32 CSPRNG bytes:
 
-- **Maker token**: returned once by either create endpoint. Authorizes
-  `heartbeat`, `hashlock` and `cancel` on that order.
-- **Taker token**: returned once by `POST /orders/:id/accept` or
+- **Maker token**: authorizes `heartbeat` and the legacy `hashlock`/`cancel`
+  lifecycle. On a private signed order it also proves access to origin-local
+  intent, fill, and cancel routes. Legacy create mints it at the server. Signed
+  create generates it at the client before signing and submits it as an outer
+  request preimage.
+- **Taker token**: returned once by legacy `POST /orders/:id/accept` or
   `POST /orders/take`. Authorizes `release` on that order.
-- **Share token** (private orders only): returned once by either create
-  endpoint when `visibility` is `private`. It is the capability that reads
-  (`GET /orders/:id`, `X-Share-Token` header) and accepts
-  (`POST /orders/:id/accept`, `shareToken` body field) the order; the maker
-  hands it to the intended counterparty, typically inside a share link's URL
-  fragment so it never touches server logs.
+- **Share token** (private orders only): gates reads and acceptance on the
+  origin. Legacy create mints it at the server. Signed create generates it at
+  the client before signing. The maker normally passes it in a share-link URL
+  fragment, which keeps it out of HTTP requests until the taker deliberately
+  uses it.
 
-The server stores only the sha256 of each token; if you lose a token it cannot
-be recovered. Treat tokens as secrets for the lifetime of the order (leaking a
-maker token lets someone cancel your listing or announce a bogus hashlock;
-never funds, per the trust model, but it can grief the swap).
+Signed OrderV1 binds the raw maker token and, for private orders, the raw share
+token through separate domain-separated commitments:
 
-These bearer tokens authorize later mutations on one book; they are not the
-maker's identity proof. New interactive listings use `POST /orders/signed` and
-carry a portable ML-DSA-87 `makerAuth` object. A mirror or browser can verify
-that proof without trusting the server.
+```text
+makerTokenCommitment = sha256(
+  UTF8("QuantaSwap Maker capability V1\0") || makerToken as 32 raw bytes
+)
+
+shareTokenCommitment = sha256(
+  UTF8("QuantaSwap Share capability V1\0") || shareToken as 32 raw bytes
+)
+```
+
+Commitments are `0x` plus 64 lowercase hex characters. The maker commitment is
+always nonzero. A public OrderV1 signs an all-zero share commitment and its
+outer create request has no `shareToken`. A private OrderV1 signs a nonzero
+share commitment and its outer request must provide the matching `shareToken`.
+
+The service stores only the legacy SHA-256 token hash or the signed
+domain-separated commitment. It never stores a signed create's raw preimage.
+Raw maker and share tokens never enter federation events or application logs.
+Deployments must also keep request bodies and capability headers out of reverse
+proxy and observability logs. Losing every local copy leaves no recovery path.
+
+These capabilities authorize origin-local operations and never federate.
+Portable protocol authority comes from ML-DSA-87 proofs: FillIntentV1 is signed
+by the taker, while FillV1 and CancelV1 are signed by the OrderV1 maker. Any
+mirror or client can verify those proofs without trusting the server.
 
 ## The order object
 
@@ -71,7 +98,7 @@ hashes and taker-IP bookkeeping are never serialized):
 
 ```jsonc
 {
-  "id": "a1b2c3d4e5f60718",        // 16 hex legacy id, or 64 hex signed nonce
+  "id": "a1b2c3d4e5f60718",        // 16 hex legacy id, or 64 hex signed derived id
   "direction": "eth->qrl",          // or "qrl->eth"; the maker escrows the from side
   "asset": "ETH",                   // ETH-leg asset symbol: ETH | USDC | tUSDT.
                                     // Absent means ETH (rows predating stable pairs).
@@ -85,7 +112,7 @@ hashes and taker-IP bookkeeping are never serialized):
   "hashlock": null,                 // set by the maker's hashlock announcement
   "initiatorTimeout": null,         // unix seconds, set with the hashlock
   "responderTimeout": null,
-  "released": false,                // taker walked away after the maker locked
+  "released": false,                // authorized taker release observed
   "makerSeen": true,                // maker heartbeated within the presence TTL (90s)
   "visibility": "public",           // public | private (see Private orders)
   "allowedTakerEth": "0x…",         // present only on restricted private orders
@@ -102,7 +129,9 @@ hashes and taker-IP bookkeeping are never serialized):
     "nonce": "0x<64 lowercase hex>",
     "signature": "0x<9254 lowercase hex>",
     "publicKey": "0x<5184 lowercase hex>",
-    "descriptor": "0x010000"
+    "descriptor": "0x010000",
+    "makerTokenCommitment": "0x<64 lowercase hex, nonzero>",
+    "shareTokenCommitment": "0x<64 lowercase hex>"
   }
 }
 ```
@@ -129,6 +158,8 @@ Out-of-bounds or malformed amounts are `400` with a field-specific message.
 
 ### Order lifecycle
 
+Legacy origin-local rows retain the original reservation flow:
+
 ```
 open ──accept/take──> accepted ──hashlock (maker locked first)──> locking
  │  ^                    │                                          │
@@ -137,6 +168,21 @@ open ──accept/take──> accepted ──hashlock (maker locked first)──
                                         governed on-chain) ────────┘
 ```
 
+New portable OrderV1 rows are single-use. A short-lived taker FillIntentV1 is
+a proposal only. The maker then signs exactly one terminal child:
+
+```
+open ──FillIntentV1 proposal──> open ──FillV1──> locking
+  └───────────────────────────────CancelV1──> cancelled
+```
+
+A FillV1 selects one intent and carries the hashlock and both timeouts. It
+never reopens. A release-secret preimage may mark the proposal or terminal fill
+released, after which the maker must stop and post a fresh OrderV1 if it still
+wants to quote. Exact proof replays are idempotent. Distinct fills, a fill plus
+a cancellation, or two OrderV1 term sets under one derived id are signed
+equivocation: mirrors retain bounded proof evidence and suppress the order.
+
 Server-side expiry (sweep) keeps the book readable; chain state remains the
 source of truth for funds:
 
@@ -144,9 +190,14 @@ source of truth for funds:
 - Signed `open` orders also auto-cancel at `makerAuth.expiresAt`, whichever is
   earlier.
 - `accepted` orders that never reach a hashlock auto-cancel after **1 h**.
-- `cancelled` records are purged after **1 h**.
+- Legacy `cancelled` records are purged after **1 h**. Signed cancellations
+  remain through OrderV1 expiry plus a short clock-skew grace period.
 - `locking` records are purged **24 h after the initiator timeout** (they
   linger for audit; the book never learns the on-chain outcome).
+- FillIntentV1 and any associated ReleaseV1 are retained until **20 min after
+  the intent expiry** while their order record exists. This covers the maximum
+  15 min FillV1 response window plus a 5 min terminal grace, including a fill
+  published near the end of a 120 s intent.
 
 The book holds at most **200 open orders**, **40 open orders per ETH/QRL maker
 address pair**, and **50 open orders per source IP**. Create endpoints return
@@ -154,15 +205,65 @@ address pair**, and **50 open orders per source IP**. Create endpoints return
 bound. Signed maker addresses are authenticated, but one actor can still own
 many keys, so the source and global caps remain necessary.
 
+Retained terminal and expiry artifacts have separate bounds: **256 orders
+globally**, **64 per maker pair**, **64 per local source IP**, and **128 total
+from federation**. Each order retains at most **8 FillIntentV1 proposals** and
+**2 conflicting proof artifacts** per conflict class. A full retained store
+rejects new creates rather than discarding active recovery evidence.
+
 ### Portable OrderV1 maker proofs
 
 `POST /orders/signed` accepts one canonical economic order plus an ML-DSA-87
 proof. The server reconstructs the payload; it never trusts a client-supplied
 typed-data document. OrderV1 commits to direction, asset and amounts, both
 maker accounts, visibility and private taker restrictions, any pre-funded
-hashlock/T1, issuance, expiry, a 32-byte nonce, both chain IDs and both HTLC
-deployments. The nonce becomes the 64-hex order id, giving independently run
-books the same identity for the same signed object.
+hashlock/T1, issuance, expiry, a 32-byte nonce, both capability commitments,
+both chain IDs, and both HTLC deployments. Its typed-data field order is part
+of the protocol and must be reproduced exactly:
+
+```text
+direction:string
+asset:string
+fromAmount:uint256
+toAmount:uint256
+makerEthAccount:string
+makerQrlAccount:string
+visibility:string
+allowedTakerEth:string
+allowedTakerQrl:string
+prelocked:bool
+hashlock:bytes32
+initiatorTimeout:uint64
+issuedAt:uint64
+expiresAt:uint64
+nonce:bytes32
+makerTokenCommitment:bytes32
+shareTokenCommitment:bytes32
+ethChainId:uint256
+ethHtlc:string
+qrlChainId:uint256
+qrlHtlc:string
+```
+
+The 64-hex order id is signer-bound:
+
+```text
+sha256(
+  UTF8("QuantaSwap OrderV1 id\0") ||
+  makerQrlAccount[1..] as 20 raw bytes ||
+  nonce as 32 raw bytes
+)
+```
+
+The digest is returned as 64 lowercase hex characters without `0x`. This keeps
+the identity stable across mirrors and prevents another signer from claiming a
+victim's bare nonce. Fixed interoperability vector:
+
+```text
+makerQrlAccount = Q2222222222222222222222222222222222222222
+nonce            = 0x4242424242424242424242424242424242424242424242424242424242424242
+id               = cd84c99465b251d67a23548932b13fe84caa67d28c8331686e91774343552e0e
+```
 
 The domain is `QuantaSwap` version `1`, QRL testnet chain `1337`, plus a
 deployment salt bound to the current Sepolia and QRL HTLCs. Two explicit,
@@ -180,11 +281,59 @@ web3 ABI treats a bare `0x...` string as bytes while standard EIP-712 treats it
 as UTF-8. The prefixed representation is byte-identical in both encoders; a
 fixed interoperability vector is covered by server and browser tests.
 
-The current server still exposes unsigned `POST /orders` for the local
-headless market-maker compatibility path. Such rows have 16-hex ids and no
-`makerAuth`; the UI labels them as legacy local liquidity. Federation and
-signed cancellation tombstones are later protocol work. This endpoint is the
-portable signed-order foundation, not a claim that the book is federated yet.
+Capability and digest interoperability vectors use the canonical fixtures in
+the server, browser, and headless-maker tests:
+
+| Value | Golden vector |
+|---|---|
+| Maker capability, raw `00` repeated 32 bytes | `0x9ca8274349471eadc293ebb7690d81e64ce538ad0d9d65646f9ff1af227709e6` |
+| Share capability, raw `11` repeated 32 bytes | `0xe0e4441fa2456254d19815bb0b962e160e06027efe181f8f8887292f527590e2` |
+| OrderV1 semantic and EIP-712 digest | `0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48` |
+| Official-wallet signed-message wrapper digest | `0xc305e6936db7a0b374f936cb7058fde90963e39896f5d127f25bd87c147211d3` |
+| ReleaseV1 commitment | `0xa786c492a3707147bfa3277ddf44d49af0c794252e42dd05379f04b8c4621e0e` |
+| FillIntentV1 semantic digest | `0x48f387eff4522d99a48f52ec0e9e8b146fa0deb119383c53ffbb7d134ca00a2b` |
+| FillV1 semantic digest | `0x6d4d7d0a3fb70062fc6897c9f402353536e3ffeefe7a6e698b5db78cedcb3c13` |
+| CancelV1 semantic digest | `0xde9d19dc6dd94501ea1fb23ac89295ce139cc2f8566aee99f5b5ca5f83769214` |
+
+Exact input terms are pinned in
+[`server/src/order-signing.test.ts`](../server/src/order-signing.test.ts) and
+cross-checked by
+[`marketmaker/src/protocol-signing.test.ts`](../marketmaker/src/protocol-signing.test.ts)
+plus [`frontend/src/lib/orderSigning.test.ts`](../frontend/src/lib/orderSigning.test.ts).
+
+Unsigned rows remain available as origin-local compatibility data and never
+enter federation. This capability-aware signed schema is predeployment, so
+there is no signed-artifact migration path. Startup rejects persisted signed
+rows missing either capability commitment, including earlier bare-nonce
+OrderV1 experiments. Recreate those test orders under the current schema.
+
+### Portable terminal proofs
+
+All replay identities are scheme-independent semantic EIP-712 digests over
+fixed fields and deployment bindings. The actual proof may use either wallet
+scheme described above.
+
+- **FillIntentV1 body**: `orderDigest`, taker ETH and QRL accounts, and
+  `releaseCommitment`. Its auth nonce is `requestNonce`; lifetime is at most
+  120 seconds and cannot exceed the OrderV1 validity window.
+- **FillV1 body**: `orderDigest`, `intentDigest`, both taker accounts,
+  `releaseCommitment`, `hashlock`, `initiatorTimeout`, and `responderTimeout`.
+  Its proof must derive the OrderV1 maker QRL account. It may use either
+  supported scheme even when OrderV1 used the other scheme. `respondBy` is the
+  auth expiry, 60 to 900 seconds after issuance, no later than OrderV1 expiry,
+  and more than 600 seconds before T2. T2 is at most 2 h after FillV1 issuance.
+  A classic T1 is at most 4 h after issuance and its window is at least twice
+  the T2 window.
+- **CancelV1 body**: `orderDigest` and an unsigned-byte `reasonCode`. Maker
+  authorization derives the same maker QRL account, may use either supported
+  scheme, and has an auth expiry equal to OrderV1 expiry.
+- **ReleaseV1**: a 32-byte preimage, without another wallet prompt. Its
+  commitment is SHA-256 over the fixed `QuantaSwap ReleaseV1` prefix plus the
+  OrderV1 digest, request nonce, and release secret. Revealing it is terminal
+  for that proposal or fill and never reopens OrderV1.
+
+FillV1 embeds the selected intent and proof when published, so a new mirror can
+verify the entire chain without trusting another book's local intent state.
 
 ### Maker presence
 
@@ -201,17 +350,17 @@ trustless execution. A private order (`"visibility": "private"` on create):
 
 - never appears in `GET /orders` or the SSE stream, and take-by-terms never
   matches it, even at exact terms;
-- is readable and acceptable only with its share token. Without a valid token,
-  reads and accepts answer the same `404` as a nonexistent id, so an id alone
-  (which transits URLs and access logs) confirms nothing;
-- may carry `allowedTakerEth`/`allowedTakerQrl`: then accept additionally
-  rejects any other taker addresses with `403`, so even a leaked link cannot
-  be sniped. The restriction is a convenience filter; the maker's client
-  re-verifies the taker before locking, and the HTLC fixes the recipient at
-  lock time (the trust model is unchanged).
-
-Everything after accept (hashlock announce, locking, release, cancel, TTLs) is
-identical to a public order.
+- is readable and usable by a taker only with its share token. Without a valid
+  token, reads, legacy accepts, and signed intent submission answer the same
+  `404` as a nonexistent id, so an id alone (which transits URLs and access
+  logs) confirms nothing;
+- may carry `allowedTakerEth`/`allowedTakerQrl`: both legacy acceptance and
+  signed FillIntentV1 verification reject any other taker addresses, so even a
+  leaked link cannot be sniped. The maker's client still verifies the taker
+  before locking, and the HTLC fixes the recipient at lock time;
+- remains origin-local for every lifecycle. Signed intent reads and maker
+  terminal mutations also require the origin's maker token. No private order,
+  protocol proof, release capability, or presence state enters federation.
 
 ### Pre-funded (prelocked) orders
 
@@ -223,13 +372,15 @@ A maker may escrow on-chain at post time with an open-recipient lock (HTLC v2
   `initiatorTimeout` while the order is still `open` (for every other order,
   a non-null hashlock implies status `locking`);
 - rejects a create whose `initiatorTimeout` is closer than **3 h** or further
-  than **72 h** out, or whose hashlock collides with another live order;
+  than **72 h** out, or whose hashlock collides with another live order. For a
+  signed order this window is measured from signed issuance and OrderV1 expiry
+  cannot outlive the prelock;
 - stops offering the order (list, take-by-terms, accept all skip or `409`)
   once less than **2 h 30 m** of the fixed T1 remains: below that a fresh 1 h
   responder window plus the clients' claim margin no longer fits;
-- requires the maker's announce to echo the stored `hashlock` and
-  `initiatorTimeout` verbatim (`400` on mismatch: a desynced maker cannot
-  produce a matching escrow).
+- requires a legacy hashlock announcement or portable FillV1 to echo the
+  stored `hashlock` and `initiatorTimeout` verbatim (`400` on mismatch: a
+  desynced maker cannot produce a matching escrow).
 
 The book cannot verify the escrow (it has no RPC on purpose). Clients treat
 `prelocked` as a hint and verify the open lock on-chain: status Open, agreed
@@ -247,13 +398,15 @@ starve the other (`429 rate limited, slow down`):
 | Reads (`GET`) | 1440/min | heartbeats count as reads despite being `POST` |
 | Mutations (other `POST`) | 120/min | |
 
-Take caps, per IP (fairness for shared demo liquidity, not sybil resistance):
+Take and FillIntent caps, per IP (fairness for shared demo liquidity, not
+sybil resistance):
 
-- **4 concurrent takes**: a take occupies a slot through the `accepted` phase
-  and the `locking` phase up to the initiator timeout; releasing frees it
-  (`429 you already have swaps in progress; finish or let them expire`).
-- **24 takes per rolling 24 h**
-  (`429 daily take limit reached; leave some liquidity for others`).
+- **4 concurrent actions**: an unreleased portable intent occupies a slot until
+  its signed expiry. A legacy take occupies a slot through `accepted` and, once
+  `locking`, through the earlier of T1 or two hours after acceptance. Release
+  frees the slot.
+- **24 actions per rolling 24 h**: portable intents count by mirror receipt
+  time and legacy takes by acceptance time.
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
@@ -263,14 +416,75 @@ beyond that the endpoint answers `503` and you should fall back to polling.
 ### `GET /health`
 
 Storage-aware readiness probe. → `200 {"status":"ok"}` while the service is
-accepting work and its state path is readable and writable; otherwise
-`503 {"status":"degraded"}`.
+accepting work and both order and federation state paths are readable and
+writable; otherwise `503 {"status":"degraded"}`.
+
+### `GET /federation/v1/events`: mirror pull feed
+
+```text
+GET /federation/v1/events?cursor=<feedId>:<sequence>&limit=256
+```
+
+The cursor belongs only to the serving mirror. A valid cursor returns ordered
+content-addressed events after that sequence. A missing, stale, foreign, or
+future cursor returns `reset: true` plus an atomic snapshot and a new cursor:
+
+```jsonc
+{
+  "reset": false,
+  "cursor": "<32 lowercase hex>:42",
+  "hasMore": false,
+  "events": [
+    {
+      "seq": 42,
+      "eventId": "<64 lowercase hex sha256>",
+      "event": { "kind": "order-v1", "payload": { "order": {}, "auth": {} } }
+    }
+  ]
+}
+```
+
+Kinds are `order-v1`, `fill-intent-v1`, `fill-v1`, `cancel-v1`, and
+`release-v1`. Event ids hash canonical JSON, allowing loop-safe relay across
+peer topologies. Every receiver verifies protocol proofs before persistence.
+The feed excludes unsigned rows, every private row, all bearer tokens, IP
+metadata, presence, and other mirror-local state.
+
+Transport is deliberately bounded. One event is at most **64 KiB**, a normal
+page contains at most **256 events**, the durable feed ring retains **4096
+events**, and one peer sync reads at most **16 pages**. Reset snapshots contain
+at most **6144 events**. Peer responses must be `application/json`, redirects
+are rejected, and the decompressed body is capped at **64 MiB** even when
+`Content-Length` is absent or compressed.
+
+Transport cursors may advance while a child arrives before its prerequisite.
+The receiver keeps up to **4096 dependency-missing events** in memory, with a
+**512-event quota per peer**, retries them after all peers in as many as **8
+causal passes**, and retains them across ordinary authoritative resets because
+local state is a verified merge. A quota offender has only its source claims
+removed and its cursor forced to reset. Shared events remain queued through any
+other peer that supplied them. Encountering the global bound applies the same
+offending-source reset. Deferred retries back off to **60 seconds**. An entry
+expires after **one hour** or **512 attempts**, resetting every associated
+source cursor. Invalid proofs are rejected rather than deferred. A restart
+discards this in-memory queue and requests reset snapshots again.
+
+Peer transport failures and repeated reset churn use independent exponential
+backoff from **10 seconds** through **5 minutes**. The first bootstrap reset is
+normal and does not count as churn; one unhealthy peer does not delay healthy
+peers.
 
 ### `GET /orders`
 
 The open book, newest first. → `200 {"orders": [Order, …]}`. Only `open`
 **public** orders are listed; fetch other statuses (and private orders, with
 their share token) by id.
+
+The reference browser caps each JSON or SSE message at **4 MiB**, accepts at
+most **200 rows** in one snapshot, verifies every signed row locally, and drops
+one malformed mirror without discarding healthy mirrors. A same-id signed
+digest conflict creates a persistent local quarantine so its disappearance
+from one later snapshot cannot silently restore the order.
 
 ### `GET /orders/stream`
 
@@ -297,8 +511,9 @@ header; without a valid token the response is the same `404` as an unknown id.
 
 ### `POST /orders`: list an order (maker)
 
-Unsigned compatibility endpoint used by the current local headless market
-maker. Interactive wallets should use `POST /orders/signed` below.
+Unsigned compatibility endpoint for legacy origin-local clients. Current
+interactive wallets and the reference headless maker use
+`POST /orders/signed` below.
 
 ```jsonc
 {
@@ -347,8 +562,11 @@ exists`, `503 order book is full`.
     "nonce": "0x<64 lowercase hex>",
     "signature": "0x<9254 lowercase hex>",
     "publicKey": "0x<5184 lowercase hex>",
-    "descriptor": "0x<6 lowercase hex>"
-  }
+    "descriptor": "0x<6 lowercase hex>",
+    "makerTokenCommitment": "0x<domain-separated makerToken digest>",
+    "shareTokenCommitment": "0x0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "makerToken": "<64 lowercase hex preimage>"
 }
 ```
 
@@ -356,16 +574,124 @@ The `order` shape is otherwise the same as `POST /orders`, but signed orders
 must make `visibility` explicit and use canonical lowercase addresses and
 amounts. Lifetime is at most 48 hours; issuance more than five minutes in the
 future, expiry with less than one minute remaining, a signer/public-key
-mismatch, or any changed term fails closed.
+mismatch, or any changed term fails closed. Signed order, prelock, intent,
+fill, cancel, and auth objects reject unknown or missing fields so every
+implementation hashes the same semantic object.
 
-→ the same `201` response and one-time capability tokens as `POST /orders`.
+The public request has exactly the outer fields `auth`, `makerToken`, and
+`order`. A private request has exactly `auth`, `makerToken`, `order`, and
+`shareToken`, with a nonzero signed share commitment matching that raw
+preimage. Unknown outer fields fail closed. JSON member order is irrelevant.
 
-Errors add `401 maker signature is invalid`; duplicate nonces return
-`409 order already exists`.
+The client must generate the raw capabilities first, commit them in OrderV1,
+sign, and durably stage the complete outer request before its first POST. The
+browser keeps one unresolved stage in local storage; the headless LP persists
+the same envelope in its mode-0600 state. Neither creates a different order
+until that stage is resolved.
+
+→ `201 {"order": Order, "makerToken": "<same submitted preimage>"}`, plus the
+same submitted `shareToken` for a private order. An exact retry after a timeout
+or lost response returns the existing authenticated order and echoes the
+preimages supplied again in that retry. The server does not recover raw tokens
+from storage. Existing-order replay is checked before admission and retained
+state capacity, so an exact recovery retry still succeeds when the book fills
+after the first write. Preserve the stage until the response reproduces the
+expected OrderV1 digest and authentication, then promote it to durable
+active-order state.
+
+A same-id request with a different OrderV1 digest returns `409`. Stored
+commitments that differ from the retried proof, reuse of either commitment by
+another retained signed order, and ordinary capacity limits also fail closed.
+Raw preimages that do not match their signed commitments return `401`.
+
+### `POST /orders/:id/intents`: propose a signed fill (taker)
+
+```jsonc
+{
+  "intent": {
+    "orderDigest": "0x<64 lowercase hex>",
+    "takerEthAccount": "0x<40 lowercase hex>",
+    "takerQrlAccount": "Q<40 lowercase hex>",
+    "releaseCommitment": "0x<64 lowercase hex>"
+  },
+  "auth": {
+    "version": "1",
+    "scheme": "qrl-sign-typed-v1",
+    "issuedAt": 1752300000,
+    "expiresAt": 1752300120,
+    "nonce": "0x<64 lowercase hex>",
+    "signature": "0x<lowercase hex>",
+    "publicKey": "0x<lowercase hex>",
+    "descriptor": "0x<6 lowercase hex>"
+  }
+}
+```
+
+For a private order, send the origin's share capability in `X-Share-Token`
+or `shareToken`. → `201 {"intent": {"intentDigest", "intent", "auth",
+"receivedAt"}}`. Exact retries are idempotent. The order remains open until
+the maker publishes FillV1. At most 8 pending intents are retained per order.
+
+### `GET /orders/:id/intents`: read pending proposals (maker)
+
+→ `200 {"intents": [...]}` ordered by signed `auth.issuedAt`, then semantic
+`intentDigest`. Mirror-local `receivedAt` never decides the winner. Proposals
+issued in the future, expired proposals, and released proposals are omitted.
+Public portable proposals are public data. A private order additionally
+requires `X-Maker-Token` and remains origin-local.
+
+### `POST /orders/:id/fill`: terminal match and hashlock (maker)
+
+```jsonc
+{
+  "fill": {
+    "orderDigest": "0x<64 lowercase hex>",
+    "intentDigest": "0x<64 lowercase hex>",
+    "takerEthAccount": "0x<40 lowercase hex>",
+    "takerQrlAccount": "Q<40 lowercase hex>",
+    "releaseCommitment": "0x<64 lowercase hex>",
+    "hashlock": "0x<64 lowercase hex>",
+    "initiatorTimeout": 1752307200,
+    "responderTimeout": 1752303600
+  },
+  "auth": { "version": "1", "scheme": "qrl-sign-typed-v1", "...": "..." },
+  "intent": { "...": "the exact selected FillIntentV1 body" },
+  "intentAuth": { "...": "the exact selected taker auth" }
+}
+```
+
+For a private order, also send `X-Maker-Token` or `token`. →
+`200 {"order": Order}` with status `locking`. This is the maker's terminal
+single-use decision and the hashlock announcement. Clients independently
+verify the full proof chain and the on-chain initiator lock before funding.
+An exact replay is idempotent. A distinct valid terminal proof quarantines the
+order and exposes its digest in `conflictDigests` on an id lookup. The returned
+order includes the exact `fill`, `fillAuth`, `fillDigest`, and `selectedIntent`
+so clients can authenticate the response without trusting HTTP status alone.
+The reference LP durably records its FillV1 acknowledgment only after this
+authentication and requires that record before its first on-chain lock.
+
+### `POST /orders/:id/cancel/signed`: terminal cancellation (maker)
+
+```jsonc
+{
+  "cancel": {
+    "orderDigest": "0x<64 lowercase hex>",
+    "reasonCode": 1
+  },
+  "auth": { "version": "1", "scheme": "qrl-sign-typed-v1", "...": "..." }
+}
+```
+
+For a private order, also send `X-Maker-Token` or `token`. →
+`200 {"order": Order}` with status `cancelled`. The proof is a permanent
+tombstone through OrderV1 validity and exact retries are idempotent. The
+returned order includes `cancelProof`, `cancelAuth`, and `cancelDigest`.
 
 ### `POST /orders/take`: take by terms (taker)
 
-Atomically fills the **best** open order matching the caller's bounds: "I pay
+Legacy-only endpoint. Atomically fills the **best unsigned** open order
+matching the caller's bounds: "I pay
 at most `maxPay` (the order's `toAmount`) to receive at least `minReceive`
 (the order's `fromAmount`)". Two takers racing for one displayed row both fill
 while depth exists, and a stale click can only fill at the terms the taker saw
@@ -391,8 +717,9 @@ have moved`, `429` take caps.
 
 ### `POST /orders/:id/accept`: take by id (taker)
 
-Reserves a specific order (including offline-maker orders take-by-terms would
-skip).
+Legacy-only endpoint. Reserves a specific unsigned order, including an
+offline-maker order that take-by-terms would skip. New portable rows return
+`409 signed orders require a FillIntentV1 request`.
 
 ```jsonc
 {
@@ -412,7 +739,8 @@ Errors: `404` (also a private order without a valid `shareToken`),
 
 ### `POST /orders/:id/hashlock`: announce the swap parameters (maker)
 
-Called after the maker (always the initiator) has locked on-chain. Moves the
+Legacy-only endpoint. Called after the maker (always the initiator) has locked
+on-chain. Moves the
 order `accepted -> locking` and publishes what the taker needs to verify the
 lock and respond.
 
@@ -436,7 +764,8 @@ mismatch), and only `responderTimeout` is new.
 
 → `200 {"order": Order}`.
 
-Errors: `403 invalid maker token`, `409 order is not awaiting a hashlock`,
+New portable rows use FillV1 and reject this endpoint. Errors:
+`403 invalid maker token`, `409 order is not awaiting a hashlock`,
 `400` hashlock/timeout validation.
 
 ### `POST /orders/:id/heartbeat`: maker presence ping (maker)
@@ -453,6 +782,8 @@ Errors: `404`, `403 invalid maker token`.
 
 ### `POST /orders/:id/cancel`: pull a listing (maker)
 
+Legacy-only endpoint. Portable rows use `cancel/signed`.
+
 ```jsonc
 { "token": "<makerToken>" }
 ```
@@ -463,6 +794,8 @@ funds already locked on-chain remain governed by the HTLC claim/refund paths.
 Errors: `404`, `403 invalid maker token`.
 
 ### `POST /orders/:id/release`: taker walk-away (taker)
+
+Legacy accepted rows use their bearer token:
 
 ```jsonc
 { "token": "<takerToken>" }
@@ -481,18 +814,41 @@ Errors: `404`, `403 invalid maker token`.
 
 Book-keeping only, so clients may fire and forget it on abandon/finish.
 
-Errors: `404`, `403 invalid taker token`.
+Portable rows instead reveal the committed release preimage:
+
+```jsonc
+{
+  "releaseSecret": "0x<64 lowercase hex>",
+  "intentDigest": "0x<64 lowercase hex>" // before or racing FillV1
+}
+```
+
+After observing FillV1, use `fillDigest` instead of `intentDigest`. Exactly one
+reference is required. A private order also carries `shareToken` and remains on
+its origin. The server verifies the commitment, marks the intent or fill
+released, and relays public ReleaseV1. A release racing a matching FillV1 also
+marks that selected fill released. OrderV1 never reopens; a maker that still
+wants to quote signs a fresh order with a fresh nonce.
+
+The reference LP persists an authenticated `released: true` observation as a
+sticky safety fact. It never starts or repeats a lock for that fill afterward.
+If an earlier lock attempt may have landed, it retains the record and follows
+verified on-chain claim or refund state instead of abandoning recovery.
+
+Errors: `404`, `403 invalid taker token` or release preimage, `409` unknown
+signed intent/fill reference.
 
 ## Error status summary
 
 | Status | Meaning |
 |---|---|
 | 400 | Malformed body or field validation failure |
-| 401 | Signed order proof does not authenticate its maker and terms |
+| 401 | Signed proof authentication or signed capability-preimage check failed |
 | 403 | Missing/wrong maker or taker token |
 | 404 | Unknown, malformed or expired order id / unknown route |
-| 409 | Wrong order state for the action, or no match for take-by-terms |
-| 413 | Body over 4096 bytes, or signed-create body over 32 KiB |
+| 409 | Wrong state, conflicting replay, reused capability, or no terms match |
+| 413 | Body over 4096 bytes, or signed-protocol body over 32 KiB |
+| 415 | POST content type is not `application/json` |
 | 429 | Rate limit, take caps, or per-maker/per-source open-order cap |
 | 503 | Book full, SSE connection cap, shutdown, or unavailable storage |
 | 500 | Unhandled server error |
