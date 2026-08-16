@@ -22,6 +22,19 @@ explicitly closed in the project release notes.
 The container packages the existing maker. It does not change pricing, reserve,
 confirmation, timeout, or swap decision behavior.
 
+## QRL network compatibility gate
+
+The current QRL v2 testnet deployment uses 20-byte Q addresses and therefore
+pins `@theqrl/web3` to `0.4.4`. Web3 1.x intentionally derives 64-byte Q
+addresses: it produces a different account from the same extended seed, rejects
+the current short HTLC address, and the current node rejects its long account
+address. Do not override this pin merely to clear a dependency scanner finding.
+
+The upgrade belongs to the network cutover. Drain every existing maker, preserve
+its old recovery environment, deploy fresh HTLCs for the new address model,
+regenerate or explicitly migrate operator wallets, and repeat signed transaction
+and refund recovery tests before accepting any inventory on web3 1.x.
+
 ## Prerequisites
 
 - Docker Engine with Compose v2;
@@ -32,6 +45,34 @@ confirmation, timeout, or swap decision behavior.
 Use RPC endpoints you trust. Claim simulation necessarily discloses a preimage
 to the configured RPC immediately before broadcast. The order book remains a
 coordination service and must never be trusted as proof of on-chain state.
+
+## Verified image releases
+
+Maintainers publish `linux/amd64` and `linux/arm64` images to
+`ghcr.io/digitalguards/quantaswap-marketmaker` from exact
+`marketmaker-vMAJOR.MINOR.PATCH` tags. The tag must match the version in
+`package.json`, and its commit must already be reachable from `dev`. The release
+workflow reruns the locked tests and dependency audit before publishing. It
+attaches an SBOM and maximum-mode build provenance, creates a GitHub artifact
+attestation, and signs the immutable image digest with Sigstore keyless signing.
+
+For production-like testing, pin the digest printed in the successful release
+workflow rather than relying on a mutable tag:
+
+```bash
+docker pull ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/DigitalGuards/QuantaSwap/\.github/workflows/marketmaker-release\.yml@refs/tags/marketmaker-v[0-9]+\.[0-9]+\.[0-9]+$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
+gh attestation verify \
+  oci://ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest> \
+  --repo DigitalGuards/QuantaSwap
+```
+
+The local Compose file builds from source by default. An operator who selects a
+published image should replace its `build` entry only after reviewing the
+release digest, signature identity, attestation, SBOM, and migration notes.
 
 ## First boot
 
