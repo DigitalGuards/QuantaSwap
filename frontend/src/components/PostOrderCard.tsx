@@ -23,7 +23,12 @@ import {
   type MyOrderRef,
   type PrelockStage,
 } from "@/lib/activeSwap";
-import { createOrder } from "@/lib/orderbook";
+import { createSignedOrder, type CreateOrderBody } from "@/lib/orderbook";
+import {
+  orderSigningLabel,
+  orderSigningSchemeForWallet,
+  signOrderV1,
+} from "@/lib/orderSigning";
 import { generateSecret } from "@/lib/secrets";
 import {
   SwapStatus,
@@ -59,6 +64,7 @@ interface Props {
   ensureSepolia: () => Promise<void>;
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   qrlTransport: QrlTransport | null;
+  qrlWalletRdns: string | null;
   /** Latest draft to load into the form (a fresh object per request). */
   prefill?: OrderDraft | null;
   onPosted: (ref: MyOrderRef) => void;
@@ -108,6 +114,7 @@ export function PostOrderCard({
   ensureSepolia,
   qrlRequest,
   qrlTransport,
+  qrlWalletRdns,
   prefill,
   onPosted,
 }: Props) {
@@ -206,6 +213,14 @@ export function PostOrderCard({
   const toSymbol = direction === "eth->qrl" ? QRL_LEG.display : asset.symbol;
 
   const ready = Boolean(ethAccount && qrlAccount && Number(fromAmount) > 0 && Number(toAmount) > 0);
+  const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
+
+  const createPortableOrder = async (body: CreateOrderBody) => {
+    setStageLabel("Authorizing OrderV1 in your QRL wallet");
+    const signed = await signOrderV1({ body, walletRdns: qrlWalletRdns, request: qrlRequest });
+    setStageLabel("Publishing the signed order");
+    return createSignedOrder(signed.order, signed.auth);
+  };
 
   /** Create the book listing for an escrowed stage and hand over the
    *  order handle. Shared by the happy path and the recovery banner. */
@@ -214,7 +229,7 @@ export function PostOrderCard({
     makerEth: string,
     makerQrl: string,
   ): Promise<void> => {
-    const { order, makerToken, shareToken } = await createOrder({
+    const { order, makerToken, shareToken } = await createPortableOrder({
       direction: stage.direction,
       asset: stage.asset,
       fromAmount: stage.fromAmount,
@@ -227,7 +242,7 @@ export function PostOrderCard({
             ...(stage.allowedTakerEth !== null ? { allowedTakerEth: stage.allowedTakerEth } : {}),
             ...(stage.allowedTakerQrl !== null ? { allowedTakerQrl: stage.allowedTakerQrl } : {}),
           }
-        : {}),
+        : { visibility: "public" as const }),
       prelock: { hashlock: stage.hashlock, initiatorTimeout: stage.initiatorTimeout },
     });
     // Belt and braces: a book that predates prelock would silently drop
@@ -367,7 +382,7 @@ export function PostOrderCard({
         return;
       }
 
-      const { order, makerToken, shareToken } = await createOrder({
+      const { order, makerToken, shareToken } = await createPortableOrder({
         direction,
         asset: asset.symbol,
         fromAmount: fromUnits.toString(),
@@ -380,7 +395,7 @@ export function PostOrderCard({
               ...(restrictEth ? { allowedTakerEth: restrictEth } : {}),
               ...(restrictQrl ? { allowedTakerQrl: restrictQrl } : {}),
             }
-          : {}),
+          : { visibility: "public" as const }),
       });
       // Anchor the terms we just posted, not the book's echo of them:
       // MyOrderCard builds the swap from this handle at match time.
@@ -687,6 +702,12 @@ export function PostOrderCard({
                   : "connect ETH wallet"}
             </span>
           </div>
+          <div className="flex items-start justify-between gap-4">
+            <span className="text-muted-foreground">Order signature</span>
+            <span className="text-right text-xs font-medium text-secondary">
+              {orderSigningLabel(qrlWalletRdns)}
+            </span>
+          </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
             <span className="font-data">
@@ -752,31 +773,43 @@ export function PostOrderCard({
           ) : null}
         </div>
 
-        <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void post()}>
+        <Button
+          className="w-full"
+          size="lg"
+          disabled={!ready || busy || signingScheme === null}
+          onClick={() => void post()}
+        >
           <BookPlus className="h-4 w-4" />
           {!ethAccount || !qrlAccount
             ? "Connect both wallets to post"
-            : !(Number(fromAmount) > 0)
-              ? `Enter the ${fromSymbol} amount`
-              : !(Number(toAmount) > 0)
-                ? `Enter the ${toSymbol} amount`
-                : busy
-                  ? stageLabel !== null
-                    ? `${stageLabel}…`
-                    : "Posting…"
-                  : prefund
-                    ? isPrivate
-                      ? "Escrow & post private order"
-                      : "Escrow & post order"
-                    : isPrivate
-                      ? "Post private order"
-                      : "Post order"}
+            : signingScheme === null
+              ? "Use a compatible QRL wallet"
+              : !(Number(fromAmount) > 0)
+                ? `Enter the ${fromSymbol} amount`
+                : !(Number(toAmount) > 0)
+                  ? `Enter the ${toSymbol} amount`
+                  : busy
+                    ? stageLabel !== null
+                      ? `${stageLabel}…`
+                      : "Posting…"
+                    : prefund
+                      ? isPrivate
+                        ? "Escrow & post private order"
+                        : "Escrow & post order"
+                      : isPrivate
+                        ? "Post private order"
+                        : "Post order"}
         </Button>
         {error ? <p className="text-sm break-words text-destructive">{error}</p> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {prefund
             ? "Pre-funding escrows your side up front; everything else still settles atomically through the HTLCs, or refunds after the timelocks."
             : "Posting is free and holds no funds. When a taker accepts, you lock first and the swap settles atomically through the HTLCs, or refunds after the timelocks."}
+        </p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Your QRL wallet signs the complete OrderV1 terms with ML-DSA-87 before publishing.
+          MyQRLWallet uses its native PQ typed-data scheme; the official QRL Web3 Wallet uses
+          its EIP-712 v4 compatibility scheme. No transaction or funds move during signing.
         </p>
       </CardContent>
     </Card>

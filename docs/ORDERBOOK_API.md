@@ -31,8 +31,9 @@ Consequences for integrators:
 - Base URL: `https://quantaswap.io/api` (same-origin `/api` proxy in front of
   the service).
 - JSON over HTTP. Request bodies must be JSON objects; anything else is a
-  `400 body must be a JSON object`. Bodies are capped at **4096 bytes**
-  (`413 body too large`).
+  `400 body must be a JSON object`. Ordinary bodies are capped at **4096
+  bytes**; the ML-DSA-87 proof on `POST /orders/signed` raises that endpoint's
+  cap to **32 KiB** (`413 body too large`).
 - Every error response is `{ "error": "<message>" }` with an appropriate HTTP
   status. Success shapes are given per endpoint below.
 - Responses are `Cache-Control: no-store`.
@@ -42,12 +43,12 @@ Consequences for integrators:
 There is no registration, no accounts, no API keys. Authorization is by
 per-order capability tokens (64 hex chars, 32 CSPRNG bytes):
 
-- **Maker token**: returned once by `POST /orders`. Authorizes `heartbeat`,
-  `hashlock` and `cancel` on that order.
+- **Maker token**: returned once by either create endpoint. Authorizes
+  `heartbeat`, `hashlock` and `cancel` on that order.
 - **Taker token**: returned once by `POST /orders/:id/accept` or
   `POST /orders/take`. Authorizes `release` on that order.
-- **Share token** (private orders only): returned once by `POST /orders` when
-  `visibility` is `private`. It is the capability that reads
+- **Share token** (private orders only): returned once by either create
+  endpoint when `visibility` is `private`. It is the capability that reads
   (`GET /orders/:id`, `X-Share-Token` header) and accepts
   (`POST /orders/:id/accept`, `shareToken` body field) the order; the maker
   hands it to the intended counterparty, typically inside a share link's URL
@@ -58,6 +59,11 @@ be recovered. Treat tokens as secrets for the lifetime of the order (leaking a
 maker token lets someone cancel your listing or announce a bogus hashlock;
 never funds, per the trust model, but it can grief the swap).
 
+These bearer tokens authorize later mutations on one book; they are not the
+maker's identity proof. New interactive listings use `POST /orders/signed` and
+carry a portable ML-DSA-87 `makerAuth` object. A mirror or browser can verify
+that proof without trusting the server.
+
 ## The order object
 
 All read and mutation endpoints return orders in this public shape (token
@@ -65,7 +71,7 @@ hashes and taker-IP bookkeeping are never serialized):
 
 ```jsonc
 {
-  "id": "a1b2c3d4e5f60718",        // 16 lowercase hex chars
+  "id": "a1b2c3d4e5f60718",        // 16 hex legacy id, or 64 hex signed nonce
   "direction": "eth->qrl",          // or "qrl->eth"; the maker escrows the from side
   "asset": "ETH",                   // ETH-leg asset symbol: ETH | USDC | tUSDT.
                                     // Absent means ETH (rows predating stable pairs).
@@ -87,7 +93,17 @@ hashes and taker-IP bookkeeping are never serialized):
   "prelocked": true,                // present only on pre-funded orders (see below);
                                     // hashlock/initiatorTimeout are then set while open
   "createdAt": 1752300000,          // unix seconds
-  "updatedAt": 1752300000
+  "updatedAt": 1752300000,
+  "makerAuth": {                    // present on portable OrderV1 listings
+    "version": "1",
+    "scheme": "qrl-sign-typed-v1", // or qrl-eip712-v4
+    "issuedAt": 1752300000,
+    "expiresAt": 1752472800,
+    "nonce": "0x<64 lowercase hex>",
+    "signature": "0x<9254 lowercase hex>",
+    "publicKey": "0x<5184 lowercase hex>",
+    "descriptor": "0x010000"
+  }
 }
 ```
 
@@ -125,16 +141,50 @@ Server-side expiry (sweep) keeps the book readable; chain state remains the
 source of truth for funds:
 
 - `open` orders auto-cancel after **48 h** without updates.
+- Signed `open` orders also auto-cancel at `makerAuth.expiresAt`, whichever is
+  earlier.
 - `accepted` orders that never reach a hashlock auto-cancel after **1 h**.
 - `cancelled` records are purged after **1 h**.
 - `locking` records are purged **24 h after the initiator timeout** (they
   linger for audit; the book never learns the on-chain outcome).
 
 The book holds at most **200 open orders**, **40 open orders per ETH/QRL maker
-address pair**, and **50 open orders per source IP**. `POST /orders` returns
+address pair**, and **50 open orders per source IP**. Create endpoints return
 `503 order book is full` at the global bound and `429` at either narrower
-bound. Maker addresses are not signed in v1, so their cap is defense in depth;
-the source and global caps remain necessary.
+bound. Signed maker addresses are authenticated, but one actor can still own
+many keys, so the source and global caps remain necessary.
+
+### Portable OrderV1 maker proofs
+
+`POST /orders/signed` accepts one canonical economic order plus an ML-DSA-87
+proof. The server reconstructs the payload; it never trusts a client-supplied
+typed-data document. OrderV1 commits to direction, asset and amounts, both
+maker accounts, visibility and private taker restrictions, any pre-funded
+hashlock/T1, issuance, expiry, a 32-byte nonce, both chain IDs and both HTLC
+deployments. The nonce becomes the 64-hex order id, giving independently run
+books the same identity for the same signed object.
+
+The domain is `QuantaSwap` version `1`, QRL testnet chain `1337`, plus a
+deployment salt bound to the current Sepolia and QRL HTLCs. Two explicit,
+non-interchangeable schemes are supported:
+
+- `qrl-sign-typed-v1`: MyQRLWallet's SHAKE256 `QRLDomain` typed-data scheme,
+  requested with `qrl_signTypedData` and verified with the QRL Connect SDK.
+- `qrl-eip712-v4`: the official QRL Web3 Wallet's EIP-712 compatibility
+  scheme, requested with `qrl_signTypedData_v4`, then wrapped with the
+  wallet's QRL signed-message hash and verified under ML-DSA context `ZOND`.
+
+Ethereum values inside string fields use a CAIP-style
+`eip155:11155111:0x...` representation. This is deliberate: the official QRL
+web3 ABI treats a bare `0x...` string as bytes while standard EIP-712 treats it
+as UTF-8. The prefixed representation is byte-identical in both encoders; a
+fixed interoperability vector is covered by server and browser tests.
+
+The current server still exposes unsigned `POST /orders` for the local
+headless market-maker compatibility path. Such rows have 16-hex ids and no
+`makerAuth`; the UI labels them as legacy local liquidity. Federation and
+signed cancellation tombstones are later protocol work. This endpoint is the
+portable signed-order foundation, not a claim that the book is federated yet.
 
 ### Maker presence
 
@@ -239,12 +289,16 @@ poll as fallback. Browser `EventSource` reconnects on its own.
 ### `GET /orders/:id`
 
 One order, any status. → `200 {"order": Order}`. `404 order not found` for
-unknown/expired ids (ids are 16 lowercase hex chars; anything else is a 404).
+unknown/expired ids (legacy ids are 16 lowercase hex; signed OrderV1 ids are
+64 lowercase hex; anything else is a 404).
 
 Private orders additionally require the share token in the `X-Share-Token`
 header; without a valid token the response is the same `404` as an unknown id.
 
 ### `POST /orders`: list an order (maker)
+
+Unsigned compatibility endpoint used by the current local headless market
+maker. Interactive wallets should use `POST /orders/signed` below.
 
 ```jsonc
 {
@@ -271,6 +325,43 @@ once. Creation counts as a heartbeat.
 Errors: `400` per-field validation (including taker restrictions on a public
 order and the prelock window), `409 an order with this hashlock already
 exists`, `503 order book is full`.
+
+### `POST /orders/signed`: list a portable signed order (maker)
+
+```jsonc
+{
+  "order": {
+    "direction": "eth->qrl",
+    "asset": "ETH",
+    "fromAmount": "1000000000000000",
+    "toAmount": "2000000000000000000",
+    "makerEthAccount": "0x…",
+    "makerQrlAccount": "Q…",
+    "visibility": "public"
+  },
+  "auth": {
+    "version": "1",
+    "scheme": "qrl-sign-typed-v1",
+    "issuedAt": 1752300000,
+    "expiresAt": 1752472800,
+    "nonce": "0x<64 lowercase hex>",
+    "signature": "0x<9254 lowercase hex>",
+    "publicKey": "0x<5184 lowercase hex>",
+    "descriptor": "0x<6 lowercase hex>"
+  }
+}
+```
+
+The `order` shape is otherwise the same as `POST /orders`, but signed orders
+must make `visibility` explicit and use canonical lowercase addresses and
+amounts. Lifetime is at most 48 hours; issuance more than five minutes in the
+future, expiry with less than one minute remaining, a signer/public-key
+mismatch, or any changed term fails closed.
+
+→ the same `201` response and one-time capability tokens as `POST /orders`.
+
+Errors add `401 maker signature is invalid`; duplicate nonces return
+`409 order already exists`.
 
 ### `POST /orders/take`: take by terms (taker)
 
@@ -397,10 +488,11 @@ Errors: `404`, `403 invalid taker token`.
 | Status | Meaning |
 |---|---|
 | 400 | Malformed body or field validation failure |
+| 401 | Signed order proof does not authenticate its maker and terms |
 | 403 | Missing/wrong maker or taker token |
 | 404 | Unknown, malformed or expired order id / unknown route |
 | 409 | Wrong order state for the action, or no match for take-by-terms |
-| 413 | Body over 4096 bytes |
+| 413 | Body over 4096 bytes, or signed-create body over 32 KiB |
 | 429 | Rate limit, take caps, or per-maker/per-source open-order cap |
 | 503 | Book full, SSE connection cap, shutdown, or unavailable storage |
 | 500 | Unhandled server error |

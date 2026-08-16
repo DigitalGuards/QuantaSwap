@@ -38,6 +38,7 @@ import {
   type OrderView,
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
+import { verifyOrderV1Auth } from "@/lib/orderSigning";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
@@ -146,6 +147,10 @@ export function OrderBookPanel({
   // starts the maker locking, so it needs an explicit confirm, not a raw
   // click on browse.
   const [pending, setPending] = useState<OrderView | null>(null);
+  const [proof, setProof] = useState<{
+    id: string;
+    status: "checking" | "valid" | "invalid" | "legacy";
+  } | null>(null);
   // Set when the server refuses further takes (per-IP caps reached); blocks
   // the whole book until the caps free rather than 429-ing click by click.
   const [capBlocked, setCapBlocked] = useState(false);
@@ -159,6 +164,28 @@ export function OrderBookPanel({
   } | null>(null);
 
   const asset = ETH_ASSETS[pair];
+
+  useEffect(() => {
+    if (!pending) {
+      setProof(null);
+      return undefined;
+    }
+    if (pending.makerAuth === undefined) {
+      setProof({ id: pending.id, status: "legacy" });
+      return undefined;
+    }
+    const target = pending;
+    let stale = false;
+    setProof({ id: target.id, status: "checking" });
+    const timer = window.setTimeout(() => {
+      const valid = verifyOrderV1Auth(target);
+      if (!stale) setProof({ id: target.id, status: valid ? "valid" : "invalid" });
+    }, 0);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [pending]);
 
   useEffect(() => {
     if (!pending || pending.prelocked !== true) {
@@ -233,6 +260,12 @@ export function OrderBookPanel({
         // verify against.
         let terms: ReturnType<typeof acceptedOrderTerms>;
         try {
+          if (
+            (accepted.makerAuth !== undefined && !verifyOrderV1Auth(accepted)) ||
+            (order.makerAuth !== undefined && accepted.makerAuth === undefined)
+          ) {
+            throw new Error("The matched order does not carry a valid maker signature.");
+          }
           terms = acceptedOrderTerms(
             order,
             accepted,
@@ -389,6 +422,14 @@ export function OrderBookPanel({
               funded
             </span>
           ) : null}
+          {row.order.makerAuth !== undefined ? (
+            <span
+              className="ml-1.5 rounded-sm bg-secondary/15 px-1 py-px text-[10px] font-medium text-secondary"
+              title="Portable ML-DSA-87 maker proof attached; verified before take"
+            >
+              PQ proof
+            </span>
+          ) : null}
         </span>
         <span className="relative text-foreground/90">{fmtAmount(row.totalQrl, 18)}</span>
         <span className="relative text-muted-foreground">
@@ -481,6 +522,25 @@ export function OrderBookPanel({
                 </p>
               )
             ) : null}
+            {proof?.id === pending.id ? (
+              proof.status === "checking" ? (
+                <p className="text-xs text-muted-foreground">
+                  Verifying the maker&apos;s ML-DSA-87 OrderV1 proof…
+                </p>
+              ) : proof.status === "invalid" ? (
+                <p className="text-xs text-destructive">
+                  The maker signature is invalid or expired. Taking is blocked.
+                </p>
+              ) : proof.status === "valid" ? (
+                <p className="text-xs text-success">
+                  Maker&apos;s portable OrderV1 signature verified in this browser.
+                </p>
+              ) : (
+                <p className="text-xs text-amber-400">
+                  Legacy local-liquidity order: no portable maker proof is attached.
+                </p>
+              )
+            ) : null}
             <p className="text-xs text-muted-foreground">
               {pending.prelocked === true
                 ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
@@ -493,7 +553,9 @@ export function OrderBookPanel({
                   !canTake ||
                   (pending.prelocked === true &&
                     escrow?.id === pending.id &&
-                    escrow.issue !== null)
+                    escrow.issue !== null) ||
+                  (proof?.id === pending.id &&
+                    (proof.status === "checking" || proof.status === "invalid"))
                 }
                 onClick={confirmTake}
               >

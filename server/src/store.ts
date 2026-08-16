@@ -23,6 +23,7 @@ import {
 import { dirname, join } from "node:path";
 import { QRL_BOUNDS, isKnownAsset, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
 import { ApiError } from "./errors.js";
+import { verifyOrderV1, type MakerOrderAuthV1, type VerifiedOrderV1 } from "./order-signing.js";
 
 export { ApiError } from "./errors.js";
 
@@ -81,6 +82,9 @@ export interface Order {
   acceptorIpHash?: string;
   /** sha256 of the creator's IP, for open-listing caps; never serialized. */
   creatorIpHash?: string;
+  /** Portable maker authorization. Absent only on legacy/local-liquidity
+   *  rows created through the unsigned compatibility endpoint. */
+  makerAuth?: MakerOrderAuthV1;
   acceptedAt?: number;
   /** Taker walked away after the maker locked. The order stays `locking`
    *  (chain state governs the funds) but stops counting as an in-progress
@@ -151,7 +155,7 @@ const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
 const TOKEN_HASH_RE = /^[0-9a-f]{64}$/;
-const ORDER_ID_RE = /^[0-9a-f]{16}$/;
+const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 const AMOUNT_RE = /^[0-9]{1,30}$/;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
@@ -291,7 +295,7 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
   const acceptedAt = optionalSafeInteger(row, index, "acceptedAt");
   const releasedAt = optionalSafeInteger(row, index, "releasedAt");
 
-  return {
+  const order: Order = {
     id: matchingString(row, index, "id", ORDER_ID_RE),
     direction,
     asset: rawAsset,
@@ -319,6 +323,38 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     ...(acceptedAt !== undefined ? { acceptedAt } : {}),
     ...(releasedAt !== undefined ? { releasedAt } : {}),
   };
+  if (row["makerAuth"] !== undefined) {
+    const verified = verifyOrderV1(
+      {
+        direction: order.direction,
+        asset: order.asset,
+        fromAmount: order.fromAmount,
+        toAmount: order.toAmount,
+        makerEthAccount: order.makerEthAccount,
+        makerQrlAccount: order.makerQrlAccount,
+        visibility: order.visibility,
+        ...(order.allowedTakerEth !== undefined
+          ? { allowedTakerEth: order.allowedTakerEth }
+          : {}),
+        ...(order.allowedTakerQrl !== undefined
+          ? { allowedTakerQrl: order.allowedTakerQrl }
+          : {}),
+        ...(order.prelocked === true && order.hashlock !== null && order.initiatorTimeout !== null
+          ? {
+              prelock: {
+                hashlock: order.hashlock,
+                initiatorTimeout: order.initiatorTimeout,
+              },
+            }
+          : {}),
+      },
+      row["makerAuth"],
+      { allowExpired: true },
+    );
+    if (verified.orderId !== order.id) invalidPersisted(index, "signed order id");
+    order.makerAuth = verified.auth;
+  }
+  return order;
 }
 
 export class OrderStore {
@@ -483,7 +519,9 @@ export class OrderStore {
     for (const order of this.orders.values()) {
       const age = now - order.updatedAt;
       if (
-        (order.status === "open" && age > OPEN_TTL_S) ||
+        (order.status === "open" &&
+          (age > OPEN_TTL_S ||
+            (order.makerAuth !== undefined && now >= order.makerAuth.expiresAt))) ||
         (order.status === "accepted" && age > ACCEPTED_TTL_S)
       ) {
         order.status = "cancelled";
@@ -546,6 +584,30 @@ export class OrderStore {
   }
 
   create(body: Record<string, unknown>, makerIp = "unknown"): {
+    order: PublicOrder;
+    makerToken: string;
+    shareToken?: string;
+  } {
+    return this.createInternal(body, makerIp);
+  }
+
+  createVerified(
+    verified: VerifiedOrderV1,
+    makerIp = "unknown",
+  ): {
+    order: PublicOrder;
+    makerToken: string;
+    shareToken?: string;
+  } {
+    return this.createInternal(verified.order, makerIp, verified.orderId, verified.auth);
+  }
+
+  private createInternal(
+    body: Record<string, unknown>,
+    makerIp: string,
+    signedId?: string,
+    makerAuth?: MakerOrderAuthV1,
+  ): {
     order: PublicOrder;
     makerToken: string;
     shareToken?: string;
@@ -653,8 +715,10 @@ export class OrderStore {
     }
 
     const makerToken = randomBytes(32).toString("hex");
+    const id = signedId ?? randomBytes(8).toString("hex");
+    if (this.orders.has(id)) throw new ApiError(409, "order already exists");
     const order: Order = {
-      id: randomBytes(8).toString("hex"),
+      id,
       direction,
       asset: asset.symbol,
       visibility,
@@ -676,6 +740,7 @@ export class OrderStore {
       updatedAt: now,
       makerTokenHash: sha256Hex(makerToken),
       creatorIpHash,
+      ...(makerAuth !== undefined ? { makerAuth } : {}),
     };
     this.orders.set(order.id, order);
     this.seenAt.set(order.id, now); // creating it proves the maker is here

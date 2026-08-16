@@ -18,6 +18,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/dist ./dist
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 RUN mkdir -p /var/lib/quantaswap-orderbook && chown node:node /var/lib/quantaswap-orderbook
 
 USER node

@@ -1,6 +1,9 @@
 # QuantaSwap
 
-Trust-minimized cross-chain swaps between Ethereum and QRL. Domain: [quantaswap.io](https://quantaswap.io).
+Trust-minimized cross-chain swaps between Ethereum and QRL. Domain:
+[quantaswap.io](https://quantaswap.io). Isolated development build:
+[dev.quantaswap.io](https://dev.quantaswap.io) (testnet, no market maker,
+`noindex`).
 
 Part of the MyQRLWallet ecosystem (MyQRLWallet, QuantaPool, zondscan, QNS). Open source under GPL-3.0.
 
@@ -36,7 +39,7 @@ Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITE
 
 ## Wallet integration
 
-- **QRL side**: MyQRLWallet via [`@qrlwallet/connect`](https://github.com/DigitalGuards/myqrlwallet-connect) (post-quantum relay protocol, ML-DSA-87 transaction signing). Users keep their own keys; the connected account auto-fills the recipient address.
+- **QRL side**: MyQRLWallet via [`@qrlwallet/connect`](https://github.com/DigitalGuards/myqrlwallet-connect), the MyQRLWallet extension, or the official QRL Web3 Wallet. Interactive makers sign the complete OrderV1 terms with ML-DSA-87 (`qrl_signTypedData` for MyQRLWallet, `qrl_signTypedData_v4` for the official wallet). Users keep their own keys; the connected account auto-fills the recipient address.
 - **Ethereum side**: any EIP-6963 injected wallet (MetaMask, Rabby, etc.).
 - **No generated custodial wallets.** HTLC claims are permissionless with a fixed recipient, so the QRL leg can be claim-sponsored: a WETH-to-QRL swapper does not need a funded QRL gas wallet.
 
@@ -50,7 +53,7 @@ contracts/
 config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
-server/        Self-hostable order book (coordination only, never custody; zero runtime deps)
+server/        Self-hostable signed order book (coordination only, never custody)
 marketmaker/   Always-online protocol-mode maker (reference liquidity provider)
 solver/        Solver service for solver mode (Phala TEE target), planned
 docs/          Architecture, deployments, order book API, LP guide

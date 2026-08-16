@@ -1,4 +1,5 @@
-// QuantaSwap order book service. Plain node:http, zero runtime deps.
+// QuantaSwap order book service. Plain node:http with a small, lockfile-pinned
+// cryptographic verification boundary.
 // Served same-origin behind nginx (/api -> 127.0.0.1:PORT) in production
 // and behind the Vite dev proxy locally.
 
@@ -6,10 +7,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolveClientIp } from "./client-ip.js";
 import { readConfig } from "./config.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
+import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
 
 const config = readConfig();
 const MAX_BODY_BYTES = 4096;
+const MAX_SIGNED_BODY_BYTES = 32 * 1024;
 let shuttingDown = false;
 
 // Naive per-IP rate limit, resets every minute. Enough to blunt scripted
@@ -54,13 +57,16 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes = MAX_BODY_BYTES,
+): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) throw new ApiError(413, "body too large");
+    if (size > maxBytes) throw new ApiError(413, "body too large");
     chunks.push(buf);
   }
   if (size === 0) return {};
@@ -76,7 +82,7 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
 }
 
 const store = new OrderStore(config.dataFile, { presenceTtlS: config.presenceTtlS });
-const ORDER_ID_RE = /^[0-9a-f]{16}$/;
+const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
 function clientIp(req: IncomingMessage): string {
   return resolveClientIp(
@@ -202,6 +208,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   if (method === "POST" && path === "/api/orders") {
     sendJson(res, 201, store.create(await readJsonBody(req), ip));
+    return;
+  }
+  if (method === "POST" && path === "/api/orders/signed") {
+    const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+    const verified = verifyOrderV1(body["order"], body["auth"]);
+    sendJson(res, 201, store.createVerified(verified, ip));
     return;
   }
   if (method === "POST" && path === "/api/orders/take") {
