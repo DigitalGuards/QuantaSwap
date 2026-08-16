@@ -50,7 +50,7 @@ contracts/
 config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
-server/        Order book service (coordination only, never custody; zero runtime deps)
+server/        Self-hostable order book (coordination only, never custody; zero runtime deps)
 marketmaker/   Always-online protocol-mode maker (reference liquidity provider)
 solver/        Solver service for solver mode (Phala TEE target), planned
 docs/          Architecture, deployments, order book API, LP guide

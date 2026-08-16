@@ -130,8 +130,11 @@ source of truth for funds:
 - `locking` records are purged **24 h after the initiator timeout** (they
   linger for audit; the book never learns the on-chain outcome).
 
-The book holds at most **200 open orders**; `POST /orders` returns
-`503 order book is full` beyond that.
+The book holds at most **200 open orders**, **40 open orders per ETH/QRL maker
+address pair**, and **50 open orders per source IP**. `POST /orders` returns
+`503 order book is full` at the global bound and `429` at either narrower
+bound. Maker addresses are not signed in v1, so their cap is defense in depth;
+the source and global caps remain necessary.
 
 ### Maker presence
 
@@ -209,7 +212,9 @@ beyond that the endpoint answers `503` and you should fall back to polling.
 
 ### `GET /health`
 
-Liveness probe. → `200 {"status":"ok"}`.
+Storage-aware readiness probe. → `200 {"status":"ok"}` while the service is
+accepting work and its state path is readable and writable; otherwise
+`503 {"status":"degraded"}`.
 
 ### `GET /orders`
 
@@ -396,6 +401,6 @@ Errors: `404`, `403 invalid taker token`.
 | 404 | Unknown, malformed or expired order id / unknown route |
 | 409 | Wrong order state for the action, or no match for take-by-terms |
 | 413 | Body over 4096 bytes |
-| 429 | Rate limit or per-IP take caps |
-| 503 | Book full, or SSE connection caps |
+| 429 | Rate limit, take caps, or per-maker/per-source open-order cap |
+| 503 | Book full, SSE connection cap, shutdown, or unavailable storage |
 | 500 | Unhandled server error |

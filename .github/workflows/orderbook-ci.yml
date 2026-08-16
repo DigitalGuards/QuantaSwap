@@ -1,0 +1,126 @@
+name: Order book CI
+
+on:
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/orderbook-ci.yml'
+      - '.github/workflows/orderbook-release.yml'
+  push:
+    branches:
+      - dev
+    paths:
+      - 'server/**'
+      - '.github/workflows/orderbook-ci.yml'
+      - '.github/workflows/orderbook-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orderbook-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Test and smoke container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Run order-book tests
+        working-directory: server
+        run: npm test
+
+      - name: Audit dependencies
+        working-directory: server
+        run: npm audit --audit-level=moderate
+
+      - name: Validate Compose configuration
+        working-directory: server
+        run: docker compose config --quiet
+
+      - name: Build runtime image
+        working-directory: server
+        run: docker build --tag quantaswap-orderbook:ci .
+
+      - name: Verify hardened runtime and packaged tests
+        run: |
+          test "$(docker image inspect quantaswap-orderbook:ci --format '{{.Config.User}}')" = node
+          test "$(docker image inspect quantaswap-orderbook:ci --format '{{json .Config.Healthcheck.Test}}')" = '["CMD","node","dist/healthcheck.js"]'
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            --entrypoint sh \
+            quantaswap-orderbook:ci \
+            -c 'node --test dist/*.test.js'
+
+      - name: Smoke Compose persistence and restart
+        working-directory: server
+        env:
+          ORDERBOOK_KIT_VERSION: ci
+        run: |
+          docker compose up -d --no-build
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8091/api/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+          for attempt in $(seq 1 30); do
+            container_id="$(docker compose ps -q orderbook)"
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy ]; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+
+          order_id="$(curl --fail-with-body --silent \
+            -H 'Content-Type: application/json' \
+            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q2222222222222222222222222222222222222222"}' \
+            http://127.0.0.1:8091/api/orders | jq -er '.order.id')"
+          test "$(docker compose exec -T orderbook stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
+
+          docker compose restart orderbook
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8091/api/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8091/api/orders \
+            | jq -e --arg id "$order_id" '.orders | any(.id == $id)'
+
+      - name: Clean isolated Compose state
+        if: always()
+        working-directory: server
+        env:
+          ORDERBOOK_KIT_VERSION: ci
+        run: docker compose down --volumes --remove-orphans

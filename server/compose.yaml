@@ -1,0 +1,40 @@
+name: ${ORDERBOOK_COMPOSE_PROJECT:-quantaswap-orderbook}
+
+services:
+  orderbook:
+    image: quantaswap-orderbook:${ORDERBOOK_KIT_VERSION:-local}
+    build:
+      context: .
+    environment:
+      ORDERBOOK_HOST: 0.0.0.0
+      PORT: "8091"
+      ORDERBOOK_DATA: /var/lib/quantaswap-orderbook/orders.json
+      ORDERBOOK_TRUST_PROXY: ${ORDERBOOK_TRUST_PROXY:-none}
+      PRESENCE_TTL_S: ${PRESENCE_TTL_S:-90}
+      ORDERBOOK_REQUEST_TIMEOUT_MS: ${ORDERBOOK_REQUEST_TIMEOUT_MS:-15000}
+      ORDERBOOK_SHUTDOWN_TIMEOUT_MS: ${ORDERBOOK_SHUTDOWN_TIMEOUT_MS:-10000}
+      ORDERBOOK_STREAM_BACKPRESSURE_MS: ${ORDERBOOK_STREAM_BACKPRESSURE_MS:-10000}
+    volumes:
+      - orderbook-state:/var/lib/quantaswap-orderbook
+    ports:
+      - "127.0.0.1:${ORDERBOOK_PORT:-8091}:8091"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+volumes:
+  orderbook-state:
+    name: ${ORDERBOOK_STATE_VOLUME:-quantaswap-orderbook-state}
