@@ -14,5 +14,6 @@ docs/decentralization.md
 *.log
 .DS_Store
 server/data/
+server/backups/
 marketmaker/data/
 marketmaker/secrets/

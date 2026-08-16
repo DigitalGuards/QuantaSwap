@@ -100,6 +100,8 @@ node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 - **Order book**: coordination only, never custody; losing it strands no funds.
   Same-origin behind `/api`; health check: `curl -s https://quantaswap.io/api/health`
   returns `{"status":"ok"}`. Full API reference: [ORDERBOOK_API.md](ORDERBOOK_API.md).
+  Independent operator packaging and recovery guidance:
+  [`../server/README.md`](../server/README.md).
 - **Market maker** (`marketmaker/`): an always-online protocol-mode maker that keeps
   the book stocked so visitors always have takeable orders. It is an ordinary maker
   driving the public protocol: killing it strands no one (in-flight swaps settle via

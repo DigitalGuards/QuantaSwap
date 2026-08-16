@@ -5,7 +5,21 @@
 // order book can waste time but cannot redirect a swap.
 
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fchmodSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { QRL_BOUNDS, isKnownAsset, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
 import { ApiError } from "./errors.js";
@@ -65,6 +79,8 @@ export interface Order {
   takerTokenHash?: string;
   /** sha256 of the taker's IP, for per-IP take caps; never serialized. */
   acceptorIpHash?: string;
+  /** sha256 of the creator's IP, for open-listing caps; never serialized. */
+  creatorIpHash?: string;
   acceptedAt?: number;
   /** Taker walked away after the maker locked. The order stays `locking`
    *  (chain state governs the funds) but stops counting as an in-progress
@@ -74,7 +90,13 @@ export interface Order {
 
 export type PublicOrder = Omit<
   Order,
-  "makerTokenHash" | "takerTokenHash" | "acceptorIpHash" | "acceptedAt" | "releasedAt" | "shareTokenHash"
+  | "makerTokenHash"
+  | "takerTokenHash"
+  | "acceptorIpHash"
+  | "creatorIpHash"
+  | "acceptedAt"
+  | "releasedAt"
+  | "shareTokenHash"
 > & {
   /** The taker released a locking-phase order: the maker should not
    *  (further) commit funds to it. Derived from `releasedAt`. */
@@ -87,6 +109,8 @@ export type PublicOrder = Omit<
 
 // Per-asset amount bounds live in assets.ts (mirrored client-side).
 const MAX_OPEN_ORDERS = 200;
+const MAX_OPEN_ORDERS_PER_MAKER = 40;
+const MAX_OPEN_ORDERS_PER_IP = 50;
 const OPEN_TTL_S = 48 * 3600;
 const ACCEPTED_TTL_S = 3600; // accepted but never locked: cancel
 const CANCELLED_TTL_S = 3600;
@@ -126,6 +150,8 @@ const MIN_TAKEABLE_RUNWAY_S = 2 * 3600 + 1800;
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
+const TOKEN_HASH_RE = /^[0-9a-f]{64}$/;
+const ORDER_ID_RE = /^[0-9a-f]{16}$/;
 const AMOUNT_RE = /^[0-9]{1,30}$/;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
@@ -158,6 +184,143 @@ function requireDirection(raw: unknown): Direction {
   return raw;
 }
 
+export class OrderStorePersistenceError extends Error {
+  override name = "OrderStorePersistenceError";
+}
+
+function invalidPersisted(index: number, field: string): never {
+  throw new Error(`persisted order ${index} has an invalid ${field}`);
+}
+
+function matchingString(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+  pattern: RegExp,
+): string {
+  const value = row[field];
+  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  return value;
+}
+
+function optionalMatchingString(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+  pattern: RegExp,
+): string | undefined {
+  const value = row[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  return value;
+}
+
+function nullableMatchingString(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+  pattern: RegExp,
+): string | null {
+  const value = row[field];
+  if (value === null) return null;
+  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  return value;
+}
+
+function safeInteger(row: Record<string, unknown>, index: number, field: string): number {
+  const value = row[field];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    invalidPersisted(index, field);
+  }
+  return value;
+}
+
+function optionalSafeInteger(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+): number | undefined {
+  if (row[field] === undefined) return undefined;
+  return safeInteger(row, index, field);
+}
+
+function nullableSafeInteger(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+): number | null {
+  if (row[field] === null) return null;
+  return safeInteger(row, index, field);
+}
+
+function hydratePersistedOrder(raw: unknown, index: number): Order {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    invalidPersisted(index, "record");
+  }
+  const row = raw as Record<string, unknown>;
+  const direction = row["direction"];
+  if (direction !== "eth->qrl" && direction !== "qrl->eth") {
+    invalidPersisted(index, "direction");
+  }
+  const status = row["status"];
+  if (status !== "open" && status !== "accepted" && status !== "locking" && status !== "cancelled") {
+    invalidPersisted(index, "status");
+  }
+
+  const rawAsset = row["asset"] ?? "ETH";
+  if (typeof rawAsset !== "string" || !isKnownAsset(rawAsset)) {
+    invalidPersisted(index, "asset");
+  }
+  const shareTokenHash = optionalMatchingString(row, index, "shareTokenHash", TOKEN_HASH_RE);
+  const rawVisibility = row["visibility"];
+  if (rawVisibility !== undefined && rawVisibility !== "public" && rawVisibility !== "private") {
+    invalidPersisted(index, "visibility");
+  }
+  const visibility: Visibility =
+    rawVisibility === "private" || shareTokenHash !== undefined ? "private" : "public";
+
+  const hashlock = nullableMatchingString(row, index, "hashlock", HASHLOCK_RE);
+  const initiatorTimeout = nullableSafeInteger(row, index, "initiatorTimeout");
+  const responderTimeout = nullableSafeInteger(row, index, "responderTimeout");
+  const prelocked = row["prelocked"] === true && hashlock !== null && initiatorTimeout !== null;
+  const allowedTakerEth = optionalMatchingString(row, index, "allowedTakerEth", ETH_ADDR_RE);
+  const allowedTakerQrl = optionalMatchingString(row, index, "allowedTakerQrl", QRL_ADDR_RE);
+  const takerTokenHash = optionalMatchingString(row, index, "takerTokenHash", TOKEN_HASH_RE);
+  const acceptorIpHash = optionalMatchingString(row, index, "acceptorIpHash", TOKEN_HASH_RE);
+  const creatorIpHash = optionalMatchingString(row, index, "creatorIpHash", TOKEN_HASH_RE);
+  const acceptedAt = optionalSafeInteger(row, index, "acceptedAt");
+  const releasedAt = optionalSafeInteger(row, index, "releasedAt");
+
+  return {
+    id: matchingString(row, index, "id", ORDER_ID_RE),
+    direction,
+    asset: rawAsset,
+    fromAmount: matchingString(row, index, "fromAmount", AMOUNT_RE),
+    toAmount: matchingString(row, index, "toAmount", AMOUNT_RE),
+    makerEthAccount: matchingString(row, index, "makerEthAccount", ETH_ADDR_RE),
+    makerQrlAccount: matchingString(row, index, "makerQrlAccount", QRL_ADDR_RE),
+    status,
+    takerEthAccount: nullableMatchingString(row, index, "takerEthAccount", ETH_ADDR_RE),
+    takerQrlAccount: nullableMatchingString(row, index, "takerQrlAccount", QRL_ADDR_RE),
+    hashlock,
+    initiatorTimeout,
+    responderTimeout,
+    ...(prelocked ? { prelocked: true } : {}),
+    createdAt: safeInteger(row, index, "createdAt"),
+    updatedAt: safeInteger(row, index, "updatedAt"),
+    visibility,
+    ...(shareTokenHash !== undefined ? { shareTokenHash } : {}),
+    ...(allowedTakerEth !== undefined ? { allowedTakerEth } : {}),
+    ...(allowedTakerQrl !== undefined ? { allowedTakerQrl } : {}),
+    makerTokenHash: matchingString(row, index, "makerTokenHash", TOKEN_HASH_RE),
+    ...(takerTokenHash !== undefined ? { takerTokenHash } : {}),
+    ...(acceptorIpHash !== undefined ? { acceptorIpHash } : {}),
+    ...(creatorIpHash !== undefined ? { creatorIpHash } : {}),
+    ...(acceptedAt !== undefined ? { acceptedAt } : {}),
+    ...(releasedAt !== undefined ? { releasedAt } : {}),
+  };
+}
+
 export class OrderStore {
   private orders = new Map<string, Order>();
   /** Last maker heartbeat per order id. Deliberately not persisted. */
@@ -170,6 +333,7 @@ export class OrderStore {
     opts: { presenceTtlS?: number } = {},
   ) {
     this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
+    this.prepareStorage();
     this.load();
   }
 
@@ -184,59 +348,108 @@ export class OrderStore {
     for (const fn of this.listeners) fn();
   }
 
-  private load(): void {
+  private prepareStorage(): void {
+    const directory = dirname(this.dataFile);
     try {
-      const raw = readFileSync(this.dataFile, "utf8");
-      // Rows persisted before the stablecoin rollout predate the asset
-      // field; absent means ETH (the wire-level default), so hydrate it
-      // here and every order in memory carries a concrete asset. A
-      // present-but-unknown symbol means a newer or corrupted writer;
-      // relabeling it would misprice the order, so drop the row instead
-      // (funds, if any, are governed on-chain, and the coordination
-      // record alone is not worth crash-looping the whole book over).
-      type PersistedOrder = Omit<Order, "asset" | "visibility" | "prelocked"> & {
-        asset?: string;
-        visibility?: string;
-        prelocked?: unknown;
-      };
-      const parsed = JSON.parse(raw) as PersistedOrder[];
-      const now = nowS();
-      for (const row of parsed) {
-        const asset: string = row.asset ?? "ETH";
-        if (!isKnownAsset(asset)) {
-          console.warn(
-            `[orderbook] dropping persisted order ${row.id}: unknown asset ${JSON.stringify(row.asset)}`,
-          );
-          continue;
-        }
-        // Privacy-leaning hydration: any evidence a row was private (the
-        // explicit flag or a stored share-token hash) keeps it out of the
-        // public list even if the flag itself got mangled.
-        const visibility: Visibility =
-          row.visibility === "private" || row.shareTokenHash !== undefined ? "private" : "public";
-        // A prelocked flag without its anchored hashlock/T1 is a mangled
-        // row; hydrate it as classic rather than wedging announce later.
-        const { prelocked: rawPrelocked, ...rest } = row;
-        const prelocked =
-          rawPrelocked === true &&
-          typeof row.hashlock === "string" &&
-          typeof row.initiatorTimeout === "number";
-        const order: Order = { ...rest, asset, visibility, ...(prelocked ? { prelocked: true } : {}) };
-        this.orders.set(order.id, order);
-        // Presence does not survive restarts; grant loaded listings one
-        // TTL window so a deploy does not flap the whole book offline.
-        if (order.status === "open") this.seenAt.set(order.id, now);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      accessSync(directory, fsConstants.R_OK | fsConstants.W_OK);
+      if (existsSync(this.dataFile)) {
+        accessSync(this.dataFile, fsConstants.R_OK | fsConstants.W_OK);
+        chmodSync(this.dataFile, 0o600);
       }
     } catch {
-      // first boot or unreadable file; start empty
+      throw new Error(`order data path is not readable and writable: ${this.dataFile}`);
+    }
+  }
+
+  storageReady(): boolean {
+    try {
+      accessSync(dirname(this.dataFile), fsConstants.R_OK | fsConstants.W_OK);
+      if (existsSync(this.dataFile)) {
+        accessSync(this.dataFile, fsConstants.R_OK | fsConstants.W_OK);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private load(): void {
+    let raw: string;
+    try {
+      raw = readFileSync(this.dataFile, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new Error(`order data file could not be read: ${this.dataFile}`);
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`order data file is not valid JSON: ${this.dataFile}`);
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(`order data file must contain an array: ${this.dataFile}`);
+    }
+
+    const now = nowS();
+    for (const [index, row] of parsed.entries()) {
+      const order = hydratePersistedOrder(row, index);
+      if (this.orders.has(order.id)) {
+        throw new Error(`order data file contains duplicate id ${order.id}`);
+      }
+      if (
+        order.hashlock !== null &&
+        order.status !== "cancelled" &&
+        [...this.orders.values()].some(
+          (existing) => existing.status !== "cancelled" && existing.hashlock === order.hashlock,
+        )
+      ) {
+        throw new Error(`order data file contains duplicate live hashlock ${order.hashlock}`);
+      }
+      this.orders.set(order.id, order);
+      // Presence does not survive restarts; grant loaded listings one
+      // TTL window so a deploy does not flap the whole book offline.
+      if (order.status === "open") this.seenAt.set(order.id, now);
     }
   }
 
   private persist(): void {
-    mkdirSync(dirname(this.dataFile), { recursive: true });
-    const tmp = join(dirname(this.dataFile), `.orders.${process.pid}.tmp`);
-    writeFileSync(tmp, JSON.stringify([...this.orders.values()]), "utf8");
-    renameSync(tmp, this.dataFile);
+    const directory = dirname(this.dataFile);
+    const suffix = randomBytes(8).toString("hex");
+    const tmp = join(directory, `.orders.${process.pid}.${suffix}.tmp`);
+    let fileDescriptor: number | undefined;
+    try {
+      fileDescriptor = openSync(tmp, "wx", 0o600);
+      fchmodSync(fileDescriptor, 0o600);
+      writeFileSync(fileDescriptor, JSON.stringify([...this.orders.values()]), "utf8");
+      fsyncSync(fileDescriptor);
+      closeSync(fileDescriptor);
+      fileDescriptor = undefined;
+      renameSync(tmp, this.dataFile);
+
+      const directoryDescriptor = openSync(directory, "r");
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    } catch {
+      if (fileDescriptor !== undefined) {
+        try {
+          closeSync(fileDescriptor);
+        } catch {
+          // Preserve the original persistence failure.
+        }
+      }
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // The rename may already have consumed the temporary file.
+      }
+      throw new OrderStorePersistenceError("order data could not be persisted safely");
+    }
     this.notify();
   }
 
@@ -249,8 +462,9 @@ export class OrderStore {
       makerTokenHash: _omit,
       takerTokenHash: _omit2,
       acceptorIpHash: _omit3,
-      acceptedAt: _omit4,
-      shareTokenHash: _omit5,
+      creatorIpHash: _omit4,
+      acceptedAt: _omit5,
+      shareTokenHash: _omit6,
       releasedAt,
       ...rest
     } = order;
@@ -331,14 +545,14 @@ export class OrderStore {
     );
   }
 
-  create(body: Record<string, unknown>): {
+  create(body: Record<string, unknown>, makerIp = "unknown"): {
     order: PublicOrder;
     makerToken: string;
     shareToken?: string;
   } {
     this.sweep();
-    const openCount = [...this.orders.values()].filter((o) => o.status === "open").length;
-    if (openCount >= MAX_OPEN_ORDERS) throw new ApiError(503, "order book is full");
+    const openOrders = [...this.orders.values()].filter((o) => o.status === "open");
+    if (openOrders.length >= MAX_OPEN_ORDERS) throw new ApiError(503, "order book is full");
 
     const direction = requireDirection(body["direction"]);
     // Asset first: the direction decides which side of the order is
@@ -347,6 +561,34 @@ export class OrderStore {
     const asset = requireAsset(body["asset"]);
     const [fromBounds, toBounds]: [AmountBounds, AmountBounds] =
       direction === "eth->qrl" ? [asset, QRL_BOUNDS] : [QRL_BOUNDS, asset];
+    const fromAmount = requireAmount(body["fromAmount"], "fromAmount", fromBounds);
+    const toAmount = requireAmount(body["toAmount"], "toAmount", toBounds);
+    const makerEthAccount = requireAddress(
+      body["makerEthAccount"],
+      "makerEthAccount",
+      ETH_ADDR_RE,
+    );
+    const makerQrlAccount = requireAddress(
+      body["makerQrlAccount"],
+      "makerQrlAccount",
+      QRL_ADDR_RE,
+    );
+
+    const makerOpenCount = openOrders.filter(
+      (order) =>
+        order.makerEthAccount.toLowerCase() === makerEthAccount.toLowerCase() &&
+        order.makerQrlAccount.toLowerCase() === makerQrlAccount.toLowerCase(),
+    ).length;
+    if (makerOpenCount >= MAX_OPEN_ORDERS_PER_MAKER) {
+      throw new ApiError(429, "maker already has too many open orders");
+    }
+    const creatorIpHash = sha256Hex(makerIp);
+    const sourceOpenCount = openOrders.filter(
+      (order) => order.creatorIpHash === creatorIpHash,
+    ).length;
+    if (sourceOpenCount >= MAX_OPEN_ORDERS_PER_IP) {
+      throw new ApiError(429, "source already has too many open orders");
+    }
 
     const rawVisibility = body["visibility"];
     if (rawVisibility !== undefined && rawVisibility !== "public" && rawVisibility !== "private") {
@@ -419,10 +661,10 @@ export class OrderStore {
       ...(shareToken !== undefined ? { shareTokenHash: sha256Hex(shareToken) } : {}),
       ...(allowedTakerEth !== undefined ? { allowedTakerEth } : {}),
       ...(allowedTakerQrl !== undefined ? { allowedTakerQrl } : {}),
-      fromAmount: requireAmount(body["fromAmount"], "fromAmount", fromBounds),
-      toAmount: requireAmount(body["toAmount"], "toAmount", toBounds),
-      makerEthAccount: requireAddress(body["makerEthAccount"], "makerEthAccount", ETH_ADDR_RE),
-      makerQrlAccount: requireAddress(body["makerQrlAccount"], "makerQrlAccount", QRL_ADDR_RE),
+      fromAmount,
+      toAmount,
+      makerEthAccount,
+      makerQrlAccount,
       status: "open",
       takerEthAccount: null,
       takerQrlAccount: null,
@@ -433,6 +675,7 @@ export class OrderStore {
       createdAt: now,
       updatedAt: now,
       makerTokenHash: sha256Hex(makerToken),
+      creatorIpHash,
     };
     this.orders.set(order.id, order);
     this.seenAt.set(order.id, now); // creating it proves the maker is here
