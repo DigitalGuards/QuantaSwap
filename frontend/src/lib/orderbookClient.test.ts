@@ -86,6 +86,30 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("endpoint-bound order book client", () => {
+  it("preserves the browser receiver when using the native fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    let receiver: unknown;
+    globalThis.fetch = function (
+      this: unknown,
+      _input: RequestInfo | URL,
+      _init?: RequestInit,
+    ): Promise<Response> {
+      receiver = this;
+      return Promise.resolve(response({ orders: [order] }));
+    };
+    try {
+      const client = new OrderbookClient({
+        id: "community",
+        apiBase: "https://mirror.test/api",
+      });
+
+      await expect(client.list()).resolves.toEqual([order]);
+      expect(receiver).toBe(globalThis);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("sends client-committed capabilities in the signed create envelope", async () => {
     const request = vi.fn<
       (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>

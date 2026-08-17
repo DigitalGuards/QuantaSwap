@@ -67,4 +67,11 @@ describe("errorMessage", () => {
     expect(errorMessage({ message: "plain provider error" })).toBe("plain provider error");
     expect(errorMessage("string error")).toBe("string error");
   });
+
+  it("preserves an EIP-1193 unauthorized-account message", () => {
+    const message =
+      "The requested account Q79b662ce3d663643df4454a8ba3f532c0de6887f has not been authorized by the user.";
+
+    expect(errorMessage({ code: 4100, message })).toBe(message);
+  });
 });

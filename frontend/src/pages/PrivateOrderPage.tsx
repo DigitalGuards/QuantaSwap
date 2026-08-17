@@ -31,6 +31,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
+import { errorMessage } from "@/utils/errorMessage";
 
 interface Props {
   eth: ReturnType<typeof useEthWallet>;
@@ -226,7 +227,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             void navigate("/");
             return;
           }
-          setError(err instanceof Error ? err.message : "Failed to request the order");
+          setError(errorMessage(err));
         })
         .finally(() => setBusy(false));
       return;
