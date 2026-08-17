@@ -9,14 +9,25 @@ import { join } from "node:path";
 
 const PORT = 18000 + Math.floor(Math.random() * 2000);
 const BASE = `http://127.0.0.1:${PORT}/api`;
-const dataFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-")), "orders.json");
+const smokeDir = mkdtempSync(join(tmpdir(), "quantaswap-ob-"));
+const dataFile = join(smokeDir, "orders.json");
+const federationDataFile = join(smokeDir, "federation.json");
 
 // PRESENCE_TTL_S=1 so maker-presence expiry is testable with a short sleep.
 const child = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
   env: {
     ...process.env,
     PORT: String(PORT),
+    ORDERBOOK_HOST: "127.0.0.1",
     ORDERBOOK_DATA: dataFile,
+    ORDERBOOK_FEDERATION_DATA: federationDataFile,
+    ORDERBOOK_FEDERATION_PEERS: "",
+    ORDERBOOK_FEDERATION_PEER_IDS: "",
+    ORDERBOOK_FEDERATION_PEER_TOKENS: "",
+    ORDERBOOK_FEDERATION_ONION_ONLY: "false",
+    ORDERBOOK_FEDERATION_ONION_PROXY: "",
+    ORDERBOOK_FEDERATION_READ_TOKEN: "",
+    ORDERBOOK_TRUST_PROXY: "loopback",
     ORDERBOOK_CORS_ORIGINS: "https://dev.quantaswap.io",
     PRESENCE_TTL_S: "1",
   },
@@ -78,6 +89,21 @@ try {
     "public mirror reads allow wildcard CORS",
     publicCors.headers.get("access-control-allow-origin") === "*",
   );
+  const statusResponse = await fetch(`${BASE}/status`, {
+    headers: { Origin: "https://mirror-reader.example" },
+  });
+  const statusBody = await statusResponse.json();
+  check(
+    "sanitized operator status is public and reports federation disabled",
+    statusResponse.status === 200 &&
+      statusResponse.headers.get("access-control-allow-origin") === "*" &&
+      statusBody.schemaVersion === 1 &&
+      statusBody.status === "ok" &&
+      statusBody.feed?.ready === true &&
+      statusBody.federation?.state === "disabled" &&
+      statusBody.federation?.configuredPeers === 0 &&
+      !JSON.stringify(statusBody).includes(dataFile),
+  );
   const preflight = await fetch(`${BASE}/orders/signed`, {
     method: "OPTIONS",
     headers: {
@@ -103,6 +129,51 @@ try {
     federationReset.status === 200 &&
       federationReset.body.reset === true &&
       Array.isArray(federationReset.body.snapshot),
+  );
+  const resetCursor = federationReset.body.cursor;
+  const incremental = await api(
+    "GET",
+    `/federation/v1/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+  );
+  check(
+    "valid incremental federation reads bypass the reset limiter",
+    incremental.status === 200 && incremental.body.reset === false,
+  );
+  const resetRetries = [];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    resetRetries.push(
+      await api(
+        "GET",
+        `/federation/v1/events?limit=16&cursor=foreign-${attempt}`,
+      ),
+    );
+  }
+  check(
+    "expensive reset snapshots have a dedicated per-source rate limit",
+    resetRetries.slice(0, 3).every((result) => result.status === 200) &&
+      resetRetries[3]?.status === 429,
+  );
+  const incrementalAfterLimit = await api(
+    "GET",
+    `/federation/v1/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+  );
+  check(
+    "reset throttling does not block incremental federation reads",
+    incrementalAfterLimit.status === 200 && incrementalAfterLimit.body.reset === false,
+  );
+  const repeatedIncremental = [];
+  for (let attempt = 0; attempt < 234; attempt += 1) {
+    repeatedIncremental.push(
+      await api(
+        "GET",
+        `/federation/v1/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+      ),
+    );
+  }
+  check(
+    "all federation reads use a dedicated per-source rate limit",
+    repeatedIncremental.slice(0, 233).every((result) => result.status === 200) &&
+      repeatedIncremental[233]?.status === 429,
   );
 
   const dust = await api("POST", "/orders", {
@@ -555,6 +626,11 @@ try {
     minReceive: ONE_ETH.toString(),
     ...taker,
   };
+  // The smoke suite uses a one-second presence TTL. Keep the ETH control row
+  // online after the USDC assertions so scheduler variance cannot hide it.
+  await api("POST", `/orders/${ethOverlap.body.order.id}/heartbeat`, {
+    token: ethOverlap.body.makerToken,
+  });
   const ethTake = await api("POST", "/orders/take", ethTerms, stableTaker);
   check(
     "asset-less take defaults to ETH and leaves USDC alone",
@@ -854,7 +930,21 @@ try {
     ]),
   );
   child2 = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
-    env: { ...process.env, PORT: String(PORT2), ORDERBOOK_DATA: legacyFile, PRESENCE_TTL_S: "90" },
+    env: {
+      ...process.env,
+      PORT: String(PORT2),
+      ORDERBOOK_HOST: "127.0.0.1",
+      ORDERBOOK_DATA: legacyFile,
+      ORDERBOOK_FEDERATION_DATA: `${legacyFile}.federation`,
+      ORDERBOOK_FEDERATION_PEERS: "",
+      ORDERBOOK_FEDERATION_PEER_IDS: "",
+      ORDERBOOK_FEDERATION_PEER_TOKENS: "",
+      ORDERBOOK_FEDERATION_ONION_ONLY: "false",
+      ORDERBOOK_FEDERATION_ONION_PROXY: "",
+      ORDERBOOK_FEDERATION_READ_TOKEN: "",
+      ORDERBOOK_TRUST_PROXY: "loopback",
+      PRESENCE_TTL_S: "90",
+    },
     stdio: ["ignore", "inherit", "inherit"],
   });
   await waitForHealth(BASE2);

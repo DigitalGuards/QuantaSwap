@@ -135,6 +135,9 @@ export interface Order {
   acceptorIpHash?: string;
   /** sha256 of the creator's IP, for open-listing caps; never serialized. */
   creatorIpHash?: string;
+  /** Opaque hash of the directly connected federation peer that first
+   *  supplied this order. Used only for per-peer retained-state quotas. */
+  federationSourceHash?: string;
   /** Portable maker authorization. Absent only on legacy/local-liquidity
    *  rows created through the unsigned compatibility endpoint. */
   makerAuth?: MakerOrderAuthV1;
@@ -172,6 +175,7 @@ export type PublicOrder = Omit<
   | "takerTokenHash"
   | "acceptorIpHash"
   | "creatorIpHash"
+  | "federationSourceHash"
   | "acceptedAt"
   | "releasedAt"
   | "releaseSecret"
@@ -200,6 +204,9 @@ const MAX_RETAINED_ORDERS = 256;
 const MAX_RETAINED_ORDERS_PER_MAKER = 64;
 const MAX_RETAINED_ORDERS_PER_IP = 64;
 const MAX_RETAINED_FEDERATED_ORDERS = 128;
+export const MAX_PUBLIC_PORTABLE_ORDERS = 64;
+export const MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS = 48;
+export const MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER = 16;
 const OPEN_TTL_S = 48 * 3600;
 const ACCEPTED_TTL_S = 3600; // accepted but never locked: cancel
 const CANCELLED_TTL_S = 3600;
@@ -589,6 +596,12 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
   const takerTokenHash = optionalMatchingString(row, index, "takerTokenHash", TOKEN_HASH_RE);
   const acceptorIpHash = optionalMatchingString(row, index, "acceptorIpHash", TOKEN_HASH_RE);
   const creatorIpHash = optionalMatchingString(row, index, "creatorIpHash", TOKEN_HASH_RE);
+  const rawFederationSourceHash = optionalMatchingString(
+    row,
+    index,
+    "federationSourceHash",
+    TOKEN_HASH_RE,
+  );
   const acceptedAt = optionalSafeInteger(row, index, "acceptedAt");
   const releasedAt = optionalSafeInteger(row, index, "releasedAt");
   const releaseSecret = optionalMatchingString(row, index, "releaseSecret", BYTES32_RE);
@@ -618,6 +631,9 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     ...(takerTokenHash !== undefined ? { takerTokenHash } : {}),
     ...(acceptorIpHash !== undefined ? { acceptorIpHash } : {}),
     ...(creatorIpHash !== undefined ? { creatorIpHash } : {}),
+    ...(rawFederationSourceHash !== undefined
+      ? { federationSourceHash: rawFederationSourceHash }
+      : {}),
     ...(acceptedAt !== undefined ? { acceptedAt } : {}),
     ...(releasedAt !== undefined ? { releasedAt } : {}),
     ...(releaseSecret !== undefined ? { releaseSecret } : {}),
@@ -637,6 +653,16 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     }
     order.orderDigest = verified.orderDigest;
     portableOrder = verified;
+    if (
+      order.visibility === "public" &&
+      order.federationSourceHash === undefined &&
+      order.creatorIpHash === sha256Hex("federation")
+    ) {
+      order.federationSourceHash = sha256Hex("legacy-federation-source");
+    }
+  }
+  if (order.federationSourceHash !== undefined && portableOrder === undefined) {
+    invalidPersisted(index, "federation source without maker proof");
   }
 
   const hasProtocolState =
@@ -966,6 +992,9 @@ export class OrderStore {
     }
 
     const now = nowS();
+    let publicPortableOrders = 0;
+    let federatedPublicPortableOrders = 0;
+    const federatedOrdersBySource = new Map<string, number>();
     for (const [index, row] of parsed.entries()) {
       const order = hydratePersistedOrder(row, index);
       if (this.orders.has(order.id)) {
@@ -979,6 +1008,29 @@ export class OrderStore {
         )
       ) {
         throw new Error(`order data file contains duplicate live hashlock ${order.hashlock}`);
+      }
+      if (order.visibility === "public" && usesPortableTerminalProtocol(order)) {
+        publicPortableOrders += 1;
+        if (publicPortableOrders > MAX_PUBLIC_PORTABLE_ORDERS) {
+          throw new Error(
+            `order data file contains more than ${MAX_PUBLIC_PORTABLE_ORDERS} portable public orders`,
+          );
+        }
+        if (order.federationSourceHash !== undefined) {
+          federatedPublicPortableOrders += 1;
+          if (federatedPublicPortableOrders > MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS) {
+            throw new Error(
+              `order data file contains more than ${MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS} federated portable public orders`,
+            );
+          }
+          const sourceCount = (federatedOrdersBySource.get(order.federationSourceHash) ?? 0) + 1;
+          if (sourceCount > MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER) {
+            throw new Error(
+              `order data file contains more than ${MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER} portable public orders from one federation source`,
+            );
+          }
+          federatedOrdersBySource.set(order.federationSourceHash, sourceCount);
+        }
       }
       this.orders.set(order.id, order);
       // Presence does not survive restarts; grant loaded listings one
@@ -1035,6 +1087,7 @@ export class OrderStore {
       takerTokenHash: _omit2,
       acceptorIpHash: _omit3,
       creatorIpHash: _omit4,
+      federationSourceHash: _omitFederationSource,
       acceptedAt: _omit5,
       shareTokenHash: _omit6,
       fillIntents: _omit7,
@@ -1093,7 +1146,8 @@ export class OrderStore {
         (order.status === "cancelled" &&
           (order.makerAuth === undefined
             ? age > CANCELLED_TTL_S
-            : now > order.makerAuth.expiresAt + SIGNED_TERMINAL_GRACE_S)) ||
+            : now > order.makerAuth.expiresAt + SIGNED_TERMINAL_GRACE_S &&
+              age > SIGNED_TERMINAL_GRACE_S)) ||
         (order.status === "locking" &&
           order.initiatorTimeout !== null &&
           now > order.initiatorTimeout + LOCKING_LINGER_S)
@@ -1177,7 +1231,10 @@ export class OrderStore {
     );
   }
 
-  importVerifiedOrder(verified: VerifiedOrderV1): PublicOrder {
+  importVerifiedOrder(
+    verified: VerifiedOrderV1,
+    federationSource = "unknown",
+  ): PublicOrder {
     this.sweep();
     if (verified.terms.visibility !== "public") {
       throw new ApiError(400, "private signed orders are origin-only");
@@ -1209,7 +1266,21 @@ export class OrderStore {
       }
       return this.pub(existing);
     }
-    return this.createInternal(verified.order, "federation", verified, true).order;
+    if (
+      federationSource.length < 1 ||
+      federationSource.length > 64 ||
+      !/^[a-z0-9][a-z0-9-]*$/.test(federationSource)
+    ) {
+      throw new ApiError(400, "federation source id is invalid");
+    }
+    return this.createInternal(
+      verified.order,
+      `federation:${federationSource}`,
+      verified,
+      true,
+      undefined,
+      federationSource,
+    ).order;
   }
 
   private createInternal(
@@ -1218,6 +1289,7 @@ export class OrderStore {
     verified?: VerifiedOrderV1,
     federated = false,
     capabilities?: { makerToken: string; shareToken?: string },
+    federationSource?: string,
   ): {
     order: PublicOrder;
     makerToken: string;
@@ -1340,6 +1412,46 @@ export class OrderStore {
       throw new ApiError(400, "visibility must be public or private");
     }
     const visibility: Visibility = rawVisibility === "private" ? "private" : "public";
+    if (
+      verified !== undefined &&
+      visibility === "public" &&
+      retainedOrders.filter(
+        (order) =>
+          order.visibility === "public" && usesPortableTerminalProtocol(order),
+      ).length >= MAX_PUBLIC_PORTABLE_ORDERS
+    ) {
+      throw new ApiError(
+        503,
+        "portable public-order capacity is full",
+        "transient_capacity",
+      );
+    }
+    if (verified !== undefined && visibility === "public" && federated) {
+      const federatedOrders = retainedOrders.filter(
+        (order) =>
+          order.visibility === "public" &&
+          usesPortableTerminalProtocol(order) &&
+          order.federationSourceHash !== undefined,
+      );
+      if (federatedOrders.length >= MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS) {
+        throw new ApiError(
+          503,
+          "federated portable public-order capacity is full",
+          "transient_capacity",
+        );
+      }
+      const sourceHash = sha256Hex(`federation:${federationSource ?? "unknown"}`);
+      if (
+        federatedOrders.filter((order) => order.federationSourceHash === sourceHash).length >=
+        MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER
+      ) {
+        throw new ApiError(
+          429,
+          "federation source already has too many portable public orders",
+          "transient_capacity",
+        );
+      }
+    }
     // The share token is the capability that finds and takes the order
     // (shared out of band by the maker); the optional taker restriction
     // pins the counterparty even if the link leaks. Neither makes sense
@@ -1456,6 +1568,9 @@ export class OrderStore {
           ? sha256Hex(makerToken)
           : signedMakerCommitment!.slice(2),
       creatorIpHash,
+      ...(federated
+        ? { federationSourceHash: sha256Hex(`federation:${federationSource ?? "unknown"}`) }
+        : {}),
       ...(verified !== undefined
         ? { makerAuth: verified.auth, orderDigest: verified.orderDigest, fillIntents: [] }
         : {}),
@@ -1547,7 +1662,11 @@ export class OrderStore {
       } = replay;
       return publicIntent;
     }
-    if (order.status !== "open" || order.equivocated === true) {
+    if (
+      (order.status !== "open" &&
+        !(order.status === "cancelled" && order.cancelProof === undefined)) ||
+      order.equivocated === true
+    ) {
       throw new ApiError(409, "order is no longer open");
     }
     return this.storeFillIntent(order, verified, "federation", true);
@@ -2012,14 +2131,14 @@ export class OrderStore {
     return events;
   }
 
-  applyFederationEvent(event: FederationEvent): void {
+  applyFederationEvent(event: FederationEvent, federationSource = "unknown"): void {
     const payload = event.payload;
     if (event.kind === "order-v1") {
       exactPayload(payload, ["order", "auth"], "federated order event");
       const verified = verifyOrderV1(payload["order"], payload["auth"], {
         allowExpired: true,
       });
-      this.importVerifiedOrder(verified);
+      this.importVerifiedOrder(verified, federationSource);
       return;
     }
 

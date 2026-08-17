@@ -50,6 +50,12 @@ export interface OrderbookEventStream {
   close: () => void;
 }
 
+export interface OrderbookStreamObserver {
+  onOpen?: () => void;
+  onClose?: () => void;
+  onInvalid?: () => void;
+}
+
 export interface EventSourcePort {
   readonly readyState: number;
   addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void;
@@ -182,7 +188,17 @@ function parseOrderList(raw: unknown): OrderView[] {
   if (raw.length > MAX_LIST_ORDERS) {
     throw new Error("order book returned too many orders");
   }
-  return raw.filter(isOrderView);
+  if (!raw.every(isOrderView)) {
+    throw new Error("order book returned an invalid order row");
+  }
+  const ids = new Set<string>();
+  for (const order of raw) {
+    if (ids.has(order.id)) {
+      throw new Error("order book returned duplicate order ids");
+    }
+    ids.add(order.id);
+  }
+  return raw;
 }
 
 export class OrderbookClient {
@@ -421,21 +437,49 @@ export class OrderbookClient {
     ).order;
   }
 
-  openBookStream(onBook: (orders: OrderView[]) => void): OrderbookEventStream {
+  openBookStream(
+    onBook: (orders: OrderView[]) => void,
+    observer: OrderbookStreamObserver = {},
+  ): OrderbookEventStream {
     const eventSource = this.makeEventSource(`${this.apiBase}/orders/stream`);
+    let state: "connecting" | "open" | "closed" = "connecting";
+    const markOpen = () => {
+      if (state === "open") return;
+      state = "open";
+      observer.onOpen?.();
+    };
+    const markClosed = () => {
+      if (state === "closed") return;
+      state = "closed";
+      observer.onClose?.();
+    };
+    eventSource.addEventListener("open", markOpen);
+    eventSource.addEventListener("error", markClosed);
     eventSource.addEventListener("book", (event) => {
       try {
-        if (event.data.length > MAX_API_RESPONSE_BYTES) return;
+        if (event.data.length > MAX_API_RESPONSE_BYTES) {
+          eventSource.close();
+          markClosed();
+          observer.onInvalid?.();
+          return;
+        }
         const payload = JSON.parse(event.data) as { orders?: unknown };
         onBook(parseOrderList(payload.orders));
       } catch {
-        // A full snapshot follows every real book change. The caller also
-        // keeps a poll fallback, so one malformed frame can be discarded.
+        // Close on malformed input. The caller keeps a bounded poll fallback
+        // and can recover the source without accepting more stream frames.
+        eventSource.close();
+        markClosed();
+        observer.onInvalid?.();
       }
     });
+    if (eventSource.readyState === 1) markOpen();
     return {
       isLive: () => eventSource.readyState === 1,
-      close: () => eventSource.close(),
+      close: () => {
+        eventSource.close();
+        markClosed();
+      },
     };
   }
 }

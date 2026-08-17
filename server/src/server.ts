@@ -7,8 +7,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolveClientIp } from "./client-ip.js";
 import { readConfig } from "./config.js";
 import { corsHeaders, preflightHeaders, type CorsMode } from "./cors.js";
-import { FederationFeed, federationEventId } from "./federation.js";
+import {
+  FederationFeed,
+  FederationResponseTooLargeError,
+  MAX_FEDERATION_RESPONSE_BYTES,
+  serializeFederationPage,
+  type FederationPage,
+} from "./federation.js";
+import {
+  FederationConcurrencyLimiter,
+  FederationResetLimiter,
+  FederationResponseCache,
+  federationBearerAuthorized,
+  federationResponseCacheKey,
+} from "./federation-reset.js";
 import { FederationPeerSync } from "./peer-sync.js";
+import { FederationPeerTransport } from "./peer-transport.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
@@ -32,6 +46,33 @@ const WINDOW_MS = 60_000;
 const MAX_MUTATIONS_PER_WINDOW = 120;
 const MAX_READS_PER_WINDOW = 1440;
 const hits = new Map<string, { windowStart: number; reads: number; mutations: number }>();
+const publicFederationResetLimiter = new FederationResetLimiter();
+const publicFederationRequestLimiter = new FederationResetLimiter({
+  perSourceLimit: 240,
+  globalLimit: 3840,
+});
+const publicFederationConcurrencyLimiter = new FederationConcurrencyLimiter({
+  perSourceLimit: 1,
+  globalLimit: 4,
+});
+const authenticatedFederationResetLimiter = new FederationResetLimiter({
+  perSourceLimit: 4,
+  globalLimit: 64,
+});
+const authenticatedFederationRequestLimiter = new FederationResetLimiter({
+  perSourceLimit: 240,
+  globalLimit: 3840,
+});
+const authenticatedFederationConcurrencyLimiter = new FederationConcurrencyLimiter({
+  perSourceLimit: 1,
+  globalLimit: 16,
+});
+const federationResponseCache = new FederationResponseCache({
+  maxEntries: 128,
+  maxBytes: MAX_FEDERATION_RESPONSE_BYTES * 2,
+  ttlMs: 5_000,
+});
+const serializedFederationPages = new WeakMap<FederationPage, string>();
 
 function rateLimited(ip: string, mutation: boolean): boolean {
   const now = Date.now();
@@ -53,11 +94,82 @@ function rateLimited(ip: string, mutation: boolean): boolean {
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
+  sendSerializedJson(res, status, body);
+}
+
+function sendSerializedJson(res: ServerResponse, status: number, body: string): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
+    "X-Content-Type-Options": "nosniff",
     "Cache-Control": "no-store",
   });
   res.end(body);
+}
+
+function waitForResponse(
+  res: ServerResponse,
+  event: "drain" | "finish",
+  timeoutMs: number,
+): Promise<boolean> {
+  if (timeoutMs <= 0 || res.destroyed) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      res.off(event, onSuccess);
+      res.off("close", onFailure);
+      res.off("error", onFailure);
+      resolve(result);
+    };
+    const onSuccess = () => finish(true);
+    const onFailure = () => finish(false);
+    const timer = setTimeout(() => {
+      res.destroy();
+      finish(false);
+    }, timeoutMs);
+    timer.unref();
+    res.once(event, onSuccess);
+    res.once("close", onFailure);
+    res.once("error", onFailure);
+  });
+}
+
+async function sendFederationJson(res: ServerResponse, body: Buffer): Promise<void> {
+  const deadline = Date.now() + config.streamBackpressureMs;
+  res.writeHead(200, {
+    "Content-Type": "application/json",
+    "Content-Length": String(body.byteLength),
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
+  });
+  for (let offset = 0; offset < body.byteLength; offset += 64 * 1024) {
+    if (res.destroyed) return;
+    const accepted = res.write(body.subarray(offset, offset + 64 * 1024));
+    if (!accepted && !(await waitForResponse(res, "drain", deadline - Date.now()))) {
+      return;
+    }
+  }
+  if (res.destroyed) return;
+  const finished = waitForResponse(res, "finish", deadline - Date.now());
+  res.end();
+  await finished;
+}
+
+function federationPageBody(page: FederationPage): string {
+  const cached = serializedFederationPages.get(page);
+  if (cached !== undefined) return cached;
+  try {
+    const serialized = serializeFederationPage(page);
+    serializedFederationPages.set(page, serialized);
+    return serialized;
+  } catch (error) {
+    if (error instanceof FederationResponseTooLargeError) {
+      throw new ApiError(503, "federation snapshot exceeds the response limit");
+    }
+    throw error;
+  }
 }
 
 async function readJsonBody(
@@ -93,18 +205,23 @@ async function readJsonBody(
 
 const store = new OrderStore(config.dataFile, { presenceTtlS: config.presenceTtlS });
 const federationFeed = new FederationFeed(config.federationDataFile);
+const peerTransport = new FederationPeerTransport(config.federationOnionProxy, {
+  connectTimeoutMs: config.federationRequestTimeoutMs,
+});
 let federationHealthy = true;
 
 // The order store and relay feed use separate atomic files. Reconcile every
 // currently live public proof before serving so a crash between those writes
 // cannot leave an accepted mutation permanently invisible to existing peers.
-for (const event of store.federationSnapshot()) {
-  if (!federationFeed.has(federationEventId(event))) federationFeed.append(event);
-}
+federationFeed.reconcileSnapshot(store.federationSnapshot());
 
 store.subscribeFederation((event) => {
   try {
-    federationFeed.append(event);
+    federationFeed.append(
+      event,
+      Math.floor(Date.now() / 1000),
+      store.federationSnapshot(),
+    );
     federationHealthy = true;
   } catch (error) {
     federationHealthy = false;
@@ -115,10 +232,19 @@ store.subscribeFederation((event) => {
 
 const peerSync = new FederationPeerSync({
   peers: config.federationPeers,
+  peerIds: config.federationPeerIds,
+  peerTokens: config.federationPeerTokens,
+  fetch: peerTransport.fetch,
   timeoutMs: config.federationRequestTimeoutMs,
-  apply: (event) => {
+  staleAfterMs: Math.max(
+    config.federationSyncMs * 3,
+    config.federationRequestTimeoutMs * 2,
+  ),
+  apply: (event, peer) => {
     try {
-      store.applyFederationEvent(event);
+      const peerIndex = config.federationPeers.indexOf(peer);
+      const peerId = peerIndex === -1 ? "peer-unknown" : config.federationPeerIds[peerIndex]!;
+      store.applyFederationEvent(event, peerId);
       return "applied";
     } catch (error) {
       if (error instanceof OrderStorePersistenceError) {
@@ -133,16 +259,14 @@ const peerSync = new FederationPeerSync({
       ) {
         return "deferred";
       }
-      console.warn(
-        "[orderbook] rejected a federation peer event:",
-        error instanceof Error ? error.message : "unknown validation error",
-      );
       return "rejected";
     }
   },
-  onError: (_peer, error) => {
+  onError: (peer, error) => {
+    const peerIndex = config.federationPeers.indexOf(peer);
+    const peerId = peerIndex === -1 ? "peer-unknown" : config.federationPeerIds[peerIndex];
     console.warn(
-      "[orderbook] federation peer sync failed:",
+      `[orderbook] federation ${peerId} sync failed:`,
       error instanceof Error ? error.message : "unknown transport error",
     );
   },
@@ -253,7 +377,9 @@ function requestOrigin(req: IncomingMessage): string | undefined {
 
 function corsMode(method: string, path: string): CorsMode {
   return method === "GET" &&
-    (path === "/api/orders" ||
+    (path === "/api/health" ||
+      path === "/api/status" ||
+      path === "/api/orders" ||
       path === "/api/orders/stream" ||
       path === "/api/federation/v1/events")
     ? "public-read"
@@ -292,7 +418,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   applyHeaders(res, corsHeaders(requestOrigin(req), corsMode(method, path), config.corsOrigins));
 
-  if (shuttingDown && path !== "/api/health") {
+  if (shuttingDown && path !== "/api/health" && path !== "/api/status") {
     sendJson(res, 503, { error: "order book is shutting down" });
     return;
   }
@@ -300,7 +426,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Heartbeats are read-class: they mutate nothing durable and a maker
   // with several listings pings often by design.
   const mutation = method !== "GET" && !path.endsWith("/heartbeat");
-  if (rateLimited(ip, mutation)) {
+  if (path !== "/api/federation/v1/events" && rateLimited(ip, mutation)) {
     sendJson(res, 429, { error: "rate limited, slow down" });
     return;
   }
@@ -312,6 +438,21 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       federationFeed.storageReady() &&
       federationHealthy;
     sendJson(res, healthy ? 200 : 503, { status: healthy ? "ok" : "degraded" });
+    return;
+  }
+  if (method === "GET" && path === "/api/status") {
+    const storageReady = store.storageReady() && federationFeed.storageReady();
+    const healthy = !shuttingDown && storageReady && federationHealthy;
+    sendJson(res, healthy ? 200 : 503, {
+      schemaVersion: 1,
+      status: healthy ? "ok" : "degraded",
+      uptimeS: Math.floor(process.uptime()),
+      feed: {
+        ready: federationFeed.storageReady() && federationHealthy,
+        ...federationFeed.status(),
+      },
+      federation: peerSync.status(),
+    });
     return;
   }
   if (method === "GET" && path === "/api/federation/v1/events") {
@@ -327,13 +468,49 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
       throw new ApiError(400, "federation limit must be between 1 and 256");
     }
-    sendJson(
-      res,
-      200,
-      federationFeed.page(url.searchParams.get("cursor"), limit, () =>
-        store.federationSnapshot(),
-      ),
+    const cursor = url.searchParams.get("cursor");
+    const reset = federationFeed.requiresReset(cursor);
+    const authenticated = federationBearerAuthorized(
+      req.headers.authorization,
+      config.federationReadToken,
     );
+    const requestLimiter = authenticated
+      ? authenticatedFederationRequestLimiter
+      : publicFederationRequestLimiter;
+    const resetLimiter = authenticated
+      ? authenticatedFederationResetLimiter
+      : publicFederationResetLimiter;
+    const concurrencyLimiter = authenticated
+      ? authenticatedFederationConcurrencyLimiter
+      : publicFederationConcurrencyLimiter;
+    const source = `${authenticated ? "peer" : "public"}:${ip}`;
+    const release = concurrencyLimiter.acquire(source);
+    if (release === null) {
+      throw new ApiError(429, "federation response already in progress");
+    }
+    try {
+      if (!requestLimiter.allow(source)) {
+        throw new ApiError(429, "federation request rate limited, retry later");
+      }
+      if (reset && !resetLimiter.allow(source)) {
+        throw new ApiError(429, "federation reset rate limited, retry later");
+      }
+      const status = federationFeed.status();
+      const cacheKey = federationResponseCacheKey(
+        reset,
+        cursor,
+        limit,
+        status.oldestSequence,
+        status.latestSequence,
+      );
+      const body = federationResponseCache.getOrCreate(cacheKey, () => {
+        const page = federationFeed.page(cursor, limit, () => store.federationSnapshot());
+        return federationPageBody(page);
+      });
+      await sendFederationJson(res, body);
+    } finally {
+      release();
+    }
     return;
   }
   if (method === "GET" && path === "/api/orders/stream") {
@@ -516,6 +693,12 @@ function initiateShutdown(reason: string, exitCode = 0): void {
   console.log(`[orderbook] stopping (${reason})`);
 
   if (peerSyncTimer !== undefined) clearInterval(peerSyncTimer);
+  void peerTransport.close().catch((error: unknown) => {
+    console.error(
+      "[orderbook] federation transport shutdown error:",
+      error instanceof Error ? error.message : "unknown transport error",
+    );
+  });
   for (const writer of [...streamClients.values()]) writer.end();
   server.close((error) => {
     if (shutdownTimer !== undefined) clearTimeout(shutdownTimer);

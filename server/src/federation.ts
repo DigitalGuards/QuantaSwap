@@ -48,6 +48,7 @@ interface FederationEnvelope {
   feedId: string;
   nextSeq: number;
   events: PersistedFederationRecord[];
+  snapshotDigest: string | null;
 }
 
 export interface FederationPage {
@@ -58,10 +59,59 @@ export interface FederationPage {
   snapshot?: FederationRecord[];
 }
 
+export interface FederationFeedStatus {
+  retainedEvents: number;
+  oldestSequence: number | null;
+  latestSequence: number | null;
+  lastEventAt: number | null;
+}
+
+export const MAX_FEDERATION_RESPONSE_BYTES = 32 * 1024 * 1024;
+export const MAX_FEDERATION_INCREMENTAL_BYTES = 4 * 1024 * 1024;
+
+export class FederationResponseTooLargeError extends Error {
+  readonly actualBytes: number;
+  readonly maxBytes: number;
+
+  constructor(actualBytes: number, maxBytes: number) {
+    super(`federation response is ${actualBytes} bytes and exceeds the ${maxBytes} byte limit`);
+    this.name = "FederationResponseTooLargeError";
+    this.actualBytes = actualBytes;
+    this.maxBytes = maxBytes;
+  }
+}
+
 const FEED_ID_RE = /^[0-9a-f]{32}$/;
 const EVENT_ID_RE = /^[0-9a-f]{64}$/;
+const FEDERATION_CURSOR_RE = /^([0-9a-f]{32}):(0|[1-9][0-9]{0,15})$/;
 const MAX_EVENT_BYTES = 64 * 1024;
 const DEFAULT_MAX_EVENTS = 4096;
+const MAX_SNAPSHOT_EVENTS = 8192;
+const RESET_CACHE_TTL_MS = 5_000;
+
+interface CachedResetPage {
+  expiresAt: number;
+  page: FederationPage;
+}
+
+export function serializeFederationPage(
+  page: FederationPage,
+  maxBytes = MAX_FEDERATION_RESPONSE_BYTES,
+): string {
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > MAX_FEDERATION_RESPONSE_BYTES
+  ) {
+    throw new Error("federation response byte limit is invalid");
+  }
+  const serialized = JSON.stringify(page);
+  const actualBytes = Buffer.byteLength(serialized, "utf8");
+  if (actualBytes > maxBytes) {
+    throw new FederationResponseTooLargeError(actualBytes, maxBytes);
+  }
+  return serialized;
+}
 
 function canonicalValue(value: unknown): string {
   if (value === null) return "null";
@@ -103,6 +153,20 @@ export function federationEventId(event: FederationEvent): string {
   return createHash("sha256").update(canonicalFederationJson(event)).digest("hex");
 }
 
+function federationSnapshotDigest(rawEvents: readonly FederationEvent[]): string {
+  if (rawEvents.length > MAX_SNAPSHOT_EVENTS) {
+    throw new Error("federation snapshot exceeds the event limit");
+  }
+  const eventIds = new Set<string>();
+  for (const raw of rawEvents) {
+    const event = parseFederationEvent(raw, "federation reconciliation event");
+    eventIds.add(federationEventId(event));
+  }
+  const hash = createHash("sha256").update("QuantaSwap Federation snapshot V1\0");
+  for (const eventId of [...eventIds].sort()) hash.update(eventId);
+  return hash.digest("hex");
+}
+
 function isEventKind(value: unknown): value is FederationEventKind {
   return (
     value === "order-v1" ||
@@ -113,11 +177,19 @@ function isEventKind(value: unknown): value is FederationEventKind {
   );
 }
 
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => keys.includes(key));
+}
+
 export function parseFederationEvent(raw: unknown, label = "federation event"): FederationEvent {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error(`${label} must be an object`);
   }
   const row = raw as Record<string, unknown>;
+  if (!hasExactKeys(row, ["kind", "payload"])) {
+    throw new Error(`${label} has unexpected fields`);
+  }
   if (!isEventKind(row["kind"])) throw new Error(`${label} has an invalid kind`);
   const payload = row["payload"];
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
@@ -163,10 +235,13 @@ export class FederationFeed {
   private nextSeq = 1;
   private events: PersistedFederationRecord[] = [];
   private eventIds = new Set<string>();
+  private snapshotDigest: string | null = null;
+  private cachedResetPage: CachedResetPage | undefined;
 
   constructor(
     private readonly file: string,
     private readonly maxEvents = DEFAULT_MAX_EVENTS,
+    private readonly now: () => number = Date.now,
   ) {
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
       throw new Error("federation maxEvents must be a positive integer");
@@ -185,15 +260,48 @@ export class FederationFeed {
     }
   }
 
+  /** Public diagnostics intentionally omit the feed id, file path and events. */
+  status(): FederationFeedStatus {
+    const first = this.events[0];
+    const last = this.events.at(-1);
+    return {
+      retainedEvents: this.events.length,
+      oldestSequence: first?.seq ?? null,
+      latestSequence: last?.seq ?? null,
+      lastEventAt: last === undefined ? null : last.receivedAt * 1000,
+    };
+  }
+
   has(eventId: string): boolean {
     return this.eventIds.has(eventId);
   }
 
-  append(raw: FederationEvent, receivedAt = Math.floor(Date.now() / 1000)): FederationRecord {
+  requiresReset(cursor: string | null): boolean {
+    if (cursor === null || cursor.length > 64) return true;
+    const match = FEDERATION_CURSOR_RE.exec(cursor);
+    if (match === null || match[1] !== this.feedId) return true;
+    const rawAfter = match[2];
+    if (rawAfter === undefined) return true;
+    const after = Number(rawAfter);
+    if (!Number.isSafeInteger(after)) return true;
+    const oldest = this.events[0]?.seq ?? this.nextSeq;
+    const highWater = this.nextSeq - 1;
+    return after < oldest - 1 || after > highWater;
+  }
+
+  append(
+    raw: FederationEvent,
+    receivedAt = Math.floor(Date.now() / 1000),
+    snapshot?: readonly FederationEvent[],
+  ): FederationRecord {
     const event = parseFederationEvent(raw);
     const eventId = federationEventId(event);
     const existing = this.events.find((entry) => entry.eventId === eventId);
-    if (existing !== undefined) return publicRecord(existing);
+    const nextSnapshotDigest =
+      snapshot === undefined ? this.snapshotDigest : federationSnapshotDigest(snapshot);
+    if (existing !== undefined && nextSnapshotDigest === this.snapshotDigest) {
+      return publicRecord(existing);
+    }
     if (!Number.isSafeInteger(receivedAt) || receivedAt < 0) {
       throw new Error("federation event receive time is invalid");
     }
@@ -204,27 +312,60 @@ export class FederationFeed {
       receivedAt,
     };
     const previousNextSeq = this.nextSeq;
-    this.nextSeq += 1;
-    this.events.push(record);
-    this.eventIds.add(eventId);
+    const previousSnapshotDigest = this.snapshotDigest;
+    if (existing === undefined) {
+      this.nextSeq += 1;
+      this.events.push(record);
+      this.eventIds.add(eventId);
+    }
+    this.snapshotDigest = nextSnapshotDigest;
     let removed: PersistedFederationRecord | undefined;
     while (this.events.length > this.maxEvents) {
       removed = this.events.shift();
       if (removed !== undefined) this.eventIds.delete(removed.eventId);
     }
+    if (
+      this.cachedResetPage !== undefined &&
+      (nextSnapshotDigest !== previousSnapshotDigest ||
+        this.requiresReset(this.cachedResetPage.page.cursor))
+    ) {
+      this.cachedResetPage = undefined;
+    }
     try {
       this.persist();
     } catch (error) {
       this.nextSeq = previousNextSeq;
-      this.events.pop();
-      this.eventIds.delete(eventId);
+      this.snapshotDigest = previousSnapshotDigest;
+      if (existing === undefined) {
+        this.events.pop();
+        this.eventIds.delete(eventId);
+      }
       if (removed !== undefined) {
         this.events.unshift(removed);
         this.eventIds.add(removed.eventId);
       }
       throw error;
     }
-    return publicRecord(record);
+    return publicRecord(existing ?? record);
+  }
+
+  reconcileSnapshot(rawEvents: readonly FederationEvent[]): boolean {
+    const digest = federationSnapshotDigest(rawEvents);
+    if (digest === this.snapshotDigest) return false;
+
+    const previousFeedId = this.feedId;
+    const previousSnapshotDigest = this.snapshotDigest;
+    this.feedId = randomBytes(16).toString("hex");
+    this.snapshotDigest = digest;
+    this.cachedResetPage = undefined;
+    try {
+      this.persist();
+    } catch (error) {
+      this.feedId = previousFeedId;
+      this.snapshotDigest = previousSnapshotDigest;
+      throw error;
+    }
+    return true;
   }
 
   page(
@@ -236,33 +377,54 @@ export class FederationFeed {
       throw new Error("federation page limit must be between 1 and 256");
     }
     const highWater = this.nextSeq - 1;
-    const match = cursor === null ? null : /^([0-9a-f]{32}):([0-9]+)$/.exec(cursor);
-    const after = match === null ? null : Number(match[2]);
-    const oldest = this.events[0]?.seq ?? this.nextSeq;
-    const needsReset =
-      match === null ||
-      match[1] !== this.feedId ||
-      after === null ||
-      !Number.isSafeInteger(after) ||
-      after < oldest - 1 ||
-      after > highWater;
-
-    if (needsReset) {
+    if (this.requiresReset(cursor)) {
+      const now = this.now();
+      if (!Number.isSafeInteger(now) || now < 0) {
+        throw new Error("federation clock returned an invalid time");
+      }
+      if (
+        this.cachedResetPage !== undefined &&
+        now < this.cachedResetPage.expiresAt &&
+        !this.requiresReset(this.cachedResetPage.page.cursor)
+      ) {
+        return this.cachedResetPage.page;
+      }
       const snapshotRecords = snapshot().map((event) => {
         const parsed = parseFederationEvent(event, "federation snapshot event");
         return { seq: highWater, eventId: federationEventId(parsed), event: parsed };
       });
-      return {
+      const page: FederationPage = {
         reset: true,
         cursor: `${this.feedId}:${highWater}`,
         hasMore: false,
         events: [],
         snapshot: snapshotRecords,
       };
+      this.cachedResetPage = { expiresAt: now + RESET_CACHE_TTL_MS, page };
+      return page;
     }
 
+    const match = FEDERATION_CURSOR_RE.exec(cursor ?? "");
+    const rawAfter = match?.[2];
+    if (rawAfter === undefined) {
+      throw new Error("federation cursor became invalid during pagination");
+    }
+    const after = Number(rawAfter);
     const available = this.events.filter((entry) => entry.seq > after);
-    const selected = available.slice(0, limit);
+    const selected: PersistedFederationRecord[] = [];
+    let selectedBytes = 256;
+    for (const entry of available) {
+      if (selected.length >= limit) break;
+      const recordBytes = Buffer.byteLength(JSON.stringify(publicRecord(entry)), "utf8") + 1;
+      if (
+        selected.length > 0 &&
+        selectedBytes + recordBytes > MAX_FEDERATION_INCREMENTAL_BYTES
+      ) {
+        break;
+      }
+      selected.push(entry);
+      selectedBytes += recordBytes;
+    }
     const lastSeq = selected.at(-1)?.seq ?? after;
     return {
       reset: false,
@@ -310,6 +472,7 @@ export class FederationFeed {
     const feedId = envelope["feedId"];
     const nextSeq = envelope["nextSeq"];
     const rawEvents = envelope["events"];
+    const snapshotDigest = envelope["snapshotDigest"];
     if (typeof feedId !== "string" || !FEED_ID_RE.test(feedId)) {
       throw new Error(`federation data file has an invalid feed id: ${this.file}`);
     }
@@ -318,6 +481,13 @@ export class FederationFeed {
     }
     if (!Array.isArray(rawEvents) || rawEvents.length > this.maxEvents) {
       throw new Error(`federation data file has an invalid event list: ${this.file}`);
+    }
+    if (
+      snapshotDigest !== undefined &&
+      snapshotDigest !== null &&
+      (typeof snapshotDigest !== "string" || !EVENT_ID_RE.test(snapshotDigest))
+    ) {
+      throw new Error(`federation data file has an invalid snapshot digest: ${this.file}`);
     }
     const events = rawEvents.map(parseRecord);
     for (let index = 1; index < events.length; index += 1) {
@@ -336,6 +506,7 @@ export class FederationFeed {
     this.nextSeq = nextSeq;
     this.events = events;
     this.eventIds = ids;
+    this.snapshotDigest = typeof snapshotDigest === "string" ? snapshotDigest : null;
   }
 
   private persist(): void {
@@ -346,6 +517,7 @@ export class FederationFeed {
       feedId: this.feedId,
       nextSeq: this.nextSeq,
       events: this.events,
+      snapshotDigest: this.snapshotDigest,
     };
     let fileDescriptor: number | undefined;
     try {

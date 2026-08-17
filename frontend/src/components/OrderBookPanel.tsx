@@ -31,10 +31,14 @@ import type { OrderDraft } from "@/components/PostOrderCard";
 import {
   acceptOrder,
   acceptedOrderTerms,
-  listOrders,
   openBookStream,
+  refreshDisconnectedOrderBooks,
+  refreshOrderBook,
   releaseOrder,
+  routeSignedOrder,
   submitFillIntent,
+  summarizeMirrorAvailability,
+  type MirrorBookResult,
   takeOrder,
   type OrderView,
 } from "@/lib/orderbook";
@@ -154,7 +158,7 @@ export function OrderBookPanel({
   onTaken,
   onPrefill,
 }: Props) {
-  const [orders, setOrders] = useState<OrderView[] | null>(null);
+  const [book, setBook] = useState<MirrorBookResult | null>(null);
   const [pair, setPair] = useState<EthAssetSymbol>("ETH");
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -180,6 +184,7 @@ export function OrderBookPanel({
 
   const asset = ETH_ASSETS[pair];
   const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
+  const orders = book?.orders ?? null;
 
   useEffect(() => {
     if (!pending) {
@@ -223,21 +228,35 @@ export function OrderBookPanel({
     };
   }, [pending, pair]);
 
+  useEffect(() => {
+    if (
+      pending !== null &&
+      book !== null &&
+      !book.orders.some(
+        (order) =>
+          order.id === pending.id && order.orderDigest === pending.orderDigest,
+      )
+    ) {
+      setPending(null);
+    }
+  }, [book, pending]);
+
   const refresh = useCallback(async () => {
     try {
-      setOrders(await listOrders());
+      setBook(await refreshOrderBook());
     } catch {
       // transient; next poll retries
     }
   }, []);
 
-  // Live book via SSE, with the old poll demoted to a fallback that only
-  // fires while the stream is down (blocked proxy, reconnect gap).
+  // Live books arrive independently. Poll only mirrors whose stream or
+  // last validated snapshot is unavailable so one healthy stream never
+  // suppresses another mirror's recovery.
   useEffect(() => {
+    const stream = openBookStream(setBook);
     void refresh();
-    const stream = openBookStream(setOrders);
     const t = setInterval(() => {
-      if (!stream.isLive()) void refresh();
+      void refreshDisconnectedOrderBooks().then(setBook).catch(() => undefined);
     }, 5000);
     return () => {
       stream.close();
@@ -253,7 +272,8 @@ export function OrderBookPanel({
     if (order.makerAuth !== undefined) {
       let recovery: ActiveSwap | null = null;
       void (async () => {
-        if (signingScheme === null || order.orderDigest === undefined) {
+        const routedOrder = routeSignedOrder(order);
+        if (signingScheme === null || routedOrder.orderDigest === undefined) {
           throw new Error(
             "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
           );
@@ -261,17 +281,17 @@ export function OrderBookPanel({
         const releaseSecret = (await generateSecret()).preimage;
         const signed = await signFillIntentV1({
           body: {
-            orderDigest: order.orderDigest,
+            orderDigest: routedOrder.orderDigest,
             ...taker,
           },
-          order,
+          order: routedOrder,
           releaseSecret,
           walletRdns: qrlWalletRdns,
           request: qrlRequest,
         });
         const digest = intentDigest(signed.intent, signed.auth);
         recovery = buildSignedTakerSwap({
-          order,
+          order: routedOrder,
           asset: pair,
           accounts: taker,
           signedIntent: signed,
@@ -280,9 +300,9 @@ export function OrderBookPanel({
         });
         saveActiveSwap(recovery);
         const submitted = await submitFillIntent(
-          order.id,
+          routedOrder.id,
           signed,
-          order.bookId,
+          routedOrder.bookId,
         );
         if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
           throw new Error("The order book did not preserve the signed FillIntentV1 request.");
@@ -438,6 +458,17 @@ export function OrderBookPanel({
 
   const canTake =
     Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
+  const mirrorSummary = summarizeMirrorAvailability(book?.mirrors ?? []);
+  const mirrorStatusText =
+    book === null
+      ? "Checking order discovery."
+      : mirrorSummary.state === "all"
+        ? `All mirrors available (${mirrorSummary.available} of ${mirrorSummary.total}).`
+        : mirrorSummary.state === "partial"
+          ? `Partial order discovery (${mirrorSummary.available} of ${mirrorSummary.total} mirrors available).`
+          : mirrorSummary.state === "checking"
+            ? "Checking order discovery."
+            : "Order discovery unavailable.";
 
   const Row = ({ row, side }: { row: BookRow; side: "ask" | "bid" }) => {
     const depth = maxCum > 0n ? Number((row.cumUnits * 1000n) / maxCum) / 10 : 0;
@@ -513,12 +544,28 @@ export function OrderBookPanel({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Order book</CardTitle>
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {orders !== null ? (
-              <span aria-hidden className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success" />
-            ) : null}
-            {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
-          </span>
+          <div className="space-y-0.5 text-right text-xs">
+            <p className="text-muted-foreground">
+              {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
+            </p>
+            <p
+              role="status"
+              aria-live="polite"
+              className={cn(
+                "flex items-center justify-end gap-1.5",
+                book === null || mirrorSummary.state === "checking"
+                  ? "text-muted-foreground"
+                  : mirrorSummary.state === "all"
+                    ? "text-success"
+                    : mirrorSummary.state === "partial"
+                      ? "text-amber-400"
+                      : "text-destructive",
+              )}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+              {mirrorStatusText}
+            </p>
+          </div>
         </div>
         <div className="flex gap-1 pt-1" role="tablist" aria-label="trading pair">
           {ETH_ASSET_SYMBOLS.map((s) => (
@@ -675,9 +722,27 @@ export function OrderBookPanel({
           <span>Total ({pair})</span>
         </div>
 
-        {asks.length === 0 && bids.length === 0 ? (
+        {book === null ? (
           <p className="px-2 py-3 text-sm text-muted-foreground">
-            No open QRL/{pair} orders right now. Post one, or check back shortly.
+            Checking configured order book mirrors…
+          </p>
+        ) : mirrorSummary.state === "checking" ? (
+          <p className="px-2 py-3 text-sm text-muted-foreground">
+            Checking configured order book mirrors…
+          </p>
+        ) : mirrorSummary.available === 0 ? (
+          <div className="space-y-1 px-2 py-3 text-sm">
+            <p className="text-destructive">Order discovery unavailable.</p>
+            <p className="text-muted-foreground">
+              Existing swaps remain governed by their on-chain HTLCs and can still settle or
+              refund.
+            </p>
+          </div>
+        ) : asks.length === 0 && bids.length === 0 ? (
+          <p className="px-2 py-3 text-sm text-muted-foreground">
+            {mirrorSummary.state === "partial"
+              ? `No open QRL/${pair} orders found on the available mirrors. Discovery may be incomplete.`
+              : `No open QRL/${pair} orders right now. Post one, or check back shortly.`}
           </p>
         ) : (
           <>
