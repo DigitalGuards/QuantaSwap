@@ -11,6 +11,7 @@ import {
   type FederationPage,
   type FederationRecord,
 } from "./federation.js";
+import type { FederationFetch } from "./peer-transport.js";
 
 export type FederationApplyResult = "applied" | "deferred" | "rejected";
 
@@ -24,6 +25,7 @@ interface PeerSyncOptions {
   peerIds?: string[];
   peerTokens?: readonly (string | null)[];
   timeoutMs: number;
+  fetch?: FederationFetch;
   staleAfterMs?: number;
   apply: FederationEventApplier;
   onError?: (peer: string, error: unknown) => void;
@@ -572,17 +574,20 @@ export class FederationPeerSync {
       if (cursor !== null) query.set("cursor", cursor);
       let response: Response;
       try {
-        response = await fetch(`${peer}/federation/v1/events?${query}`, {
-          headers:
-            peerToken === null
-              ? { Accept: "application/json" }
-              : {
-                  Accept: "application/json",
-                  Authorization: `Bearer ${peerToken}`,
-                },
-          redirect: "error",
-          signal,
-        });
+        response = await (this.options.fetch ?? globalThis.fetch)(
+          `${peer}/federation/v1/events?${query}`,
+          {
+            headers:
+              peerToken === null
+                ? { Accept: "application/json" }
+                : {
+                    Accept: "application/json",
+                    Authorization: `Bearer ${peerToken}`,
+                  },
+            redirect: "error",
+            signal,
+          },
+        );
       } catch (error) {
         if (signal.aborted) {
           throw new Error("federation peer exceeded the total sync deadline");

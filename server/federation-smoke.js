@@ -322,6 +322,8 @@ function spawnMirror(name, port, peerBase, directory) {
       ORDERBOOK_FEDERATION_PEERS: peerBase,
       ORDERBOOK_FEDERATION_PEER_IDS: name === "mirror-a" ? "mirror-b" : "mirror-a",
       ORDERBOOK_FEDERATION_PEER_TOKENS: name === "mirror-a" ? READ_TOKEN_B : READ_TOKEN_A,
+      ORDERBOOK_FEDERATION_ONION_ONLY: "false",
+      ORDERBOOK_FEDERATION_ONION_PROXY: "",
       ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "true",
       ORDERBOOK_FEDERATION_READ_TOKEN: name === "mirror-a" ? READ_TOKEN_A : READ_TOKEN_B,
       ORDERBOOK_FEDERATION_SYNC_MS: "1000",

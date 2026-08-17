@@ -22,6 +22,7 @@ import {
   federationResponseCacheKey,
 } from "./federation-reset.js";
 import { FederationPeerSync } from "./peer-sync.js";
+import { FederationPeerTransport } from "./peer-transport.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
@@ -204,6 +205,9 @@ async function readJsonBody(
 
 const store = new OrderStore(config.dataFile, { presenceTtlS: config.presenceTtlS });
 const federationFeed = new FederationFeed(config.federationDataFile);
+const peerTransport = new FederationPeerTransport(config.federationOnionProxy, {
+  connectTimeoutMs: config.federationRequestTimeoutMs,
+});
 let federationHealthy = true;
 
 // The order store and relay feed use separate atomic files. Reconcile every
@@ -230,6 +234,7 @@ const peerSync = new FederationPeerSync({
   peers: config.federationPeers,
   peerIds: config.federationPeerIds,
   peerTokens: config.federationPeerTokens,
+  fetch: peerTransport.fetch,
   timeoutMs: config.federationRequestTimeoutMs,
   staleAfterMs: Math.max(
     config.federationSyncMs * 3,
@@ -688,6 +693,12 @@ function initiateShutdown(reason: string, exitCode = 0): void {
   console.log(`[orderbook] stopping (${reason})`);
 
   if (peerSyncTimer !== undefined) clearInterval(peerSyncTimer);
+  void peerTransport.close().catch((error: unknown) => {
+    console.error(
+      "[orderbook] federation transport shutdown error:",
+      error instanceof Error ? error.message : "unknown transport error",
+    );
+  });
   for (const writer of [...streamClients.values()]) writer.end();
   server.close((error) => {
     if (shutdownTimer !== undefined) clearTimeout(shutdownTimer);

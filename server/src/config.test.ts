@@ -2,6 +2,8 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { readConfig } from "./config.js";
 
+const ONION_HOST = `${"a".repeat(56)}.onion`;
+
 describe("order-book runtime configuration", () => {
   it("keeps the loopback-safe native defaults", () => {
     const config = readConfig({});
@@ -14,6 +16,8 @@ describe("order-book runtime configuration", () => {
     assert.deepEqual(config.federationPeerTokens, []);
     assert.equal(config.federationReadToken, null);
     assert.equal(config.federationAllowInsecurePeerTokens, false);
+    assert.equal(config.federationOnionOnly, false);
+    assert.equal(config.federationOnionProxy, null);
     assert.deepEqual(config.corsOrigins, []);
     assert.equal(config.federationDataFile, `${config.dataFile}.federation`);
   });
@@ -43,6 +47,8 @@ describe("order-book runtime configuration", () => {
     assert.deepEqual(config.federationPeerTokens, ["11".repeat(32), "22".repeat(32)]);
     assert.equal(config.federationReadToken, "33".repeat(32));
     assert.equal(config.federationAllowInsecurePeerTokens, false);
+    assert.equal(config.federationOnionOnly, false);
+    assert.equal(config.federationOnionProxy, null);
     assert.deepEqual(config.corsOrigins, ["https://swap.example", "http://127.0.0.1:5173"]);
   });
 
@@ -147,6 +153,46 @@ describe("order-book runtime configuration", () => {
       () => readConfig({ ORDERBOOK_CORS_ORIGINS: "https://a.example,,https://b.example" }),
       /without empty entries/,
     );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_PEERS: `http://${"a".repeat(16)}.onion/api` }),
+      /canonical v3 hostnames/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_PEERS: `http://${ONION_HOST}./api` }),
+      /canonical v3 hostnames/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_PEERS: `http://${ONION_HOST}/api` }),
+      /require ORDERBOOK_FEDERATION_ONION_PROXY/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_ONION_PROXY: "socks5://127.0.0.1:9050" }),
+      /plain socks5h URL/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1" }),
+      /explicit port/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://user@127.0.0.1:9050" }),
+      /plain socks5h URL/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1:9050/path" }),
+      /plain socks5h URL/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://proxy.example:9050" }),
+      /plain socks5h URL/,
+    );
+    assert.throws(
+      () =>
+        readConfig({
+          ORDERBOOK_FEDERATION_PEERS: "https://book.example/api",
+          ORDERBOOK_FEDERATION_ONION_ONLY: "true",
+        }),
+      /requires every peer to use a v3 onion URL/,
+    );
   });
 
   it("allows authenticated HTTP only with the explicit disposable-lab opt-in", () => {
@@ -158,5 +204,50 @@ describe("order-book runtime configuration", () => {
     assert.deepEqual(config.federationPeers, ["http://book:8091/api"]);
     assert.deepEqual(config.federationPeerTokens, ["11".repeat(32)]);
     assert.equal(config.federationAllowInsecurePeerTokens, true);
+  });
+
+  it("requires a strict remote-DNS SOCKS route for canonical v3 onion peers", () => {
+    const config = readConfig({
+      ORDERBOOK_FEDERATION_PEERS: `http://${ONION_HOST}/api`,
+      ORDERBOOK_FEDERATION_ONION_ONLY: "true",
+      ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1:9050",
+    });
+    assert.deepEqual(config.federationPeers, [`http://${ONION_HOST}/api`]);
+    assert.deepEqual(config.federationPeerTokens, [null]);
+    assert.equal(config.federationOnionOnly, true);
+    assert.equal(config.federationOnionProxy, "socks5h://127.0.0.1:9050");
+  });
+
+  it("allows mixed authenticated HTTPS and public onion peers with a null sentinel", () => {
+    const token = "11".repeat(32);
+    const config = readConfig({
+      ORDERBOOK_FEDERATION_PEERS: `https://book.example/api,http://${ONION_HOST}/api`,
+      ORDERBOOK_FEDERATION_PEER_TOKENS: `${token},-`,
+      ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1:9050",
+    });
+    assert.deepEqual(config.federationPeerTokens, [token, null]);
+  });
+
+  it("never treats the disposable HTTP-token flag as an onion exception", () => {
+    assert.throws(
+      () =>
+        readConfig({
+          ORDERBOOK_FEDERATION_PEERS: `http://${ONION_HOST}/api`,
+          ORDERBOOK_FEDERATION_PEER_TOKENS: "11".repeat(32),
+          ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1:9050",
+          ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "true",
+        }),
+      /cannot be sent over HTTP onion peers/,
+    );
+  });
+
+  it("allows authenticated HTTPS onion peers through the explicit SOCKS route", () => {
+    const token = "22".repeat(32);
+    const config = readConfig({
+      ORDERBOOK_FEDERATION_PEERS: `https://${ONION_HOST}/api`,
+      ORDERBOOK_FEDERATION_PEER_TOKENS: token,
+      ORDERBOOK_FEDERATION_ONION_PROXY: "socks5h://127.0.0.1:9050",
+    });
+    assert.deepEqual(config.federationPeerTokens, [token]);
   });
 });

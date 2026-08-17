@@ -88,10 +88,44 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose -f compose.federation-lab.yaml config --quiet
+          docker compose -f compose.yaml -f compose.tor.yaml config --quiet
+          docker compose -f compose.yaml -f compose.tor.yaml config --format json \
+            | jq -e '
+                (.services.orderbook.networks | keys) == ["tor-socks"] and
+                ((.services.orderbook.ports // []) | length) == 0 and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ONION_PROXY == "socks5h://tor:9050" and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ONION_ONLY == "true" and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS == "false" and
+                .networks["tor-socks"].internal == true and
+                any(.services.tor.volumes[];
+                  .target == "/var/lib/quantaswap-tor/data" and .type == "volume") and
+                any(.services.tor.volumes[];
+                  .target == "/var/lib/quantaswap-tor/hidden-service" and .type == "volume") and
+                any(.services["admin-proxy"].ports[];
+                  .host_ip == "127.0.0.1" and .target == 8091) and
+                ([.services[] | (.ports // [])[] |
+                  select(.target == 9050 or .published == "9050")] | length) == 0 and
+                ([.services.tor, .services["admin-proxy"]] | all(.[];
+                  .user == "10001:10001" and
+                  .read_only == true and
+                  (.cap_drop | index("ALL")) != null and
+                  (.security_opt | index("no-new-privileges:true")) != null))
+              '
 
       - name: Build runtime image
         working-directory: server
         run: docker build --tag quantaswap-orderbook:ci .
+
+      - name: Build Tor sidecars
+        working-directory: server
+        run: docker compose -f compose.yaml -f compose.tor.yaml build --pull tor admin-proxy
+
+      - name: Verify Tor sidecar image metadata
+        run: |
+          for image in quantaswap-orderbook-tor:local quantaswap-orderbook-tor-admin:local; do
+            test "$(docker image inspect "$image" --format '{{.Config.User}}')" = 10001:10001
+            test "$(docker image inspect "$image" --format '{{index .Config.Healthcheck.Test 0}}')" = CMD
+          done
 
       - name: Verify hardened runtime and packaged tests
         run: |

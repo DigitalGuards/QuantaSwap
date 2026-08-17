@@ -438,8 +438,22 @@ The feed remains publicly readable. A mirror may set one 32-byte lowercase-hex
 selects the independent authenticated lane. Pulling mirrors put the remote
 tokens, aligned one-for-one with `ORDERBOOK_FEDERATION_PEERS`, in
 `ORDERBOOK_FEDERATION_PEER_TOKENS`. Setting the outbound variable requires one
-64-character token for every configured peer. Token comparison is constant
-time, and tokens stay out of status, logs, events, and state files.
+entry for every configured peer. An entry is either a 64-character token or
+the literal `-` for a public-lane peer. Token comparison is constant time, and
+tokens stay out of status, logs, events, and state files.
+
+A peer may be a canonical 56-character v3 onion hostname. Every onion peer
+requires an explicit `ORDERBOOK_FEDERATION_ONION_PROXY` using a plain
+`socks5h://host:port` URL whose host is the local `tor` sidecar or a literal
+loopback address. The puller sends the onion hostname to the SOCKS
+proxy as a domain and never falls back to native DNS or direct transport.
+Clearnet peers keep the ordinary direct HTTP(S) path. An HTTP onion peer must
+use the public feed lane and the `-` token entry, including when disposable-lab
+HTTP tokens are enabled. An HTTPS onion peer may use a bearer token under the
+ordinary certificate checks. Malformed and legacy v2 onion names fail startup.
+Set `ORDERBOOK_FEDERATION_ONION_ONLY=true` in a Tor-confined deployment to
+reject every clearnet peer at startup before native DNS or direct transport can
+be attempted.
 
 ## Endpoints
 

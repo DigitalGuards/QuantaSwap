@@ -1,0 +1,86 @@
+services:
+  orderbook:
+    environment:
+      ORDERBOOK_FEDERATION_ONION_PROXY: socks5h://tor:9050
+      ORDERBOOK_FEDERATION_ONION_ONLY: "true"
+      ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "false"
+    networks: !override
+      - tor-socks
+    ports: !reset []
+
+  admin-proxy:
+    image: ${ORDERBOOK_TOR_ADMIN_IMAGE:-quantaswap-orderbook-tor-admin:local}
+    build:
+      context: ./tor
+      dockerfile: AdminProxy.Dockerfile
+    user: "10001:10001"
+    depends_on:
+      orderbook:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ORDERBOOK_PORT:-8091}:8091"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    networks:
+      - admin-ingress
+      - tor-socks
+
+  tor:
+    image: ${ORDERBOOK_TOR_IMAGE:-quantaswap-orderbook-tor:local}
+    build:
+      context: ./tor
+    user: "10001:10001"
+    depends_on:
+      orderbook:
+        condition: service_healthy
+        restart: true
+    volumes:
+      - tor-data:/var/lib/quantaswap-tor/data
+      - tor-onion-identity:/var/lib/quantaswap-tor/hidden-service
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      tor-socks:
+        aliases:
+          - tor-socks
+      tor-egress: {}
+
+volumes:
+  tor-data:
+    name: ${ORDERBOOK_TOR_DATA_VOLUME:-quantaswap-orderbook-tor-data}
+  tor-onion-identity:
+    name: ${ORDERBOOK_TOR_IDENTITY_VOLUME:-quantaswap-orderbook-tor-identity}
+
+networks:
+  admin-ingress: {}
+  tor-socks:
+    internal: true
+  tor-egress: {}

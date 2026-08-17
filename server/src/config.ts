@@ -12,6 +12,8 @@ export interface ServerConfig {
   federationPeerTokens: Array<string | null>;
   federationReadToken: string | null;
   federationAllowInsecurePeerTokens: boolean;
+  federationOnionOnly: boolean;
+  federationOnionProxy: string | null;
   federationSyncMs: number;
   federationRequestTimeoutMs: number;
   corsOrigins: string[];
@@ -25,6 +27,11 @@ export interface ServerConfig {
 const MAX_FEDERATION_PEERS = 16;
 const FEDERATION_PEER_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 const FEDERATION_TOKEN_RE = /^[0-9a-f]{64}$/;
+export const V3_ONION_HOST_RE = /^[a-z2-7]{56}\.onion$/;
+
+export function isLocalOnionProxyHost(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "tor";
+}
 
 function booleanEnv(
   env: NodeJS.ProcessEnv,
@@ -95,6 +102,12 @@ function federationPeers(env: NodeJS.ProcessEnv): string[] {
     ) {
       throw new Error("ORDERBOOK_FEDERATION_PEERS URLs must be plain HTTP(S) base URLs");
     }
+    if (
+      (url.hostname.endsWith(".onion") || url.hostname.endsWith(".onion.")) &&
+      !V3_ONION_HOST_RE.test(url.hostname)
+    ) {
+      throw new Error("ORDERBOOK_FEDERATION_PEERS onion URLs must use canonical v3 hostnames");
+    }
     url.pathname = url.pathname.replace(/\/$/, "");
     return url.toString().replace(/\/$/, "");
   });
@@ -124,14 +137,43 @@ function federationPeerTokens(
 ): Array<string | null> {
   const raw = env["ORDERBOOK_FEDERATION_PEER_TOKENS"];
   if (raw === undefined || raw === "") return peers.map(() => null);
-  const tokens = raw.split(",");
-  if (tokens.length !== peers.length) {
+  const rawTokens = raw.split(",");
+  if (rawTokens.length !== peers.length) {
     throw new Error("ORDERBOOK_FEDERATION_PEER_TOKENS must contain one token for every peer");
   }
-  if (tokens.some((token) => !FEDERATION_TOKEN_RE.test(token))) {
-    throw new Error("ORDERBOOK_FEDERATION_PEER_TOKENS entries must be 32 bytes of lowercase hex");
+  if (rawTokens.some((token) => token !== "-" && !FEDERATION_TOKEN_RE.test(token))) {
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEER_TOKENS entries must be 32 bytes of lowercase hex or -",
+    );
   }
-  return tokens;
+  return rawTokens.map((token) => (token === "-" ? null : token));
+}
+
+function federationOnionProxy(env: NodeJS.ProcessEnv): string | null {
+  const raw = env["ORDERBOOK_FEDERATION_ONION_PROXY"];
+  if (raw === undefined || raw === "") return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("ORDERBOOK_FEDERATION_ONION_PROXY contains an invalid URL");
+  }
+  if (
+    url.protocol !== "socks5h:" ||
+    url.hostname === "" ||
+    !isLocalOnionProxyHost(url.hostname) ||
+    url.port === "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    (url.pathname !== "" && url.pathname !== "/") ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error(
+      "ORDERBOOK_FEDERATION_ONION_PROXY must be a plain socks5h URL with an explicit port",
+    );
+  }
+  return url.toString().replace(/\/$/, "");
 }
 
 function federationReadToken(env: NodeJS.ProcessEnv): string | null {
@@ -184,11 +226,37 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error("ORDERBOOK_DATA and ORDERBOOK_FEDERATION_DATA must be different files");
   }
   const peerTokens = federationPeerTokens(env, peers);
+  const onionProxy = federationOnionProxy(env);
+  const onionOnly = booleanEnv(env, "ORDERBOOK_FEDERATION_ONION_ONLY", false);
+  if (
+    onionOnly &&
+    peers.some((peer) => !V3_ONION_HOST_RE.test(new URL(peer).hostname))
+  ) {
+    throw new Error("ORDERBOOK_FEDERATION_ONION_ONLY requires every peer to use a v3 onion URL");
+  }
+  if (
+    onionProxy === null &&
+    peers.some((peer) => V3_ONION_HOST_RE.test(new URL(peer).hostname))
+  ) {
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEERS onion URLs require ORDERBOOK_FEDERATION_ONION_PROXY",
+    );
+  }
   const allowInsecurePeerTokens = booleanEnv(
     env,
     "ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS",
     false,
   );
+  if (
+    peers.some(
+      (peer, index) =>
+        peerTokens[index] !== null &&
+        new URL(peer).protocol === "http:" &&
+        V3_ONION_HOST_RE.test(new URL(peer).hostname),
+    )
+  ) {
+    throw new Error("ORDERBOOK_FEDERATION_PEER_TOKENS cannot be sent over HTTP onion peers");
+  }
   if (
     !allowInsecurePeerTokens &&
     peers.some((peer, index) => peerTokens[index] !== null && new URL(peer).protocol !== "https:")
@@ -207,6 +275,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     federationPeerTokens: peerTokens,
     federationReadToken: federationReadToken(env),
     federationAllowInsecurePeerTokens: allowInsecurePeerTokens,
+    federationOnionOnly: onionOnly,
+    federationOnionProxy: onionProxy,
     federationSyncMs: integerEnv(env, "ORDERBOOK_FEDERATION_SYNC_MS", 5000, 1000, 300_000),
     federationRequestTimeoutMs: integerEnv(
       env,

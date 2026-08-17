@@ -133,7 +133,9 @@ Set your generated 64-character lowercase-hex value as
 `ORDERBOOK_FEDERATION_READ_TOKEN`. Each operator pulling your feed puts that
 value in their aligned `ORDERBOOK_FEDERATION_PEER_TOKENS` list. Put the inbound
 token supplied by each remote operator at that peer's position in your own
-list. When the outbound list is set, every configured peer needs a token.
+list. When the outbound list is set, every configured peer needs either a token
+or the literal `-` public-lane sentinel. The onion-only profile in the next
+section uses `-` for every peer.
 
 Every peer paired with a bearer token must use HTTPS. Startup fails if an
 authenticated peer uses HTTP. The
@@ -183,7 +185,270 @@ Public order snapshots, SSE, status, and federation feeds use wildcard read
 CORS. Mutation responses echo only an exact configured origin, never
 credentials. Keep capability headers and request bodies out of proxy logs.
 
-## 4. Bootstrap two independent mirrors
+## 4. Run the onion-only Tor profile
+
+The optional `server/compose.tor.yaml` profile publishes the order-book API as
+a v3 onion service and routes outbound onion federation pulls through the same
+C Tor daemon. It is an onion-only topology. The merged Compose model attaches
+the order-book container only to the internal `tor-socks` network, which gives
+it no native DNS or direct Internet egress. Tor has a separate egress network.
+
+The base order-book port is removed from that container. A small, separately
+hardened administration proxy republishes it at
+`127.0.0.1:${ORDERBOOK_PORT:-8091}` for local health checks and maintenance.
+The Tor SOCKS port has no host publication. It listens only on the internal
+network shared with the order book.
+
+The Tor image is built locally from `server/tor/`. Its Debian base is pinned by
+multi-architecture digest and its C Tor package is pinned to an exact version.
+Tor and the administration proxy run as uid and gid 10001 with read-only root
+filesystems, all capabilities dropped, and `no-new-privileges` enabled.
+
+From `server/`, build the two local sidecars and start the merged model:
+
+```bash
+docker compose -f compose.yaml -f compose.tor.yaml build --pull tor admin-proxy
+docker compose -f compose.yaml -f compose.tor.yaml up -d --no-build
+docker compose -f compose.yaml -f compose.tor.yaml ps
+docker compose -f compose.yaml -f compose.tor.yaml logs --tail=100 tor
+curl --fail http://127.0.0.1:8091/api/health
+```
+
+Use only canonical 56-character v3 onion peers in this profile. Each aligned
+token position is the literal `-`, which selects the public feed lane:
+
+```dotenv
+ORDERBOOK_FEDERATION_PEERS=http://<first-56-character-v3-host>.onion/api,http://<second-56-character-v3-host>.onion/api
+ORDERBOOK_FEDERATION_PEER_IDS=onion-book-1,onion-book-2
+ORDERBOOK_FEDERATION_PEER_TOKENS=-,-
+ORDERBOOK_FEDERATION_ONION_ONLY=true
+ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS=false
+```
+
+The overlay sets
+`ORDERBOOK_FEDERATION_ONION_PROXY=socks5h://tor:9050`, fixes
+`ORDERBOOK_FEDERATION_ONION_ONLY=true`, and fixes
+`ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS=false`. An HTTP onion peer
+never receives an application bearer token. Startup rejects every configured
+peer that is not a canonical v3 onion URL. The `socks5h` route sends the
+hostname to Tor. Direct and native-DNS fallbacks are unavailable.
+
+### Verify the onion path
+
+The persistent identity volume defaults to
+`quantaswap-orderbook-tor-identity`. Set a stable custom name before first boot
+when required:
+
+```dotenv
+ORDERBOOK_TOR_IDENTITY_VOLUME=quantaswap-orderbook-tor-identity
+ORDERBOOK_TOR_DATA_VOLUME=quantaswap-orderbook-tor-data
+```
+
+The data volume retains Tor guard, consensus, and client state across container
+recreation. Long-lived guard state is part of the onion service's network
+privacy posture. Keep this volume private and reuse it with the identity
+volume. The identity volume remains separate so its secret key can use the
+narrow encrypted backup and restore procedure below.
+
+Read the generated public hostname:
+
+```bash
+compose=(docker compose -f compose.yaml -f compose.tor.yaml)
+onion_host=$("${compose[@]}" exec -T tor \
+  cat /var/lib/quantaswap-tor/hidden-service/hostname)
+printf '%s\n' "$onion_host"
+```
+
+The hostname must contain 56 lowercase base32 characters followed by
+`.onion`. Probe the full orderbook-to-SOCKS-to-onion path from the order-book
+container:
+
+```bash
+"${compose[@]}" exec -T -e ONION_HOST="$onion_host" orderbook \
+  node --input-type=module -e '
+    import { FederationPeerTransport } from "./dist/peer-transport.js";
+    const transport = new FederationPeerTransport("socks5h://tor:9050", {
+      connectTimeoutMs: 90000,
+    });
+    try {
+      const response = await transport.fetch(
+        `http://${process.env.ONION_HOST}/api/health`,
+        { redirect: "error", signal: AbortSignal.timeout(90000) },
+      );
+      console.log(`${response.status} ${await response.text()}`);
+      if (!response.ok) process.exitCode = 1;
+    } finally {
+      await transport.close();
+    }
+  '
+```
+
+The expected result is `200 {"status":"ok"}`. Also wait for every configured
+peer to become healthy:
+
+```bash
+curl --fail http://127.0.0.1:8091/api/status \
+  | jq -e '.status == "ok" and .federation.state == "healthy"'
+```
+
+### Browser and rate-limit constraints
+
+The overlay publishes the order-book API. It does not publish the reference
+frontend as an onion site. Ordinary browsers cannot resolve `.onion`; use Tor
+Browser or another explicitly Tor-aware client. A clearnet HTTPS frontend can
+also be prevented from fetching an HTTP onion API by mixed-content, CSP, or
+CORS policy. A browser onion deployment needs its own reviewed frontend,
+origin, CSP, wallet, and RPC design.
+
+Tor forwards every inbound onion stream from the sidecar's one internal IP.
+The order book therefore sees all onion visitors as one source. They share the
+per-source request limits, the 240 feed reads and four resets per minute, the
+single public-feed response slot, SSE limits, and other source-scoped quotas.
+One busy client can consume that shared allowance and cause `429` responses
+for other onion users. Keep `ORDERBOOK_TRUST_PROXY=none`: Tor supplies no
+authenticated original-client header. Monitor aggregate load, `429` responses,
+feed health, and request latency. This profile is sized for bounded testnet
+federation and direct operator probes.
+
+### Encrypt and restore the onion identity
+
+The named identity volume holds `hostname`, `hs_ed25519_public_key`, and
+`hs_ed25519_secret_key`. Possession of the secret key permits impersonation of
+the onion service. Loss of the key means loss of the hostname. Keep the backup
+encrypted, restrict it like a wallet key, and store the OpenPGP recovery key in
+a separate failure domain.
+
+Stop Tor and stream the complete identity directory directly into OpenPGP
+encryption. Replace the recipient placeholder with a reviewed fingerprint:
+
+```bash
+set -euo pipefail
+compose=(docker compose -f compose.yaml -f compose.tor.yaml)
+compose_json=$("${compose[@]}" config --format json)
+tor_image=$(jq -er '.services.tor.image' <<<"$compose_json")
+tor_image_id=$(docker image inspect --format '{{.Id}}' "$tor_image")
+identity_volume=$(jq -er '
+  .services.tor.volumes[]
+  | select(.target == "/var/lib/quantaswap-tor/hidden-service")
+  | .source
+' <<<"$compose_json")
+docker volume inspect "$identity_volume" >/dev/null
+offline_run=(
+  docker run --rm --network none --read-only
+  --cap-drop ALL --security-opt no-new-privileges:true
+  --pids-limit 32 --user 10001:10001
+)
+tor_needs_start=true
+trap 'if [ "$tor_needs_start" = true ]; then "${compose[@]}" start tor; fi' EXIT
+"${compose[@]}" stop tor
+"${offline_run[@]}" \
+  --mount "type=volume,src=$identity_volume,dst=/var/lib/quantaswap-tor/hidden-service,readonly" \
+  --entrypoint sh "$tor_image_id" -ec '
+    test -s /var/lib/quantaswap-tor/hidden-service/hostname
+    test -s /var/lib/quantaswap-tor/hidden-service/hs_ed25519_secret_key
+  '
+mkdir -p ./backups
+umask 077
+gpg_recipient=replace-with-reviewed-key-fingerprint
+backup_file="./backups/onion-identity-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
+if ! "${offline_run[@]}" \
+    --mount "type=volume,src=$identity_volume,dst=/var/lib/quantaswap-tor/hidden-service,readonly" \
+    --entrypoint tar "$tor_image_id" \
+      -C /var/lib/quantaswap-tor/hidden-service -czf - . \
+    | gpg --batch --yes --encrypt --recipient "$gpg_recipient" \
+        --output "$backup_file"; then
+  rm -f "$backup_file"
+  exit 1
+fi
+if ! gpg --batch --pinentry-mode error --list-only --decrypt "$backup_file" >/dev/null; then
+  rm -f "$backup_file"
+  exit 1
+fi
+"${compose[@]}" start tor
+tor_needs_start=false
+trap - EXIT
+```
+
+Periodically prove that the recovery key can decrypt and parse the archive:
+
+```bash
+set -o pipefail
+gpg --decrypt "$backup_file" | tar -tzf - >/dev/null
+```
+
+Restore into a new named volume so the current identity remains available for
+rollback. The target name in this example must not already exist:
+
+```bash
+set -euo pipefail
+compose=(docker compose -f compose.yaml -f compose.tor.yaml)
+compose_json=$("${compose[@]}" config --format json)
+tor_image=$(jq -er '.services.tor.image' <<<"$compose_json")
+tor_image_id=$(docker image inspect --format '{{.Id}}' "$tor_image")
+offline_run=(
+  docker run --rm --network none --read-only
+  --cap-drop ALL --security-opt no-new-privileges:true
+  --pids-limit 32 --user 10001:10001
+)
+backup_file=./backups/onion-identity-YYYYMMDDTHHMMSSZ.tar.gz.gpg
+restore_volume=quantaswap-orderbook-tor-identity-restore-YYYYMMDD
+if docker volume inspect "$restore_volume" >/dev/null 2>&1; then
+  echo "restore volume already exists" >&2
+  exit 1
+fi
+gpg --decrypt "$backup_file" | tar -tzf - >/dev/null
+docker volume create "$restore_volume" >/dev/null
+restore_complete=false
+trap 'if [ "$restore_complete" = false ]; then docker volume rm "$restore_volume" >/dev/null 2>&1 || true; fi' EXIT
+gpg --decrypt "$backup_file" \
+  | "${offline_run[@]}" --interactive \
+      --mount "type=volume,src=$restore_volume,dst=/var/lib/quantaswap-tor/hidden-service" \
+      --entrypoint tar "$tor_image_id" \
+        -C /var/lib/quantaswap-tor/hidden-service -xzf -
+"${offline_run[@]}" \
+  --mount "type=volume,src=$restore_volume,dst=/var/lib/quantaswap-tor/hidden-service,readonly" \
+  --entrypoint sh "$tor_image_id" -ec '
+      test "$(stat -c %a /var/lib/quantaswap-tor/hidden-service)" = 700
+      test "$(stat -c %a /var/lib/quantaswap-tor/hidden-service/hs_ed25519_secret_key)" = 600
+      grep -Eq "^[a-z2-7]{56}\\.onion$" \
+        /var/lib/quantaswap-tor/hidden-service/hostname
+  '
+restore_complete=true
+trap - EXIT
+```
+
+The restore volume is created empty. Its first mount uses the exact Tor image
+at the image's pre-created identity path, so Docker initializes the volume with
+the path's uid 10001 ownership and mode 0700 before the non-root extraction.
+Every backup, extraction, and verification helper uses `--network none`, a
+read-only root filesystem, no Linux capabilities, and
+`no-new-privileges`. The backup volume is mounted read-only, and decrypted
+archive bytes travel only through the pipe into the new volume.
+
+Record `ORDERBOOK_TOR_IDENTITY_VOLUME=$restore_volume` in `.env`, stop the
+current Tor container, and start the merged Compose model. Confirm that the
+hostname matches the recorded original, repeat the onion probe, and retain the
+previous volume until the recovery observation window ends.
+
+### Privacy boundary and Tor guidance
+
+This profile routes only the mirror's onion-service traffic and onion
+federation pulls. The browser, wallet extension, market maker, chain indexer,
+and their Ethereum and QRL RPC calls have separate network paths. Wallet
+addresses, amounts, HTLC calls, transaction hashes, and timing remain public on
+their respective chains. RPC and wallet providers can observe their own
+requests and may correlate them with public transactions. Tor transport for the
+order book does not create on-chain anonymity.
+
+Read the Tor Project's [onion-service setup and key
+guidance](https://community.torproject.org/onion-services/setup/), [onion
+service overview](https://community.torproject.org/onion-services/overview/),
+[Tor Browser onion-service
+guide](https://support.torproject.org/tor-browser/features/onion-services/),
+and [onion-service operational security
+guidance](https://community.torproject.org/onion-services/advanced/opsec/).
+
+## 5. Bootstrap two independent mirrors
 
 Each operator first confirms their own local service:
 
@@ -209,7 +474,7 @@ has its own identity and sequence, while mirrors converge on authenticated
 protocol evidence. A restart intentionally forgets pull cursors and requests a
 fresh bounded reset snapshot.
 
-## 5. Monitor the right signals
+## 6. Monitor the right signals
 
 Use both endpoints:
 
@@ -226,7 +491,7 @@ capability. Timestamp fields are Unix milliseconds.
 Also monitor HTTPS from a different network. A loopback-only health check cannot
 detect DNS, CDN, certificate, firewall, or reverse-proxy failures.
 
-## 6. Back up, update, and roll back
+## 7. Back up, update, and roll back
 
 The named volume contains `orders.json` plus `orders.json.federation`. Stop the
 service and stream a consistent archive directly into GPG encryption. Replace
@@ -247,7 +512,7 @@ if ! docker compose run --rm --no-deps --entrypoint tar orderbook \
   rm -f "$backup_file"
   exit 1
 fi
-if ! gpg --list-packets "$backup_file" >/dev/null; then
+if ! gpg --batch --pinentry-mode error --list-only --decrypt "$backup_file" >/dev/null; then
   rm -f "$backup_file"
   exit 1
 fi
@@ -259,9 +524,11 @@ trap - EXIT
 The pipeline leaves no plaintext backup directory. Its exit trap attempts to
 restart the service after every failure, and any failed stop, backup,
 verification, or restart leaves a nonzero exit. A failed partial output is
-removed. `gpg --list-packets` confirms that the result parses as an OpenPGP
-message; it does not prove that the private key and passphrase can restore the
-archive. Periodically run a
+removed. The noninteractive
+`gpg --batch --pinentry-mode error --list-only --decrypt` check confirms that
+the output is decryptable by an available key without opening pinentry. It does
+not prove that the interactive passphrase path can restore the archive.
+Periodically run a
 decrypt-and-list recovery drill on the workstation that holds the private key:
 
 ```bash
@@ -287,7 +554,7 @@ For an update:
 If startup rejects state, stop. Preserve the exact file and use the prior image
 for recovery. Never erase or replace state merely to make a new binary boot.
 
-## 7. Add the mirror to a browser build
+## 8. Add the mirror to a browser build
 
 Running a mirror does not automatically enroll it in the reference frontend.
 After operator, TLS, CORS, uptime, and incident-contact review, add it at build

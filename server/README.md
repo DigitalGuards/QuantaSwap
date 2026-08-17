@@ -130,6 +130,108 @@ does not fail `/api/health` or the top-level local status: this mirror can still
 serve verified state while operators alert separately on
 `federation.state != "healthy"`.
 
+## Optional Tor operator overlay
+
+`compose.tor.yaml` adds one locally built C Tor sidecar. Its Debian base image
+uses an immutable multi-architecture digest and the Debian Tor package uses an
+exact version. The container runs as uid and gid 10001, has a read-only root
+filesystem, drops every Linux capability, and enables `no-new-privileges`.
+
+The overlay creates a v3 onion service whose virtual port 80 reaches
+`orderbook:8091`. It also sets
+`ORDERBOOK_FEDERATION_ONION_PROXY=socks5h://tor:9050`. Tor binds port 9050 only
+to the internal `tor-socks` Compose network. No SOCKS port is published on the
+host.
+
+The order-book container is attached only to `tor-socks`, so native DNS and
+direct Internet egress are unavailable. A separate hardened `admin-proxy`
+sidecar preserves the host administration endpoint at
+`127.0.0.1:${ORDERBOOK_PORT:-8091}`. That loopback endpoint is intended for
+health checks and local maintenance in this onion-only topology.
+
+Build the pinned sidecar from the reviewed checkout, then start the merged
+configuration:
+
+```bash
+docker compose -f compose.yaml -f compose.tor.yaml build --pull tor admin-proxy
+docker compose -f compose.yaml -f compose.tor.yaml up -d --no-build
+docker compose -f compose.yaml -f compose.tor.yaml ps
+docker compose -f compose.yaml -f compose.tor.yaml logs --tail=100 tor
+```
+
+The onion hostname and its private identity keys live in the named
+`quantaswap-orderbook-tor-identity` volume. Tor guard, consensus, and client
+state lives separately in `quantaswap-orderbook-tor-data`, preserving the Tor
+instance's state across container recreation. Set
+`ORDERBOOK_TOR_IDENTITY_VOLUME` and `ORDERBOOK_TOR_DATA_VOLUME` in `.env` before
+first boot when the deployment needs different stable volume names. Reuse both
+volumes across rebuilds and restarts. Back up the identity volume separately.
+
+Configure only canonical v3 onion peers with this overlay. Align one token
+position with every peer, and use the literal `-` in every position to select
+the public feed lane:
+
+```dotenv
+ORDERBOOK_FEDERATION_PEERS=http://<first-56-character-v3-host>.onion/api,http://<second-56-character-v3-host>.onion/api
+ORDERBOOK_FEDERATION_PEER_IDS=onion-book-1,onion-book-2
+ORDERBOOK_FEDERATION_PEER_TOKENS=-,-
+ORDERBOOK_FEDERATION_ONION_ONLY=true
+ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS=false
+```
+
+The overlay fixes onion-only validation at `true` and the insecure-token flag
+at `false`. Startup rejects every peer that is not a canonical v3 onion URL.
+HTTP onion peers never receive an application bearer token. The `socks5h`
+transport sends the onion hostname to Tor and has no native-DNS or direct
+fallback.
+
+Read the generated hostname, then probe the complete orderbook-to-SOCKS-to-onion
+path from the running order-book container:
+
+```bash
+compose=(docker compose -f compose.yaml -f compose.tor.yaml)
+onion_host=$("${compose[@]}" exec -T tor \
+  cat /var/lib/quantaswap-tor/hidden-service/hostname)
+"${compose[@]}" exec -T -e ONION_HOST="$onion_host" orderbook \
+  node --input-type=module -e '
+    import { FederationPeerTransport } from "./dist/peer-transport.js";
+    const transport = new FederationPeerTransport("socks5h://tor:9050", {
+      connectTimeoutMs: 90000,
+    });
+    try {
+      const response = await transport.fetch(
+        `http://${process.env.ONION_HOST}/api/health`,
+        { redirect: "error", signal: AbortSignal.timeout(90000) },
+      );
+      console.log(`${response.status} ${await response.text()}`);
+      if (!response.ok) process.exitCode = 1;
+    } finally {
+      await transport.close();
+    }
+  '
+```
+
+The expected result is `200 {"status":"ok"}`. Every inbound onion connection
+reaches the order book from the Tor sidecar's single internal IP. All onion
+visitors consequently share the service's per-source request, reset, stream,
+and concurrency limits. One busy or abusive onion client can consume that
+shared allowance. Keep `ORDERBOOK_TRUST_PROXY=none`, monitor `429` responses,
+and treat this as a bounded testnet federation endpoint.
+
+A normal browser cannot resolve an onion hostname. Tor Browser can open the
+API, while this overlay does not publish the QuantaSwap frontend as an onion
+site. Browser mixed-content, CSP, and CORS rules can also block a clearnet page
+from fetching an HTTP onion API. Use the onion endpoint for server federation
+and direct Tor-aware probes unless the complete browser deployment has
+received a separate review.
+
+The Tor Project documents [onion-service setup and identity
+keys](https://community.torproject.org/onion-services/setup/) and [access from
+Tor Browser](https://support.torproject.org/tor-browser/features/onion-services/).
+Encrypted identity backup, restore, browser limits, and the complete privacy
+boundary are covered in
+[`../docs/MIRROR_OPERATORS.md`](../docs/MIRROR_OPERATORS.md).
+
 ## Local two-mirror acceptance lab
 
 The checked-in Compose lab proves two separately hardened containers and state
@@ -301,7 +403,7 @@ if ! docker compose run --rm --no-deps --entrypoint tar orderbook \
   rm -f "$backup_file"
   exit 1
 fi
-if ! gpg --list-packets "$backup_file" >/dev/null; then
+if ! gpg --batch --pinentry-mode error --list-only --decrypt "$backup_file" >/dev/null; then
   rm -f "$backup_file"
   exit 1
 fi
@@ -312,10 +414,11 @@ trap - EXIT
 
 This pipeline writes encrypted output directly. Its exit trap attempts to
 restart the service after every failure, and any failed stop, backup,
-verification, or restart leaves a nonzero exit. `gpg --list-packets` confirms
-that the output parses as an OpenPGP message. It does not prove that the private
-key and passphrase can restore the archive. Periodically run a decrypt-and-list
-recovery drill on the
+verification, or restart leaves a nonzero exit. The noninteractive
+`gpg --batch --pinentry-mode error --list-only --decrypt` check confirms that
+the output is decryptable by an available key without opening pinentry. It does
+not prove that the interactive passphrase path can restore the archive.
+Periodically run a decrypt-and-list recovery drill on the
 workstation that holds the private key:
 
 ```bash
