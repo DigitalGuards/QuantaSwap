@@ -1,12 +1,15 @@
 // EIP-6963 wallet discovery + connection for the Ethereum leg.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserProvider } from "ethers";
 import { ETH_LEG } from "../config";
+import { errorMessage } from "@/utils/errorMessage";
 
 export interface Eip1193Provider {
   request(args: { method: string; params?: unknown[] | object }): Promise<unknown>;
   on?(event: string, handler: (...args: unknown[]) => void): void;
+  off?(event: string, handler: (...args: unknown[]) => void): void;
+  removeListener?(event: string, handler: (...args: unknown[]) => void): void;
 }
 
 interface ProviderDetail {
@@ -21,10 +24,27 @@ declare global {
 }
 
 export function useEthWallet() {
+  const activeProviderRef = useRef<Eip1193Provider | null>(null);
+  const accountsListenerRef = useRef<{
+    provider: Eip1193Provider;
+    handler: (...args: unknown[]) => void;
+  } | null>(null);
+  const connectGenerationRef = useRef(0);
   const [providers, setProviders] = useState<ProviderDetail[]>([]);
   const [selected, setSelected] = useState<ProviderDetail | null>(null);
   const [account, setAccount] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const detachAccountsListener = useCallback(() => {
+    const current = accountsListenerRef.current;
+    accountsListenerRef.current = null;
+    if (!current) return;
+    if (current.provider.removeListener) {
+      current.provider.removeListener("accountsChanged", current.handler);
+      return;
+    }
+    current.provider.off?.("accountsChanged", current.handler);
+  }, []);
 
   useEffect(() => {
     const onAnnounce = (event: CustomEvent<ProviderDetail>) => {
@@ -41,8 +61,18 @@ export function useEthWallet() {
     return () => window.removeEventListener("eip6963:announceProvider", onAnnounce);
   }, []);
 
+  useEffect(
+    () => () => {
+      connectGenerationRef.current += 1;
+      activeProviderRef.current = null;
+      detachAccountsListener();
+    },
+    [detachAccountsListener]
+  );
+
   const connect = useCallback(
     async (choice?: ProviderDetail) => {
+      const generation = ++connectGenerationRef.current;
       setError(null);
       const detail =
         choice ??
@@ -62,27 +92,43 @@ export function useEthWallet() {
         const accounts = (await detail.provider.request({
           method: "eth_requestAccounts",
         })) as string[];
+        if (generation !== connectGenerationRef.current) return;
+        detachAccountsListener();
+        activeProviderRef.current = detail.provider;
         setSelected(detail);
         setAccount(accounts[0] ?? null);
-        detail.provider.on?.("accountsChanged", (accs) => {
+        setError(null);
+        const onAccountsChanged = (accs: unknown) => {
+          if (activeProviderRef.current !== detail.provider) return;
           const list = accs as string[];
           setAccount(list[0] ?? null);
-        });
+          setError(null);
+        };
+        accountsListenerRef.current = {
+          provider: detail.provider,
+          handler: onAccountsChanged,
+        };
+        detail.provider.on?.("accountsChanged", onAccountsChanged);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Wallet connection rejected");
+        if (generation === connectGenerationRef.current) {
+          setError(errorMessage(err));
+        }
       }
     },
-    [providers, selected]
+    [detachAccountsListener, providers, selected]
   );
 
   const disconnect = useCallback(() => {
     // EIP-1193 has no standard "revoke" call the app can rely on; matches
     // QuantaPool's convention of forgetting the local selection so the UI
     // reflects disconnected, even though the extension itself stays paired.
+    connectGenerationRef.current += 1;
+    activeProviderRef.current = null;
+    detachAccountsListener();
     setSelected(null);
     setAccount(null);
     setError(null);
-  }, []);
+  }, [detachAccountsListener]);
 
   const ensureSepolia = useCallback(async (): Promise<void> => {
     if (!selected) throw new Error("Ethereum wallet not connected");

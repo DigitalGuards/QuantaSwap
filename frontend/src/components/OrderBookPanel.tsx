@@ -57,6 +57,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
+import { errorMessage } from "@/utils/errorMessage";
 
 interface Props {
   ethAccount: string | null;
@@ -315,7 +316,7 @@ export function OrderBookPanel({
             onTaken(recovery);
             return;
           }
-          const message = err instanceof Error ? err.message : "Failed to request the order";
+          const message = errorMessage(err);
           setError(message);
           if (CAP_ERROR_RE.test(message)) setCapBlocked(true);
           void refresh();

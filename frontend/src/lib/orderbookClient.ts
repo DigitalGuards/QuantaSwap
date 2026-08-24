@@ -80,6 +80,11 @@ const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const defaultEventSource = (url: string): EventSourcePort =>
   new EventSource(url) as unknown as EventSourcePort;
 
+const defaultFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> => globalThis.fetch(input, init);
+
 function privateHeader(shareToken: string | undefined): Record<string, string> | undefined {
   return shareToken === undefined ? undefined : { "X-Share-Token": shareToken };
 }
@@ -212,7 +217,7 @@ export class OrderbookClient {
   constructor(mirror: OrderbookMirror, options: OrderbookClientOptions = {}) {
     this.bookId = mirror.id;
     this.apiBase = mirror.apiBase;
-    this.requestFetch = options.fetch ?? fetch;
+    this.requestFetch = options.fetch ?? defaultFetch;
     this.makeEventSource = options.eventSource ?? defaultEventSource;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
