@@ -342,8 +342,14 @@ export function MyOrderCard({
       <CardContent className="space-y-3">
         {order && fromSide && toSide && myOrder.fromAmount && myOrder.toAmount ? (
           <p className="text-sm">
-            Give <span className="font-data font-medium">{formatUnits(BigInt(myOrder.fromAmount), fromSide.decimals)} {fromSide.symbol}</span>{" "}
-            for <span className="font-data font-medium">{formatUnits(BigInt(myOrder.toAmount), toSide.decimals)} {toSide.symbol}</span>
+            Give{" "}
+            <span className="font-data font-medium">
+              {formatUnits(BigInt(myOrder.fromAmount), fromSide.decimals)} {fromSide.symbol}
+            </span>{" "}
+            for{" "}
+            <span className="font-data font-medium">
+              {formatUnits(BigInt(myOrder.toAmount), toSide.decimals)} {toSide.symbol}
+            </span>
           </p>
         ) : order && myOrder.direction === null ? (
           <p className="text-sm text-destructive">
@@ -355,16 +361,15 @@ export function MyOrderCard({
         {orphaned ? (
           <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
             <p className="text-xs leading-relaxed text-amber-400">
-              The listing is gone from the book, but your pre-funded escrow may still sit
-              on-chain. Release it to reclaim your funds; this handle keeps the swap secret until
-              then.
+              The listing is gone from the book, but your pre-funded escrow may still sit on-chain.
+              Release it to reclaim your funds; this handle keeps the swap secret until then.
             </p>
             <Button size="sm" variant="outline" disabled={busy} onClick={releaseEscrow}>
               {busy ? "Releasing…" : "Release escrow"}
             </Button>
           </div>
         ) : order?.status === "accepted" ? (
-          <p className="text-sm text-blue-accent">
+          <p className="text-sm text-identity-accent">
             {busy ? "Taker found: preparing the swap…" : "Taker found."}
           </p>
         ) : (

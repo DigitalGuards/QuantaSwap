@@ -31,13 +31,17 @@ function Section({
   return (
     <Card
       className={
-        accent === "secondary" ? "border-l-2 border-l-secondary" : "border-l-2 border-l-blue-accent"
+        accent === "secondary"
+          ? "border-l-2 border-l-secondary"
+          : "border-l-2 border-l-identity-accent"
       }
     >
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <Icon
-            className={accent === "secondary" ? "h-5 w-5 text-secondary" : "h-5 w-5 text-blue-accent"}
+            className={
+              accent === "secondary" ? "h-5 w-5 text-secondary" : "h-5 w-5 text-identity-accent"
+            }
           />
           {title}
         </CardTitle>
@@ -61,26 +65,28 @@ export function HowItWorksPage() {
 
       <Section icon={ArrowLeftRight} title="The problem QuantaSwap solves">
         <p>
-          Moving value between Ethereum and QRL normally means a bridge or an exchange holding
-          your coins for you. Both are custody: a bridge hack or a frozen account can take your
-          funds. QuantaSwap swaps coins directly between the two chains using hashed timelock
-          contracts, so no operator ever holds them. Every swap either completes on both sides or
-          refunds on both.
+          Moving value between Ethereum and QRL normally means a bridge or an exchange holding your
+          coins for you. Both are custody: a bridge hack or a frozen account can take your funds.
+          QuantaSwap swaps coins directly between the two chains using hashed timelock contracts, so
+          no operator ever holds them. Every swap either completes on both sides or refunds on both.
         </p>
       </Section>
 
       <Section icon={BookOpen} title="Finding a counterparty: the order book" accent="blue">
         <p>
-          Swaps start on the <Link to="/" className="text-blue-accent hover:underline">Swap page</Link>:
-          post an order naming what you give and what you want, or take one someone else posted.
+          Swaps start on the{" "}
+          <Link to="/" className="text-identity-accent hover:underline">
+            Swap page
+          </Link>
+          : post an order naming what you give and what you want, or take one someone else posted.
           The order book only introduces the two of you; it never holds funds, and both browsers
-          verify every amount, recipient, and timeout directly on-chain before committing
-          anything. If the order book vanished mid-swap, your coins would still settle or refund
-          through the contracts alone.
+          verify every amount, recipient, and timeout directly on-chain before committing anything.
+          If the order book vanished mid-swap, your coins would still settle or refund through the
+          contracts alone.
         </p>
         <p>
           Curious how the handshake below actually feels, without waiting for a counterparty? The{" "}
-          <Link to="/sandbox" className="text-blue-accent hover:underline">
+          <Link to="/sandbox" className="text-identity-accent hover:underline">
             Sandbox
           </Link>{" "}
           lets you play both sides of a swap from one browser and watch every step land on both
@@ -90,9 +96,9 @@ export function HowItWorksPage() {
 
       <Section icon={Lock} title="Step 1: Lock on both chains">
         <p>
-          You generate a random 32-byte secret in your browser and hash it with sha256. That hash
-          is the <strong>hashlock</strong>. You lock your coins on your chain against the hashlock,
-          and your counterparty locks theirs on the other chain against the <em>same</em> hashlock.
+          You generate a random 32-byte secret in your browser and hash it with sha256. That hash is
+          the <strong>hashlock</strong>. You lock your coins on your chain against the hashlock, and
+          your counterparty locks theirs on the other chain against the <em>same</em> hashlock.
         </p>
         <p>
           Neither lock can be spent without the secret, and each can be refunded to its owner once
@@ -109,31 +115,31 @@ export function HowItWorksPage() {
           on-chain.
         </p>
         <p>
-          Your counterparty reads that secret and uses it to claim the other leg. One reveal
-          unlocks both sides, so the swap is <strong>atomic</strong>: it is impossible for one
-          party to walk away with both coins.
+          Your counterparty reads that secret and uses it to claim the other leg. One reveal unlocks
+          both sides, so the swap is <strong>atomic</strong>: it is impossible for one party to walk
+          away with both coins.
         </p>
       </Section>
 
       <Section icon={Clock} title="Step 3: Refund if it stalls">
         <p>
-          Every lock carries a timeout. If a swap does not complete, whoever locked can refund
-          their own coins once their timeout passes. The two timeouts are deliberately uneven: the
-          initiator's is at least twice the responder's ({INITIATOR_HOURS}h versus{" "}
-          {RESPONDER_HOURS}h in the current demo), which removes any window where a claim and a
-          refund could both succeed.
+          Every lock carries a timeout. If a swap does not complete, whoever locked can refund their
+          own coins once their timeout passes. The two timeouts are deliberately uneven: the
+          initiator's is at least twice the responder's ({INITIATOR_HOURS}h versus {RESPONDER_HOURS}
+          h in the current demo), which removes any window where a claim and a refund could both
+          succeed.
         </p>
         <p>
-          The outcome is always clean: you get the coins you wanted, or you get your own coins
-          back. Never neither, never both.
+          The outcome is always clean: you get the coins you wanted, or you get your own coins back.
+          Never neither, never both.
         </p>
       </Section>
 
       <Section icon={Fuel} title="Receiving without gas" accent="blue">
         <p>
-          The claim is <strong>permissionless</strong>, and the recipient is fixed at the moment
-          the coins are locked. Anyone can submit the claim transaction, but the coins can only go
-          to the address chosen at lock time.
+          The claim is <strong>permissionless</strong>, and the recipient is fixed at the moment the
+          coins are locked. Anyone can submit the claim transaction, but the coins can only go to
+          the address chosen at lock time.
         </p>
         <p>
           That means you can receive on a chain where you hold no gas at all. A relayer, or your
@@ -173,7 +179,7 @@ export function HowItWorksPage() {
             href="https://qrlwallet.com"
             target="_blank"
             rel="noreferrer"
-            className="text-blue-accent hover:underline"
+            className="text-identity-accent hover:underline"
           >
             MyQRLWallet
           </a>
@@ -185,7 +191,7 @@ export function HowItWorksPage() {
             href="https://myqrlwallet.com"
             target="_blank"
             rel="noreferrer"
-            className="text-blue-accent hover:underline"
+            className="text-identity-accent hover:underline"
           >
             myqrlwallet.com
           </a>
@@ -194,7 +200,7 @@ export function HowItWorksPage() {
             href="https://zondscan.com"
             target="_blank"
             rel="noreferrer"
-            className="text-blue-accent hover:underline"
+            className="text-identity-accent hover:underline"
           >
             ZondScan
           </a>

@@ -214,16 +214,15 @@ export function OrderBookPanel({
     // Offline-maker rows are excluded from matching, so those go by
     // explicit id.
     const byId = order.makerSeen === false;
-    const request =
-      byId
-        ? acceptOrder(order.id, taker)
-        : takeOrder({
-            direction: order.direction,
-            asset: pair,
-            maxPay: order.toAmount,
-            minReceive: order.fromAmount,
-            ...taker,
-          });
+    const request = byId
+      ? acceptOrder(order.id, taker)
+      : takeOrder({
+          direction: order.direction,
+          asset: pair,
+          maxPay: order.toAmount,
+          minReceive: order.fromAmount,
+          ...taker,
+        });
     request
       .then(({ order: accepted, takerToken }) => {
         // Take-by-terms may legitimately fill a different row, but only
@@ -323,8 +322,12 @@ export function OrderBookPanel({
     const top = [askRows.at(-1)?.cumUnits ?? 0n, bidRows.at(-1)?.cumUnits ?? 0n];
     const bestAsk = askRows[0]?.price;
     const bestBid = bidRows[0]?.price;
-    const m = bestAsk !== undefined && bestBid !== undefined ? (bestAsk + bestBid) / 2 : (bestAsk ?? bestBid);
-    const s = bestAsk !== undefined && bestBid !== undefined && m ? ((bestAsk - bestBid) / m) * 100 : null;
+    const m =
+      bestAsk !== undefined && bestBid !== undefined
+        ? (bestAsk + bestBid) / 2
+        : (bestAsk ?? bestBid);
+    const s =
+      bestAsk !== undefined && bestBid !== undefined && m ? ((bestAsk - bestBid) / m) * 100 : null;
     return {
       asks: askRows,
       bids: bidRows,
@@ -362,7 +365,7 @@ export function OrderBookPanel({
         className={cn(
           "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
           selectable ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
-          pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
+          pending?.id === row.order.id && "bg-muted/40 ring-1 ring-identity-accent/40",
           offline && !own && "opacity-40",
         )}
       >
@@ -374,10 +377,12 @@ export function OrderBookPanel({
           )}
           style={{ width: `${depth}%` }}
         />
-        <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
+        <span
+          className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}
+        >
           {busyId === row.order.id ? "taking…" : fmtPrice(row.price, asset.decimals)}
           {own ? (
-            <span className="ml-1.5 rounded-sm bg-blue-accent/15 px-1 py-px text-[10px] font-medium text-blue-accent">
+            <span className="ml-1.5 rounded-sm bg-identity-accent/15 px-1 py-px text-[10px] font-medium text-identity-accent">
               yours
             </span>
           ) : null}
@@ -405,7 +410,10 @@ export function OrderBookPanel({
           <CardTitle className="text-lg">Order book</CardTitle>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
             {orders !== null ? (
-              <span aria-hidden className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success" />
+              <span
+                aria-hidden
+                className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success"
+              />
             ) : null}
             {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
           </span>
@@ -437,13 +445,13 @@ export function OrderBookPanel({
       <CardContent className="space-y-0 px-3 pb-3">
         {capBlocked ? (
           <div className="mx-2 mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-xs text-amber-400">
-            You have reached the per-visitor take limit (4 swaps at once, 24 per day). Finish or
-            let your current swaps expire before taking another.
+            You have reached the per-visitor take limit (4 swaps at once, 24 per day). Finish or let
+            your current swaps expire before taking another.
           </div>
         ) : null}
 
         {pending ? (
-          <div className="mx-2 mb-2 space-y-2 rounded-md border border-blue-accent/40 bg-blue-accent/10 p-3">
+          <div className="mx-2 mb-2 space-y-2 rounded-md border border-identity-accent/40 bg-identity-accent/10 p-3">
             {(() => {
               const t = describeTake(pending, asset);
               return (
@@ -467,8 +475,8 @@ export function OrderBookPanel({
                 </p>
               ) : escrow.issue !== null ? (
                 <p className="text-xs text-destructive">
-                  Pre-funded escrow check failed: {escrow.issue}. Taking is blocked; the listing
-                  is not what it claims.
+                  Pre-funded escrow check failed: {escrow.issue}. Taking is blocked; the listing is
+                  not what it claims.
                 </p>
               ) : escrow.status === "unverified" ? (
                 <p className="text-xs text-amber-400">
@@ -491,9 +499,7 @@ export function OrderBookPanel({
                 size="sm"
                 disabled={
                   !canTake ||
-                  (pending.prelocked === true &&
-                    escrow?.id === pending.id &&
-                    escrow.issue !== null)
+                  (pending.prelocked === true && escrow?.id === pending.id && escrow.issue !== null)
                 }
                 onClick={confirmTake}
               >
@@ -512,8 +518,14 @@ export function OrderBookPanel({
                     onPrefill({
                       direction: sellsAsset ? "qrl->eth" : "eth->qrl",
                       asset: pair,
-                      fromAmount: fmtAmount(BigInt(pending.toAmount), sellsAsset ? 18 : asset.decimals),
-                      toAmount: fmtAmount(BigInt(pending.fromAmount), sellsAsset ? asset.decimals : 18),
+                      fromAmount: fmtAmount(
+                        BigInt(pending.toAmount),
+                        sellsAsset ? 18 : asset.decimals,
+                      ),
+                      toAmount: fmtAmount(
+                        BigInt(pending.fromAmount),
+                        sellsAsset ? asset.decimals : 18,
+                      ),
                     });
                     setPending(null);
                   }}

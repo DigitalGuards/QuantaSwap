@@ -16,13 +16,17 @@ function Section({
   return (
     <Card
       className={
-        accent === "secondary" ? "border-l-2 border-l-secondary" : "border-l-2 border-l-blue-accent"
+        accent === "secondary"
+          ? "border-l-2 border-l-secondary"
+          : "border-l-2 border-l-identity-accent"
       }
     >
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
           <Icon
-            className={accent === "secondary" ? "h-5 w-5 text-secondary" : "h-5 w-5 text-blue-accent"}
+            className={
+              accent === "secondary" ? "h-5 w-5 text-secondary" : "h-5 w-5 text-identity-accent"
+            }
           />
           {title}
         </CardTitle>
@@ -49,13 +53,12 @@ export function LegalPage() {
           Everything on this site runs exclusively on test networks: the Ethereum Sepolia testnet
           and the QRL 2.0 (Zond) testnet. Sepolia ETH, testnet QRL, and the test tokens listed on
           the order book are test assets with no monetary value. They cannot be bought or sold for
-          money and represent no claim on anyone. No real funds are involved anywhere on this
-          site.
+          money and represent no claim on anyone. No real funds are involved anywhere on this site.
         </p>
         <p>
-          The QuantaSwap contracts are not deployed on any mainnet. If a mainnet deployment
-          happens in the future, it will be announced separately and will operate under its own
-          terms and structure.
+          The QuantaSwap contracts are not deployed on any mainnet. If a mainnet deployment happens
+          in the future, it will be announced separately and will operate under its own terms and
+          structure.
         </p>
       </Section>
 
@@ -80,21 +83,21 @@ export function LegalPage() {
         <p>
           This site and the underlying contracts are provided as-is and as-available, without
           warranties of any kind, in line with sections 15 and 16 of the GPL-3.0 license. This is
-          experimental software under active development; expect bugs, resets, and breaking
-          changes. To the maximum extent permitted by law, DigitalGuards accepts no liability for
-          any loss or damage arising from its use.
+          experimental software under active development; expect bugs, resets, and breaking changes.
+          To the maximum extent permitted by law, DigitalGuards accepts no liability for any loss or
+          damage arising from its use.
         </p>
       </Section>
 
       <Section icon={Code2} title="Open source" accent="blue">
         <p>
-          QuantaSwap is open source under the GPL-3.0 license. The contracts, frontend, order
-          book, and market maker are published at{" "}
+          QuantaSwap is open source under the GPL-3.0 license. The contracts, frontend, order book,
+          and market maker are published at{" "}
           <a
             href={GITHUB_URL}
             target="_blank"
             rel="noreferrer"
-            className="text-blue-accent hover:underline"
+            className="text-identity-accent hover:underline"
           >
             github.com/DigitalGuards/QuantaSwap
           </a>
@@ -104,18 +107,17 @@ export function LegalPage() {
 
       <Section icon={Building2} title="Provider">
         <p>
-          This site is operated by DigitalGuards, a sole proprietorship (eenmanszaak) registered
-          in the Netherlands, Chamber of Commerce (KvK) number 91987482. Contact:{" "}
-          <a href="mailto:info@digitalguards.nl" className="text-blue-accent hover:underline">
+          This site is operated by DigitalGuards, a sole proprietorship (eenmanszaak) registered in
+          the Netherlands, Chamber of Commerce (KvK) number 91987482. Contact:{" "}
+          <a href="mailto:info@digitalguards.nl" className="text-identity-accent hover:underline">
             info@digitalguards.nl
           </a>
-          . The full imprint and the legal documents for the MyQRLWallet products are published
-          at{" "}
+          . The full imprint and the legal documents for the MyQRLWallet products are published at{" "}
           <a
             href="https://qrlwallet.com/legal"
             target="_blank"
             rel="noreferrer"
-            className="text-blue-accent hover:underline"
+            className="text-identity-accent hover:underline"
           >
             qrlwallet.com/legal
           </a>

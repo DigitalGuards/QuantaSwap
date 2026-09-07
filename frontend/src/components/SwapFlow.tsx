@@ -18,11 +18,7 @@ import {
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
-import {
-  makeLegSender,
-  makePreflightedClaimSender,
-  sendEthTokenLock,
-} from "@/lib/legSender";
+import { makeLegSender, makePreflightedClaimSender, sendEthTokenLock } from "@/lib/legSender";
 import {
   hasCurrentTermBinding,
   initiatorLeg,
@@ -57,7 +53,7 @@ interface Props {
 
 const pillStyles: Record<string, string> = {
   none: "bg-muted/40 text-muted-foreground",
-  open: "bg-blue-accent/10 text-blue-accent",
+  open: "bg-identity-accent/10 text-identity-accent",
   claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
@@ -121,10 +117,7 @@ export function SwapFlow({
   const refresh = useCallback(async () => {
     if (!hashlock) return;
     try {
-      const [i, r] = await Promise.all([
-        getLegState(iLeg, hashlock),
-        getLegState(rLeg, hashlock),
-      ]);
+      const [i, r] = await Promise.all([getLegState(iLeg, hashlock), getLegState(rLeg, hashlock)]);
       setLegs({ [iLeg]: i, [rLeg]: r });
       setNowS(Math.floor(Date.now() / 1000));
     } catch {
@@ -267,7 +260,8 @@ export function SwapFlow({
   // closed, or the maker could delete the only copy of the hashlock while
   // the escrow is still Open. Once loaded, an Open escrow flows into
   // ownLockedLegs (warning + release) and a settled one frees the discard.
-  const prelockChainUnknown = swap.prelocked === true && swap.role === "maker" && iState === undefined;
+  const prelockChainUnknown =
+    swap.prelocked === true && swap.role === "maker" && iState === undefined;
   const ethAsset = ETH_ASSETS[swap.ethAsset];
   const iPlan = legPlan[iLeg];
   const rPlan = legPlan[rLeg];
@@ -440,9 +434,9 @@ export function SwapFlow({
       <CardContent className="space-y-1">
         {!termsBound ? (
           <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
-            This saved swap predates local term binding. New locks, assignments, and secret-revealing
-            claims are disabled. Keep this record for refund, release, or a taker's public-secret
-            claim recovery.
+            This saved swap predates local term binding. New locks, assignments, and
+            secret-revealing claims are disabled. Keep this record for refund, release, or a taker's
+            public-secret claim recovery.
           </p>
         ) : null}
         {complete ? (
@@ -482,7 +476,7 @@ export function SwapFlow({
                   step.done
                     ? "border-success/60 bg-success/10 text-success"
                     : step.own && step.canRun
-                      ? "border-blue-accent/60 text-blue-accent"
+                      ? "border-identity-accent/60 text-identity-accent"
                       : "border-border text-muted-foreground",
                 )}
               >
@@ -547,9 +541,9 @@ export function SwapFlow({
                       </Button>
                     </div>
                   ) : step.canRun ? (
-                    <p className="text-xs text-blue-accent">{view.waitingText}</p>
+                    <p className="text-xs text-identity-accent">{view.waitingText}</p>
                   ) : step.key === "lock-responder" && awaitingAssign ? (
-                    <p className="text-xs text-blue-accent">
+                    <p className="text-xs text-identity-accent">
                       {presentation["assign-initiator"].waitingText}
                     </p>
                   ) : null)}

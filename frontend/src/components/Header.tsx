@@ -3,7 +3,6 @@ import { Wallet, LogOut } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/UI/Button";
 import { shortAddr } from "@/lib/htlc";
-import { cn } from "@/utils/cn";
 import { QRL_LEG, ETH_LEG } from "@/config";
 import type { QrlStatus } from "@/hooks/useQrlWallet";
 
@@ -35,18 +34,31 @@ function WalletSlot({
 }: WalletSlotProps) {
   if (account) {
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <a
           href={`${explorerBase}${account}`}
           target="_blank"
           rel="noreferrer"
-          title={`View address on ${explorerName}`}
-          className="font-data rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs text-blue-accent transition-colors hover:border-blue-accent/50"
+          title={`${account}: view on ${explorerName}`}
+          aria-label={`${label} address ${account}`}
+          className="font-data inline-flex min-h-9 items-center gap-2 whitespace-nowrap rounded-md border border-identity-accent/15 bg-identity-accent/[0.04] px-2.5 text-xs text-identity-accent transition-colors hover:border-identity-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
-          {shortAddr(account)}
+          <span className="hidden font-sans text-[10px] font-medium text-muted-foreground sm:inline">
+            {label.split(" ")[0]}
+          </span>
+          <span className="sm:hidden">
+            {account.slice(0, 4)}…{account.slice(-4)}
+          </span>
+          <span className="hidden sm:inline">{shortAddr(account)}</span>
         </a>
         {onDisconnect ? (
-          <Button variant="ghost" size="sm" onClick={onDisconnect} aria-label={`Disconnect ${label}`}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="px-2 text-muted-foreground"
+            onClick={onDisconnect}
+            aria-label={`Disconnect ${label}`}
+          >
             <LogOut className="h-4 w-4" />
           </Button>
         ) : null}
@@ -54,15 +66,16 @@ function WalletSlot({
     );
   }
   return (
-    <Button size="sm" disabled={pending} onClick={onConnect}>
+    <Button size="sm" disabled={pending} onClick={onConnect} aria-label={`Connect ${label}`}>
       <Wallet className="h-4 w-4" />
-      <span className="hidden sm:inline">{pending ? "Pairing…" : label}</span>
+      <span>{pending ? "Pairing…" : label}</span>
     </Button>
   );
 }
 
 interface Props {
   ethAccount: string | null;
+  ethPending?: boolean;
   onConnectEth: () => void;
   onDisconnectEth: () => void;
   qrlAccount: string | null;
@@ -74,33 +87,22 @@ interface Props {
 export function Header(props: Props) {
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4">
-        <div className="flex items-center gap-6">
+      <div className="mx-auto flex min-h-18 max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-3 px-4 py-3 sm:flex-nowrap sm:py-0">
+        <div className="flex items-center gap-8 sm:self-stretch">
           <Link to="/" aria-label="QuantaSwap home">
             <Logo />
           </Link>
-          <nav className="hidden items-center gap-1 md:flex">
+          <nav aria-label="Main navigation" className="hidden items-stretch gap-6 lg:flex">
             {navItems.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end
-                className={({ isActive }) =>
-                  cn(
-                    "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                    isActive
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:text-foreground",
-                  )
-                }
-              >
+              <NavLink key={item.to} to={item.to} end className="header-nav-link">
                 {item.label}
               </NavLink>
             ))}
           </nav>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="hidden rounded-full border border-secondary/40 bg-secondary/10 px-2.5 py-0.5 text-xs font-medium text-secondary sm:inline">
+        <span className="text-xs font-medium text-muted-foreground sm:hidden">Testnet</span>
+        <div className="flex w-full items-center justify-end gap-3 sm:w-auto">
+          <span className="mr-1 hidden text-xs font-medium text-muted-foreground sm:inline">
             Testnet
           </span>
           <WalletSlot
@@ -108,6 +110,7 @@ export function Header(props: Props) {
             account={props.ethAccount}
             explorerBase={ETH_LEG.explorerAddress}
             explorerName="Etherscan"
+            pending={props.ethPending ?? false}
             onConnect={props.onConnectEth}
             onDisconnect={props.ethAccount ? props.onDisconnectEth : undefined}
           />
@@ -123,19 +126,12 @@ export function Header(props: Props) {
         </div>
       </div>
       {/* Mobile nav */}
-      <nav className="flex items-center justify-around border-t border-border/60 py-2 md:hidden">
+      <nav
+        aria-label="Mobile navigation"
+        className="flex items-center justify-around border-t border-border/60 lg:hidden"
+      >
         {navItems.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end
-            className={({ isActive }) =>
-              cn(
-                "px-3 py-1 text-sm font-medium",
-                isActive ? "text-primary" : "text-muted-foreground hover:text-foreground",
-              )
-            }
-          >
+          <NavLink key={item.to} to={item.to} end className="header-nav-link">
             {item.label}
           </NavLink>
         ))}
