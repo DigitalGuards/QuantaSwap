@@ -69,7 +69,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
     kind: "From" | "To",
     leg: typeof ETH_LEG | typeof QRL_LEG,
     value: string,
-    setValue: (v: string) => void
+    setValue: (v: string) => void,
   ) => (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -123,7 +123,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
           <div className="flex justify-between">
             <span className="text-muted-foreground">Receive to</span>
-            <span className="font-data text-xs text-blue-accent">
+            <span className="font-data text-xs text-identity-accent">
               {toLeg.key === "qrl"
                 ? qrlAccount
                   ? shortAddr(qrlAccount)
