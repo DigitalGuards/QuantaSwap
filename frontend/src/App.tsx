@@ -97,6 +97,8 @@ export default function App() {
         error={eth.error}
         onSelect={(wallet) => void eth.connect(wallet)}
         onMetaMask={() => void eth.connectMetaMask()}
+        walletConnectAvailable={eth.walletConnectAvailable}
+        onWalletConnect={() => void eth.connectWalletConnect()}
         onClose={eth.closePicker}
       />
 

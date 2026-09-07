@@ -1,11 +1,21 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
+import {
+  getWalletConnectClient,
+  rememberWalletConnect,
+  shouldRestoreWalletConnect,
+  type WalletConnectClient,
+} from "@/lib/walletConnect";
 import { useEthWallet, type ProviderDetail } from "./useEthWallet";
 
 vi.mock("@/lib/metaMask", () => ({ getMetaMaskClient: vi.fn() }));
+vi.mock("@/lib/walletConnect", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/walletConnect")>()),
+  getWalletConnectClient: vi.fn(),
+}));
 
 const accountA = `0x${"11".repeat(20)}`;
 const accountB = `0x${"22".repeat(20)}`;
@@ -15,7 +25,7 @@ class FakeProvider {
   handlers = new Map<string, Set<(...args: unknown[]) => void>>();
   request = vi.fn(
     async ({ method }: { method: string; params?: unknown[] | object }): Promise<unknown> => {
-      if (method === "eth_requestAccounts") return [accountA];
+      if (method === "eth_requestAccounts" || method === "eth_accounts") return [accountA];
       if (method === "eth_chainId") return "0xaa36a7";
       if (method === "wallet_switchEthereumChain") return null;
       throw new Error(`Unexpected request: ${method}`);
@@ -36,7 +46,10 @@ class FakeProvider {
 
 function wallet(name = "MetaMask", rdns = "io.metamask") {
   const provider = new FakeProvider();
-  const detail = { info: { uuid: name, name, rdns, icon: "" }, provider } satisfies ProviderDetail;
+  const detail = {
+    info: { uuid: name, name, rdns, icon: "" },
+    provider,
+  } satisfies ProviderDetail;
   return detail;
 }
 
@@ -73,6 +86,131 @@ afterEach(() => {
   cleanups.splice(0).forEach((dispose) => dispose());
   Reflect.deleteProperty(window, "ethereum");
   vi.clearAllMocks();
+  localStorage.clear();
+  vi.unstubAllEnvs();
+});
+
+function mockWalletConnect() {
+  const client = Object.assign(new FakeProvider(), {
+    enable: vi.fn(async () => [accountA]),
+    disconnect: vi.fn(async () => undefined),
+    session: {} as object | undefined,
+  });
+  vi.mocked(getWalletConnectClient).mockResolvedValue(client as unknown as WalletConnectClient);
+  return client;
+}
+
+describe("WalletConnect connections", () => {
+  beforeEach(() => vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", "0".repeat(32)));
+
+  it("loads on selection, follows account changes, and closes the session on disconnect", async () => {
+    const client = mockWalletConnect();
+    const { result } = renderHook(useEthWallet);
+    expect(getWalletConnectClient).not.toHaveBeenCalled();
+    act(() => result.current.openPicker());
+    await act(async () => result.current.connectWalletConnect());
+    expect(client.enable).toHaveBeenCalledOnce();
+    expect(result.current.walletName).toBe("WalletConnect");
+    expect(result.current.pickerOpen).toBe(false);
+    expect(shouldRestoreWalletConnect()).toBe(true);
+    act(() => client.emit("accountsChanged", [accountB]));
+    expect(result.current.account).toBe(accountB);
+    await act(async () => result.current.disconnect());
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(result.current.account).toBeNull();
+    expect(client.handlers.get("accountsChanged")?.size).toBe(0);
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
+
+  it.each(["accountsChanged", "disconnect"])(
+    "clears the remembered choice after wallet-side %s",
+    async (event) => {
+      const client = mockWalletConnect();
+      const { result } = renderHook(useEthWallet);
+      await act(async () => result.current.connectWalletConnect());
+      act(() => client.emit(event, []));
+      expect(result.current.account).toBeNull();
+      expect(shouldRestoreWalletConnect()).toBe(false);
+    },
+  );
+
+  it("restores an existing session without a new QR or approval request", async () => {
+    const client = mockWalletConnect();
+    rememberWalletConnect(true);
+    const { result } = renderHook(useEthWallet);
+    await waitFor(() => expect(result.current.account).toBe(accountA));
+    expect(client.request).toHaveBeenCalledWith({ method: "eth_accounts" });
+    expect(client.enable).not.toHaveBeenCalled();
+    expect(result.current.pickerOpen).toBe(false);
+    expect(result.current.pendingId).toBeNull();
+  });
+
+  it("forgets an expired session without creating a replacement pairing", async () => {
+    const client = mockWalletConnect();
+    client.session = undefined;
+    rememberWalletConnect(true);
+    const { result } = renderHook(useEthWallet);
+    await waitFor(() => expect(result.current.pendingId).toBeNull());
+    expect(result.current.account).toBeNull();
+    expect(client.enable).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalled();
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
+
+  it("returns to the chooser after QR cancellation and permits retry", async () => {
+    const client = mockWalletConnect();
+    client.session = undefined;
+    client.enable.mockRejectedValueOnce(new Error("Connection request reset. Please try again."));
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connectWalletConnect());
+    expect(result.current.pickerOpen).toBe(true);
+    expect(result.current.error).toMatch(/Connection canceled/);
+    expect(result.current.pendingId).toBeNull();
+    await act(async () => result.current.connectWalletConnect());
+    expect(result.current.account).toBe(accountA);
+  });
+
+  it("retires an approved session that has no usable account", async () => {
+    const client = mockWalletConnect();
+    client.enable.mockResolvedValueOnce([]);
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connectWalletConnect());
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(result.current.account).toBeNull();
+    expect(result.current.error).toMatch(/did not share/);
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
+
+  it("ignores and closes a session approved after unmount", async () => {
+    const client = mockWalletConnect();
+    const pending = deferred<string[]>();
+    client.enable.mockReturnValueOnce(pending.promise);
+    const { result, unmount } = renderHook(useEthWallet);
+    let connecting!: Promise<void>;
+    await act(async () => {
+      connecting = result.current.connectWalletConnect();
+    });
+    await act(async () => result.current.connectMetaMask());
+    expect(getMetaMaskClient).not.toHaveBeenCalled();
+    unmount();
+    await act(async () => {
+      pending.resolve([accountA]);
+      await connecting;
+    });
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
+
+  it("keeps a disconnected session forgotten when SDK teardown fails", async () => {
+    const client = mockWalletConnect();
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connectWalletConnect());
+    client.disconnect.mockRejectedValueOnce(new Error("Offline"));
+    await act(async () => result.current.disconnect());
+    expect(result.current.account).toBeNull();
+    expect(result.current.error).toMatch(/Disconnect QuantaSwap in your wallet too/);
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
 });
 
 describe("Ethereum wallet selection", () => {
@@ -107,7 +245,10 @@ describe("Ethereum wallet selection", () => {
 
   it("offers an older injected provider as an explicit choice", async () => {
     const provider = new FakeProvider();
-    Object.defineProperty(window, "ethereum", { configurable: true, value: provider });
+    Object.defineProperty(window, "ethereum", {
+      configurable: true,
+      value: provider,
+    });
     const { result } = renderHook(useEthWallet);
     act(() => result.current.openPicker());
     expect(provider.request).not.toHaveBeenCalled();
