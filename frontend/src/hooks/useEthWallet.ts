@@ -2,6 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserProvider } from "ethers";
 import { ETH_LEG } from "@/config";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
+import {
+  getWalletConnectClient,
+  isWalletConnectConfigured,
+  rememberWalletConnect,
+  shouldRestoreWalletConnect,
+  type WalletConnectClient,
+} from "@/lib/walletConnect";
 import { errorMessage, isUserRejection } from "@/utils/errorMessage";
 
 export interface Eip1193Provider {
@@ -28,6 +35,18 @@ function firstAccount(value: unknown): string | null {
   return typeof account === "string" && /^0x[\da-f]{40}$/i.test(account) ? account : null;
 }
 
+function walletConnectDetail(client: WalletConnectClient): ProviderDetail {
+  return {
+    info: {
+      uuid: "walletconnect",
+      name: "WalletConnect",
+      icon: "",
+      rdns: "com.walletconnect",
+    },
+    provider: client,
+  };
+}
+
 export function useEthWallet() {
   const [announced, setAnnounced] = useState<ProviderDetail[]>([]);
   const [legacy, setLegacy] = useState<ProviderDetail | null>(null);
@@ -43,6 +62,7 @@ export function useEthWallet() {
   const activeRef = useRef<Eip1193Provider | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const metaMaskRef = useRef<MetaMaskClient | null>(null);
+  const walletConnectRef = useRef<WalletConnectClient | null>(null);
 
   useEffect(() => {
     const onAnnounce = (event: CustomEvent<ProviderDetail>) => {
@@ -101,7 +121,12 @@ export function useEthWallet() {
     setLegacy(
       provider && typeof provider.request === "function" && !qrlProvidersRef.current.has(provider)
         ? {
-            info: { uuid: "window.ethereum", name: "Browser wallet", icon: "", rdns: "" },
+            info: {
+              uuid: "window.ethereum",
+              name: "Browser wallet",
+              icon: "",
+              rdns: "",
+            },
             provider,
           }
         : null,
@@ -126,6 +151,7 @@ export function useEthWallet() {
         throw new Error("Your wallet did not share an Ethereum account. Try connecting again.");
       detach();
       activeRef.current = detail.provider;
+      rememberWalletConnect(detail.info.uuid === "walletconnect");
       setSelected(detail);
       setAccount(next);
       setError(null);
@@ -136,6 +162,7 @@ export function useEthWallet() {
         setAccount(nextAccount);
         setError(null);
         if (!nextAccount) {
+          rememberWalletConnect(false);
           setSelected(null);
           detach();
         }
@@ -143,6 +170,7 @@ export function useEthWallet() {
       const onDisconnect = () => {
         if (activeRef.current !== detail.provider) return;
         generationRef.current += 1;
+        rememberWalletConnect(false);
         detach();
         setSelected(null);
         setAccount(null);
@@ -163,6 +191,39 @@ export function useEthWallet() {
     [detach],
   );
 
+  useEffect(() => {
+    if (!shouldRestoreWalletConnect()) return;
+    const generation = ++generationRef.current;
+    busyRef.current = true;
+    setPendingId("walletconnect");
+    void (async () => {
+      try {
+        const client = await getWalletConnectClient();
+        walletConnectRef.current = client;
+        if (generation !== generationRef.current) return;
+        if (!client.session) {
+          rememberWalletConnect(false);
+          return;
+        }
+        // Restore an approved session without opening a new pairing request.
+        const accounts = await client.request({ method: "eth_accounts" });
+        if (generation === generationRef.current) {
+          attach(walletConnectDetail(client), accounts);
+        }
+      } catch {
+        if (generation === generationRef.current) rememberWalletConnect(false);
+      } finally {
+        if (generation === generationRef.current) {
+          busyRef.current = false;
+          setPendingId(null);
+        }
+      }
+    })();
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [attach]);
+
   const connect = useCallback(
     async (choice: ProviderDetail) => {
       if (busyRef.current) return;
@@ -176,7 +237,9 @@ export function useEthWallet() {
       setPendingId(choice.info.uuid);
       setError(null);
       try {
-        const accounts = await choice.provider.request({ method: "eth_requestAccounts" });
+        const accounts = await choice.provider.request({
+          method: "eth_requestAccounts",
+        });
         if (generation === generationRef.current) attach(choice, accounts);
       } catch (cause) {
         if (generation === generationRef.current) {
@@ -217,7 +280,12 @@ export function useEthWallet() {
       }
       attach(
         {
-          info: { uuid: "metamask-mobile", name: "MetaMask", icon: "", rdns: "io.metamask" },
+          info: {
+            uuid: "metamask-mobile",
+            name: "MetaMask",
+            icon: "",
+            rdns: "io.metamask",
+          },
           provider: client.getProvider(),
         },
         accounts,
@@ -237,9 +305,53 @@ export function useEthWallet() {
     }
   }, [attach]);
 
+  const connectWalletConnect = useCallback(async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    const generation = ++generationRef.current;
+    setPendingId("walletconnect");
+    setPickerOpen(false);
+    setError(null);
+    let client: WalletConnectClient | undefined;
+    try {
+      client = await getWalletConnectClient();
+      walletConnectRef.current = client;
+      if (generation !== generationRef.current) return;
+      const accounts = await client.enable();
+      if (generation !== generationRef.current) {
+        await client.disconnect();
+        return;
+      }
+      attach(walletConnectDetail(client), accounts);
+    } catch (cause) {
+      // Retire sessions that were approved without a usable account.
+      if (client?.session && activeRef.current !== client) {
+        await client.disconnect().catch(() => undefined);
+      }
+      if (generation === generationRef.current) {
+        rememberWalletConnect(false);
+        const message = errorMessage(cause);
+        setError(
+          isUserRejection(cause) ||
+            /connection request reset|user rejected|user denied/i.test(message)
+            ? "Connection canceled. Choose a wallet to try again."
+            : message,
+        );
+        setPickerOpen(true);
+      }
+    } finally {
+      if (generation === generationRef.current) {
+        busyRef.current = false;
+        setPendingId(null);
+      }
+    }
+  }, [attach]);
+
   const disconnect = useCallback(async () => {
     generationRef.current += 1;
     const isMetaMask = selected?.info.uuid === "metamask-mobile";
+    const isWalletConnect = selected?.info.uuid === "walletconnect";
+    rememberWalletConnect(false);
     detach();
     setSelected(null);
     setAccount(null);
@@ -252,6 +364,20 @@ export function useEthWallet() {
       } catch {
         setError(
           "The MetaMask session could not be closed. Disconnect QuantaSwap in MetaMask too.",
+        );
+      } finally {
+        busyRef.current = false;
+        setPendingId(null);
+      }
+    }
+    if (isWalletConnect && walletConnectRef.current) {
+      busyRef.current = true;
+      setPendingId("walletconnect");
+      try {
+        await walletConnectRef.current.disconnect();
+      } catch {
+        setError(
+          "The WalletConnect session could not be closed. Disconnect QuantaSwap in your wallet too.",
         );
       } finally {
         busyRef.current = false;
@@ -286,6 +412,8 @@ export function useEthWallet() {
     account,
     connect,
     connectMetaMask,
+    connectWalletConnect,
+    walletConnectAvailable: isWalletConnectConfigured(),
     disconnect,
     ensureSepolia,
     browserProvider,
