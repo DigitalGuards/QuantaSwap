@@ -58,7 +58,7 @@ import {
 } from "./protocol-signing.js";
 import { StateFile, StateFilePoisonedError, StateProcessLease } from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
-import { AdmissionBackoff, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
+import { AdmissionBackoff, canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 
 const cfg: Config = loadConfig();
 const deployment = makeDeploymentIdentity(cfg);
@@ -270,6 +270,11 @@ async function legStateOrNull(
 }
 
 async function advance(managed: ManagedOrder): Promise<OrderView | null> {
+  if (canRetireExpiredUnfundedQuote(managed, nowS())) {
+    state.delete(managed.id);
+    log(`portable quote ${short(managed.id)} reached its signed expiry`);
+    return null;
+  }
   const iLeg = initiatorLeg(managed.direction);
   const rLeg = responderLeg(managed.direction);
   const protocol = managed.protocol;
