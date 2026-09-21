@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "evm": {
+      "runtime": "evm-256",
+      "addressBytes": 20,
+      "compilerEnv": "EVM_HYPC_BIN",
+      "defaultCompiler": "hypc",
+      "compilerVersion": "0.2.0-develop.2026.4.13+commit.d5d1b977",
+      "qrvmVersion": "zond",
+      "viaIR": true,
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      }
+    },
+    "qrl": {
+      "runtime": "qrvm-512",
+      "addressBytes": 64,
+      "compilerEnv": "QRL_HYPC_BIN",
+      "defaultCompiler": "../hyperion/build/hypc/hypc",
+      "compilerVersion": "0.2.0-develop.2026.8.27+commit.6f862206.mod",
+      "qrvmVersion": "zond",
+      "viaIR": true,
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      }
+    }
+  }
+}

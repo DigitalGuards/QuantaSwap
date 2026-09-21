@@ -9,13 +9,34 @@ import { join } from "node:path";
 
 const PORT = 18000 + Math.floor(Math.random() * 2000);
 const BASE = `http://127.0.0.1:${PORT}/api`;
-const dataFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-")), "orders.json");
+const smokeDir = mkdtempSync(join(tmpdir(), "quantaswap-ob-"));
+const dataFile = join(smokeDir, "orders.json");
+const federationDataFile = join(smokeDir, "federation.json");
 
 // PRESENCE_TTL_S=1 so maker-presence expiry is testable with a short sleep.
-const child = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
-  env: { ...process.env, PORT: String(PORT), ORDERBOOK_DATA: dataFile, PRESENCE_TTL_S: "1" },
-  stdio: ["ignore", "inherit", "inherit"],
-});
+const child = spawn(
+  process.execPath,
+  [new URL("./dist/server.js", import.meta.url).pathname],
+  {
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      ORDERBOOK_HOST: "127.0.0.1",
+      ORDERBOOK_DATA: dataFile,
+      ORDERBOOK_FEDERATION_DATA: federationDataFile,
+      ORDERBOOK_FEDERATION_PEERS: "",
+      ORDERBOOK_FEDERATION_PEER_IDS: "",
+      ORDERBOOK_FEDERATION_PEER_TOKENS: "",
+      ORDERBOOK_FEDERATION_ONION_ONLY: "false",
+      ORDERBOOK_FEDERATION_ONION_PROXY: "",
+      ORDERBOOK_FEDERATION_READ_TOKEN: "",
+      ORDERBOOK_TRUST_PROXY: "loopback",
+      ORDERBOOK_CORS_ORIGINS: "https://dev.quantaswap.io",
+      PRESENCE_TTL_S: "1",
+    },
+    stdio: ["ignore", "inherit", "inherit"],
+  },
+);
 
 /** Second instance for the legacy-persistence section; spawned late,
  *  killed in the shared finally. */
@@ -57,13 +78,117 @@ async function waitForHealth(base = BASE) {
 
 const ETH_A = `0x${"a".repeat(40)}`;
 const ETH_B = `0x${"b".repeat(40)}`;
-const QRL_A = `Q${"c".repeat(40)}`;
-const QRL_B = `Q${"d".repeat(40)}`;
+const QRL_A = `Q${"c".repeat(128)}`;
+const QRL_B = `Q${"d".repeat(128)}`;
 const ONE_ETH = 10n ** 18n;
 
 try {
   await waitForHealth();
   console.log("lifecycle:");
+
+  const publicCors = await fetch(`${BASE}/orders`, {
+    headers: { Origin: "https://mirror-reader.example" },
+  });
+  check(
+    "public mirror reads allow wildcard CORS",
+    publicCors.headers.get("access-control-allow-origin") === "*",
+  );
+  const statusResponse = await fetch(`${BASE}/status`, {
+    headers: { Origin: "https://mirror-reader.example" },
+  });
+  const statusBody = await statusResponse.json();
+  check(
+    "sanitized operator status is public and reports federation disabled",
+    statusResponse.status === 200 &&
+      statusResponse.headers.get("access-control-allow-origin") === "*" &&
+      statusBody.schemaVersion === 1 &&
+      statusBody.status === "ok" &&
+      statusBody.feed?.ready === true &&
+      statusBody.federation?.state === "disabled" &&
+      statusBody.federation?.configuredPeers === 0 &&
+      !JSON.stringify(statusBody).includes(dataFile),
+  );
+  const preflight = await fetch(`${BASE}/orders/signed`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://dev.quantaswap.io",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+  check(
+    "configured frontend passes mutation preflight",
+    preflight.status === 204 &&
+      preflight.headers.get("access-control-allow-origin") ===
+        "https://dev.quantaswap.io",
+  );
+  const simpleCrossOrigin = await fetch(`${BASE}/orders`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain",
+      Origin: "https://untrusted.example",
+    },
+    body: "{}",
+  });
+  check(
+    "simple cross-origin mutation body is rejected",
+    simpleCrossOrigin.status === 415,
+  );
+  const federationReset = await api("GET", "/federation/v2/events?limit=16");
+  check(
+    "federation feed starts with a reset snapshot",
+    federationReset.status === 200 &&
+      federationReset.body.reset === true &&
+      Array.isArray(federationReset.body.snapshot),
+  );
+  const resetCursor = federationReset.body.cursor;
+  const incremental = await api(
+    "GET",
+    `/federation/v2/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+  );
+  check(
+    "valid incremental federation reads bypass the reset limiter",
+    incremental.status === 200 && incremental.body.reset === false,
+  );
+  const resetRetries = [];
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    resetRetries.push(
+      await api(
+        "GET",
+        `/federation/v2/events?limit=16&cursor=foreign-${attempt}`,
+      ),
+    );
+  }
+  check(
+    "expensive reset snapshots have a dedicated per-source rate limit",
+    resetRetries.slice(0, 3).every((result) => result.status === 200) &&
+      resetRetries[3]?.status === 429,
+  );
+  const incrementalAfterLimit = await api(
+    "GET",
+    `/federation/v2/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+  );
+  check(
+    "reset throttling does not block incremental federation reads",
+    incrementalAfterLimit.status === 200 &&
+      incrementalAfterLimit.body.reset === false,
+  );
+  const repeatedIncremental = [];
+  for (let attempt = 0; attempt < 234; attempt += 1) {
+    repeatedIncremental.push(
+      await api(
+        "GET",
+        `/federation/v2/events?limit=16&cursor=${encodeURIComponent(resetCursor)}`,
+      ),
+    );
+  }
+  check(
+    "all federation reads use a dedicated per-source rate limit",
+    repeatedIncremental
+      .slice(0, 233)
+      .every((result) => result.status === 200) &&
+      repeatedIncremental[233]?.status === 429,
+  );
 
   const dust = await api("POST", "/orders", {
     direction: "eth->qrl",
@@ -90,14 +215,26 @@ try {
     makerEthAccount: ETH_A,
     makerQrlAccount: QRL_A,
   });
-  check("order created", created.status === 201 && typeof created.body.makerToken === "string");
+  check(
+    "order created",
+    created.status === 201 && typeof created.body.makerToken === "string",
+  );
   const { id } = created.body.order;
   const token = created.body.makerToken;
-  check("token not leaked on order", created.body.order.makerTokenHash === undefined);
-  check("asset-less create defaults to ETH", created.body.order.asset === "ETH");
+  check(
+    "token not leaked on order",
+    created.body.order.makerTokenHash === undefined,
+  );
+  check(
+    "asset-less create defaults to ETH",
+    created.body.order.asset === "ETH",
+  );
 
   const list = await api("GET", "/orders");
-  check("order listed while open", list.body.orders.some((o) => o.id === id));
+  check(
+    "order listed while open",
+    list.body.orders.some((o) => o.id === id),
+  );
 
   const earlyHashlock = await api("POST", `/orders/${id}/hashlock`, {
     token,
@@ -111,9 +248,18 @@ try {
     takerEthAccount: ETH_B,
     takerQrlAccount: QRL_B,
   });
-  check("order accepted", accepted.status === 200 && accepted.body.order.status === "accepted");
-  check("accept mints a taker token", typeof accepted.body.takerToken === "string");
-  check("taker token not leaked on order", accepted.body.order.takerTokenHash === undefined);
+  check(
+    "order accepted",
+    accepted.status === 200 && accepted.body.order.status === "accepted",
+  );
+  check(
+    "accept mints a taker token",
+    typeof accepted.body.takerToken === "string",
+  );
+  check(
+    "taker token not leaked on order",
+    accepted.body.order.takerTokenHash === undefined,
+  );
 
   const doubleAccept = await api("POST", `/orders/${id}/accept`, {
     takerEthAccount: ETH_B,
@@ -144,7 +290,10 @@ try {
     initiatorTimeout: now + 7200,
     responderTimeout: now + 3600,
   });
-  check("hashlock announced", locked.status === 200 && locked.body.order.status === "locking");
+  check(
+    "hashlock announced",
+    locked.status === 200 && locked.body.order.status === "locking",
+  );
 
   const fetched = await api("GET", `/orders/${id}`);
   check(
@@ -154,13 +303,21 @@ try {
   );
 
   const gone = await api("GET", "/orders");
-  check("locking order not listed as open", !gone.body.orders.some((o) => o.id === id));
+  check(
+    "locking order not listed as open",
+    !gone.body.orders.some((o) => o.id === id),
+  );
 
-  const cancelForeign = await api("POST", `/orders/${id}/cancel`, { token: "f".repeat(64) });
+  const cancelForeign = await api("POST", `/orders/${id}/cancel`, {
+    token: "f".repeat(64),
+  });
   check("cancel with wrong token rejected", cancelForeign.status === 403);
 
   const cancelled = await api("POST", `/orders/${id}/cancel`, { token });
-  check("maker can cancel", cancelled.status === 200 && cancelled.body.order.status === "cancelled");
+  check(
+    "maker can cancel",
+    cancelled.status === 200 && cancelled.body.order.status === "cancelled",
+  );
 
   const missing = await api("GET", "/orders/0000000000000000");
   check("unknown order 404s", missing.status === 404);
@@ -196,15 +353,30 @@ try {
   for (let i = 0; i <= CONCURRENT_CAP; i += 1) opens.push(await mk());
   let greedyOk = true;
   for (let i = 0; i < CONCURRENT_CAP; i += 1) {
-    const took = await api("POST", `/orders/${opens[i].id}/accept`, taker, greedy);
+    const took = await api(
+      "POST",
+      `/orders/${opens[i].id}/accept`,
+      taker,
+      greedy,
+    );
     greedyOk = greedyOk && took.status === 200;
   }
   check(`${CONCURRENT_CAP} concurrent takes allowed`, greedyOk);
-  const over = await api("POST", `/orders/${opens[CONCURRENT_CAP].id}/accept`, taker, greedy);
+  const over = await api(
+    "POST",
+    `/orders/${opens[CONCURRENT_CAP].id}/accept`,
+    taker,
+    greedy,
+  );
   check("take past the concurrency cap rejected", over.status === 429);
-  const other = await api("POST", `/orders/${opens[CONCURRENT_CAP].id}/accept`, taker, {
-    "X-Forwarded-For": "203.0.113.8",
-  });
+  const other = await api(
+    "POST",
+    `/orders/${opens[CONCURRENT_CAP].id}/accept`,
+    taker,
+    {
+      "X-Forwarded-For": "203.0.113.8",
+    },
+  );
   check("other visitors can still take", other.status === 200);
 
   const drip = { "X-Forwarded-For": "203.0.113.9" };
@@ -249,7 +421,12 @@ try {
   const blocked = await api("POST", `/orders/${r3.id}/accept`, taker, walker);
   check("slots full before release", blocked.status === 429);
 
-  const badRelease = await api("POST", `/orders/${r1.id}/release`, { token: "f".repeat(64) }, walker);
+  const badRelease = await api(
+    "POST",
+    `/orders/${r1.id}/release`,
+    { token: "f".repeat(64) },
+    walker,
+  );
   check("release with wrong token rejected", badRelease.status === 403);
 
   const released = await api(
@@ -265,7 +442,10 @@ try {
       released.body.order.takerEthAccount === null,
   );
   const relisted = await api("GET", "/orders");
-  check("released order listed again", relisted.body.orders.some((o) => o.id === r1.id));
+  check(
+    "released order listed again",
+    relisted.body.orders.some((o) => o.id === r1.id),
+  );
 
   const retake = await api("POST", `/orders/${r3.id}/accept`, taker, walker);
   check("release frees the concurrency slot", retake.status === 200);
@@ -298,24 +478,43 @@ try {
     "release after lock keeps the order locking",
     lateRelease.status === 200 && lateRelease.body.order.status === "locking",
   );
-  check("release is visible to the maker", lateRelease.body.order.released === true);
+  check(
+    "release is visible to the maker",
+    lateRelease.body.order.released === true,
+  );
   const freshView = await api("GET", `/orders/${r3.id}`);
-  check("unreleased order reads released=false", freshView.body.order.released === false);
+  check(
+    "unreleased order reads released=false",
+    freshView.body.order.released === false,
+  );
   const r4 = await mk();
   const afterLate = await api("POST", `/orders/${r4.id}/accept`, taker, walker);
-  check("late release frees the concurrency slot too", afterLate.status === 200);
+  check(
+    "late release frees the concurrency slot too",
+    afterLate.status === 200,
+  );
 
   console.log("maker presence:");
   const p1 = await mk();
   const fresh = await api("GET", `/orders/${p1.id}`);
-  check("fresh order shows the maker online", fresh.body.order.makerSeen === true);
+  check(
+    "fresh order shows the maker online",
+    fresh.body.order.makerSeen === true,
+  );
   await sleep(1200); // one presence TTL
   const stale = await api("GET", `/orders/${p1.id}`);
   check("silent maker goes offline", stale.body.order.makerSeen === false);
-  const hbBad = await api("POST", `/orders/${p1.id}/heartbeat`, { token: "f".repeat(64) });
+  const hbBad = await api("POST", `/orders/${p1.id}/heartbeat`, {
+    token: "f".repeat(64),
+  });
   check("heartbeat with wrong token rejected", hbBad.status === 403);
-  const hb = await api("POST", `/orders/${p1.id}/heartbeat`, { token: p1.token });
-  check("heartbeat revives presence", hb.status === 200 && hb.body.order.makerSeen === true);
+  const hb = await api("POST", `/orders/${p1.id}/heartbeat`, {
+    token: p1.token,
+  });
+  check(
+    "heartbeat revives presence",
+    hb.status === 200 && hb.body.order.makerSeen === true,
+  );
 
   console.log("take-by-terms:");
   // Fresh direction (qrl->eth) so leftovers from earlier sections cannot
@@ -364,9 +563,12 @@ try {
   });
   check(
     "take-by-terms with no online match is a clean conflict",
-    takeEmpty.status === 409 && !String(takeEmpty.body.error).includes("no longer open"),
+    takeEmpty.status === 409 &&
+      !String(takeEmpty.body.error).includes("no longer open"),
   );
-  await api("POST", `/orders/${offlineBest.id}/heartbeat`, { token: offlineBest.token });
+  await api("POST", `/orders/${offlineBest.id}/heartbeat`, {
+    token: offlineBest.token,
+  });
   const takeRevived = await api("POST", "/orders/take", terms, {
     "X-Forwarded-For": "203.0.113.31",
   });
@@ -376,10 +578,18 @@ try {
   );
   const offlineById = await mkBid(2n * 10n ** 18n, ONE_ETH);
   await sleep(1200);
-  const explicitTake = await api("POST", `/orders/${offlineById.id}/accept`, taker, {
-    "X-Forwarded-For": "203.0.113.32",
-  });
-  check("offline orders stay takeable by explicit id", explicitTake.status === 200);
+  const explicitTake = await api(
+    "POST",
+    `/orders/${offlineById.id}/accept`,
+    taker,
+    {
+      "X-Forwarded-For": "203.0.113.32",
+    },
+  );
+  check(
+    "offline orders stay takeable by explicit id",
+    explicitTake.status === 200,
+  );
 
   console.log("per-asset orders:");
   const HUNDRED_USDC = 100n * 10n ** 6n; // 6-decimal base units
@@ -417,7 +627,10 @@ try {
     },
     makerHdr,
   );
-  check("QRL side of a USDC order keeps the wei floor", qrlSideDust.status === 400);
+  check(
+    "QRL side of a USDC order keeps the wei floor",
+    qrlSideDust.status === 400,
+  );
 
   const badAsset = await api(
     "POST",
@@ -447,7 +660,10 @@ try {
     },
     makerHdr,
   );
-  check("null asset rejected (only absent means ETH)", nullAsset.status === 400);
+  check(
+    "null asset rejected (only absent means ETH)",
+    nullAsset.status === 400,
+  );
 
   // Cross-match guard: an ETH order whose raw numbers overlap a USDC
   // request (1 ETH escrowed = 1e18 >= any USDC minReceive, same QRL
@@ -464,6 +680,10 @@ try {
       makerQrlAccount: QRL_A,
     },
     makerHdr,
+  );
+  check(
+    "overlapping ETH order created",
+    ethOverlap.status === 201 && ethOverlap.body.order.asset === "ETH",
   );
   const usdcTerms = {
     direction: "eth->qrl",
@@ -495,7 +715,9 @@ try {
   const usdcListed = await api("GET", "/orders");
   check(
     "asset field present in the order list",
-    usdcListed.body.orders.some((o) => o.id === usdcCreated.body.order.id && o.asset === "USDC"),
+    usdcListed.body.orders.some(
+      (o) => o.id === usdcCreated.body.order.id && o.asset === "USDC",
+    ),
   );
 
   const usdcTake = await api("POST", "/orders/take", usdcTerms, stableTaker);
@@ -511,10 +733,17 @@ try {
     minReceive: ONE_ETH.toString(),
     ...taker,
   };
+  // The smoke suite uses a one-second presence TTL. Keep the ETH control row
+  // online after the USDC assertions so scheduler variance cannot hide it.
+  await api("POST", `/orders/${ethOverlap.body.order.id}/heartbeat`, {
+    token: ethOverlap.body.makerToken,
+  });
   const ethTake = await api("POST", "/orders/take", ethTerms, stableTaker);
   check(
     "asset-less take defaults to ETH and leaves USDC alone",
-    ethTake.status === 200 && ethTake.body.order.id === ethOverlap.body.order.id,
+    ethTake.status === 200 &&
+      ethTake.body.order.asset === "ETH" &&
+      ethTake.body.order.id !== usdcCreated.body.order.id,
   );
 
   console.log("private orders:");
@@ -541,8 +770,14 @@ try {
     "private create mints a share token",
     priv.status === 201 && typeof priv.body.shareToken === "string",
   );
-  check("share token hash not leaked on the order", priv.body.order.shareTokenHash === undefined);
-  check("order reports private visibility", priv.body.order.visibility === "private");
+  check(
+    "share token hash not leaked on the order",
+    priv.body.order.shareTokenHash === undefined,
+  );
+  check(
+    "order reports private visibility",
+    priv.body.order.visibility === "private",
+  );
   const privId = priv.body.order.id;
   const share = priv.body.shareToken;
 
@@ -558,7 +793,9 @@ try {
     "X-Share-Token": "0".repeat(64),
   });
   check("get with a wrong share token 404s", wrongGet.status === 404);
-  const authedGet = await api("GET", `/orders/${privId}`, undefined, { "X-Share-Token": share });
+  const authedGet = await api("GET", `/orders/${privId}`, undefined, {
+    "X-Share-Token": share,
+  });
   check(
     "get with the share token returns the order",
     authedGet.status === 200 && authedGet.body.order.id === privId,
@@ -575,7 +812,10 @@ try {
     },
     { "X-Forwarded-For": "203.0.113.51" },
   );
-  check("take-by-terms never matches a private order", privTerms.status === 409);
+  check(
+    "take-by-terms never matches a private order",
+    privTerms.status === 409,
+  );
 
   const blindAccept = await api("POST", `/orders/${privId}/accept`, privTaker, {
     "X-Forwarded-For": "203.0.113.51",
@@ -589,19 +829,30 @@ try {
   );
   check(
     "accept with the share token succeeds",
-    authedAccept.status === 200 && authedAccept.body.order.status === "accepted",
+    authedAccept.status === 200 &&
+      authedAccept.body.order.status === "accepted",
   );
 
-  const restricted = await mkPrivate({ allowedTakerEth: ETH_B, allowedTakerQrl: QRL_B });
+  const restricted = await mkPrivate({
+    allowedTakerEth: ETH_B,
+    allowedTakerQrl: QRL_B,
+  });
   const rId = restricted.body.order.id;
   const rShare = restricted.body.shareToken;
   const wrongTaker = await api(
     "POST",
     `/orders/${rId}/accept`,
-    { takerEthAccount: `0x${"e".repeat(40)}`, takerQrlAccount: QRL_B, shareToken: rShare },
+    {
+      takerEthAccount: `0x${"e".repeat(40)}`,
+      takerQrlAccount: QRL_B,
+      shareToken: rShare,
+    },
     { "X-Forwarded-For": "203.0.113.52" },
   );
-  check("restricted order rejects a different taker", wrongTaker.status === 403);
+  check(
+    "restricted order rejects a different taker",
+    wrongTaker.status === 403,
+  );
   const rightTaker = await api(
     "POST",
     `/orders/${rId}/accept`,
@@ -622,7 +873,10 @@ try {
     makerQrlAccount: QRL_A,
     allowedTakerEth: ETH_B,
   });
-  check("taker restriction on a public order rejected", restrictedPublic.status === 400);
+  check(
+    "taker restriction on a public order rejected",
+    restrictedPublic.status === 400,
+  );
   const badVis = await api("POST", "/orders", {
     direction: "qrl->eth",
     fromAmount: (5n * 10n ** 18n).toString(),
@@ -674,7 +928,9 @@ try {
   check("prelock T1 past the ceiling rejected", tooFar.status === 400);
 
   const preT1 = nowSec() + 48 * 3600;
-  const pre = await mkPre({ prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 } });
+  const pre = await mkPre({
+    prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 },
+  });
   check(
     "prelocked create round-trips flag, hashlock and T1",
     pre.status === 201 &&
@@ -685,8 +941,13 @@ try {
   const preId = pre.body.order.id;
   const preToken = pre.body.makerToken;
 
-  const dupHash = await mkPre({ prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 } });
-  check("second live order with the same hashlock rejected", dupHash.status === 409);
+  const dupHash = await mkPre({
+    prelock: { hashlock: HASH_PRE, initiatorTimeout: preT1 },
+  });
+  check(
+    "second live order with the same hashlock rejected",
+    dupHash.status === 409,
+  );
 
   const preList = await api("GET", "/orders");
   const listedPre = preList.body.orders.find((o) => o.id === preId);
@@ -709,7 +970,10 @@ try {
     initiatorTimeout: preT1,
     responderTimeout: nowSec() + 3600,
   });
-  check("announce with a mismatched hashlock rejected", wrongEcho.status === 400);
+  check(
+    "announce with a mismatched hashlock rejected",
+    wrongEcho.status === 400,
+  );
   const wrongT1 = await api("POST", `/orders/${preId}/hashlock`, {
     token: preToken,
     hashlock: HASH_PRE,
@@ -734,7 +998,8 @@ try {
   const streamRes = await fetch(`${BASE}/orders/stream`);
   check(
     "stream connects as an event stream",
-    streamRes.status === 200 && streamRes.headers.get("content-type") === "text/event-stream",
+    streamRes.status === 200 &&
+      streamRes.headers.get("content-type") === "text/event-stream",
   );
   const reader = streamRes.body.getReader();
   const dec = new TextDecoder();
@@ -753,7 +1018,10 @@ try {
     streamed += await nextChunk();
   }
   check("stream pushes book changes", streamed.includes(streamedOrder.id));
-  check("stream payload carries the asset field", streamed.includes('"asset":"ETH"'));
+  check(
+    "stream payload carries the asset field",
+    streamed.includes('"asset":"ETH"'),
+  );
   check(
     "stream payload excludes private orders",
     !(firstEvent + streamed).includes(privOpenId),
@@ -765,7 +1033,10 @@ try {
   // store must hydrate them as ETH so prod data survives the rollout.
   const PORT2 = PORT + 2000;
   const BASE2 = `http://127.0.0.1:${PORT2}/api`;
-  const legacyFile = join(mkdtempSync(join(tmpdir(), "quantaswap-ob-legacy-")), "orders.json");
+  const legacyFile = join(
+    mkdtempSync(join(tmpdir(), "quantaswap-ob-legacy-")),
+    "orders.json",
+  );
   const legacyNow = Math.floor(Date.now() / 1000);
   const legacyBase = {
     direction: "eth->qrl",
@@ -807,20 +1078,43 @@ try {
       { ...legacyBase, id: "00000000000000ae", prelocked: true },
     ]),
   );
-  child2 = spawn(process.execPath, [new URL("./dist/server.js", import.meta.url).pathname], {
-    env: { ...process.env, PORT: String(PORT2), ORDERBOOK_DATA: legacyFile, PRESENCE_TTL_S: "90" },
-    stdio: ["ignore", "inherit", "inherit"],
-  });
+  child2 = spawn(
+    process.execPath,
+    [new URL("./dist/server.js", import.meta.url).pathname],
+    {
+      env: {
+        ...process.env,
+        PORT: String(PORT2),
+        ORDERBOOK_HOST: "127.0.0.1",
+        ORDERBOOK_DATA: legacyFile,
+        ORDERBOOK_FEDERATION_DATA: `${legacyFile}.federation`,
+        ORDERBOOK_FEDERATION_PEERS: "",
+        ORDERBOOK_FEDERATION_PEER_IDS: "",
+        ORDERBOOK_FEDERATION_PEER_TOKENS: "",
+        ORDERBOOK_FEDERATION_ONION_ONLY: "false",
+        ORDERBOOK_FEDERATION_ONION_PROXY: "",
+        ORDERBOOK_FEDERATION_READ_TOKEN: "",
+        ORDERBOOK_TRUST_PROXY: "loopback",
+        PRESENCE_TTL_S: "90",
+      },
+      stdio: ["ignore", "inherit", "inherit"],
+    },
+  );
   await waitForHealth(BASE2);
   const legacyList = await fetch(`${BASE2}/orders`).then((r) => r.json());
   const legacyRow = legacyList.orders.find((o) => o.id === "00000000000000ab");
   check("legacy asset-less row still listed", legacyRow !== undefined);
-  check("legacy row hydrates as ETH", legacyRow !== undefined && legacyRow.asset === "ETH");
+  check(
+    "legacy row hydrates as ETH",
+    legacyRow !== undefined && legacyRow.asset === "ETH",
+  );
   check(
     "classic row carries no prelocked key after restart",
     legacyRow !== undefined && !("prelocked" in legacyRow),
   );
-  const preSurvivor = legacyList.orders.find((o) => o.id === "00000000000000ac");
+  const preSurvivor = legacyList.orders.find(
+    (o) => o.id === "00000000000000ac",
+  );
   check(
     "prelocked row survives restart with flag and anchors",
     preSurvivor !== undefined &&
@@ -833,7 +1127,10 @@ try {
   );
   const lowAccept = await fetch(`${BASE2}/orders/00000000000000ad/accept`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Forwarded-For": "203.0.113.62" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Forwarded-For": "203.0.113.62",
+    },
     body: JSON.stringify({ takerEthAccount: ETH_B, takerQrlAccount: QRL_B }),
   });
   check("accept under the runway floor rejected", lowAccept.status === 409);

@@ -4,7 +4,13 @@
 
 import { Interface } from "ethers";
 import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
-import { qToHex } from "./qrlAddress";
+import { formatQrlAddressFingerprint, isQrlAddress, qToHex } from "./qrlAddress";
+import { decodeQrvmSwap, encodeQrvmHtlc } from "./qrvmHtlc";
+import { assertQrlNetwork } from "./qrlNetwork";
+import {
+  assertQip55ReadReady,
+  QRVM_ZERO_ADDRESS,
+} from "./qip55";
 
 export { hexToQ, qToHex } from "./qrlAddress";
 
@@ -59,11 +65,16 @@ export interface LegState {
   preimage: string;
 }
 
-/** The native-coin sentinel in the HTLC's `token` field (address(0)). */
+/** Ethereum address(0). QRL QRVM64 uses QRL_NATIVE_TOKEN. */
 export const NATIVE_TOKEN = `0x${"0".repeat(40)}`;
+export const QRL_NATIVE_TOKEN = QRVM_ZERO_ADDRESS;
+
+export const nativeTokenForLeg = (leg: LegKey): string =>
+  leg === "qrl" ? QRL_NATIVE_TOKEN : NATIVE_TOKEN;
 
 async function rpc(url: string, method: string, params: unknown[]): Promise<unknown> {
   const res = await fetch(url, {
+    signal: AbortSignal.timeout(20_000),
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -74,7 +85,10 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
   return body.result;
 }
 
-export const qrlRpc = (method: string, params: unknown[]) => rpc(QRL_LEG.rpc, method, params);
+export const qrlRpc = async (method: string, params: unknown[]): Promise<unknown> => {
+  await assertQrlNetwork((identityMethod, identityParams) => rpc(QRL_LEG.rpc, identityMethod, identityParams));
+  return rpc(QRL_LEG.rpc, method, params);
+};
 export const ethRpc = (method: string, params: unknown[]) => rpc(ETH_LEG.rpc, method, params);
 
 export async function getLegState(
@@ -82,11 +96,15 @@ export async function getLegState(
   hashlock: string,
   blockTag = "latest",
 ): Promise<LegState> {
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
+  if (leg === "qrl") {
+    return decodeQrvmSwap(await qrlRpc("qrl_call", [
+      { to: QRL_LEG.htlc, data: encodeQrvmHtlc("getSwap", [hashlock]) },
+      blockTag,
+    ]));
+  }
   const data = htlcInterface.encodeFunctionData("getSwap", [hashlock]);
-  const call =
-    leg === "qrl"
-      ? qrlRpc("qrl_call", [{ to: QRL_LEG.htlc, data }, blockTag])
-      : ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, blockTag]);
+  const call = ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, blockTag]);
   const raw = (await call) as string;
   const [swap] = htlcInterface.decodeFunctionResult("getSwap", raw) as unknown as [
     {
@@ -126,6 +144,7 @@ export const confirmedBlock = (head: number, confirmations: number): number =>
  *  (hashlock freshness is enforced by the contract), so a confirmed
  *  snapshot's fields are canonical. */
 export async function getConfirmedLegState(leg: LegKey, hashlock: string): Promise<LegState> {
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const head = await getBlockNumber(leg);
   const depth = confirmedBlock(head, legByKey(leg).confirmations);
   return getLegState(leg, hashlock, `0x${depth.toString(16)}`);
@@ -157,15 +176,45 @@ const TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
   [eventTopic("Refunded"), "refunded"],
 ]);
 
+/** QRVM64 log topics are 64-byte ABI words. A bytes32 signature or
+ * indexed hash occupies the high half, followed by 32 zero bytes. */
+export function qrvm64Topic(word: string): string {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(word)) {
+    throw new Error("QRVM64 topic source must be exactly 32 bytes");
+  }
+  return `${word.toLowerCase()}${"0".repeat(64)}`;
+}
+
+const QRL_TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
+  [qrvm64Topic(eventTopic("Locked")), "locked"],
+  [qrvm64Topic(eventTopic("Assigned")), "assigned"],
+  [qrvm64Topic(eventTopic("Claimed")), "claimed"],
+  [qrvm64Topic(eventTopic("Refunded")), "refunded"],
+]);
+
+export function swapEventKindFromTopic(
+  leg: LegKey,
+  topic: string,
+): SwapEventKind | undefined {
+  return (leg === "qrl" ? QRL_TOPIC_KIND : TOPIC_KIND).get(topic.toLowerCase());
+}
+
 /** Every HTLC action (both parties') indexed by the shared hashlock, with
  *  its transaction hash for explorer links. Chain-derived, so it works
  *  for any visitor with no order-book record and no wallet. Both legs
  *  scan from genesis: the QRL node is ours, and the ETH side uses the
  *  logs-capable proxy (the main Sepolia RPC refuses log scans). */
 export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<SwapEvent[]> {
+  // Only the qualified full-width deployment accepts QRL reads.
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const cfg = legByKey(leg);
   const params = [
-    { address: cfg.htlc, topics: [null, hashlock], fromBlock: "0x0", toBlock: "latest" },
+    {
+      address: cfg.htlc,
+      topics: [null, leg === "qrl" ? qrvm64Topic(hashlock) : hashlock],
+      fromBlock: "0x0",
+      toBlock: "latest",
+    },
   ];
   const raw = await (leg === "qrl"
     ? qrlRpc("qrl_getLogs", params)
@@ -177,15 +226,35 @@ export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<Swap
     const log = entry as { topics?: unknown; transactionHash?: unknown };
     const topic0 =
       Array.isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
-    const kind = topic0 === null ? undefined : TOPIC_KIND.get(topic0);
+    const kind =
+      topic0 === null
+        ? undefined
+        : swapEventKindFromTopic(leg, topic0);
     if (kind === undefined || typeof log.transactionHash !== "string") continue;
     events.push({ kind, txHash: log.transactionHash });
   }
   return events;
 }
 
-export const buildLockNativeData = (hashlock: string, recipient: string, timeout: number): string =>
-  htlcInterface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+function assertEthersAddressRecipient(recipient: string): void {
+  if (isQrlAddress(recipient)) throw new Error("The Ethereum leg requires a 20-byte Ethereum recipient");
+}
+
+function assertLegCalldataReady(leg: LegKey): void {
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
+}
+
+export const buildLockNativeData = (
+  leg: LegKey,
+  hashlock: string,
+  recipient: string,
+  timeout: number,
+): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("lockNative", [hashlock, recipient, timeout]);
+  assertEthersAddressRecipient(recipient);
+  return htlcInterface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+};
 
 /** ERC-20 escrow lock: the amount rides in calldata (msg.value must be 0)
  *  and the HTLC pulls the tokens via transferFrom, so the exact-amount
@@ -196,8 +265,16 @@ export const buildLockTokenData = (
   token: string,
   amount: bigint,
   timeout: number,
-): string =>
-  htlcInterface.encodeFunctionData("lockToken", [hashlock, qToHex(recipient), token, amount, timeout]);
+): string => {
+  assertEthersAddressRecipient(recipient);
+  return htlcInterface.encodeFunctionData("lockToken", [
+    hashlock,
+    qToHex(recipient),
+    token,
+    amount,
+    timeout,
+  ]);
+};
 
 /** approve(spender, amount) calldata; sent to the TOKEN contract, not the
  *  HTLC. Raw calldata by design: see the noReturnValue note on ERC20_ABI. */
@@ -215,16 +292,29 @@ export async function allowanceOf(token: string, owner: string, spender: string)
   return value;
 }
 
-export const buildClaimData = (hashlock: string, preimage: string): string =>
-  htlcInterface.encodeFunctionData("claim", [hashlock, preimage]);
+export const buildClaimData = (leg: LegKey, hashlock: string, preimage: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("claim", [hashlock, preimage]);
+  return htlcInterface.encodeFunctionData("claim", [hashlock, preimage]);
+};
 
-export const buildRefundData = (hashlock: string): string =>
-  htlcInterface.encodeFunctionData("refund", [hashlock]);
+export const buildRefundData = (leg: LegKey, hashlock: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("refund", [hashlock]);
+  return htlcInterface.encodeFunctionData("refund", [hashlock]);
+};
 
 /** Open-recipient (prelock) escrow: no recipient in the calldata; it is
  *  fixed later by assign(). */
-export const buildLockNativeOpenData = (hashlock: string, timeout: number): string =>
-  htlcInterface.encodeFunctionData("lockNativeOpen", [hashlock, timeout]);
+export const buildLockNativeOpenData = (
+  leg: LegKey,
+  hashlock: string,
+  timeout: number,
+): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("lockNativeOpen", [hashlock, timeout]);
+  return htlcInterface.encodeFunctionData("lockNativeOpen", [hashlock, timeout]);
+};
 
 export const buildLockTokenOpenData = (
   hashlock: string,
@@ -234,12 +324,23 @@ export const buildLockTokenOpenData = (
 ): string => htlcInterface.encodeFunctionData("lockTokenOpen", [hashlock, token, amount, timeout]);
 
 /** One-time, initiator-only recipient assignment on an open lock. */
-export const buildAssignData = (hashlock: string, recipient: string): string =>
-  htlcInterface.encodeFunctionData("assign", [hashlock, qToHex(recipient)]);
+export const buildAssignData = (leg: LegKey, hashlock: string, recipient: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("assign", [hashlock, recipient]);
+  assertEthersAddressRecipient(recipient);
+  return htlcInterface.encodeFunctionData("assign", [hashlock, qToHex(recipient)]);
+};
 
 /** On-demand escrow reclaim, valid only while the lock is unassigned. */
-export const buildReleaseData = (hashlock: string): string =>
-  htlcInterface.encodeFunctionData("release", [hashlock]);
+export const buildReleaseData = (leg: LegKey, hashlock: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("release", [hashlock]);
+  return htlcInterface.encodeFunctionData("release", [hashlock]);
+};
 
 export const shortAddr = (addr: string): string =>
-  addr.length > 12 ? `${addr.slice(0, 8)}…${addr.slice(-4)}` : addr;
+  addr.startsWith("Q")
+    ? formatQrlAddressFingerprint(addr)
+    : addr.length > 12
+      ? `${addr.slice(0, 8)}…${addr.slice(-4)}`
+      : addr;

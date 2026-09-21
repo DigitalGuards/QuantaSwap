@@ -1,0 +1,216 @@
+name: Order book CI
+
+on:
+  pull_request:
+    paths:
+      - 'config/protocol-v2*.json'
+      - 'server/**'
+      - 'frontend/**'
+      - '.github/workflows/orderbook-ci.yml'
+      - '.github/workflows/orderbook-release.yml'
+  push:
+    branches:
+      - dev
+    paths:
+      - 'config/protocol-v2*.json'
+      - 'server/**'
+      - 'frontend/**'
+      - '.github/workflows/orderbook-ci.yml'
+      - '.github/workflows/orderbook-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orderbook-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    name: Test browser mirror client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Test and build browser client
+        working-directory: frontend
+        run: |
+          npm test
+          npm run build
+
+      - name: Audit dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=moderate
+
+  verify:
+    name: Test and smoke container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Run order-book tests
+        working-directory: server
+        run: npm test
+
+      - name: Audit dependencies
+        working-directory: server
+        run: npm audit --audit-level=moderate
+
+      - name: Validate Compose configuration
+        working-directory: server
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.federation-lab.yaml config --quiet
+          docker compose -f compose.yaml -f compose.tor.yaml config --quiet
+          docker compose -f compose.yaml -f compose.tor.yaml config --format json \
+            | jq -e '
+                (.services.orderbook.networks | keys) == ["tor-socks"] and
+                ((.services.orderbook.ports // []) | length) == 0 and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ONION_PROXY == "socks5h://tor:9050" and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ONION_ONLY == "true" and
+                .services.orderbook.environment.ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS == "false" and
+                .networks["tor-socks"].internal == true and
+                any(.services.tor.volumes[];
+                  .target == "/var/lib/quantaswap-tor/data" and .type == "volume") and
+                any(.services.tor.volumes[];
+                  .target == "/var/lib/quantaswap-tor/hidden-service" and .type == "volume") and
+                any(.services["admin-proxy"].ports[];
+                  .host_ip == "127.0.0.1" and .target == 8091) and
+                ([.services[] | (.ports // [])[] |
+                  select(.target == 9050 or .published == "9050")] | length) == 0 and
+                ([.services.tor, .services["admin-proxy"]] | all(.[];
+                  .user == "10001:10001" and
+                  .read_only == true and
+                  (.cap_drop | index("ALL")) != null and
+                  (.security_opt | index("no-new-privileges:true")) != null))
+              '
+
+      - name: Build runtime image
+        working-directory: server
+        run: docker build --file Dockerfile --tag quantaswap-orderbook:ci ..
+
+      - name: Build Tor sidecars
+        working-directory: server
+        run: docker compose -f compose.yaml -f compose.tor.yaml build --pull tor admin-proxy
+
+      - name: Verify Tor sidecar image metadata
+        run: |
+          for image in quantaswap-orderbook-tor:local quantaswap-orderbook-tor-admin:local; do
+            test "$(docker image inspect "$image" --format '{{.Config.User}}')" = 10001:10001
+            test "$(docker image inspect "$image" --format '{{index .Config.Healthcheck.Test 0}}')" = CMD
+          done
+
+      - name: Verify hardened runtime and packaged tests
+        run: |
+          test "$(docker image inspect quantaswap-orderbook:ci --format '{{.Config.User}}')" = node
+          test "$(docker image inspect quantaswap-orderbook:ci --format '{{json .Config.Healthcheck.Test}}')" = '["CMD","node","dist/healthcheck.js"]'
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=32m \
+            --entrypoint sh \
+            quantaswap-orderbook:ci \
+            -c 'node --test dist/*.test.js'
+
+      - name: Smoke Compose persistence and restart
+        working-directory: server
+        env:
+          ORDERBOOK_IMAGE: quantaswap-orderbook:ci
+        run: |
+          docker compose up -d --no-build
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8091/api/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+          for attempt in $(seq 1 30); do
+            container_id="$(docker compose ps -q orderbook)"
+            if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy ]; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+
+          order_id="$(curl --fail-with-body --silent \
+            -H 'Content-Type: application/json' \
+            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"}' \
+            http://127.0.0.1:8091/api/orders | jq -er '.order.id')"
+          test "$(docker compose exec -T orderbook stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
+
+          docker compose restart orderbook
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8091/api/health >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose logs orderbook
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8091/api/orders \
+            | jq -e --arg id "$order_id" '.orders | any(.id == $id)'
+
+      - name: Smoke reciprocal container federation
+        working-directory: server
+        env:
+          ORDERBOOK_LAB_IMAGE: quantaswap-orderbook:ci
+        run: |
+          docker compose -f compose.federation-lab.yaml up -d --no-build
+          FEDERATION_SMOKE_BASE_A=http://127.0.0.1:18091/api \
+          FEDERATION_SMOKE_BASE_B=http://127.0.0.1:18092/api \
+            node federation-smoke.js
+
+          for service in mirror-a mirror-b; do
+            test "$(docker compose -f compose.federation-lab.yaml exec -T "$service" \
+              stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
+            test "$(docker compose -f compose.federation-lab.yaml exec -T "$service" \
+              stat -c '%a' /var/lib/quantaswap-orderbook/orders.json.federation)" = 600
+          done
+
+      - name: Clean isolated Compose state
+        if: always()
+        working-directory: server
+        env:
+          ORDERBOOK_IMAGE: quantaswap-orderbook:ci
+          ORDERBOOK_LAB_IMAGE: quantaswap-orderbook:ci
+        run: |
+          docker compose -f compose.federation-lab.yaml down --volumes --remove-orphans || true
+          docker compose down --volumes --remove-orphans || true

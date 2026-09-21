@@ -4,14 +4,14 @@
 
 import { describe, expect, it } from "vitest";
 import { CLAIM_MARGIN_S, ETH_ASSETS } from "../config";
-import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc";
+import { NATIVE_TOKEN, QRL_NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc";
 import type { ActiveSwap, SwapRole } from "./activeSwap";
 import { ZERO32, deriveSwapMachine, sameAddr, type LegStates } from "./swapMachine";
 
 const MAKER_ETH = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TAKER_ETH = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const MAKER_QRL = "Qcccccccccccccccccccccccccccccccccccccccc";
-const TAKER_QRL = "Qdddddddddddddddddddddddddddddddddddddddd";
+const MAKER_QRL = `Q${"c".repeat(128)}`;
+const TAKER_QRL = `Q${"d".repeat(128)}`;
 const HASHLOCK = `0x${"12".repeat(32)}`;
 const PREIMAGE = `0x${"34".repeat(32)}`;
 
@@ -71,7 +71,7 @@ const rOpen = (overrides: Partial<LegState> = {}): LegState => ({
   status: SwapStatus.Open,
   initiator: `0x${TAKER_QRL.slice(1)}`,
   recipient: `0x${MAKER_QRL.slice(1)}`,
-  token: NATIVE_TOKEN,
+  token: QRL_NATIVE_TOKEN,
   amount: QRL_AMOUNT,
   timeout: R_TIMEOUT,
   preimage: ZERO32,
@@ -318,12 +318,12 @@ describe("ERC-20 ETH-leg verification (stable pairs)", () => {
   it("exposes the expected token on the leg plan (native sentinel only for native assets)", () => {
     const native = derive("taker", { eth: none(), qrl: none() }, {});
     expect(native.legPlan.eth.expectedToken).toBe(NATIVE_TOKEN);
-    expect(native.legPlan.qrl.expectedToken).toBe(NATIVE_TOKEN);
+    expect(native.legPlan.qrl.expectedToken).toBe(QRL_NATIVE_TOKEN);
     const usdc = derive("taker", { eth: none(), qrl: none() }, {}, { swap: usdcSwap });
     expect(usdc.legPlan.eth.expectedToken).toBe(USDC_ADDRESS);
     expect(usdc.legPlan.eth.symbol).toBe("USDC");
     expect(usdc.legPlan.eth.decimals).toBe(6);
-    expect(usdc.legPlan.qrl.expectedToken).toBe(NATIVE_TOKEN);
+    expect(usdc.legPlan.qrl.expectedToken).toBe(QRL_NATIVE_TOKEN);
   });
 
   it("accepts a confirmed initiator lock escrowing exactly the agreed USDC", () => {
@@ -388,7 +388,7 @@ describe("ERC-20 ETH-leg verification (stable pairs)", () => {
     status: SwapStatus.Open,
     initiator: `0x${MAKER_QRL.slice(1)}`,
     recipient: `0x${TAKER_QRL.slice(1)}`,
-    token: NATIVE_TOKEN,
+    token: QRL_NATIVE_TOKEN,
     amount: QRL_AMOUNT,
     timeout: I_TIMEOUT,
     preimage: ZERO32,

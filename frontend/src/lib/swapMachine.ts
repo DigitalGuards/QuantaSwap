@@ -6,7 +6,14 @@
 
 import { formatUnits } from "ethers";
 import { CLAIM_MARGIN_S, ETH_ASSETS, QRL_LEG, type LegKey } from "../config";
-import { NATIVE_TOKEN, SwapStatus, qToHex, type LegState } from "./htlc";
+import {
+  NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
+  SwapStatus,
+  nativeTokenForLeg,
+  qToHex,
+  type LegState,
+} from "./htlc";
 import { initiatorLeg, responderLeg, type ActiveSwap } from "./activeSwap";
 
 export const ZERO32 = `0x${"0".repeat(64)}`;
@@ -140,7 +147,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
           symbol: ethAsset.symbol,
           decimals: ethAsset.decimals,
         }
-      : { expectedToken: NATIVE_TOKEN, symbol: QRL_LEG.display, decimals: 18 };
+      : { expectedToken: QRL_NATIVE_TOKEN, symbol: QRL_LEG.display, decimals: 18 };
 
   const legPlan = {
     [iLeg]: { recipient: addrOn(iLeg, "taker"), amount: BigInt(swap.fromAmount), ...assetOn(iLeg) },
@@ -154,15 +161,15 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   // (native sentinel or the agreed asset's registry address) is honest.
   const tokenIssue = (confirmedToken: string, plan: LegPlan): string | null => {
     if (sameAddr(confirmedToken, plan.expectedToken)) return null;
-    return sameAddr(plan.expectedToken, NATIVE_TOKEN)
+    return sameAddr(plan.expectedToken, NATIVE_TOKEN) || sameAddr(plan.expectedToken, QRL_NATIVE_TOKEN)
       ? `it escrows a token, not native ${plan.symbol}`
       : `it escrows the wrong token contract, not the agreed ${plan.symbol}`;
   };
 
   // Prelocked swaps: the initiator escrow exists before a recipient does.
   const prelocked = swap.prelocked === true;
-  const ZERO_ADDR = `0x${"0".repeat(40)}`;
-  const unassigned = (st: LegState): boolean => sameAddr(st.recipient, ZERO_ADDR);
+  const unassigned = (st: LegState, leg: LegKey): boolean =>
+    sameAddr(st.recipient, nativeTokenForLeg(leg));
 
   // An unassigned-at-depth escrow is "waiting for the maker's assign",
   // not a verification failure; but it must block the responder lock
@@ -170,7 +177,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   // recipient is themselves, at depth).
   const awaitingAssign =
     prelocked &&
-    Boolean(iConfirmed && iConfirmed.status === SwapStatus.Open && unassigned(iConfirmed));
+    Boolean(iConfirmed && iConfirmed.status === SwapStatus.Open && unassigned(iConfirmed, iLeg));
 
   // Taker-side verification of the maker's lock before responding with
   // funds. The order book announced the parameters; the chain confirms
@@ -222,7 +229,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     leg: iLeg,
     own: mySteps[0],
     done: Boolean(
-      iConfirmed && iConfirmed.status !== SwapStatus.None && !unassigned(iConfirmed),
+      iConfirmed && iConfirmed.status !== SwapStatus.None && !unassigned(iConfirmed, iLeg),
     ),
     // Assigning while the shared hashlock is already used on the
     // responder chain would trade the maker's on-demand release for a
@@ -232,7 +239,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     canRun: Boolean(
       iState &&
         iState.status === SwapStatus.Open &&
-        unassigned(iState) &&
+        unassigned(iState, iLeg) &&
         rState &&
         rState.status === SwapStatus.None &&
         nowS < responderTimeout,
@@ -241,7 +248,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       mySteps[0] &&
       iState &&
       iState.status === SwapStatus.Open &&
-      unassigned(iState) &&
+      unassigned(iState, iLeg) &&
       rState &&
       rState.status !== SwapStatus.None
         ? "the hashlock is already used on the responder chain; release your escrow and relist"
@@ -249,8 +256,8 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     awaitingDepth: Boolean(
       iState &&
         iState.status === SwapStatus.Open &&
-        !unassigned(iState) &&
-        !(iConfirmed && iConfirmed.status === SwapStatus.Open && !unassigned(iConfirmed)),
+        !unassigned(iState, iLeg) &&
+        !(iConfirmed && iConfirmed.status === SwapStatus.Open && !unassigned(iConfirmed, iLeg)),
     ),
   };
 
@@ -302,7 +309,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         swap.preimage &&
           iState &&
           iState.status === SwapStatus.Open &&
-          (!prelocked || !unassigned(iState)) &&
+          (!prelocked || !unassigned(iState, iLeg)) &&
           rConfirmed &&
           rConfirmed.status === SwapStatus.Open &&
           !responderLockIssue &&
@@ -329,7 +336,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         revealedPreimage &&
           iState &&
           iState.status === SwapStatus.Open &&
-          (!prelocked || !unassigned(iState)) &&
+          (!prelocked || !unassigned(iState, iLeg)) &&
           nowS < iState.timeout,
       ),
       issue: null,
@@ -355,7 +362,7 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     ? []
     : ownLockedLegs.filter((leg) => {
         const state = legs[leg];
-        return state !== undefined && unassigned(state);
+        return state !== undefined && unassigned(state, leg);
       });
 
   return {

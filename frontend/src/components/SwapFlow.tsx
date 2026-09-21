@@ -26,6 +26,7 @@ import {
   type ActiveSwap,
 } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
+import { verifyTakerFill } from "@/components/signedOrderFlow";
 import {
   deriveSwapMachine,
   sameAddr,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/swapMachine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
@@ -180,7 +182,11 @@ export function SwapFlow({
     let stop = false;
     const poll = async () => {
       try {
-        const view = await getOrder(orderId);
+        const view = await getOrder(
+          orderId,
+          swap.shareToken ?? undefined,
+          swap.bookId,
+        );
         if (!stop) setOrder(view);
       } catch {
         // transient or gone; ignore, the chain governs the funds
@@ -192,7 +198,7 @@ export function SwapFlow({
       stop = true;
       clearInterval(t);
     };
-  }, [orderId]);
+  }, [orderId, swap.shareToken, swap.bookId]);
 
   // Shared with the prelock post flow; see lib/legSender.ts for the
   // transport quirks (extension gas shape, approve targeting).
@@ -267,6 +273,41 @@ export function SwapFlow({
   const rPlan = legPlan[rLeg];
   const fmtLeg = (plan: LegPlan) => `${formatUnits(plan.amount, plan.decimals)} ${plan.symbol}`;
   const termsBound = hasCurrentTermBinding(swap);
+  let signedFillIssue: string | null = null;
+  if (swap.role !== "sandbox" && swap.intent !== undefined) {
+    if (
+      order === null ||
+      swap.orderDigest === undefined ||
+      swap.intentDigest === undefined ||
+      swap.fill === undefined ||
+      swap.fillDigest === undefined
+    ) {
+      signedFillIssue = "Checking the signed FillV1 before funding.";
+    } else if (order.released === true) {
+      signedFillIssue = "This signed fill was released. Funding is blocked.";
+    } else {
+      try {
+        const verified = verifyTakerFill(
+          order,
+          {
+            orderDigest: swap.orderDigest,
+            intent: swap.intent,
+            intentDigest: swap.intentDigest,
+          },
+          { now: nowS },
+        );
+        if (
+          verified === null ||
+          verified.digest !== swap.fillDigest ||
+          verified.signed.fill.hashlock !== swap.fill.fill.hashlock
+        ) {
+          signedFillIssue = "The live FillV1 no longer matches local recovery data.";
+        }
+      } catch (err) {
+        signedFillIssue = err instanceof Error ? err.message : "FillV1 verification failed.";
+      }
+    }
+  }
   const requireBoundTerms = () => {
     if (!termsBound) {
       throw new Error(
@@ -278,6 +319,13 @@ export function SwapFlow({
   const lockLeg = (leg: LegKey) =>
     runAction(`lock-${leg}`, async () => {
       requireBoundTerms();
+      if (
+        swap.intent !== undefined &&
+        ((swap.role === "taker" && leg === rLeg) ||
+          (swap.role === "maker" && leg === iLeg))
+      ) {
+        if (signedFillIssue !== null) throw new Error(signedFillIssue);
+      }
       const plan = legPlan[leg];
       const timeout = leg === iLeg ? initiatorTimeout : (swap.responderTimeout ?? 0);
       if (leg === "eth" && ethAsset.address !== null) {
@@ -300,7 +348,11 @@ export function SwapFlow({
           onStage: setLockStage,
         });
       } else {
-        await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
+        await sendOnLeg(
+          leg,
+          buildLockNativeData(leg, hashlock, plan.recipient, timeout),
+          plan.amount,
+        );
       }
     });
 
@@ -316,12 +368,12 @@ export function SwapFlow({
         revealedPreimage !== null &&
         preimage === revealedPreimage;
       if (!legacyPublicSecretRecovery) requireBoundTerms();
-      await sendClaimOnLeg(leg, buildClaimData(hashlock, preimage), 0n);
+      await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n);
     });
 
   const refundLeg = (leg: LegKey) =>
     runAction(`refund-${leg}`, async () => {
-      await sendOnLeg(leg, buildRefundData(hashlock), 0n);
+      await sendOnLeg(leg, buildRefundData(leg, hashlock), 0n);
     });
 
   // Prelocked swaps only: one-time recipient assignment on the maker's
@@ -330,12 +382,15 @@ export function SwapFlow({
   const assignLeg = (leg: LegKey) =>
     runAction(`assign-${leg}`, async () => {
       requireBoundTerms();
-      await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
+      if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
+        throw new Error(signedFillIssue);
+      }
+      await sendOnLeg(leg, buildAssignData(leg, hashlock, legPlan[leg].recipient), 0n);
     });
 
   const releaseLeg = (leg: LegKey) =>
     runAction(`release-${leg}`, async () => {
-      await sendOnLeg(leg, buildReleaseData(hashlock), 0n);
+      await sendOnLeg(leg, buildReleaseData(leg, hashlock), 0n);
     });
 
   /** Busy-state key for a step's own action button. */
@@ -439,6 +494,11 @@ export function SwapFlow({
             public-secret claim recovery.
           </p>
         ) : null}
+        {signedFillIssue !== null ? (
+          <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
+            {signedFillIssue}
+          </p>
+        ) : null}
         {complete ? (
           <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
             Atomic swap complete on both chains
@@ -446,11 +506,27 @@ export function SwapFlow({
         ) : null}
 
         {accountMismatch ? (
-          <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
-            A connected wallet differs from the address this swap was agreed with. Payouts still go
-            to the agreed addresses (<span className="font-data">{ownEth.slice(0, 8)}…</span> /{" "}
-            <span className="font-data">{ownQrl.slice(0, 8)}…</span>).
-          </p>
+          <div className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
+            <p>
+              A connected wallet differs from the address this swap was agreed with. Payouts still
+              go to the agreed addresses (
+              <AddressFingerprint address={ownEth} /> /{" "}
+              <AddressFingerprint address={ownQrl} />).
+            </p>
+            <details className="mt-2">
+              <summary className="cursor-pointer font-medium">Show full agreed addresses</summary>
+              <dl className="mt-1 space-y-1 font-data text-[11px]">
+                <div>
+                  <dt className="inline font-sans">Ethereum: </dt>
+                  <dd className="inline break-all select-text">{ownEth}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-sans">QRL: </dt>
+                  <dd className="inline break-all select-text">{ownQrl}</dd>
+                </div>
+              </dl>
+            </details>
+          </div>
         ) : null}
 
         {steps.map((step, i) => {
@@ -528,6 +604,13 @@ export function SwapFlow({
                             )) ||
                           !step.canRun ||
                           busy !== null ||
+                          (step.key === "lock-responder" &&
+                            swap.role === "taker" &&
+                            signedFillIssue !== null) ||
+                          ((step.key === "lock-initiator" ||
+                            step.key === "assign-initiator") &&
+                            swap.role === "maker" &&
+                            signedFillIssue !== null) ||
                           ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
                             takerWalkedAway)
                         }

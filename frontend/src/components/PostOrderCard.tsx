@@ -7,6 +7,7 @@ import {
   ETH_ASSET_SYMBOLS,
   ETH_LEG,
   MIN_QRL_AMOUNT_WEI,
+  PRIMARY_ORDERBOOK_ID,
   PRELOCK_INITIATOR_TIMEOUT_S,
   QRL_LEG,
   ethAssetSymbolOrNull,
@@ -16,14 +17,25 @@ import {
 import type { Direction } from "@/lib/activeSwap";
 import {
   clearPrelockStage,
+  clearSignedOrderStage,
   initiatorLeg,
   loadPrelockStage,
+  loadSignedOrderStage,
   saveMyOrder,
   savePrelockStage,
+  saveSignedOrderStage,
   type MyOrderRef,
   type PrelockStage,
+  type SignedOrderStage,
 } from "@/lib/activeSwap";
-import { createOrder } from "@/lib/orderbook";
+import { createSignedOrder, type CreateOrderBody } from "@/lib/orderbook";
+import {
+  orderDigest,
+  orderSigningLabel,
+  orderSigningSchemeForWallet,
+  signOrderV1,
+  verifyOrderCapabilities,
+} from "@/lib/orderSigning";
 import { generateSecret } from "@/lib/secrets";
 import {
   SwapStatus,
@@ -31,12 +43,13 @@ import {
   buildLockTokenOpenData,
   buildReleaseData,
   getLegState,
-  shortAddr,
 } from "@/lib/htlc";
 import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
+import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { errorMessage, isUserRejection } from "@/utils/errorMessage";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
 
@@ -59,6 +72,7 @@ interface Props {
   ensureSepolia: () => Promise<void>;
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   qrlTransport: QrlTransport | null;
+  qrlWalletRdns: string | null;
   /** Latest draft to load into the form (a fresh object per request). */
   prefill?: OrderDraft | null;
   onPosted: (ref: MyOrderRef) => void;
@@ -80,9 +94,24 @@ const parseAmount = (value: string, decimals: number, symbol: string): bigint =>
 };
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const sameOrderAuth = (
+  left: SignedOrderStage["auth"] | undefined,
+  right: SignedOrderStage["auth"],
+): boolean =>
+  left !== undefined &&
+  left.version === right.version &&
+  left.scheme === right.scheme &&
+  left.issuedAt === right.issuedAt &&
+  left.expiresAt === right.expiresAt &&
+  left.nonce === right.nonce &&
+  left.makerTokenCommitment === right.makerTokenCommitment &&
+  left.shareTokenCommitment === right.shareTokenCommitment &&
+  left.signature === right.signature &&
+  left.publicKey === right.publicKey &&
+  left.descriptor === right.descriptor;
 
 /** Poll until the escrow is visible Open at the head. Sepolia includes in
  *  ~12s, QRL in up to about a minute; two minutes of patience covers both
@@ -108,6 +137,7 @@ export function PostOrderCard({
   ensureSepolia,
   qrlRequest,
   qrlTransport,
+  qrlWalletRdns,
   prefill,
   onPosted,
 }: Props) {
@@ -125,6 +155,9 @@ export function PostOrderCard({
   const [stageLabel, setStageLabel] = useState<string | null>(null);
   /** Interrupted pre-funded post (escrow possibly on-chain, no order). */
   const [staged, setStaged] = useState<PrelockStage | null>(() => loadPrelockStage());
+  const [signedStage, setSignedStage] = useState<SignedOrderStage | null>(() =>
+    loadSignedOrderStage(),
+  );
   /** A chain read for the staged record just returned None (no escrow yet).
    *  Reveals the explicit discard override: the record can only be dropped
    *  here by a warned user, never automatically, since a None reading
@@ -203,6 +236,100 @@ export function PostOrderCard({
   const toSymbol = direction === "eth->qrl" ? QRL_LEG.display : asset.symbol;
 
   const ready = Boolean(ethAccount && qrlAccount && Number(fromAmount) > 0 && Number(toAmount) > 0);
+  const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
+
+  const publishSignedStage = async (stage: SignedOrderStage) => {
+    if (
+      !verifyOrderCapabilities(
+        stage.order,
+        stage.auth,
+        stage.makerToken,
+        stage.shareToken,
+      )
+    ) {
+      throw new Error("The saved order capabilities do not match its signed commitments");
+    }
+    setStageLabel("Publishing the signed order");
+    const created = await createSignedOrder(
+      {
+        order: stage.order,
+        auth: stage.auth,
+        makerToken: stage.makerToken,
+        ...(stage.shareToken === undefined ? {} : { shareToken: stage.shareToken }),
+      },
+      stage.bookId,
+    );
+    if (
+      created.order.orderDigest !== stage.orderDigest ||
+      !sameOrderAuth(created.order.makerAuth, stage.auth)
+    ) {
+      throw new Error("The order book acknowledged a different signed order");
+    }
+    return created.order;
+  };
+
+  const createPortableOrder = async (body: CreateOrderBody) => {
+    const unresolved = signedStage ?? loadSignedOrderStage();
+    if (unresolved !== null) {
+      setSignedStage(unresolved);
+      throw new Error("An earlier signed order is still awaiting publication recovery");
+    }
+    setStageLabel("Authorizing OrderV2 in your QRL wallet");
+    const signed = await signOrderV1({ body, walletRdns: qrlWalletRdns, request: qrlRequest });
+    const stage: SignedOrderStage = {
+      order: signed.order,
+      auth: signed.auth,
+      makerToken: signed.makerToken,
+      ...(signed.shareToken === undefined ? {} : { shareToken: signed.shareToken }),
+      orderDigest: orderDigest(signed.order, signed.auth),
+      bookId: PRIMARY_ORDERBOOK_ID,
+      createdAt: signed.auth.issuedAt,
+    };
+    saveSignedOrderStage(stage);
+    setSignedStage(stage);
+    const order = await publishSignedStage(stage);
+    return {
+      order,
+      stage,
+    };
+  };
+
+  const promoteSignedOrder = (
+    stage: SignedOrderStage,
+    order: Awaited<ReturnType<typeof publishSignedStage>>,
+    prelockStage: PrelockStage | null,
+  ): MyOrderRef => {
+    const ref: MyOrderRef = {
+      id: order.id,
+      ...(order.bookId === undefined ? {} : { bookId: order.bookId }),
+      orderAuth: stage.auth,
+      orderDigest: stage.orderDigest,
+      token: stage.makerToken,
+      direction: stage.order.direction,
+      asset: stage.order.asset,
+      fromAmount: stage.order.fromAmount,
+      toAmount: stage.order.toAmount,
+      shareToken: stage.shareToken ?? null,
+      prelock:
+        prelockStage === null
+          ? null
+          : {
+              hashlock: prelockStage.hashlock,
+              preimage: prelockStage.preimage,
+              initiatorTimeout: prelockStage.initiatorTimeout,
+              leg: prelockStage.leg,
+            },
+    };
+    saveMyOrder(ref);
+    clearSignedOrderStage();
+    setSignedStage(null);
+    if (prelockStage !== null) {
+      clearPrelockStage();
+      setStaged(null);
+    }
+    onPosted(ref);
+    return ref;
+  };
 
   /** Create the book listing for an escrowed stage and hand over the
    *  order handle. Shared by the happy path and the recovery banner. */
@@ -211,7 +338,7 @@ export function PostOrderCard({
     makerEth: string,
     makerQrl: string,
   ): Promise<void> => {
-    const { order, makerToken, shareToken } = await createOrder({
+    const { order, stage: signedOrderStage } = await createPortableOrder({
       direction: stage.direction,
       asset: stage.asset,
       fromAmount: stage.fromAmount,
@@ -224,7 +351,7 @@ export function PostOrderCard({
             ...(stage.allowedTakerEth !== null ? { allowedTakerEth: stage.allowedTakerEth } : {}),
             ...(stage.allowedTakerQrl !== null ? { allowedTakerQrl: stage.allowedTakerQrl } : {}),
           }
-        : {}),
+        : { visibility: "public" as const }),
       prelock: { hashlock: stage.hashlock, initiatorTimeout: stage.initiatorTimeout },
     });
     // Belt and braces: a book that predates prelock would silently drop
@@ -234,25 +361,7 @@ export function PostOrderCard({
         "the order book ignored the pre-funding; release the escrow from the recovery banner",
       );
     }
-    const ref: MyOrderRef = {
-      id: order.id,
-      token: makerToken,
-      direction: stage.direction,
-      asset: stage.asset,
-      fromAmount: stage.fromAmount,
-      toAmount: stage.toAmount,
-      shareToken: shareToken ?? null,
-      prelock: {
-        hashlock: stage.hashlock,
-        preimage: stage.preimage,
-        initiatorTimeout: stage.initiatorTimeout,
-        leg: stage.leg,
-      },
-    };
-    saveMyOrder(ref);
-    clearPrelockStage();
-    setStaged(null);
-    onPosted(ref);
+    promoteSignedOrder(signedOrderStage, order, stage);
   };
 
   const post = async () => {
@@ -260,6 +369,12 @@ export function PostOrderCard({
     setError(null);
     setBusy(true);
     try {
+      assertPortableOrderV1CanSign(qrlAccount);
+      const unresolved = signedStage ?? loadSignedOrderStage();
+      if (unresolved !== null) {
+        setSignedStage(unresolved);
+        throw new Error("An earlier signed order is still awaiting publication recovery");
+      }
       const ethSide = direction === "eth->qrl" ? fromAmount : toAmount;
       const qrlSide = direction === "eth->qrl" ? toAmount : fromAmount;
       const ethUnits = parseAmount(ethSide, asset.decimals, asset.symbol);
@@ -280,8 +395,8 @@ export function PostOrderCard({
         if (restrictEth && !ETH_ADDR_RE.test(restrictEth)) {
           throw new Error("Taker ETH address must be a 0x-prefixed 20-byte address");
         }
-        if (restrictQrl && !QRL_ADDR_RE.test(restrictQrl)) {
-          throw new Error("Taker QRL address must be a Q-prefixed 20-byte address");
+        if (restrictQrl && !isQip55QrlAddress(restrictQrl)) {
+          throw new Error("Taker QRL address must be a Q-prefixed 64-byte address with a valid checksum");
         }
       }
 
@@ -342,7 +457,7 @@ export function PostOrderCard({
             setStageLabel(`Lock ${fromSymbol}`);
             await sendOnLeg(
               leg,
-              buildLockNativeOpenData(secret.hashlock, stage.initiatorTimeout),
+              buildLockNativeOpenData(leg, secret.hashlock, stage.initiatorTimeout),
               fromUnits,
             );
           }
@@ -364,7 +479,7 @@ export function PostOrderCard({
         return;
       }
 
-      const { order, makerToken, shareToken } = await createOrder({
+      const { order, stage } = await createPortableOrder({
         direction,
         asset: asset.symbol,
         fromAmount: fromUnits.toString(),
@@ -377,28 +492,64 @@ export function PostOrderCard({
               ...(restrictEth ? { allowedTakerEth: restrictEth } : {}),
               ...(restrictQrl ? { allowedTakerQrl: restrictQrl } : {}),
             }
-          : {}),
+          : { visibility: "public" as const }),
       });
       // Anchor the terms we just posted, not the book's echo of them:
       // MyOrderCard builds the swap from this handle at match time.
-      const ref: MyOrderRef = {
-        id: order.id,
-        token: makerToken,
-        direction,
-        asset: asset.symbol,
-        fromAmount: fromUnits.toString(),
-        toAmount: toUnits.toString(),
-        shareToken: shareToken ?? null,
-        prelock: null,
-      };
-      saveMyOrder(ref);
-      onPosted(ref);
+      promoteSignedOrder(stage, order, null);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
       setStageLabel(null);
       setActivePost(false);
+    }
+  };
+
+  /** Retry the byte-identical signed envelope after a lost response or
+   *  reload. The capabilities and proof are reused without another wallet
+   *  prompt, then promoted only after the returned proof matches. */
+  const resumeSignedPost = async () => {
+    const stage = signedStage ?? loadSignedOrderStage();
+    if (stage === null || !ethAccount || !qrlAccount) return;
+    setError(null);
+    setBusy(true);
+    try {
+      if (
+        stage.order.makerEthAccount.toLowerCase() !== ethAccount.toLowerCase() ||
+        stage.order.makerQrlAccount.toLowerCase() !== qrlAccount.toLowerCase()
+      ) {
+        throw new Error("Connect the same maker accounts that signed this pending order");
+      }
+      let prelockStage: PrelockStage | null = null;
+      if (stage.order.prelock !== undefined) {
+        prelockStage = staged ?? loadPrelockStage();
+        if (
+          prelockStage === null ||
+          prelockStage.hashlock !== stage.order.prelock.hashlock ||
+          prelockStage.initiatorTimeout !== stage.order.prelock.initiatorTimeout ||
+          prelockStage.direction !== stage.order.direction ||
+          prelockStage.asset !== stage.order.asset ||
+          prelockStage.fromAmount !== stage.order.fromAmount ||
+          prelockStage.toAmount !== stage.order.toAmount
+        ) {
+          throw new Error("The pending pre-funded order has lost its matching escrow recovery record");
+        }
+        const chain = await getLegState(prelockStage.leg, prelockStage.hashlock);
+        if (chain.status !== SwapStatus.Open) {
+          throw new Error("The pending pre-funded order no longer has an open escrow");
+        }
+      }
+      const order = await publishSignedStage(stage);
+      if (stage.order.prelock !== undefined && order.prelocked !== true) {
+        throw new Error("The order book ignored the signed pre-funding terms");
+      }
+      promoteSignedOrder(stage, order, prelockStage);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+      setStageLabel(null);
     }
   };
 
@@ -444,7 +595,7 @@ export function PostOrderCard({
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.Open) {
         setStageLabel("Releasing the escrow");
-        await sendOnLeg(staged.leg, buildReleaseData(staged.hashlock), 0n);
+        await sendOnLeg(staged.leg, buildReleaseData(staged.leg, staged.hashlock), 0n);
         for (let i = 0; i < 40; i += 1) {
           const cur = await getLegState(staged.leg, staged.hashlock).catch(() => null);
           if (cur && cur.status !== SwapStatus.Open) break;
@@ -592,7 +743,24 @@ export function PostOrderCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {staged && !activePost ? (
+        {signedStage && !activePost ? (
+          <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
+            <p className="text-xs leading-relaxed text-amber-400">
+              A signed order is awaiting a confirmed publication response. Its exact OrderV2 and
+              private capabilities are saved in this browser, so retrying does not require another
+              wallet signature and cannot create a different order.
+            </p>
+            <Button
+              size="sm"
+              disabled={busy || !ethAccount || !qrlAccount}
+              onClick={() => void resumeSignedPost()}
+            >
+              {busy && stageLabel !== null ? `${stageLabel}…` : "Retry exact publication"}
+            </Button>
+          </div>
+        ) : null}
+
+        {staged && !signedStage && !activePost ? (
           <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
             <p className="text-xs leading-relaxed text-amber-400">
               {stagedChain === "checking"
@@ -672,19 +840,29 @@ export function PostOrderCard({
         {legBox("You want", direction === "eth->qrl" ? "qrl" : "eth", toAmount, setToAmount)}
 
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-          <div className="flex flex-wrap justify-between gap-x-3 gap-y-1">
+          <div className="flex items-start justify-between gap-4">
             <span className="text-muted-foreground">Receive {toSymbol} to</span>
-            <span className="font-data text-xs text-identity-accent">
+            <span className="min-w-0 text-right text-xs text-blue-accent">
               {direction === "eth->qrl"
                 ? qrlAccount
-                  ? shortAddr(qrlAccount)
+                  ? (
+                      <AddressFingerprint address={qrlAccount} />
+                    )
                   : "connect QRL wallet"
                 : ethAccount
-                  ? shortAddr(ethAccount)
+                  ? (
+                      <AddressFingerprint address={ethAccount} />
+                    )
                   : "connect ETH wallet"}
             </span>
           </div>
-          <div className="flex flex-wrap justify-between gap-x-3 gap-y-1">
+          <div className="flex items-start justify-between gap-4">
+            <span className="text-muted-foreground">Order signature</span>
+            <span className="text-right text-xs font-medium text-secondary">
+              {orderSigningLabel(qrlWalletRdns)}
+            </span>
+          </div>
+          <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
             <span className="font-data">
               {prefund ? "48h escrow / 1h taker leg" : "2h your leg / 1h taker leg"}
@@ -748,31 +926,44 @@ export function PostOrderCard({
           ) : null}
         </div>
 
-        <Button className="w-full" size="lg" disabled={!ready || busy} onClick={() => void post()}>
+        <Button
+          className="w-full"
+          size="lg"
+          disabled={!ready || busy || signingScheme === null || signedStage !== null}
+          onClick={() => void post()}
+        >
           <BookPlus className="h-4 w-4" />
           {!ethAccount || !qrlAccount
             ? "Connect both wallets to post"
-            : !(Number(fromAmount) > 0)
-              ? `Enter the ${fromSymbol} amount`
-              : !(Number(toAmount) > 0)
-                ? `Enter the ${toSymbol} amount`
-                : busy
-                  ? stageLabel !== null
-                    ? `${stageLabel}…`
-                    : "Posting…"
-                  : prefund
-                    ? isPrivate
-                      ? "Escrow & post private order"
-                      : "Escrow & post order"
-                    : isPrivate
-                      ? "Post private order"
-                      : "Post order"}
+            : signingScheme === null
+              ? "Use a compatible QRL wallet"
+              : !(Number(fromAmount) > 0)
+                ? `Enter the ${fromSymbol} amount`
+                : !(Number(toAmount) > 0)
+                  ? `Enter the ${toSymbol} amount`
+                  : busy
+                    ? stageLabel !== null
+                      ? `${stageLabel}…`
+                      : "Posting…"
+                    : prefund
+                      ? isPrivate
+                        ? "Escrow & post private order"
+                        : "Escrow & post order"
+                      : isPrivate
+                        ? "Post private order"
+                        : "Post order"}
         </Button>
         {error ? <p className="text-sm break-words text-destructive">{error}</p> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {prefund
             ? "Pre-funding escrows your side up front; everything else still settles atomically through the HTLCs, or refunds after the timelocks."
             : "Posting is free and holds no funds. When a taker accepts, you lock first and the swap settles atomically through the HTLCs, or refunds after the timelocks."}
+        </p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          MyQRLWallet signs the complete OrderV2 terms with ML-DSA-87 before publishing.
+          Connect MyQRLWallet Extension or the MyQRLWallet web wallet. The signed message binds
+          both chains, the private v3 genesis, and this deployment's contracts. Your browser
+          verifies the proof. No transaction or funds move during signing.
         </p>
       </CardContent>
     </Card>

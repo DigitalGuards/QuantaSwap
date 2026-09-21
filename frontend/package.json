@@ -14,9 +14,11 @@
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/sora": "^5.2.8",
     "@metamask/connect-evm": "2.1.1",
-    "@qrlwallet/connect": "4.0.0",
-    "@qrlwallet/connect-ui": "0.2.1",
+    "@noble/hashes": "2.2.0",
+    "@qrlwallet/connect": "5.0.1",
+    "@qrlwallet/connect-ui": "0.2.2",
     "@radix-ui/react-slot": "^1.1.2",
+    "@theqrl/mldsa87": "2.1.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ethers": "^6.13.4",
@@ -30,6 +32,7 @@
     "@tailwindcss/vite": "^4.1.18",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
+    "@theqrl/web3-qrl-abi": "1.0.3",
     "@types/node": "^22.20.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
@@ -38,7 +41,7 @@
     "tailwindcss": "^4.1.18",
     "typescript": "~5.8.3",
     "vite": "^7.3.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=22.22.0"

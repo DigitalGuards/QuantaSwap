@@ -31,20 +31,40 @@ import type { OrderDraft } from "@/components/PostOrderCard";
 import {
   acceptOrder,
   acceptedOrderTerms,
-  listOrders,
   openBookStream,
+  refreshDisconnectedOrderBooks,
+  refreshOrderBook,
   releaseOrder,
+  routeSignedOrder,
+  submitFillIntent,
+  summarizeMirrorAvailability,
+  type MirrorBookResult,
   takeOrder,
   type OrderView,
 } from "@/lib/orderbook";
 import { shortAddr } from "@/lib/htlc";
+import {
+  intentDigest,
+  orderSigningSchemeForWallet,
+  signFillIntentV1,
+  verifyOrderV1Auth,
+} from "@/lib/orderSigning";
+import { generateSecret } from "@/lib/secrets";
+import {
+  buildSignedTakerSwap,
+  sameSignedIntent,
+} from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
+import { errorMessage } from "@/utils/errorMessage";
 
 interface Props {
   ethAccount: string | null;
   qrlAccount: string | null;
+  qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+  qrlWalletRdns: string | null;
   /** The maker's own listing renders marked ("yours") and untakeable. */
   ownOrderId: string | null;
   /** Taking is disabled while you have an order or swap of your own. */
@@ -133,12 +153,14 @@ function cumulate(rows: Omit<BookRow, "cumUnits">[]): BookRow[] {
 export function OrderBookPanel({
   ethAccount,
   qrlAccount,
+  qrlRequest,
+  qrlWalletRdns,
   ownOrderId,
   takeDisabled,
   onTaken,
   onPrefill,
 }: Props) {
-  const [orders, setOrders] = useState<OrderView[] | null>(null);
+  const [book, setBook] = useState<MirrorBookResult | null>(null);
   const [pair, setPair] = useState<EthAssetSymbol>("ETH");
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -146,6 +168,10 @@ export function OrderBookPanel({
   // starts the maker locking, so it needs an explicit confirm, not a raw
   // click on browse.
   const [pending, setPending] = useState<OrderView | null>(null);
+  const [proof, setProof] = useState<{
+    id: string;
+    status: "checking" | "valid" | "invalid" | "legacy";
+  } | null>(null);
   // Set when the server refuses further takes (per-IP caps reached); blocks
   // the whole book until the caps free rather than 429-ing click by click.
   const [capBlocked, setCapBlocked] = useState(false);
@@ -159,6 +185,30 @@ export function OrderBookPanel({
   } | null>(null);
 
   const asset = ETH_ASSETS[pair];
+  const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
+  const orders = book?.orders ?? null;
+
+  useEffect(() => {
+    if (!pending) {
+      setProof(null);
+      return undefined;
+    }
+    if (pending.makerAuth === undefined) {
+      setProof({ id: pending.id, status: "legacy" });
+      return undefined;
+    }
+    const target = pending;
+    let stale = false;
+    setProof({ id: target.id, status: "checking" });
+    const timer = window.setTimeout(() => {
+      const valid = verifyOrderV1Auth(target);
+      if (!stale) setProof({ id: target.id, status: valid ? "valid" : "invalid" });
+    }, 0);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [pending]);
 
   useEffect(() => {
     if (!pending || pending.prelocked !== true) {
@@ -180,21 +230,35 @@ export function OrderBookPanel({
     };
   }, [pending, pair]);
 
+  useEffect(() => {
+    if (
+      pending !== null &&
+      book !== null &&
+      !book.orders.some(
+        (order) =>
+          order.id === pending.id && order.orderDigest === pending.orderDigest,
+      )
+    ) {
+      setPending(null);
+    }
+  }, [book, pending]);
+
   const refresh = useCallback(async () => {
     try {
-      setOrders(await listOrders());
+      setBook(await refreshOrderBook());
     } catch {
       // transient; next poll retries
     }
   }, []);
 
-  // Live book via SSE, with the old poll demoted to a fallback that only
-  // fires while the stream is down (blocked proxy, reconnect gap).
+  // Live books arrive independently. Poll only mirrors whose stream or
+  // last validated snapshot is unavailable so one healthy stream never
+  // suppresses another mirror's recovery.
   useEffect(() => {
+    const stream = openBookStream(setBook);
     void refresh();
-    const stream = openBookStream(setOrders);
     const t = setInterval(() => {
-      if (!stream.isLive()) void refresh();
+      void refreshDisconnectedOrderBooks().then(setBook).catch(() => undefined);
     }, 5000);
     return () => {
       stream.close();
@@ -207,6 +271,60 @@ export function OrderBookPanel({
     setError(null);
     setBusyId(order.id);
     const taker = { takerEthAccount: ethAccount, takerQrlAccount: qrlAccount };
+    if (order.makerAuth !== undefined) {
+      let recovery: ActiveSwap | null = null;
+      void (async () => {
+        const routedOrder = routeSignedOrder(order);
+        if (signingScheme === null || routedOrder.orderDigest === undefined) {
+          throw new Error(
+            "Portable V2 orders require message signing. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
+          );
+        }
+        const releaseSecret = (await generateSecret()).preimage;
+        const signed = await signFillIntentV1({
+          body: {
+            orderDigest: routedOrder.orderDigest,
+            ...taker,
+          },
+          order: routedOrder,
+          releaseSecret,
+          walletRdns: qrlWalletRdns,
+          request: qrlRequest,
+        });
+        const digest = intentDigest(signed.intent, signed.auth);
+        recovery = buildSignedTakerSwap({
+          order: routedOrder,
+          asset: pair,
+          accounts: taker,
+          signedIntent: signed,
+          intentDigestHex: digest,
+          releaseSecret,
+        });
+        saveActiveSwap(recovery);
+        const submitted = await submitFillIntent(
+          routedOrder.id,
+          signed,
+          routedOrder.bookId,
+        );
+        if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
+          throw new Error("The order book did not preserve the signed FillIntentV1 request.");
+        }
+        return recovery;
+      })()
+        .then((swap) => onTaken(swap))
+        .catch((err: unknown) => {
+          if (recovery !== null) {
+            onTaken(recovery);
+            return;
+          }
+          const message = errorMessage(err);
+          setError(message);
+          if (CAP_ERROR_RE.test(message)) setCapBlocked(true);
+          void refresh();
+        })
+        .finally(() => setBusyId(null));
+      return;
+    }
     // Take by terms: if this exact row was just sniped, fill the next
     // order at the same terms or better instead of failing. The request
     // carries the active pair's asset so a QRL/USDC take can never fill a
@@ -232,6 +350,12 @@ export function OrderBookPanel({
         // verify against.
         let terms: ReturnType<typeof acceptedOrderTerms>;
         try {
+          if (
+            (accepted.makerAuth !== undefined && !verifyOrderV1Auth(accepted)) ||
+            (order.makerAuth !== undefined && accepted.makerAuth === undefined)
+          ) {
+            throw new Error("The matched order does not carry a valid maker signature.");
+          }
           terms = acceptedOrderTerms(
             order,
             accepted,
@@ -339,6 +463,17 @@ export function OrderBookPanel({
 
   const canTake =
     Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
+  const mirrorSummary = summarizeMirrorAvailability(book?.mirrors ?? []);
+  const mirrorStatusText =
+    book === null
+      ? "Checking order discovery."
+      : mirrorSummary.state === "all"
+        ? `All mirrors available (${mirrorSummary.available} of ${mirrorSummary.total}).`
+        : mirrorSummary.state === "partial"
+          ? `Partial order discovery (${mirrorSummary.available} of ${mirrorSummary.total} mirrors available).`
+          : mirrorSummary.state === "checking"
+            ? "Checking order discovery."
+            : "Order discovery unavailable.";
 
   const Row = ({ row, side }: { row: BookRow; side: "ask" | "bid" }) => {
     const depth = maxCum > 0n ? Number((row.cumUnits * 1000n) / maxCum) / 10 : 0;
@@ -377,10 +512,8 @@ export function OrderBookPanel({
           )}
           style={{ width: `${depth}%` }}
         />
-        <span
-          className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}
-        >
-          {busyId === row.order.id ? "taking…" : fmtPrice(row.price, asset.decimals)}
+        <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
+          {busyId === row.order.id ? "requesting…" : fmtPrice(row.price, asset.decimals)}
           {own ? (
             <span className="ml-1.5 rounded-sm bg-identity-accent/15 px-1 py-px text-[10px] font-medium text-identity-accent">
               yours
@@ -392,6 +525,14 @@ export function OrderBookPanel({
               title="The maker escrowed funds at post time; verified on-chain before you commit"
             >
               funded
+            </span>
+          ) : null}
+          {row.order.makerAuth !== undefined ? (
+            <span
+              className="ml-1.5 rounded-sm bg-secondary/15 px-1 py-px text-[10px] font-medium text-secondary"
+              title="Portable ML-DSA-87 maker proof attached; verified before take"
+            >
+              PQ proof
             </span>
           ) : null}
         </span>
@@ -408,15 +549,28 @@ export function OrderBookPanel({
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-lg">Order book</CardTitle>
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            {orders !== null ? (
-              <span
-                aria-hidden
-                className="glow-dot h-1.5 w-1.5 rounded-full bg-current text-success"
-              />
-            ) : null}
-            {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
-          </span>
+          <div className="space-y-0.5 text-right text-xs">
+            <p className="text-muted-foreground">
+              {orders === null ? "loading…" : `${asks.length + bids.length} open · QRL/${pair}`}
+            </p>
+            <p
+              role="status"
+              aria-live="polite"
+              className={cn(
+                "flex items-center justify-end gap-1.5",
+                book === null || mirrorSummary.state === "checking"
+                  ? "text-muted-foreground"
+                  : mirrorSummary.state === "all"
+                    ? "text-success"
+                    : mirrorSummary.state === "partial"
+                      ? "text-amber-400"
+                      : "text-destructive",
+              )}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+              {mirrorStatusText}
+            </p>
+          </div>
         </div>
         <div className="flex gap-1 pt-1" role="tablist" aria-label="trading pair">
           {ETH_ASSET_SYMBOLS.map((s) => (
@@ -468,6 +622,14 @@ export function OrderBookPanel({
                 </p>
               );
             })()}
+            <div className="grid grid-cols-1 items-start gap-1 rounded-md border border-border/60 bg-background/30 p-2 text-xs sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
+              <span className="text-muted-foreground">Maker identity</span>
+              <ChainAddressPair
+                ethAddress={pending.makerEthAccount}
+                qrlAddress={pending.makerQrlAccount}
+                className="justify-items-start sm:justify-items-end"
+              />
+            </div>
             {pending.prelocked === true && escrow?.id === pending.id ? (
               escrow.status === "checking" ? (
                 <p className="text-xs text-muted-foreground">
@@ -489,21 +651,53 @@ export function OrderBookPanel({
                 </p>
               )
             ) : null}
+            {proof?.id === pending.id ? (
+              proof.status === "checking" ? (
+                <p className="text-xs text-muted-foreground">
+                  Verifying the maker&apos;s ML-DSA-87 OrderV1 proof…
+                </p>
+              ) : proof.status === "invalid" ? (
+                <p className="text-xs text-destructive">
+                  The maker signature is invalid or expired. Taking is blocked.
+                </p>
+              ) : proof.status === "valid" ? (
+                <p className="text-xs text-success">
+                  Maker&apos;s portable OrderV1 signature verified in this browser.
+                </p>
+              ) : (
+                <p className="text-xs text-amber-400">
+                  Legacy local-liquidity order: no portable maker proof is attached.
+                </p>
+              )
+            ) : null}
             <p className="text-xs text-muted-foreground">
-              {pending.prelocked === true
-                ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
-                : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
+              {pending.makerAuth !== undefined
+                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV2. The maker selects one request and publishes a signed FillV2 before you can fund. No funds move during either signature."
+                : pending.prelocked === true
+                  ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
+                  : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
             </p>
+            {pending.makerAuth !== undefined && signingScheme === null ? (
+              <p className="text-xs text-amber-400">
+                Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2
+                orders.
+              </p>
+            ) : null}
             <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
                 disabled={
                   !canTake ||
-                  (pending.prelocked === true && escrow?.id === pending.id && escrow.issue !== null)
+                  (pending.prelocked === true &&
+                    escrow?.id === pending.id &&
+                    escrow.issue !== null) ||
+                  (proof?.id === pending.id &&
+                    (proof.status === "checking" || proof.status === "invalid")) ||
+                  (pending.makerAuth !== undefined && signingScheme === null)
                 }
                 onClick={confirmTake}
               >
-                Confirm take
+                {pending.makerAuth !== undefined ? "Sign fill request" : "Confirm take"}
               </Button>
               {onPrefill ? (
                 <Button
@@ -546,9 +740,27 @@ export function OrderBookPanel({
           <span>Total ({pair})</span>
         </div>
 
-        {asks.length === 0 && bids.length === 0 ? (
+        {book === null ? (
           <p className="px-2 py-3 text-sm text-muted-foreground">
-            No open QRL/{pair} orders right now. Post one, or check back shortly.
+            Checking configured order book mirrors…
+          </p>
+        ) : mirrorSummary.state === "checking" ? (
+          <p className="px-2 py-3 text-sm text-muted-foreground">
+            Checking configured order book mirrors…
+          </p>
+        ) : mirrorSummary.available === 0 ? (
+          <div className="space-y-1 px-2 py-3 text-sm">
+            <p className="text-destructive">Order discovery unavailable.</p>
+            <p className="text-muted-foreground">
+              Existing swaps remain governed by their on-chain HTLCs and can still settle or
+              refund.
+            </p>
+          </div>
+        ) : asks.length === 0 && bids.length === 0 ? (
+          <p className="px-2 py-3 text-sm text-muted-foreground">
+            {mirrorSummary.state === "partial"
+              ? `No open QRL/${pair} orders found on the available mirrors. Discovery may be incomplete.`
+              : `No open QRL/${pair} orders right now. Post one, or check back shortly.`}
           </p>
         ) : (
           <>

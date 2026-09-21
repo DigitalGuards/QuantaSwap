@@ -12,13 +12,26 @@ import {
   OrderGoneError,
   parseShareToken,
   releaseOrder,
+  submitFillIntent,
   type OrderView,
 } from "@/lib/orderbook";
-import { shortAddr } from "@/lib/htlc";
 import { prelockEscrowIssue } from "@/lib/prelock";
+import {
+  intentDigest,
+  orderSigningSchemeForWallet,
+  signFillIntentV1,
+  verifyOrderV1Auth,
+} from "@/lib/orderSigning";
+import { generateSecret } from "@/lib/secrets";
+import {
+  buildSignedTakerSwap,
+  sameSignedIntent,
+} from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
+import { errorMessage } from "@/utils/errorMessage";
 
 interface Props {
   eth: ReturnType<typeof useEthWallet>;
@@ -42,6 +55,9 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [proof, setProof] = useState<"checking" | "valid" | "invalid" | "legacy" | null>(
+    null,
+  );
   // On-chain check of a pre-funded order's escrow claim (the book cannot
   // prove funding; the hard gate stays the at-depth verification).
   const [escrow, setEscrow] = useState<{
@@ -72,6 +88,56 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
 
   const orderIsPrelocked = order?.prelocked === true && order.status === "open";
   const orderAssetRaw = order?.asset ?? "ETH";
+  const orderProofKey =
+    order === null
+      ? null
+      : JSON.stringify([
+          order.id,
+          order.direction,
+          order.asset ?? "ETH",
+          order.fromAmount,
+          order.toAmount,
+          order.makerEthAccount,
+          order.makerQrlAccount,
+          order.visibility ?? "public",
+          order.allowedTakerEth ?? "",
+          order.allowedTakerQrl ?? "",
+          order.prelocked === true,
+          order.hashlock,
+          order.initiatorTimeout,
+          order.makerAuth?.version,
+          order.makerAuth?.scheme,
+          order.makerAuth?.issuedAt,
+          order.makerAuth?.expiresAt,
+          order.makerAuth?.nonce,
+          order.makerAuth?.signature,
+          order.makerAuth?.publicKey,
+          order.makerAuth?.descriptor,
+        ]);
+  useEffect(() => {
+    if (!order) {
+      setProof(null);
+      return undefined;
+    }
+    if (order.makerAuth === undefined) {
+      setProof("legacy");
+      return undefined;
+    }
+    const target = order;
+    let stale = false;
+    setProof("checking");
+    const timer = window.setTimeout(() => {
+      const valid = verifyOrderV1Auth(target);
+      if (!stale) setProof(valid ? "valid" : "invalid");
+    }, 0);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+    // Polling replaces the row object every five seconds. Re-check only if
+    // signed OrderV1 material changed, so the proof badge does not flicker.
+  }, [orderProofKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!order || !orderIsPrelocked) {
       setEscrow(null);
@@ -101,6 +167,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
 
   const invalid = !id || !shareToken;
   const assetSymbol = order ? ethAssetSymbolOrNull(order.asset ?? "ETH") : null;
+  const signingScheme = orderSigningSchemeForWallet(qrl.rdns);
 
   const take = () => {
     if (!order || !eth.account || !qrl.account || !shareToken || assetSymbol === null) return;
@@ -108,6 +175,63 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     const qrlAccount = qrl.account;
     setError(null);
     setBusy(true);
+    if (order.makerAuth !== undefined) {
+      let recovery: ActiveSwap | null = null;
+      void (async () => {
+        if (signingScheme === null || order.orderDigest === undefined) {
+          throw new Error(
+            "Portable V2 orders require message signing. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
+          );
+        }
+        const releaseSecret = (await generateSecret()).preimage;
+        const signed = await signFillIntentV1({
+          body: {
+            orderDigest: order.orderDigest,
+            takerEthAccount: ethAccount,
+            takerQrlAccount: qrlAccount,
+          },
+          order,
+          releaseSecret,
+          walletRdns: qrl.rdns,
+          request: qrl.request,
+        });
+        const digest = intentDigest(signed.intent, signed.auth);
+        recovery = buildSignedTakerSwap({
+          order,
+          asset: assetSymbol,
+          accounts: {
+            takerEthAccount: ethAccount,
+            takerQrlAccount: qrlAccount,
+          },
+          signedIntent: signed,
+          intentDigestHex: digest,
+          releaseSecret,
+          shareToken,
+        });
+        setSwap(recovery);
+        const submitted = await submitFillIntent(
+          order.id,
+          signed,
+          order.bookId,
+          shareToken,
+        );
+        if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
+          throw new Error("The order book did not preserve the signed FillIntentV1 request.");
+        }
+      })()
+        .then(() => {
+          void navigate("/");
+        })
+        .catch((err: unknown) => {
+          if (recovery !== null) {
+            void navigate("/");
+            return;
+          }
+          setError(errorMessage(err));
+        })
+        .finally(() => setBusy(false));
+      return;
+    }
     acceptOrder(order.id, {
       takerEthAccount: ethAccount,
       takerQrlAccount: qrlAccount,
@@ -119,6 +243,12 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
         // response is untrusted, like everywhere else).
         let terms: ReturnType<typeof acceptedOrderTerms>;
         try {
+          if (
+            (accepted.makerAuth !== undefined && !verifyOrderV1Auth(accepted)) ||
+            (order.makerAuth !== undefined && accepted.makerAuth === undefined)
+          ) {
+            throw new Error("The private order does not carry a valid maker signature.");
+          }
           terms = acceptedOrderTerms(order, accepted, assetSymbol, "same-order", {
             takerEthAccount: ethAccount,
             takerQrlAccount: qrlAccount,
@@ -222,11 +352,13 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           .
         </p>
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-          <div className="flex justify-between">
+          <div className="grid grid-cols-1 items-start gap-1 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
             <span className="text-muted-foreground">Maker</span>
-            <span className="font-data text-xs">
-              {shortAddr(order.makerEthAccount)} / {shortAddr(order.makerQrlAccount)}
-            </span>
+            <ChainAddressPair
+              ethAddress={order.makerEthAccount}
+              qrlAddress={order.makerQrlAccount}
+              className="justify-items-start sm:justify-items-end"
+            />
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Maker online</span>
@@ -235,14 +367,13 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             </span>
           </div>
           {reserved ? (
-            <div className="flex justify-between">
+            <div className="grid grid-cols-1 items-start gap-1 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
               <span className="text-muted-foreground">Reserved for</span>
-              <span className="font-data text-xs">
-                {[order.allowedTakerEth, order.allowedTakerQrl]
-                  .filter((a): a is string => Boolean(a))
-                  .map((a) => shortAddr(a))
-                  .join(" / ")}
-              </span>
+              <ChainAddressPair
+                ethAddress={order.allowedTakerEth}
+                qrlAddress={order.allowedTakerQrl}
+                className="justify-items-start sm:justify-items-end"
+              />
             </div>
           ) : null}
           {order.prelocked === true ? (
@@ -269,6 +400,28 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
               </span>
             </div>
           ) : null}
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Maker proof</span>
+            <span
+              className={
+                proof === "valid"
+                  ? "text-success"
+                  : proof === "invalid"
+                    ? "text-destructive"
+                    : proof === "legacy"
+                      ? "text-amber-400"
+                      : "text-muted-foreground"
+              }
+            >
+              {proof === "valid"
+                ? "ML-DSA-87 verified"
+                : proof === "invalid"
+                  ? "invalid or expired"
+                  : proof === "legacy"
+                    ? "legacy unsigned"
+                    : "verifying…"}
+            </span>
+          </div>
         </div>
         {order.prelocked === true && escrow?.issue ? (
           <p className="text-xs text-destructive">
@@ -289,6 +442,9 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             !eth.account ||
             !qrl.account ||
             busy ||
+            proof === "checking" ||
+            proof === "invalid" ||
+            (order.makerAuth !== undefined && signingScheme === null) ||
             (order.prelocked === true && escrow?.issue !== null && escrow?.issue !== undefined)
           }
           onClick={take}
@@ -296,13 +452,24 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           {!eth.account || !qrl.account
             ? "Connect both wallets to take this swap"
             : busy
-              ? "Taking…"
-              : "Take this swap"}
+              ? order.makerAuth !== undefined
+                ? "Requesting…"
+                : "Taking…"
+              : order.makerAuth !== undefined
+                ? "Sign fill request"
+                : "Take this swap"}
         </Button>
+        {order.makerAuth !== undefined && signingScheme === null ? (
+          <p className="text-xs text-amber-400">
+            Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2 orders.
+          </p>
+        ) : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          {order.prelocked === true
-            ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
-            : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}
+          {order.makerAuth !== undefined
+            ? "Your signed request holds no funds. The maker must publish a valid FillV2 before its response deadline; your browser verifies it before enabling any lock."
+            : order.prelocked === true
+              ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
+              : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}
         </p>
       </div>
     );

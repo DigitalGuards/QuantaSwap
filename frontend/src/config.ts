@@ -1,3 +1,6 @@
+/// <reference types="vite/client" />
+import deployment from "../../config/protocol-v2.json";
+
 // `confirmations`: extra block depth a counterparty lock must reach
 // before this client acts on it irreversibly (taker locking, maker
 // revealing the secret). 0 acts as soon as the lock is included at the
@@ -8,15 +11,15 @@
 // section 2 sizes the timelock margins for full ~13 min finality).
 export const QRL_LEG = {
   key: "qrl" as const,
-  name: "QRL v2 testnet",
+  name: "QRL Testnet v3 (Private)",
   asset: "QRL",
   // Unit label for amount displays. Ecosystem convention: amounts show as
   // "Quanta"; "QRL" stays the ticker in pair labels (QRL/USDC) and the
   // protocol-level `asset` identifier above.
   display: "Quanta",
-  chainIdHex: "0x539",
-  // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
-  htlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
+  chainIdHex: `0x${BigInt(deployment.qrlChainId).toString(16)}`,
+  genesisHash: deployment.qrlGenesisHash,
+  htlc: deployment.qrlHtlc,
   rpc: "/rpc/qrl",
   confirmations: 0,
   explorerTx: "https://zondscan.com/tx/",
@@ -30,14 +33,16 @@ export const ETH_LEG = {
   // and the persisted swap (see lib/assetRegistry.ts).
   asset: "ETH",
   display: "ETH",
-  chainIdHex: "0xaa36a7",
-  // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
-  htlc: "0x910D5d4a7f2037c01F3B4C835167357e89909281",
+  chainIdHex: `0x${BigInt(deployment.ethChainId).toString(16)}`,
+  htlc: deployment.ethHtlc,
   rpc: "/rpc/sepolia",
   confirmations: 0,
   explorerTx: "https://sepolia.etherscan.io/tx/",
   explorerAddress: "https://sepolia.etherscan.io/address/",
 };
+
+// New deployments never adopt prior-chain swap secrets, orders, or stages.
+export const DEPLOYMENT_STORAGE_PREFIX = `quantaswap.v3.${deployment.qrlChainId}.${deployment.qrlGenesisHash}.${deployment.ethHtlc.toLowerCase()}.${deployment.qrlHtlc.toLowerCase()}`;
 
 // The ETH-leg asset model: the Sepolia leg can escrow native ETH or a
 // registry ERC-20 (USDC, tUSDT); the QRL leg is always native QRL.
@@ -66,8 +71,87 @@ export const legByKey = (key: LegKey) => (key === "qrl" ? QRL_LEG : ETH_LEG);
 export const INITIATOR_TIMEOUT_S = 2 * 3600;
 export const RESPONDER_TIMEOUT_S = 1 * 3600;
 
-// Order book service, same-origin (nginx in prod, Vite proxy in dev).
-export const ORDERBOOK_API = "/api";
+// Order-book mirrors. The primary stays same-origin (nginx in deployments,
+// Vite proxy in development). Additional public mirrors are an optional JSON
+// build variable, for example:
+// VITE_ORDERBOOK_MIRRORS='[{"id":"community","apiBase":"https://book.example/api"}]'
+export interface OrderbookMirror {
+  id: string;
+  apiBase: string;
+}
+
+export const PRIMARY_ORDERBOOK_ID = "primary";
+
+const MIRROR_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const MAX_ORDERBOOK_MIRRORS = 16;
+
+export function parseConfiguredMirrors(raw: unknown): OrderbookMirror[] {
+  if (typeof raw !== "string" || raw === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("VITE_ORDERBOOK_MIRRORS must be valid JSON");
+  }
+  if (!Array.isArray(parsed)) throw new Error("VITE_ORDERBOOK_MIRRORS must be an array");
+  if (parsed.length >= MAX_ORDERBOOK_MIRRORS) {
+    throw new Error(
+      `VITE_ORDERBOOK_MIRRORS cannot contain more than ${MAX_ORDERBOOK_MIRRORS - 1} entries`,
+    );
+  }
+  const mirrors = parsed.map((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must be an object`);
+    }
+    const row = entry as Record<string, unknown>;
+    const keys = Object.keys(row).sort();
+    if (keys.length !== 2 || keys[0] !== "apiBase" || keys[1] !== "id") {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has unexpected fields`);
+    }
+    if (typeof row["id"] !== "string" || !MIRROR_ID_RE.test(row["id"])) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid id`);
+    }
+    if (row["id"] === PRIMARY_ORDERBOOK_ID) {
+      throw new Error("VITE_ORDERBOOK_MIRRORS cannot replace the primary mirror");
+    }
+    if (typeof row["apiBase"] !== "string") {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid apiBase`);
+    }
+    let url: URL;
+    try {
+      url = new URL(row["apiBase"]);
+    } catch {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has an invalid apiBase`);
+    }
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must use a plain HTTP(S) URL`);
+    }
+    return {
+      id: row["id"],
+      apiBase: url.toString().replace(/\/+$/, ""),
+    };
+  });
+  if (new Set(mirrors.map((mirror) => mirror.id)).size !== mirrors.length) {
+    throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate ids");
+  }
+  if (new Set(mirrors.map((mirror) => mirror.apiBase)).size !== mirrors.length) {
+    throw new Error("VITE_ORDERBOOK_MIRRORS contains duplicate API bases");
+  }
+  return mirrors;
+}
+
+export const ORDERBOOK_MIRRORS: readonly OrderbookMirror[] = [
+  { id: PRIMARY_ORDERBOOK_ID, apiBase: "/api" },
+  ...parseConfiguredMirrors(import.meta.env.VITE_ORDERBOOK_MIRRORS),
+];
+
+export const ORDERBOOK_API = ORDERBOOK_MIRRORS[0]?.apiBase ?? "/api";
 
 // Dust guard for the QRL side of orders (0.001 QRL); mirrored server-side
 // in server/src/store.ts. The ETH-leg floor is per asset: see

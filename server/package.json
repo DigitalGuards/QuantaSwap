@@ -5,13 +5,24 @@
   "description": "QuantaSwap order book: coordination-only matching service for protocol-mode HTLC swaps",
   "license": "GPL-3.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "test": "npm run build && node smoke.js"
+    "test": "npm run build && node --test dist/*.test.js && node smoke.js && node federation-smoke.js",
+    "smoke:federation": "npm run build && node federation-smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
     "typescript": "~5.8.3"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.2.0",
+    "@qrlwallet/connect": "5.0.0",
+    "@theqrl/mldsa87": "2.1.4",
+    "ethers": "6.17.0",
+    "socks-proxy-agent": "10.1.0"
   }
 }

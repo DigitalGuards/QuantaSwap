@@ -2,6 +2,9 @@
 // knob has a testnet-sized default. Amounts are base-unit bigints (wei
 // for the native coins, token units for ERC-20 assets).
 
+import { readFileSync } from "node:fs";
+import { protocolV2Config } from "./protocol-v2-config.js";
+import { DEFAULT_ORDER_LIFETIME_S } from "./admission.js";
 import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
 
 /** Ladder policy for one ETH-leg asset. */
@@ -37,6 +40,8 @@ export interface Config {
   /** Concurrent listings per price rung. 2 lets a second taker start the
    *  same trade while the first swap is still settling. */
   ordersPerLevel: number;
+  /** Short quote authorization bounds retained cancellation artifacts. */
+  orderLifetimeS: number;
   /** Max orders simultaneously past `open` (accepted/locking). Caps how
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
@@ -77,6 +82,14 @@ export interface Config {
   initiatorWindowS: number;
   responderWindowS: number;
   stateFile: string;
+  /** Read-only local health endpoint. It never exposes keys, addresses,
+   *  endpoint URLs, balances, order ids, or raw error messages. */
+  healthHost: string;
+  healthPort: number;
+  /** A running or completed tick older than this marks health degraded. */
+  healthStaleS: number;
+  /** Cancel open listings, settle active swaps, and post no replacements. */
+  drain: boolean;
 }
 
 function env(name: string, fallback: string): string {
@@ -88,6 +101,12 @@ function envInt(name: string, fallback: number): number {
   const v = Number(env(name, String(fallback)));
   if (!Number.isFinite(v) || v <= 0) throw new Error(`${name} must be a positive number`);
   return Math.floor(v);
+}
+
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = env(name, String(fallback)).toLowerCase();
+  if (raw !== "true" && raw !== "false") throw new Error(`${name} must be true or false`);
+  return raw === "true";
 }
 
 function envWei(name: string, fallback: bigint): bigint {
@@ -104,10 +123,29 @@ function envChainId(name: string, fallback: string): string {
   return BigInt(raw).toString(10);
 }
 
-function required(name: string): string {
-  const v = process.env[name];
-  if (v === undefined || v === "") throw new Error(`${name} is required`);
-  return v;
+/** Load a signing secret directly or through Docker/Kubernetes-style
+ *  NAME_FILE indirection. Exactly one source must be configured. */
+export function readRequiredSecret(name: string): string {
+  const direct = process.env[name];
+  const fileName = `${name}_FILE`;
+  const file = process.env[fileName];
+  const hasDirect = direct !== undefined && direct !== "";
+  const hasFile = file !== undefined && file !== "";
+  if (hasDirect && hasFile) {
+    throw new Error(`${name} and ${fileName} are mutually exclusive`);
+  }
+  if (hasDirect) return direct;
+  if (!hasFile) throw new Error(`${name} or ${fileName} is required`);
+
+  let value: string;
+  try {
+    value = readFileSync(file, "utf8").trim();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : "unknown read error";
+    throw new Error(`${fileName} could not be read: ${reason}`);
+  }
+  if (value === "") throw new Error(`${fileName} points to an empty secret file`);
+  return value;
 }
 
 /** Human-unit decimal amount (e.g. "5" or "2.5" USDC) to base units. */
@@ -170,6 +208,12 @@ export function loadConfig(): Config {
   const ordersPerDirection = envInt("MM_ORDERS_PER_DIRECTION", 2);
   const ethOrderWei = envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n); // 0.02 ETH base size
   const ethReserveWei = envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n);
+  const healthPort = envInt("MM_HEALTH_PORT", 8092);
+  const orderLifetimeS = Number(env("MM_ORDER_LIFETIME_S", String(DEFAULT_ORDER_LIFETIME_S)));
+  if (!Number.isSafeInteger(orderLifetimeS) || orderLifetimeS < 180 || orderLifetimeS > 1800) {
+    throw new Error("MM_ORDER_LIFETIME_S must be an integer between 180 and 1800");
+  }
+  if (healthPort > 65_535) throw new Error("MM_HEALTH_PORT must be at most 65535");
   return {
     assets,
     assetPolicies: loadAssetPolicies(assets, {
@@ -179,18 +223,16 @@ export function loadConfig(): Config {
     }),
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
     ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
-    qrlRpcUrl: env("MM_QRL_RPC_URL", "http://127.0.0.1:8545"),
-    ethChainId: envChainId("MM_ETH_CHAIN_ID", "11155111"),
-    qrlChainId: envChainId("MM_QRL_CHAIN_ID", "1337"),
-    // 2026-07-13 redeploy: HTLCv2 open-recipient locks (assign + release) on
-    // both legs (docs/DEPLOYMENTS.md). The MM does not prelock, so its own
-    // flow is unchanged; it just points at the new addresses.
-    ethHtlc: env("MM_ETH_HTLC", "0x910D5d4a7f2037c01F3B4C835167357e89909281"),
-    qrlHtlc: env("MM_QRL_HTLC", "Q238322ad2e8f935b4481fcc379779c31b84decb0"),
-    ethPrivateKey: required("MM_ETH_PRIVATE_KEY"),
-    qrlHexseed: required("MM_QRL_HEXSEED"),
+    qrlRpcUrl: env("MM_QRL_RPC_URL", "https://qrlwallet.com/api/qrl-rpc/testnet"),
+    ethChainId: envChainId("MM_ETH_CHAIN_ID", protocolV2Config.ethChainId),
+    qrlChainId: envChainId("MM_QRL_CHAIN_ID", protocolV2Config.qrlChainId),
+    ethHtlc: env("MM_ETH_HTLC", protocolV2Config.ethHtlc),
+    qrlHtlc: env("MM_QRL_HTLC", protocolV2Config.qrlHtlc),
+    ethPrivateKey: readRequiredSecret("MM_ETH_PRIVATE_KEY"),
+    qrlHexseed: readRequiredSecret("MM_QRL_HEXSEED"),
     ordersPerDirection,
     ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
+    orderLifetimeS,
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
     ethOrderWei,
     // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).
@@ -211,6 +253,10 @@ export function loadConfig(): Config {
     lockGraceS: envInt("MM_LOCK_GRACE_S", 30),
     initiatorWindowS: envInt("MM_INITIATOR_WINDOW_S", 7200),
     responderWindowS: envInt("MM_RESPONDER_WINDOW_S", 3600),
-    stateFile: env("MM_STATE_FILE", new URL("../data/state.json", import.meta.url).pathname),
+    stateFile: env("MM_STATE_FILE", new URL("../data/v3-private-state.json", import.meta.url).pathname),
+    healthHost: env("MM_HEALTH_HOST", "127.0.0.1"),
+    healthPort,
+    healthStaleS: envInt("MM_HEALTH_STALE_S", 600),
+    drain: envBool("MM_DRAIN", false),
   };
 }

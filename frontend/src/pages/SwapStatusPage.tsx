@@ -15,7 +15,7 @@ import {
   getLegState,
   getSwapEvents,
   hexToQ,
-  NATIVE_TOKEN,
+  nativeTokenForLeg,
   SwapStatus,
   shortAddr,
   type LegState,
@@ -73,7 +73,7 @@ function LegCard({
     // shows its symbol and decimals, and an UNKNOWN token must never
     // render as any known asset: it shows raw base units plus the
     // truncated token address instead.
-    if (sameAddr(snapshot.token, NATIVE_TOKEN)) {
+    if (sameAddr(snapshot.token, nativeTokenForLeg(leg))) {
       rows.push(["Amount", `${formatUnits(snapshot.amount, 18)} ${cfg.display}`]);
     } else {
       const known = leg === "eth" ? ethAssetByAddress(snapshot.token) : null;

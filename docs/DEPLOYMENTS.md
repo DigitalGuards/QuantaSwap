@@ -1,6 +1,51 @@
 # Deployments
 
-## Testnet, 2026-07-13 (HTLCv2 open-recipient locks / prelock, CURRENT)
+## Private v3 testnet release, 2026-09-21
+
+The current deployment uses Sepolia and the private QRL v3 testnet. QRL network v3,
+the HTLCv2 open-recipient contract interface, and portable signing wire V2 are separate
+versioned interfaces. The public deployment source of truth is
+[`config/protocol-v2.json`](../config/protocol-v2.json).
+
+| Leg | Chain ID | HTLC address | Deploy transaction |
+|---|---|---|---|
+| QRL private v3 | `3151909` | `Q71D5194EaaBF33e753b9F5ae7375C9c77F063Ed0CB2908De65D0ba00354da0bf40403Eb0247A536760625Ca6AB9bBB58B875A72c8DCdB67FEDA2266580D05405` | `0x83aa79c2a47dc5385a61e6657d7da8db059e19120a26352a57f76124bedd8e66` |
+| Ethereum Sepolia | `11155111` | `0x4D9D3adAe3e479CA8a9e13c6E5eE4E4E7Bc4f9B5` | `0xd593f7ab2394008a7735f06f4255c21f3a25748ccf15100da002e0ab375c5738` |
+
+The QRL genesis is pinned to
+`0xd15407991193e6c23b733dc6bf9c628deaff8f9b6e252aa0d60030952b3e3ea4`.
+Clients verify both chain ID and genesis before QRL operations. QRL accounts and
+contract addresses contain 64 bytes, represented as uppercase `Q` plus 128 hexadecimal
+characters. Ethereum retains 20-byte addresses.
+
+Both deployed runtimes exactly match their target-bound compiled artifacts:
+
+| Artifact | SHA-256 |
+|---|---|
+| Reviewed source bundle | `089e8775ac06c6c01ecc930da9985f3c278a194a1e611f1030ed571d9261108f` |
+| Ethereum runtime | `9ad68221efceaf9f958d96a9f650946f6fce37f2ddcaf12e2b6194d7578a5e8f` |
+| QRL runtime | `7d9b70ef0d4a427f357a721b9c897cc253abaff077465cbcd8513a696cd70903` |
+
+Portable V2 uses `qrl_signMessage` and a fixed ordered-message encoding that binds
+both chain IDs, both HTLCs, and the QRL genesis. The browser pins Connect SDK 5.0.1
+for explicit transaction-chain checks; the order book and market maker retain
+SDK 5.0.0 for their signing and verification helpers. The browser,
+order book, and market maker reject V1 proofs. Previous deployment records remain
+separate recovery data and are never automatically migrated into this deployment.
+
+### Target-bound build
+
+The current reviewed Hyperion source builds into two target-bound artifacts. Ethereum uses the
+EVM-256 compiler target at `build/hyperion/evm/HTLC.json`; QRL uses the QRVM-512 Q128 target at
+`build/hyperion/qrl/HTLC.json`. Both builds enable the optimizer at 200 runs and `viaIR: true`.
+Their manifests require the same source-bundle hash and ABI, and record distinct compiler versions,
+address widths, runtimes, and bytecode hashes. Deployment and smoke scripts load only the artifact
+for their named chain and reject a mismatched manifest or artifact before network traffic.
+
+The deployed artifacts above use this build boundary. The July deployments below
+are historical and must not be selected for new v3 orders.
+
+## Historical testnet, 2026-07-13 (HTLCv2 open-recipient locks / prelock)
 
 One hypc-compiled artifact deployed to both chains, byte-identical runtime (4136 bytes).
 Adds open-recipient locks over the 2026-07-12 artifact: `lockNativeOpen` / `lockTokenOpen`
@@ -100,6 +145,8 @@ node scripts/smoke-eth.js 0x805100Fa4310B9c0dbb0754E14CbDe827E3b8a3c
 - **Order book**: coordination only, never custody; losing it strands no funds.
   Same-origin behind `/api`; health check: `curl -s https://quantaswap.io/api/health`
   returns `{"status":"ok"}`. Full API reference: [ORDERBOOK_API.md](ORDERBOOK_API.md).
+  Independent operator packaging and recovery guidance:
+  [`../server/README.md`](../server/README.md).
 - **Market maker** (`marketmaker/`): an always-online protocol-mode maker that keeps
   the book stocked so visitors always have takeable orders. It is an ordinary maker
   driving the public protocol: killing it strands no one (in-flight swaps settle via
