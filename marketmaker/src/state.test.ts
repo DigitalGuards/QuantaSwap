@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ManagedOrder } from "./policy.js";
-import { LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
+import { canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 import {
   makeDeploymentIdentity,
   type DeploymentIdentity,
@@ -235,6 +235,21 @@ const envelope = (
 ): Record<string, unknown> => ({ version: 1, deployment, orders });
 
 describe("durable quote retention accounting", () => {
+  it("retires a pure quote at its signed expiry while retaining its admission slot", (t) => {
+    let now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      now += 300;
+      const quote = state.all()[0]!;
+      assert.equal(canRetireExpiredUnfundedQuote(quote, now), true);
+      state.delete(quote.id);
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(restarted.all().length, 0);
+      assert.equal(restarted.retainedAdmissionCount(now), 1);
+      assert.equal(restarted.retainedAdmissionCount(now + 300), 1);
+      assert.equal(restarted.retainedAdmissionCount(now + 301), 0);
+    });
+  });
   it("bounds rapid repricing across terminal cleanup and a restart", (t) => {
     let now = preFieldRecord.createdAt;
     t.mock.method(Date, "now", () => now * 1000);
