@@ -26,8 +26,10 @@ Both deployed runtimes exactly match their target-bound compiled artifacts:
 | Ethereum runtime | `9ad68221efceaf9f958d96a9f650946f6fce37f2ddcaf12e2b6194d7578a5e8f` |
 | QRL runtime | `7d9b70ef0d4a427f357a721b9c897cc253abaff077465cbcd8513a696cd70903` |
 
-Portable V2 uses `qrl_signMessage` with Connect SDK 5.0.0 and a fixed ordered-message
-encoding that binds both chain IDs, both HTLCs, and the QRL genesis. The browser,
+Portable V2 uses `qrl_signMessage` and a fixed ordered-message encoding that binds
+both chain IDs, both HTLCs, and the QRL genesis. The browser pins Connect SDK 5.0.1
+for explicit transaction-chain checks; the order book and market maker retain
+SDK 5.0.0 for their signing and verification helpers. The browser,
 order book, and market maker reject V1 proofs. Previous deployment records remain
 separate recovery data and are never automatically migrated into this deployment.
 
