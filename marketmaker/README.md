@@ -9,6 +9,32 @@ privilege, custody user funds, or share keys with another LP.
 Use only Sepolia ETH/tokens and private QRL v3 testnet funds until that milestone is
 explicitly closed in the project release notes.
 
+## Quote admission and retained proofs
+
+New quotes expire after five minutes by default (`MM_ORDER_LIFETIME_S`, integer
+180 through 1800 seconds). Existing signed records keep their original expiry.
+The maker durably accounts for each quote through the book's cancellation grace
+and for filled orders through their recovery retention horizon. A local budget
+of 60 retained records leaves headroom below the book's unchanged 64-record
+public, maker, and source limits. Fast price moves can temporarily thin quoted
+depth until retained records expire. Cancellation, claim, and refund handling
+continue throughout admission pressure.
+
+Rate limits and unavailable create responses use a shared bounded retry delay.
+Retries reuse the exact persisted order proof and capability. `/health` includes
+sanitized `quoteAdmission` state; upstream admission backoff reports degraded
+health, while a normal local retention wait is visible as `waiting-retention`.
+The ledger is part of the atomic state file and survives restarts and terminal
+order cleanup. Preserve it with the rest of the recovery state. Upgrading an
+existing state file cannot erase already retained book artifacts or shorten
+their signed validity. A saturated existing identity may need to wait for its
+previous proofs to expire.
+
+The maker reads existing version-1 state and writes version 2 with its admission
+ledger on the next normal save. Older binaries refuse version 2. Preserve a
+pre-upgrade backup and settle any newer swaps before a deliberate rollback;
+never strip the ledger or relabel recovery state to make a downgrade load.
+
 ## What the kit provides
 
 - a multi-stage image built from a digest-pinned Node base and `npm ci` lockfile;

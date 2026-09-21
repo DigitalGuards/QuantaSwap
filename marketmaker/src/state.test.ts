@@ -15,6 +15,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ManagedOrder } from "./policy.js";
+import { LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 import {
   makeDeploymentIdentity,
   type DeploymentIdentity,
@@ -83,6 +85,7 @@ const LEGACY_IDENTITY = protocolV2Identity(EXTENDED_SEED);
 
 function portableOpenRecord(
   orderExpiresAt = preFieldRecord.createdAt + 3600,
+  nonce = ORDER_NONCE,
 ): Record<string, unknown> {
   const order: CanonicalOrderV1Body = {
     direction: "eth->qrl",
@@ -96,7 +99,7 @@ function portableOpenRecord(
   const unsignedAuth = {
     issuedAt: preFieldRecord.createdAt,
     expiresAt: orderExpiresAt,
-    nonce: ORDER_NONCE,
+    nonce,
     makerTokenCommitment: capabilityCommitment(
       MAKER_CAPABILITY_DOMAIN,
       MAKER_TOKEN,
@@ -230,6 +233,72 @@ const envelope = (
   orders: unknown[],
   deployment: DeploymentIdentity = DEPLOYMENT,
 ): Record<string, unknown> => ({ version: 1, deployment, orders });
+
+describe("durable quote retention accounting", () => {
+  it("bounds rapid repricing across terminal cleanup and a restart", (t) => {
+    let now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([]), (state, file) => {
+      for (let quote = 0; quote < LOCAL_RETAINED_ORDER_BUDGET; quote++) {
+        assert.ok(state.retainedAdmissionCount(now) < LOCAL_RETAINED_ORDER_BUDGET);
+        const nonce = `0x${quote.toString(16).padStart(64, "0")}`;
+        const row = portableOpenRecord(now + 300, nonce) as unknown as ManagedOrder;
+        state.upsert(row);
+        state.delete(row.id);
+      }
+      assert.equal(state.all().length, 0);
+      assert.equal(state.retainedAdmissionCount(now), 60);
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(JSON.parse(readFileSync(file, "utf8")).version, 2);
+      assert.equal(restarted.retainedAdmissionCount(now), 60);
+      now += 600;
+      assert.equal(restarted.retainedAdmissionCount(now), 60);
+      now += 1;
+      assert.equal(restarted.retainedAdmissionCount(now), 0);
+      const row = portableOpenRecord(now + 300) as unknown as ManagedOrder;
+      restarted.upsert(row);
+      assert.equal(JSON.parse(readFileSync(file, "utf8")).admissions.length, 1);
+    });
+  });
+
+  it("keeps exact pending proofs and reserves a single slot on every retry", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const original = portableOpenRecord(now + 300);
+    withStateFile(envelope([original]), (state, file) => {
+      const row = state.all()[0]!;
+      for (let retry = 0; retry < 10; retry++) state.upsert(row);
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(restarted.retainedAdmissionCount(now), 1);
+      assert.deepEqual(restarted.all()[0]!.protocol, row.protocol);
+      assert.equal(restarted.all()[0]!.token, row.token);
+      assert.equal(restarted.all()[0]!.id, row.id);
+    });
+  });
+
+  it("keeps filled recovery state active past short quote expiry", (t) => {
+    let now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const original = portableFillRecord({ orderExpiresAt: now + 300, fillRespondBy: now + 290 });
+    withStateFile(envelope([original]), (state, file) => {
+      const row = state.all()[0]!;
+      state.upsert(row);
+      now += 601;
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(restarted.retainedAdmissionCount(now), 1);
+      assert.deepEqual(restarted.all()[0], row);
+      restarted.delete(row.id);
+      const terminal = new StateFile(file, DEPLOYMENT);
+      assert.equal(terminal.retainedAdmissionCount(row.initiatorTimeout! + 86400), 1);
+      assert.equal(terminal.retainedAdmissionCount(row.initiatorTimeout! + 86401), 0);
+    });
+  });
+
+  it("refuses corrupted admission history without rewriting recovery state", () => {
+    assertRefusedWithoutMutation({ ...envelope([]), admissions: [{ id: "bad", retainUntil: 2 }] }, /admission/);
+    assertRefusedWithoutMutation({ ...envelope([]), version: 2 }, /admission/);
+  });
+});
 
 function withStateFile(
   contents: unknown,
@@ -463,7 +532,7 @@ describe("deployment-bound state hydration", () => {
         string,
         unknown
       >;
-      assert.equal(persisted.version, 1);
+      assert.equal(persisted.version, 2);
       assert.deepEqual(persisted.deployment, DEPLOYMENT);
       assert.deepEqual(persisted.orders, []);
     });

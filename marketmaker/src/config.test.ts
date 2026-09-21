@@ -3,7 +3,36 @@ import { describe, it } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readRequiredSecret } from "./config.js";
+import { loadConfig, readRequiredSecret } from "./config.js";
+
+describe("bounded signed quote lifetime", () => {
+  it("uses five minutes by default and rejects unsafe or noninteger bounds", () => {
+    const keys = ["MM_ORDER_LIFETIME_S", "MM_ETH_PRIVATE_KEY", "MM_ETH_PRIVATE_KEY_FILE",
+      "MM_QRL_HEXSEED", "MM_QRL_HEXSEED_FILE"];
+    const before = new Map(keys.map(key => [key, process.env[key]]));
+    try {
+      process.env.MM_ETH_PRIVATE_KEY = "test-only-unused-key";
+      process.env.MM_QRL_HEXSEED = "test-only-unused-seed";
+      delete process.env.MM_ETH_PRIVATE_KEY_FILE;
+      delete process.env.MM_QRL_HEXSEED_FILE;
+      delete process.env.MM_ORDER_LIFETIME_S;
+      assert.equal(loadConfig().orderLifetimeS, 300);
+      for (const value of ["180", "300", "1800"]) {
+        process.env.MM_ORDER_LIFETIME_S = value;
+        assert.equal(loadConfig().orderLifetimeS, Number(value));
+      }
+      for (const value of ["0", "179", "1801", "300.5", "NaN", "Infinity"]) {
+        process.env.MM_ORDER_LIFETIME_S = value;
+        assert.throws(() => loadConfig(), /MM_ORDER_LIFETIME_S/);
+      }
+    } finally {
+      for (const [key, value] of before) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});
 
 function withSecretEnv(run: () => void): void {
   const direct = process.env.TEST_SIGNING_SECRET;

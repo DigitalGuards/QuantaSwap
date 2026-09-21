@@ -4,6 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { protocolV2Config } from "./protocol-v2-config.js";
+import { DEFAULT_ORDER_LIFETIME_S } from "./admission.js";
 import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
 
 /** Ladder policy for one ETH-leg asset. */
@@ -39,6 +40,8 @@ export interface Config {
   /** Concurrent listings per price rung. 2 lets a second taker start the
    *  same trade while the first swap is still settling. */
   ordersPerLevel: number;
+  /** Short quote authorization bounds retained cancellation artifacts. */
+  orderLifetimeS: number;
   /** Max orders simultaneously past `open` (accepted/locking). Caps how
    *  much inventory a griefer can tie up in half-open swaps at once. */
   maxInflight: number;
@@ -206,6 +209,10 @@ export function loadConfig(): Config {
   const ethOrderWei = envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n); // 0.02 ETH base size
   const ethReserveWei = envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n);
   const healthPort = envInt("MM_HEALTH_PORT", 8092);
+  const orderLifetimeS = Number(env("MM_ORDER_LIFETIME_S", String(DEFAULT_ORDER_LIFETIME_S)));
+  if (!Number.isSafeInteger(orderLifetimeS) || orderLifetimeS < 180 || orderLifetimeS > 1800) {
+    throw new Error("MM_ORDER_LIFETIME_S must be an integer between 180 and 1800");
+  }
   if (healthPort > 65_535) throw new Error("MM_HEALTH_PORT must be at most 65535");
   return {
     assets,
@@ -225,6 +232,7 @@ export function loadConfig(): Config {
     qrlHexseed: readRequiredSecret("MM_QRL_HEXSEED"),
     ordersPerDirection,
     ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
+    orderLifetimeS,
     maxInflight: envInt("MM_MAX_INFLIGHT", 2),
     ethOrderWei,
     // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).

@@ -66,6 +66,7 @@ export interface OrderView {
 
 export class OrderGoneError extends Error {}
 export class OrderBookUnavailableError extends Error {}
+export class OrderBookCapacityError extends OrderBookUnavailableError {}
 class OrderBookResponseError extends Error {}
 
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
@@ -622,6 +623,10 @@ export class OrderBookClient {
           cause: error,
         },
       );
+    }
+    if (res.status === 429) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new OrderBookCapacityError("order book admission is rate or capacity limited");
     }
     if (res.status >= 500) {
       await res.body?.cancel().catch(() => undefined);

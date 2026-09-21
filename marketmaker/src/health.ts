@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 
 export type MakerStatus = "starting" | "ok" | "degraded";
 
@@ -16,6 +17,12 @@ export interface HealthSnapshot {
   lastTickErrorAt: string | null;
   lastTickErrorCount: number;
   consecutiveFailedTicks: number;
+  quoteAdmission: {
+    state: "active" | "waiting-retention" | "backoff";
+    retainedOrders: number;
+    budget: number;
+    retryAt: string | null;
+  };
 }
 
 const iso = (value: number | null): string | null =>
@@ -33,6 +40,8 @@ export class MakerHealth {
   private lastTickErrorAtMs: number | null = null;
   private lastTickErrorCount = 0;
   private consecutiveFailedTicks = 0;
+  private retainedOrders = 0;
+  private admissionRetryAt = 0;
 
   constructor(
     private readonly opts: {
@@ -48,6 +57,11 @@ export class MakerHealth {
 
   markRuntimeVerified(): void {
     this.runtimeVerified = true;
+  }
+
+  markQuoteAdmission(retainedOrders: number, retryAt: number): void {
+    this.retainedOrders = retainedOrders;
+    this.admissionRetryAt = retryAt;
   }
 
   markTickStarted(managedOrders: number): void {
@@ -79,7 +93,7 @@ export class MakerHealth {
       : this.lastTickCompletedAtMs;
     if (
       (progressAt !== null && now - progressAt > this.opts.staleAfterMs) ||
-      this.lastTickErrorCount > 0
+      this.lastTickErrorCount > 0 || this.admissionRetryAt * 1000 > now
     ) {
       status = "degraded";
     }
@@ -97,6 +111,13 @@ export class MakerHealth {
       lastTickErrorAt: iso(this.lastTickErrorAtMs),
       lastTickErrorCount: this.lastTickErrorCount,
       consecutiveFailedTicks: this.consecutiveFailedTicks,
+      quoteAdmission: {
+        state: this.admissionRetryAt * 1000 > now ? "backoff"
+          : this.retainedOrders >= LOCAL_RETAINED_ORDER_BUDGET ? "waiting-retention" : "active",
+        retainedOrders: this.retainedOrders,
+        budget: LOCAL_RETAINED_ORDER_BUDGET,
+        retryAt: this.admissionRetryAt === 0 ? null : iso(this.admissionRetryAt * 1000),
+      },
     };
   }
 

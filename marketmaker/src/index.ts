@@ -58,6 +58,7 @@ import {
 } from "./protocol-signing.js";
 import { StateFile, StateFilePoisonedError, StateProcessLease } from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
+import { AdmissionBackoff, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 
 const cfg: Config = loadConfig();
 const deployment = makeDeploymentIdentity(cfg);
@@ -100,6 +101,7 @@ const short = (id: string): string => id.slice(0, 8);
 const log = (...args: unknown[]) => console.log(`[mm ${new Date().toISOString()}]`, ...args);
 const CANCEL_REASON_OPERATOR = 1;
 const FILL_RESPONSE_TARGET_S = 5 * 60;
+const admissionBackoff = new AdmissionBackoff();
 
 const feed = new PriceFeed({
   url: COINGECKO_URL,
@@ -209,14 +211,21 @@ function persistAuthenticatedFillObservation(
   protocol.releaseObserved = releaseObserved;
 }
 
-async function publishSignedOrder(managed: ManagedOrder): Promise<OrderView> {
+async function publishSignedOrder(managed: ManagedOrder): Promise<OrderView | null> {
   const protocol = managed.protocol;
   if (protocol === undefined) throw new Error("portable order state is missing");
   if (managed.token === null) throw new Error("portable order maker capability is missing");
-  const created = await book.createSigned({
-    order: protocol.order,
-    auth: protocol.orderAuth,
-  }, managed.token);
+  if (!admissionBackoff.canAttempt(nowS())) return null;
+  let created;
+  try {
+    created = await book.createSigned({ order: protocol.order, auth: protocol.orderAuth }, managed.token);
+    admissionBackoff.succeeded();
+  } catch (error) {
+    if (!(error instanceof OrderBookUnavailableError)) throw error;
+    admissionBackoff.failed(nowS());
+    log("quote publication deferred; settlement remains active");
+    return null;
+  }
   if (created.order.id !== managed.id) {
     throw new Error("signed order book response changed the deterministic order id");
   }
@@ -324,7 +333,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       return null;
     }
     const published = await publishSignedOrder(managed);
-    log(`recovered portable order ${short(managed.id)} with its original proof`);
+    if (published !== null) log(`recovered portable order ${short(managed.id)} with its original proof`);
     return published;
   }
 
@@ -727,7 +736,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
-  if (cfg.drain) return;
+  if (cfg.drain || !admissionBackoff.canAttempt(nowS())) return;
   const managed = state.all();
   const inflight = managed.filter((m) => {
     const v = views.get(m.id);
@@ -824,8 +833,10 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         gasReserveWei,
       });
       if (!post) continue;
+      if (state.retainedAdmissionCount(nowS()) >= LOCAL_RETAINED_ORDER_BUDGET) return;
 
       const makerToken = randomBytes(32).toString("hex");
+      const issuedAt = nowS();
       const signed = protocolSigner.signOrderV1(
         {
           direction,
@@ -835,7 +846,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
           makerEthAccount: eth.address,
           makerQrlAccount: qrl.address,
         },
-        { makerToken },
+        { makerToken, issuedAt, expiresAt: issuedAt + cfg.orderLifetimeS },
       );
       const orderDigest = computeOrderDigest(signed.order, signed.auth);
       const pending: ManagedOrder = {
@@ -872,6 +883,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       // form its stable id, so a timed-out create retries the exact artifact.
       state.upsert(pending);
       const order = await publishSignedOrder(pending);
+      if (order === null) return;
       log(
         `posted ${direction} ${asset} L${level} order ${short(order.id)} (${quote.fromAmount} -> ${quote.toAmount})`,
       );
@@ -913,6 +925,7 @@ async function tick(): Promise<void> {
     let orderCount = startingOrderCount;
     try {
       orderCount = state.all().length;
+      health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
     } catch {
       // A poisoned state file is already forcing process shutdown.
     }
