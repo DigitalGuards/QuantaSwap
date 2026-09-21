@@ -58,7 +58,7 @@ Raw capabilities stay on the origin path and never enter federation events.
 
 ## Wallet integration
 
-- **QRL side**: MyQRLWallet web wallet via [`@qrlwallet/connect` 5.0.0](https://github.com/DigitalGuards/myqrlwallet-connect) or MyQRLWallet Extension. Portable V2 signs canonical ordered message bytes through `qrl_signMessage` with ML-DSA-87, binding both chains, HTLC addresses, and the private v3 genesis. Every proof derives and verifies the full 64-byte signer address. Typed-data-only wallet providers are unsupported for portable orders. Users keep their own keys; the connected account auto-fills the recipient address.
+- **QRL side**: MyQRLWallet web wallet via [`@qrlwallet/connect` 5.0.1](https://github.com/DigitalGuards/myqrlwallet-connect) or MyQRLWallet Extension. Portable V2 signs canonical ordered message bytes through `qrl_signMessage` with ML-DSA-87, binding both chains, HTLC addresses, and the private v3 genesis. Every proof derives and verifies the full 64-byte signer address. Typed-data-only wallet providers are unsupported for portable orders. Users keep their own keys; the connected account auto-fills the recipient address.
 - **Ethereum side**: any EIP-6963 injected wallet (MetaMask, Rabby, etc.).
 - **No generated custodial wallets.** HTLC claims are permissionless with a fixed recipient, so the QRL leg can be claim-sponsored: a WETH-to-QRL swapper does not need a funded QRL gas wallet.
 
