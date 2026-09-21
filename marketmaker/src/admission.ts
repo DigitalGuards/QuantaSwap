@@ -11,6 +11,22 @@ export interface AdmissionRecord {
   retainUntil: number;
 }
 
+/** A pure unfunded quote expires by its own signed deadline, independently
+ * of an untrusted mirror's automatic cancellation projection. */
+export function canRetireExpiredUnfundedQuote(order: ManagedOrder, now: number): boolean {
+  const protocol = order.protocol;
+  return protocol !== undefined && protocol.orderAuth.expiresAt <= now &&
+    protocol.selectedIntent === undefined && protocol.fillProof === undefined &&
+    protocol.cancelProof === undefined && protocol.fillAcknowledged !== true &&
+    protocol.releaseObserved !== true &&
+    protocol.order.prelock === undefined && order.preimage === null &&
+    order.hashlock === null && order.initiatorTimeout === null &&
+    order.responderTimeout === null && order.announcedAt === null &&
+    order.takerEthAccount === null && order.takerQrlAccount === null &&
+    order.lockSentAt === null &&
+    order.claimSentAt === null && order.refundSentAt === null;
+}
+
 /** Retention is accounting only. It never authorizes settlement or rewrites a proof. */
 export function orderRetentionUntil(order: ManagedOrder, now: number): number | null {
   const protocol = order.protocol;
