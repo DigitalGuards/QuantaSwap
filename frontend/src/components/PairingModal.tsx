@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { defineQrlPairingModal, QrlPairingModal } from "@qrlwallet/connect-ui";
 
 interface Props {
@@ -13,13 +13,18 @@ interface Props {
  * replacing the hand-copied QR modal. Attributes sync via effects; the
  * element's qrl-new-connection / qrl-cancel events map onto the wallet hook.
  */
-export function PairingModal({ uri, statusDetail, onNewConnection, onCancel }: Props) {
+export function PairingModal({
+  uri,
+  statusDetail,
+  onNewConnection,
+  onCancel,
+}: Props) {
   const hostRef = useRef<HTMLSpanElement | null>(null);
   const elRef = useRef<QrlPairingModal | null>(null);
   const handlers = useRef({ onNewConnection, onCancel });
   handlers.current = { onNewConnection, onCancel };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     defineQrlPairingModal();
     const el = new QrlPairingModal();
     const onNew = () => handlers.current.onNewConnection();
@@ -29,8 +34,8 @@ export function PairingModal({ uri, statusDetail, onNewConnection, onCancel }: P
     hostRef.current?.append(el);
     elRef.current = el;
     return () => {
-      // Listeners off before remove(): removal fires qrl-cancel by design
-      // (external-unmount dismissal), which must not loop back into React.
+      // Layout cleanup runs before React detaches the host. The element's
+      // disconnectedCallback emits qrl-cancel, so remove listeners first.
       el.removeEventListener("qrl-new-connection", onNew);
       el.removeEventListener("qrl-cancel", onDismiss);
       el.remove();
