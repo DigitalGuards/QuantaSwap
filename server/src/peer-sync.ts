@@ -72,7 +72,12 @@ interface ParsedCursor {
   sequence: number;
 }
 
-export type FederationPeerState = "pending" | "syncing" | "healthy" | "degraded" | "stale";
+export type FederationPeerState =
+  | "pending"
+  | "syncing"
+  | "healthy"
+  | "degraded"
+  | "stale";
 
 export interface FederationPeerStatus {
   id: string;
@@ -154,7 +159,8 @@ export async function readFederationJson(
       throw new Error("federation peer response exceeds the size limit");
     }
   }
-  if (response.body === null) throw new Error("federation peer returned an empty response");
+  if (response.body === null)
+    throw new Error("federation peer returned an empty response");
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -212,7 +218,11 @@ function parseRecord(
   if (typeof event !== "object" || event === null || Array.isArray(event)) {
     throw new Error(`${label} has an invalid event`);
   }
-  assertExactKeys(event as Record<string, unknown>, ["kind", "payload"], `${label} event`);
+  assertExactKeys(
+    event as Record<string, unknown>,
+    ["kind", "payload"],
+    `${label} event`,
+  );
   const parsed = parseFederationEvent(event, label);
   if (federationEventId(parsed) !== eventId) {
     throw new Error(`${label} content hash does not match`);
@@ -273,7 +283,10 @@ export function parseFederationPage(raw: unknown): FederationPage {
   );
   let snapshot: FederationRecord[] | undefined;
   if (hasSnapshot) {
-    if (!Array.isArray(row["snapshot"]) || row["snapshot"].length > MAX_SNAPSHOT_EVENTS) {
+    if (
+      !Array.isArray(row["snapshot"]) ||
+      row["snapshot"].length > MAX_SNAPSHOT_EVENTS
+    ) {
       throw new Error("federation peer returned an invalid snapshot");
     }
     const snapshotEventIds = new Set<string>();
@@ -299,7 +312,9 @@ export function parseFederationPage(raw: unknown): FederationPage {
     }
   } else {
     if (snapshot?.some((entry) => entry.seq !== cursor.sequence)) {
-      throw new Error("federation peer snapshot sequence does not match its cursor");
+      throw new Error(
+        "federation peer snapshot sequence does not match its cursor",
+      );
     }
   }
   return {
@@ -387,15 +402,20 @@ export class FederationPeerSync {
     ) {
       throw new Error("federation peer tokens are invalid");
     }
-    this.peerIds = options.peerIds ?? options.peers.map((_peer, index) => `peer-${index + 1}`);
+    this.peerIds =
+      options.peerIds ??
+      options.peers.map((_peer, index) => `peer-${index + 1}`);
     if (
       this.peerIds.length !== options.peers.length ||
       new Set(this.peerIds).size !== this.peerIds.length ||
-      this.peerIds.some((id) => !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(id))
+      this.peerIds.some(
+        (id) => !/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(id),
+      )
     ) {
       throw new Error("federation peer ids are invalid");
     }
-    this.staleAfterMs = options.staleAfterMs ?? Math.max(30_000, options.timeoutMs * 3);
+    this.staleAfterMs =
+      options.staleAfterMs ?? Math.max(30_000, options.timeoutMs * 3);
     if (!Number.isSafeInteger(this.staleAfterMs) || this.staleAfterMs < 1_000) {
       throw new Error("federation stale threshold is invalid");
     }
@@ -410,29 +430,31 @@ export class FederationPeerSync {
     if (!Number.isSafeInteger(now) || now < 0) {
       throw new Error("federation status time is invalid");
     }
-    const peers = this.options.peers.map((peer, index): FederationPeerStatus => {
-      const health = this.healthFor(peer);
-      let state: FederationPeerState;
-      if (health.failures > 0 || health.resetStreak > 0) state = "degraded";
-      else if (health.lastAttemptAt === undefined) state = "pending";
-      else if (
-        health.lastSuccessAt !== undefined &&
-        now - health.lastSuccessAt > this.staleAfterMs
-      ) {
-        state = "stale";
-      } else if (this.activePeers.has(peer)) state = "syncing";
-      else if (health.lastSuccessAt === undefined) state = "pending";
-      else state = "healthy";
-      return {
-        id: this.peerIds[index] ?? `peer-${index + 1}`,
-        state,
-        consecutiveFailures: health.failures,
-        resetStreak: health.resetStreak,
-        lastAttemptAt: health.lastAttemptAt ?? null,
-        lastSuccessAt: health.lastSuccessAt ?? null,
-        nextAttemptAt: health.nextSyncAt > now ? health.nextSyncAt : null,
-      };
-    });
+    const peers = this.options.peers.map(
+      (peer, index): FederationPeerStatus => {
+        const health = this.healthFor(peer);
+        let state: FederationPeerState;
+        if (health.failures > 0 || health.resetStreak > 0) state = "degraded";
+        else if (health.lastAttemptAt === undefined) state = "pending";
+        else if (
+          health.lastSuccessAt !== undefined &&
+          now - health.lastSuccessAt > this.staleAfterMs
+        ) {
+          state = "stale";
+        } else if (this.activePeers.has(peer)) state = "syncing";
+        else if (health.lastSuccessAt === undefined) state = "pending";
+        else state = "healthy";
+        return {
+          id: this.peerIds[index] ?? `peer-${index + 1}`,
+          state,
+          consecutiveFailures: health.failures,
+          resetStreak: health.resetStreak,
+          lastAttemptAt: health.lastAttemptAt ?? null,
+          lastSuccessAt: health.lastSuccessAt ?? null,
+          nextAttemptAt: health.nextSyncAt > now ? health.nextSyncAt : null,
+        };
+      },
+    );
     const configuredPeers = peers.length;
     const healthyPeers = peers.filter(
       (peer) =>
@@ -443,9 +465,12 @@ export class FederationPeerSync {
     ).length;
     let state: FederationSyncStatus["state"];
     if (configuredPeers === 0) state = "disabled";
-    else if (peers.some((peer) => peer.state === "degraded" || peer.state === "stale")) {
+    else if (
+      peers.some((peer) => peer.state === "degraded" || peer.state === "stale")
+    ) {
       state = "degraded";
-    } else if (peers.some((peer) => peer.lastSuccessAt === null)) state = "starting";
+    } else if (peers.some((peer) => peer.lastSuccessAt === null))
+      state = "starting";
     else state = "healthy";
     return {
       enabled: configuredPeers > 0,
@@ -475,7 +500,10 @@ export class FederationPeerSync {
           await this.syncConfiguredPeer(peer, applications, rejectedThisSync);
         }
       };
-      const workerCount = Math.min(MAX_CONCURRENT_PEER_SYNCS, this.options.peers.length);
+      const workerCount = Math.min(
+        MAX_CONCURRENT_PEER_SYNCS,
+        this.options.peers.length,
+      );
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
       await this.retryDeferred(rejectedThisSync);
     } finally {
@@ -519,7 +547,11 @@ export class FederationPeerSync {
     }
   }
 
-  private recordRejectedEvents(peer: string, count: number, label: string): void {
+  private recordRejectedEvents(
+    peer: string,
+    count: number,
+    label: string,
+  ): void {
     this.recordPeerIssue(
       peer,
       `federation peer supplied ${count} rejected ${label}`,
@@ -563,7 +595,10 @@ export class FederationPeerSync {
     let cursor = this.cursors.get(peer) ?? null;
     const peerIndex = this.options.peers.indexOf(peer);
     const peerToken = this.peerTokens[peerIndex] ?? null;
-    let feedId = cursor === null ? null : parseCursor(cursor, "stored federation cursor").feedId;
+    let feedId =
+      cursor === null
+        ? null
+        : parseCursor(cursor, "stored federation cursor").feedId;
     let reset = false;
     const seenEventIds = new Set<string>();
     let rejectedEvents = 0;
@@ -575,7 +610,7 @@ export class FederationPeerSync {
       let response: Response;
       try {
         response = await (this.options.fetch ?? globalThis.fetch)(
-          `${peer}/federation/v1/events?${query}`,
+          `${peer}/federation/v2/events?${query}`,
           {
             headers:
               peerToken === null
@@ -596,7 +631,9 @@ export class FederationPeerSync {
       }
       assertWithinDeadline();
       if (!response.ok) {
-        throw new Error(`federation peer request failed with HTTP ${response.status}`);
+        throw new Error(
+          `federation peer request failed with HTTP ${response.status}`,
+        );
       }
       const page = parseFederationPage(await readFederationJson(response));
       assertWithinDeadline();
@@ -615,7 +652,9 @@ export class FederationPeerSync {
       }
       for (const record of pageRecords) {
         assertWithinDeadline();
-        if ((await this.applyRecord(record, peer, applications)) === "rejected") {
+        if (
+          (await this.applyRecord(record, peer, applications)) === "rejected"
+        ) {
           rejectedEvents += 1;
           const totalRejected = Math.min(
             (rejectedThisSync.get(peer) ?? 0) + 1,
@@ -653,9 +692,9 @@ export class FederationPeerSync {
     if (deferred !== undefined) {
       if (deferred.sources.has(peer)) return "deferred";
       this.deferRecord(record, peer);
-      const result = await Promise.resolve(this.options.apply(record.event, peer)).then(
-        (value) => value ?? "applied",
-      );
+      const result = await Promise.resolve(
+        this.options.apply(record.event, peer),
+      ).then((value) => value ?? "applied");
       if (result === "deferred") {
         const sources = [...deferred.sources];
         const currentIndex = sources.indexOf(peer);
@@ -758,7 +797,9 @@ export class FederationPeerSync {
     this.options.onError?.(peer, new Error(reason));
   }
 
-  private async retryDeferred(rejectedThisSync: Map<string, number>): Promise<void> {
+  private async retryDeferred(
+    rejectedThisSync: Map<string, number>,
+  ): Promise<void> {
     const rejectedByPeer = new Map<string, number>();
     const expiredByPeer = new Map<string, number>();
     for (let pass = 0; pass < MAX_DEFERRED_PASSES; pass += 1) {
@@ -787,11 +828,15 @@ export class FederationPeerSync {
         }
         deferred.attempts += 1;
         try {
-          const result = await this.options.apply(deferred.event, deferred.peer);
+          const result = await this.options.apply(
+            deferred.event,
+            deferred.peer,
+          );
           if (result === "deferred") {
             const currentSource = eligibleSources.indexOf(deferred.peer);
             deferred.peer =
-              eligibleSources[(currentSource + 1) % eligibleSources.length] ?? deferred.peer;
+              eligibleSources[(currentSource + 1) % eligibleSources.length] ??
+              deferred.peer;
             deferred.nextAttemptAt =
               now +
               Math.min(

@@ -1,26 +1,26 @@
+import {
+  ORDER_V2_DOMAIN,
+  ORDER_V2_DEPLOYMENT,
+  protocolMessageBytes,
+  assertV2Deployment,
+} from "./protocol-v2-wire.js";
 // Portable maker authorization for OrderV1. The order book reconstructs the
 // payload from the submitted economic terms and verifies the ML-DSA-87 proof;
 // it never accepts an arbitrary wallet-supplied payload as authoritative.
 
 import { sha256 } from "@noble/hashes/sha2.js";
-import { shake256, keccak_256 } from "@noble/hashes/sha3.js";
 import {
   ML_DSA_87_PUBLIC_KEY_BYTES,
   ML_DSA_87_SIGNATURE_BYTES,
-  verifyTypedDataForSigner,
+  verifyMessageForSigner,
   type TypedDataPayload,
 } from "@qrlwallet/connect";
-import { cryptoSignVerify } from "@theqrl/mldsa87";
-import { TypedDataEncoder, getBytes } from "ethers";
+import { getBytes } from "ethers";
 import { isKnownAsset } from "./assets.js";
 import { ApiError } from "./errors.js";
 
-export const ORDER_V1_DOMAIN = {
-  name: "QuantaSwap",
-  version: "1",
-  chainId: "1337",
-  salt: "0x1ed0597b5e221ddfd0e541d33a5c14d663f5261645be67c4ee3a4be4d804a740",
-} as const;
+/** Source compatibility name; the wire domain is exclusively V2. */
+export const ORDER_V1_DOMAIN = ORDER_V2_DOMAIN;
 
 export const ORDER_V1_FIELDS = [
   { name: "direction", type: "string" },
@@ -91,17 +91,12 @@ export const CANCEL_V1_FIELDS = [
   { name: "qrlHtlc", type: "string" },
 ] as const;
 
-export const ORDER_V1_DEPLOYMENT = {
-  ethChainId: "11155111",
-  ethHtlc: "eip155:11155111:0x910d5d4a7f2037c01f3b4c835167357e89909281",
-  qrlChainId: "1337",
-  qrlHtlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
-} as const;
+export const ORDER_V1_DEPLOYMENT = ORDER_V2_DEPLOYMENT;
 
-export type OrderSigningScheme = "qrl-sign-typed-v1" | "qrl-eip712-v4";
+export type OrderSigningScheme = "qrl-sign-message-v2";
 
 export interface ProtocolAuthV1 {
-  version: "1";
+  version: "2";
   scheme: OrderSigningScheme;
   issuedAt: number;
   expiresAt: number;
@@ -237,12 +232,17 @@ export interface VerifiedCancelV1 {
 }
 
 const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-f]{40}$/;
+// Portable V2 binds the full 64-byte QRL identity.
+const QRL_ADDR_RE = /^Q[0-9a-f]{128}$/;
 const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
-const SIGNATURE_RE = new RegExp(`^0x[0-9a-f]{${ML_DSA_87_SIGNATURE_BYTES * 2}}$`);
-const PUBLIC_KEY_RE = new RegExp(`^0x[0-9a-f]{${ML_DSA_87_PUBLIC_KEY_BYTES * 2}}$`);
+const SIGNATURE_RE = new RegExp(
+  `^0x[0-9a-f]{${ML_DSA_87_SIGNATURE_BYTES * 2}}$`,
+);
+const PUBLIC_KEY_RE = new RegExp(
+  `^0x[0-9a-f]{${ML_DSA_87_PUBLIC_KEY_BYTES * 2}}$`,
+);
 const DESCRIPTOR_RE = /^0x[0-9a-f]{6}$/;
 const EMPTY_HASHLOCK = `0x${"00".repeat(32)}`;
 const MAX_ORDER_LIFETIME_S = 48 * 3600;
@@ -257,12 +257,9 @@ const MIN_PRELOCK_LISTING_WINDOW_S = 3 * 60 * 60;
 const MAX_PRELOCK_LISTING_WINDOW_S = 72 * 60 * 60;
 const MAX_CLOCK_SKEW_S = 5 * 60;
 const MIN_REMAINING_LIFETIME_S = 60;
-const ZOND_CONTEXT = new TextEncoder().encode("ZOND");
-const QRL_MESSAGE_PREFIX = new TextEncoder().encode("\x19QRL Signed Message:\n32");
-const OFFICIAL_DESCRIPTOR = "0x010000";
-export const RELEASE_V1_PREFIX = "QuantaSwap ReleaseV1\0";
+export const RELEASE_V1_PREFIX = "QuantaSwap ReleaseV2\0";
 const RELEASE_V1_PREFIX_BYTES = new TextEncoder().encode(RELEASE_V1_PREFIX);
-export const ORDER_ID_V1_PREFIX = "QuantaSwap OrderV1 id\0";
+export const ORDER_ID_V1_PREFIX = "QuantaSwap OrderV2 id\0";
 const ORDER_ID_V1_PREFIX_BYTES = new TextEncoder().encode(ORDER_ID_V1_PREFIX);
 const PROTOCOL_AUTH_KEYS = [
   "version",
@@ -281,10 +278,10 @@ const MAKER_ORDER_AUTH_KEYS = [
 ] as const;
 const ZERO_BYTES32 = `0x${"00".repeat(32)}`;
 const MAKER_CAPABILITY_V1_PREFIX = new TextEncoder().encode(
-  "QuantaSwap Maker capability V1\0",
+  "QuantaSwap Maker capability V2\0",
 );
 const SHARE_CAPABILITY_V1_PREFIX = new TextEncoder().encode(
-  "QuantaSwap Share capability V1\0",
+  "QuantaSwap Share capability V2\0",
 );
 const RAW_CAPABILITY_RE = /^[0-9a-f]{64}$/;
 
@@ -328,17 +325,19 @@ function allowedObject(
   return object;
 }
 
-function exactString(
-  raw: unknown,
-  field: string,
-  pattern: RegExp,
-): string {
-  if (typeof raw !== "string" || !pattern.test(raw)) invalid(`${field} is invalid`);
+function exactString(raw: unknown, field: string, pattern: RegExp): string {
+  if (typeof raw !== "string" || !pattern.test(raw))
+    invalid(`${field} is invalid`);
   return raw;
 }
 
 function exactInteger(raw: unknown, field: string): number {
-  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) {
+  if (
+    typeof raw !== "number" ||
+    !Number.isSafeInteger(raw) ||
+    raw < 0 ||
+    Object.is(raw, -0)
+  ) {
     invalid(`${field} must be a non-negative safe integer`);
   }
   return raw;
@@ -351,7 +350,9 @@ function exactUint8(raw: unknown, field: string): number {
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  const result = new Uint8Array(
+    parts.reduce((length, part) => length + part.length, 0),
+  );
   let offset = 0;
   for (const part of parts) {
     result.set(part, offset);
@@ -381,8 +382,13 @@ function canonicalOrderBody(raw: unknown): {
     invalid("order.direction is invalid");
   }
   const asset = input["asset"];
-  if (typeof asset !== "string" || !isKnownAsset(asset)) invalid("order.asset is invalid");
-  const fromAmount = exactString(input["fromAmount"], "order.fromAmount", AMOUNT_RE);
+  if (typeof asset !== "string" || !isKnownAsset(asset))
+    invalid("order.asset is invalid");
+  const fromAmount = exactString(
+    input["fromAmount"],
+    "order.fromAmount",
+    AMOUNT_RE,
+  );
   const toAmount = exactString(input["toAmount"], "order.toAmount", AMOUNT_RE);
   const makerEthAccount = exactString(
     input["makerEthAccount"],
@@ -433,7 +439,11 @@ function canonicalOrderBody(raw: unknown): {
       "initiatorTimeout",
     ]);
     prelocked = true;
-    hashlock = exactString(prelock["hashlock"], "order.prelock.hashlock", HASHLOCK_RE);
+    hashlock = exactString(
+      prelock["hashlock"],
+      "order.prelock.hashlock",
+      HASHLOCK_RE,
+    );
     const timeout = exactInteger(
       prelock["initiatorTimeout"],
       "order.prelock.initiatorTimeout",
@@ -478,7 +488,10 @@ function canonicalOrderBody(raw: unknown): {
   };
 }
 
-export function deriveOrderV1Id(makerQrlAccount: string, nonce: string): string {
+export function deriveOrderV1Id(
+  makerQrlAccount: string,
+  nonce: string,
+): string {
   if (!QRL_ADDR_RE.test(makerQrlAccount) || !BYTES32_RE.test(nonce)) {
     invalid("OrderV1 identity is invalid");
   }
@@ -493,7 +506,11 @@ export function deriveOrderV1Id(makerQrlAccount: string, nonce: string): string 
   ).toString("hex");
 }
 
-function capabilityCommitment(rawToken: string, prefix: Uint8Array, field: string): string {
+function capabilityCommitment(
+  rawToken: string,
+  prefix: Uint8Array,
+  field: string,
+): string {
   if (!RAW_CAPABILITY_RE.test(rawToken)) invalid(`${field} is invalid`);
   const digest = sha256(concatBytes(prefix, getBytes(`0x${rawToken}`)));
   return `0x${Buffer.from(digest).toString("hex")}`;
@@ -523,23 +540,32 @@ function parseAuth(
   const auth = exact
     ? exactObject(raw, field, PROTOCOL_AUTH_KEYS)
     : objectValue(raw, field);
-  if (auth["version"] !== "1") invalid(`${field}.version must be 1`);
+  if (auth["version"] !== "2") invalid(`${field}.version must be 2`);
   const scheme = auth["scheme"];
-  if (scheme !== "qrl-sign-typed-v1" && scheme !== "qrl-eip712-v4") {
+  if (scheme !== "qrl-sign-message-v2") {
     invalid(`${field}.scheme is unsupported`);
   }
-  const descriptor = exactString(auth["descriptor"], `${field}.descriptor`, DESCRIPTOR_RE);
-  if (scheme === "qrl-eip712-v4" && descriptor !== OFFICIAL_DESCRIPTOR) {
-    invalid(`${field} official-wallet proofs require descriptor 0x010000`);
-  }
+  const descriptor = exactString(
+    auth["descriptor"],
+    `${field}.descriptor`,
+    DESCRIPTOR_RE,
+  );
   return {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: exactInteger(auth["issuedAt"], `${field}.issuedAt`),
     expiresAt: exactInteger(auth["expiresAt"], `${field}.expiresAt`),
     nonce: exactString(auth["nonce"], `${field}.nonce`, BYTES32_RE),
-    signature: exactString(auth["signature"], `${field}.signature`, SIGNATURE_RE),
-    publicKey: exactString(auth["publicKey"], `${field}.publicKey`, PUBLIC_KEY_RE),
+    signature: exactString(
+      auth["signature"],
+      `${field}.signature`,
+      SIGNATURE_RE,
+    ),
+    publicKey: exactString(
+      auth["publicKey"],
+      `${field}.publicKey`,
+      PUBLIC_KEY_RE,
+    ),
     descriptor,
   };
 }
@@ -561,26 +587,18 @@ function parseMakerOrderAuth(raw: unknown): MakerOrderAuthV1 {
   };
 }
 
-const DOMAIN_FIELDS = [
-  { name: "name", type: "string" },
-  { name: "version", type: "string" },
-  { name: "chainId", type: "uint256" },
-  { name: "salt", type: "bytes32" },
-] as const;
-
 function buildPayload(
   primaryType: string,
   fields: readonly { name: string; type: string }[],
   terms: Record<string, unknown>,
   scheme: OrderSigningScheme,
 ): TypedDataPayload {
+  if (scheme !== "qrl-sign-message-v2")
+    throw new Error("Unsupported portable V2 scheme");
   return {
-    types: {
-      [scheme === "qrl-sign-typed-v1" ? "QRLDomain" : "EIP712Domain"]: [...DOMAIN_FIELDS],
-      [primaryType]: [...fields],
-    },
+    types: { [primaryType]: [...fields] },
     primaryType,
-    domain: { ...ORDER_V1_DOMAIN },
+    domain: { ...ORDER_V2_DOMAIN },
     message: terms,
   };
 }
@@ -590,10 +608,15 @@ function semanticDigest(
   fields: readonly { name: string; type: string }[],
   terms: Record<string, unknown>,
 ): string {
-  return TypedDataEncoder.hash(
-    ORDER_V1_DOMAIN,
-    { [primaryType]: [...fields] },
-    terms,
+  return (
+    "0x" +
+    Buffer.from(
+      sha256(
+        protocolMessageBytes(
+          buildPayload(primaryType, fields, terms, "qrl-sign-message-v2"),
+        ),
+      ),
+    ).toString("hex")
   );
 }
 
@@ -601,44 +624,44 @@ export function buildOrderV1Payload(
   terms: SignedOrderTerms,
   scheme: OrderSigningScheme,
 ): TypedDataPayload {
-  return buildPayload("OrderV1", ORDER_V1_FIELDS, terms, scheme);
+  return buildPayload("OrderV2", ORDER_V1_FIELDS, terms, scheme);
 }
 
 export function buildFillIntentV1Payload(
   terms: FillIntentV1Terms,
   scheme: OrderSigningScheme,
 ): TypedDataPayload {
-  return buildPayload("FillIntentV1", FILL_INTENT_V1_FIELDS, terms, scheme);
+  return buildPayload("FillIntentV2", FILL_INTENT_V1_FIELDS, terms, scheme);
 }
 
 export function buildFillV1Payload(
   terms: FillV1Terms,
   scheme: OrderSigningScheme,
 ): TypedDataPayload {
-  return buildPayload("FillV1", FILL_V1_FIELDS, terms, scheme);
+  return buildPayload("FillV2", FILL_V1_FIELDS, terms, scheme);
 }
 
 export function buildCancelV1Payload(
   terms: CancelV1Terms,
   scheme: OrderSigningScheme,
 ): TypedDataPayload {
-  return buildPayload("CancelV1", CANCEL_V1_FIELDS, terms, scheme);
+  return buildPayload("CancelV2", CANCEL_V1_FIELDS, terms, scheme);
 }
 
 export function orderDigest(terms: SignedOrderTerms): string {
-  return semanticDigest("OrderV1", ORDER_V1_FIELDS, terms);
+  return semanticDigest("OrderV2", ORDER_V1_FIELDS, terms);
 }
 
 export function intentDigest(terms: FillIntentV1Terms): string {
-  return semanticDigest("FillIntentV1", FILL_INTENT_V1_FIELDS, terms);
+  return semanticDigest("FillIntentV2", FILL_INTENT_V1_FIELDS, terms);
 }
 
 export function fillDigest(terms: FillV1Terms): string {
-  return semanticDigest("FillV1", FILL_V1_FIELDS, terms);
+  return semanticDigest("FillV2", FILL_V1_FIELDS, terms);
 }
 
 export function cancelDigest(terms: CancelV1Terms): string {
-  return semanticDigest("CancelV1", CANCEL_V1_FIELDS, terms);
+  return semanticDigest("CancelV2", CANCEL_V1_FIELDS, terms);
 }
 
 export function computeReleaseCommitment(
@@ -651,8 +674,16 @@ export function computeReleaseCommitment(
     "orderDigest",
     BYTES32_RE,
   );
-  const canonicalRequestNonce = exactString(requestNonce, "requestNonce", BYTES32_RE);
-  const canonicalReleaseSecret = exactString(releaseSecret, "releaseSecret", BYTES32_RE);
+  const canonicalRequestNonce = exactString(
+    requestNonce,
+    "requestNonce",
+    BYTES32_RE,
+  );
+  const canonicalReleaseSecret = exactString(
+    releaseSecret,
+    "releaseSecret",
+    BYTES32_RE,
+  );
   const digest = sha256(
     concatBytes(
       RELEASE_V1_PREFIX_BYTES,
@@ -664,51 +695,22 @@ export function computeReleaseCommitment(
   return `0x${Buffer.from(digest).toString("hex")}`;
 }
 
-function publicKeyMatchesSigner(
-  signer: string,
-  descriptorHex: string,
-  publicKeyHex: string,
-): boolean {
-  const descriptor = getBytes(descriptorHex);
-  if (descriptor[0] !== 1) return false;
-  const address = shake256(concatBytes(descriptor, getBytes(publicKeyHex)), { dkLen: 20 });
-  const derived = `Q${Buffer.from(address).toString("hex")}`;
-  return derived === signer;
-}
-
-function officialDigest(payload: TypedDataPayload): Uint8Array {
-  const fields = payload.types[payload.primaryType];
-  if (fields === undefined) return new Uint8Array();
-  const eip712 = TypedDataEncoder.hash(
-    payload.domain,
-    { [payload.primaryType]: [...fields] },
-    payload.message,
-  );
-  return keccak_256(concatBytes(QRL_MESSAGE_PREFIX, getBytes(eip712)));
-}
-
 function verifyProof(
   signer: string,
   auth: ProtocolAuthV1,
   payload: TypedDataPayload,
 ): boolean {
-  if (auth.scheme === "qrl-sign-typed-v1") {
-    return verifyTypedDataForSigner({
+  assertV2Deployment();
+  return (
+    auth.version === "2" &&
+    auth.scheme === "qrl-sign-message-v2" &&
+    verifyMessageForSigner({
       expectedSigner: signer,
       descriptor: auth.descriptor,
       signature: auth.signature,
       publicKey: auth.publicKey,
-      payload,
-    });
-  }
-  return (
-    publicKeyMatchesSigner(signer, auth.descriptor, auth.publicKey) &&
-    cryptoSignVerify(
-      getBytes(auth.signature),
-      officialDigest(payload),
-      getBytes(auth.publicKey),
-      ZOND_CONTEXT,
-    )
+      messageBytes: protocolMessageBytes(payload),
+    })
   );
 }
 
@@ -720,15 +722,23 @@ export function verifyOrderV1(
   const { body, terms: baseTerms } = canonicalOrderBody(rawOrder);
   const auth = parseMakerOrderAuth(rawAuth);
   const now = options.now ?? Math.floor(Date.now() / 1000);
-  if (auth.expiresAt <= auth.issuedAt) invalid("signed order expiry must follow issuance");
+  if (auth.expiresAt <= auth.issuedAt)
+    invalid("signed order expiry must follow issuance");
   if (auth.expiresAt - auth.issuedAt > MAX_ORDER_LIFETIME_S) {
     invalid("signed order lifetime exceeds 48 hours");
   }
-  if (auth.issuedAt > now + MAX_CLOCK_SKEW_S) invalid("signed order issuance is in the future");
-  if (!options.allowExpired && auth.expiresAt < now + MIN_REMAINING_LIFETIME_S) {
+  if (auth.issuedAt > now + MAX_CLOCK_SKEW_S)
+    invalid("signed order issuance is in the future");
+  if (
+    !options.allowExpired &&
+    auth.expiresAt < now + MIN_REMAINING_LIFETIME_S
+  ) {
     invalid("signed order is expired or too close to expiry");
   }
-  if (baseTerms.prelocked && auth.expiresAt > Number(baseTerms.initiatorTimeout)) {
+  if (
+    baseTerms.prelocked &&
+    auth.expiresAt > Number(baseTerms.initiatorTimeout)
+  ) {
     invalid("signed order expiry exceeds the prelock timeout");
   }
   if (baseTerms.prelocked) {
@@ -775,6 +785,18 @@ export function verifyOrderV1(
   };
 }
 
+// V2 entry points. Compatibility names above reject all V1 wire proofs.
+export { ORDER_V2_DOMAIN, ORDER_V2_DEPLOYMENT, protocolMessageBytes };
+export {
+  verifyOrderV1 as verifyOrderV2,
+  verifyFillIntentV1 as verifyFillIntentV2,
+  verifyFillV1 as verifyFillV2,
+  verifyCancelV1 as verifyCancelV2,
+  deriveOrderV1Id as deriveOrderV2Id,
+};
+export type ProtocolAuthV2 = ProtocolAuthV1;
+export type MakerOrderAuthV2 = MakerOrderAuthV1;
+
 function canonicalFillIntentBody(raw: unknown): FillIntentV1Body {
   const body = exactObject(raw, "intent", [
     "orderDigest",
@@ -783,7 +805,11 @@ function canonicalFillIntentBody(raw: unknown): FillIntentV1Body {
     "releaseCommitment",
   ]);
   return {
-    orderDigest: exactString(body["orderDigest"], "intent.orderDigest", BYTES32_RE),
+    orderDigest: exactString(
+      body["orderDigest"],
+      "intent.orderDigest",
+      BYTES32_RE,
+    ),
     takerEthAccount: exactString(
       body["takerEthAccount"],
       "intent.takerEthAccount",
@@ -816,8 +842,16 @@ function canonicalFillBody(raw: unknown): FillV1Body {
   const hashlock = exactString(body["hashlock"], "fill.hashlock", HASHLOCK_RE);
   if (hashlock === EMPTY_HASHLOCK) invalid("fill.hashlock cannot be zero");
   return {
-    orderDigest: exactString(body["orderDigest"], "fill.orderDigest", BYTES32_RE),
-    intentDigest: exactString(body["intentDigest"], "fill.intentDigest", BYTES32_RE),
+    orderDigest: exactString(
+      body["orderDigest"],
+      "fill.orderDigest",
+      BYTES32_RE,
+    ),
+    intentDigest: exactString(
+      body["intentDigest"],
+      "fill.intentDigest",
+      BYTES32_RE,
+    ),
     takerEthAccount: exactString(
       body["takerEthAccount"],
       "fill.takerEthAccount",
@@ -834,15 +868,25 @@ function canonicalFillBody(raw: unknown): FillV1Body {
       BYTES32_RE,
     ),
     hashlock,
-    initiatorTimeout: exactInteger(body["initiatorTimeout"], "fill.initiatorTimeout"),
-    responderTimeout: exactInteger(body["responderTimeout"], "fill.responderTimeout"),
+    initiatorTimeout: exactInteger(
+      body["initiatorTimeout"],
+      "fill.initiatorTimeout",
+    ),
+    responderTimeout: exactInteger(
+      body["responderTimeout"],
+      "fill.responderTimeout",
+    ),
   };
 }
 
 function canonicalCancelBody(raw: unknown): CancelV1Body {
   const body = exactObject(raw, "cancel", ["orderDigest", "reasonCode"]);
   return {
-    orderDigest: exactString(body["orderDigest"], "cancel.orderDigest", BYTES32_RE),
+    orderDigest: exactString(
+      body["orderDigest"],
+      "cancel.orderDigest",
+      BYTES32_RE,
+    ),
     reasonCode: exactUint8(body["reasonCode"], "cancel.reasonCode"),
   };
 }
@@ -865,7 +909,8 @@ function assertOrderValidity(
   now: number,
   allowExpired: boolean,
 ): void {
-  if (!allowExpired && now >= order.auth.expiresAt) invalid("referenced order is expired");
+  if (!allowExpired && now >= order.auth.expiresAt)
+    invalid("referenced order is expired");
   if (
     artifactIssuedAt < order.auth.issuedAt ||
     artifactIssuedAt >= order.auth.expiresAt
@@ -879,14 +924,25 @@ function caipEthAccount(account: string): string {
 }
 
 function assertOrderReference(order: VerifiedOrderV1, digest: string): void {
-  if (digest !== order.orderDigest) invalid("orderDigest does not match the signed order");
+  if (digest !== order.orderDigest)
+    invalid("orderDigest does not match the signed order");
 }
 
-function assertAllowedTaker(order: VerifiedOrderV1, eth: string, qrl: string): void {
-  if (order.terms.allowedTakerEth !== "" && order.terms.allowedTakerEth !== eth) {
+function assertAllowedTaker(
+  order: VerifiedOrderV1,
+  eth: string,
+  qrl: string,
+): void {
+  if (
+    order.terms.allowedTakerEth !== "" &&
+    order.terms.allowedTakerEth !== eth
+  ) {
     invalid("taker ETH account is not allowed by the signed order");
   }
-  if (order.terms.allowedTakerQrl !== "" && order.terms.allowedTakerQrl !== qrl) {
+  if (
+    order.terms.allowedTakerQrl !== "" &&
+    order.terms.allowedTakerQrl !== qrl
+  ) {
     invalid("taker QRL account is not allowed by the signed order");
   }
 }
@@ -965,19 +1021,28 @@ export function verifyFillV1(
   ) {
     invalid("fill taker terms do not match the signed fill intent");
   }
-  if (auth.issuedAt < intent.auth.issuedAt || auth.issuedAt >= intent.auth.expiresAt) {
+  if (
+    auth.issuedAt < intent.auth.issuedAt ||
+    auth.issuedAt >= intent.auth.expiresAt
+  ) {
     invalid("fill issuance falls outside the fill intent validity window");
   }
 
   const responseWindow = auth.expiresAt - auth.issuedAt;
-  if (responseWindow < MIN_FILL_RESPONSE_S || responseWindow > MAX_FILL_RESPONSE_S) {
+  if (
+    responseWindow < MIN_FILL_RESPONSE_S ||
+    responseWindow > MAX_FILL_RESPONSE_S
+  ) {
     invalid("fill respondBy must be 60 to 900 seconds after issuance");
   }
   if (auth.expiresAt > order.auth.expiresAt) {
     invalid("fill respondBy exceeds the order validity window");
   }
   assertInitialAcceptance(auth, now, "fill", allowExpired);
-  if (fill.responderTimeout - auth.expiresAt <= MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S) {
+  if (
+    fill.responderTimeout - auth.expiresAt <=
+    MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S
+  ) {
     invalid("responder timeout must be more than 600 seconds after respondBy");
   }
 
@@ -993,7 +1058,9 @@ export function verifyFillV1(
     invalid("fill initiator timeout exceeds the maximum window");
   }
   if (responderWindow > Math.floor(initiatorWindow / 2)) {
-    invalid("initiator timeout window must be at least twice the responder window");
+    invalid(
+      "initiator timeout window must be at least twice the responder window",
+    );
   }
 
   if (order.terms.prelocked) {
@@ -1001,7 +1068,9 @@ export function verifyFillV1(
       fill.hashlock !== order.terms.hashlock ||
       String(fill.initiatorTimeout) !== order.terms.initiatorTimeout
     ) {
-      invalid("fill hashlock and initiator timeout must match the signed prelock");
+      invalid(
+        "fill hashlock and initiator timeout must match the signed prelock",
+      );
     }
     if (fill.initiatorTimeout - auth.issuedAt < MIN_PRELOCK_RUNWAY_S) {
       invalid("signed prelock must provide at least 9000 seconds of runway");

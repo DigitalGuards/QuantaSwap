@@ -6,6 +6,7 @@ on:
       - dev
       - main
     paths:
+      - 'config/protocol-v2*.json'
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
   push:
@@ -13,6 +14,7 @@ on:
       - dev
       - main
     paths:
+      - 'config/protocol-v2*.json'
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
   workflow_dispatch:

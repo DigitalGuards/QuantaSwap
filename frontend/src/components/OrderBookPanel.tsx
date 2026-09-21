@@ -55,6 +55,7 @@ import {
   sameSignedIntent,
 } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
@@ -276,7 +277,7 @@ export function OrderBookPanel({
         const routedOrder = routeSignedOrder(order);
         if (signingScheme === null || routedOrder.orderDigest === undefined) {
           throw new Error(
-            "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
+            "Portable V2 orders require message signing. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
           );
         }
         const releaseSecret = (await generateSecret()).preimage;
@@ -331,16 +332,15 @@ export function OrderBookPanel({
     // Offline-maker rows are excluded from matching, so those go by
     // explicit id.
     const byId = order.makerSeen === false;
-    const request =
-      byId
-        ? acceptOrder(order.id, taker)
-        : takeOrder({
-            direction: order.direction,
-            asset: pair,
-            maxPay: order.toAmount,
-            minReceive: order.fromAmount,
-            ...taker,
-          });
+    const request = byId
+      ? acceptOrder(order.id, taker)
+      : takeOrder({
+          direction: order.direction,
+          asset: pair,
+          maxPay: order.toAmount,
+          minReceive: order.fromAmount,
+          ...taker,
+        });
     request
       .then(({ order: accepted, takerToken }) => {
         // Take-by-terms may legitimately fill a different row, but only
@@ -446,8 +446,12 @@ export function OrderBookPanel({
     const top = [askRows.at(-1)?.cumUnits ?? 0n, bidRows.at(-1)?.cumUnits ?? 0n];
     const bestAsk = askRows[0]?.price;
     const bestBid = bidRows[0]?.price;
-    const m = bestAsk !== undefined && bestBid !== undefined ? (bestAsk + bestBid) / 2 : (bestAsk ?? bestBid);
-    const s = bestAsk !== undefined && bestBid !== undefined && m ? ((bestAsk - bestBid) / m) * 100 : null;
+    const m =
+      bestAsk !== undefined && bestBid !== undefined
+        ? (bestAsk + bestBid) / 2
+        : (bestAsk ?? bestBid);
+    const s =
+      bestAsk !== undefined && bestBid !== undefined && m ? ((bestAsk - bestBid) / m) * 100 : null;
     return {
       asks: askRows,
       bids: bidRows,
@@ -496,7 +500,7 @@ export function OrderBookPanel({
         className={cn(
           "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
           selectable ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
-          pending?.id === row.order.id && "bg-muted/40 ring-1 ring-blue-accent/40",
+          pending?.id === row.order.id && "bg-muted/40 ring-1 ring-identity-accent/40",
           offline && !own && "opacity-40",
         )}
       >
@@ -511,7 +515,7 @@ export function OrderBookPanel({
         <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
           {busyId === row.order.id ? "requesting…" : fmtPrice(row.price, asset.decimals)}
           {own ? (
-            <span className="ml-1.5 rounded-sm bg-blue-accent/15 px-1 py-px text-[10px] font-medium text-blue-accent">
+            <span className="ml-1.5 rounded-sm bg-identity-accent/15 px-1 py-px text-[10px] font-medium text-identity-accent">
               yours
             </span>
           ) : null}
@@ -595,13 +599,13 @@ export function OrderBookPanel({
       <CardContent className="space-y-0 px-3 pb-3">
         {capBlocked ? (
           <div className="mx-2 mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-xs text-amber-400">
-            You have reached the per-visitor take limit (4 swaps at once, 24 per day). Finish or
-            let your current swaps expire before taking another.
+            You have reached the per-visitor take limit (4 swaps at once, 24 per day). Finish or let
+            your current swaps expire before taking another.
           </div>
         ) : null}
 
         {pending ? (
-          <div className="mx-2 mb-2 space-y-2 rounded-md border border-blue-accent/40 bg-blue-accent/10 p-3">
+          <div className="mx-2 mb-2 space-y-2 rounded-md border border-identity-accent/40 bg-identity-accent/10 p-3">
             {(() => {
               const t = describeTake(pending, asset);
               return (
@@ -618,6 +622,14 @@ export function OrderBookPanel({
                 </p>
               );
             })()}
+            <div className="grid grid-cols-1 items-start gap-1 rounded-md border border-border/60 bg-background/30 p-2 text-xs sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
+              <span className="text-muted-foreground">Maker identity</span>
+              <ChainAddressPair
+                ethAddress={pending.makerEthAccount}
+                qrlAddress={pending.makerQrlAccount}
+                className="justify-items-start sm:justify-items-end"
+              />
+            </div>
             {pending.prelocked === true && escrow?.id === pending.id ? (
               escrow.status === "checking" ? (
                 <p className="text-xs text-muted-foreground">
@@ -625,8 +637,8 @@ export function OrderBookPanel({
                 </p>
               ) : escrow.issue !== null ? (
                 <p className="text-xs text-destructive">
-                  Pre-funded escrow check failed: {escrow.issue}. Taking is blocked; the listing
-                  is not what it claims.
+                  Pre-funded escrow check failed: {escrow.issue}. Taking is blocked; the listing is
+                  not what it claims.
                 </p>
               ) : escrow.status === "unverified" ? (
                 <p className="text-xs text-amber-400">
@@ -660,16 +672,15 @@ export function OrderBookPanel({
             ) : null}
             <p className="text-xs text-muted-foreground">
               {pending.makerAuth !== undefined
-                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV1. The maker selects one request and publishes a signed FillV1 before you can fund. No funds move during either signature."
+                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV2. The maker selects one request and publishes a signed FillV2 before you can fund. No funds move during either signature."
                 : pending.prelocked === true
                   ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
                   : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
             </p>
             {pending.makerAuth !== undefined && signingScheme === null ? (
               <p className="text-xs text-amber-400">
-                Install and connect MyQRLWallet Extension for the recommended portable-order
-                flow. The official QRL Web3 Wallet is also compatible through
-                qrl_signTypedData_v4.
+                Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2
+                orders.
               </p>
             ) : null}
             <div className="flex flex-wrap gap-2">
@@ -701,8 +712,14 @@ export function OrderBookPanel({
                     onPrefill({
                       direction: sellsAsset ? "qrl->eth" : "eth->qrl",
                       asset: pair,
-                      fromAmount: fmtAmount(BigInt(pending.toAmount), sellsAsset ? 18 : asset.decimals),
-                      toAmount: fmtAmount(BigInt(pending.fromAmount), sellsAsset ? asset.decimals : 18),
+                      fromAmount: fmtAmount(
+                        BigInt(pending.toAmount),
+                        sellsAsset ? 18 : asset.decimals,
+                      ),
+                      toAmount: fmtAmount(
+                        BigInt(pending.fromAmount),
+                        sellsAsset ? asset.decimals : 18,
+                      ),
                     });
                     setPending(null);
                   }}

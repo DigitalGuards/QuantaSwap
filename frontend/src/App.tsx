@@ -2,17 +2,13 @@ import { useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
-import {
-  clearActiveSwap,
-  loadActiveSwap,
-  saveActiveSwap,
-  type ActiveSwap,
-} from "@/lib/activeSwap";
+import { clearActiveSwap, loadActiveSwap, saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
 import { Header } from "@/components/Header";
 import { RouteMeta } from "@/components/RouteMeta";
 import { Footer } from "@/components/Footer";
 import { PairingModal } from "@/components/PairingModal";
 import { WalletPickerModal } from "@/components/WalletPickerModal";
+import { EthWalletPickerModal } from "@/components/EthWalletPickerModal";
 import { SwapPage } from "@/pages/SwapPage";
 import { SandboxPage } from "@/pages/SandboxPage";
 import { HowItWorksPage } from "@/pages/HowItWorksPage";
@@ -40,8 +36,9 @@ export default function App() {
       <RouteMeta />
       <Header
         ethAccount={eth.account}
-        onConnectEth={() => void eth.connect()}
-        onDisconnectEth={() => eth.disconnect()}
+        ethPending={eth.pendingId !== null}
+        onConnectEth={eth.openPicker}
+        onDisconnectEth={() => void eth.disconnect()}
         qrlAccount={qrl.account}
         qrlStatus={qrl.status}
         onConnectQrl={qrl.connect}
@@ -53,7 +50,16 @@ export default function App() {
           role="status"
           className="border-b border-accent/40 bg-accent/10 px-4 py-2 text-center text-sm text-foreground"
         >
-          Development deployment · signed OrderV1 experiment · no first-party liquidity
+          Development deployment · portable OrderV2 · private v3 testnet
+        </div>
+      ) : null}
+
+      {eth.error && !eth.pickerOpen ? (
+        <div
+          role="alert"
+          className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-center text-sm text-destructive"
+        >
+          {eth.error}
         </div>
       ) : null}
 
@@ -68,7 +74,10 @@ export default function App() {
 
       <main className="mx-auto w-full max-w-5xl flex-1 px-4">
         <Routes>
-          <Route path="/" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
+          <Route
+            path="/"
+            element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
+          />
           <Route
             path="/sandbox"
             element={<SandboxPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
@@ -83,11 +92,24 @@ export default function App() {
             path="/o/:id"
             element={<PrivateOrderPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
           />
-          <Route path="*" element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />} />
+          <Route
+            path="*"
+            element={<SwapPage eth={eth} qrl={qrl} swap={swap} setSwap={setSwap} />}
+          />
         </Routes>
       </main>
 
       <Footer />
+
+      <EthWalletPickerModal
+        open={eth.pickerOpen}
+        wallets={eth.providers}
+        pendingId={eth.pendingId}
+        error={eth.error}
+        onSelect={(wallet) => void eth.connect(wallet)}
+        onMetaMask={() => void eth.connectMetaMask()}
+        onClose={eth.closePicker}
+      />
 
       <WalletPickerModal
         open={qrl.pickerOpen}

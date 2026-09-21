@@ -20,7 +20,7 @@ const order: OrderView = {
   fromAmount: "1",
   toAmount: "2",
   makerEthAccount: `0x${"11".repeat(20)}`,
-  makerQrlAccount: `Q${"22".repeat(20)}`,
+  makerQrlAccount: `Q${"22".repeat(64)}`,
   status: "open",
   takerEthAccount: null,
   takerQrlAccount: null,
@@ -33,8 +33,8 @@ const order: OrderView = {
 };
 
 const auth: ProtocolAuthV1 = {
-  version: "1",
-  scheme: "qrl-sign-typed-v1",
+  version: "2",
+  scheme: "qrl-sign-message-v2",
   issuedAt: 10,
   expiresAt: 20,
   nonce: `0x${"33".repeat(32)}`,
@@ -53,7 +53,7 @@ const intent: SignedFillIntentV1 = {
   intent: {
     orderDigest: `0x${"44".repeat(32)}`,
     takerEthAccount: `0x${"55".repeat(20)}`,
-    takerQrlAccount: `Q${"66".repeat(20)}`,
+    takerQrlAccount: `Q${"66".repeat(64)}`,
     releaseCommitment: `0x${"77".repeat(32)}`,
   },
   auth,

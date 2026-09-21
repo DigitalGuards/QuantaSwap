@@ -16,7 +16,7 @@ const KEYS: OperatorKeys = {
   ethPrivateKey: `0x${"1".repeat(64)}`,
   ethAddress: `0x${"2".repeat(40)}`,
   qrlHexseed: `0x${"3".repeat(102)}`,
-  qrlAddress: `Q${"4".repeat(40)}`,
+  qrlAddress: `Q${"4".repeat(128)}`,
 };
 
 describe("operator key initialization", () => {

@@ -4,15 +4,23 @@
   "private": true,
   "description": "QuantaSwap HTLC contracts (Hyperion) and deploy/test tooling",
   "license": "GPL-3.0",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "compile": "node scripts/compile.js",
-    "test": "node scripts/test-local.js",
+    "compile:evm": "node scripts/compile.js evm",
+    "compile:qrl": "node scripts/compile.js qrl",
+    "test": "node scripts/compile.js && node --test scripts/artifacts.test.js scripts/qip55.test.js && node scripts/test-local.js && node scripts/test-q128-accessors.js",
+    "test:artifacts": "node scripts/compile.js && node --test scripts/artifacts.test.js",
+    "test:semantic": "node scripts/test-q128-accessors.js",
+    "test:qip55": "node --test scripts/qip55.test.js",
     "deploy:qrl": "node scripts/deploy-qrl.js",
     "deploy:eth": "node scripts/deploy-eth.js",
     "deploy:test-stable": "node scripts/deploy-test-stable.js"
   },
   "dependencies": {
-    "@theqrl/web3": "^0.4.0",
+    "@theqrl/web3": "1.0.3",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.4"
   }

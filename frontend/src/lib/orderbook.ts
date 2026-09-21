@@ -26,6 +26,7 @@ import type {
   SignedFillIntentV1,
   SignedFillV1,
 } from "./orderSigning";
+import { assertPortableOrderV1CanSign } from "./qip55";
 
 export type OrderStatus = "open" | "accepted" | "locking" | "cancelled";
 
@@ -91,10 +92,10 @@ export interface OrderView {
   conflictDigests?: string[];
 }
 
-export type OrderSigningScheme = "qrl-sign-typed-v1" | "qrl-eip712-v4";
+export type OrderSigningScheme = "qrl-sign-message-v2";
 
 export interface MakerOrderAuthV1 {
-  version: "1";
+  version: "2";
   scheme: OrderSigningScheme;
   issuedAt: number;
   expiresAt: number;
@@ -489,6 +490,7 @@ export const createOrder = async (
   body: CreateOrderBody,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> => {
+  assertPortableOrderV1CanSign(body.makerQrlAccount);
   if (bookId !== PRIMARY_ORDERBOOK_ID && body.visibility !== "private") {
     throw new Error("unsigned public orders can be posted to the primary book only");
   }
@@ -499,6 +501,7 @@ export const createSignedOrder = async (
   request: SignedOrderCreateRequest,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<{ order: OrderView }> => {
+  assertPortableOrderV1CanSign(request.order.makerQrlAccount);
   const created = await federatedOrderBook.client(bookId).createSigned(request);
   return { order: authenticateDirectOrder(created.order, bookId) };
 };
@@ -507,8 +510,10 @@ export const acceptOrder = async (
   id: string,
   body: { takerEthAccount: string; takerQrlAccount: string; shareToken?: string },
   bookId = PRIMARY_ORDERBOOK_ID,
-): Promise<{ order: OrderView; takerToken: string }> =>
-  localResult(await federatedOrderBook.client(bookId).accept(id, body), bookId);
+): Promise<{ order: OrderView; takerToken: string }> => {
+  assertPortableOrderV1CanSign(body.takerQrlAccount);
+  return localResult(await federatedOrderBook.client(bookId).accept(id, body), bookId);
+};
 
 /** Fragment carrying a private order's share token on /o/<id> links. In
  *  the fragment (never the query string) so it stays out of every access
@@ -538,6 +543,7 @@ export const takeOrder = async (
   },
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<{ order: OrderView; takerToken: string }> => {
+  assertPortableOrderV1CanSign(body.takerQrlAccount);
   if (bookId !== PRIMARY_ORDERBOOK_ID) {
     throw new Error("unsigned take-by-terms is available on the primary book only");
   }
@@ -627,8 +633,10 @@ export const submitFillIntent = async (
   signed: SignedFillIntentV1,
   bookId = PRIMARY_ORDERBOOK_ID,
   shareToken?: string,
-): Promise<FillIntentView> =>
-  federatedOrderBook.client(bookId).submitIntent(id, signed, shareToken);
+): Promise<FillIntentView> => {
+  assertPortableOrderV1CanSign(signed.intent.takerQrlAccount);
+  return federatedOrderBook.client(bookId).submitIntent(id, signed, shareToken);
+};
 
 export const listFillIntents = async (
   id: string,
@@ -643,11 +651,13 @@ export const fillOrder = async (
   selected: SignedFillIntentV1,
   bookId = PRIMARY_ORDERBOOK_ID,
   makerToken?: string,
-): Promise<OrderView> =>
-  authenticateDirectOrder(
+): Promise<OrderView> => {
+  assertPortableOrderV1CanSign(signed.fill.takerQrlAccount);
+  return authenticateDirectOrder(
     await federatedOrderBook.client(bookId).fill(id, signed, selected, makerToken),
     bookId,
   );
+};
 
 export const cancelSignedOrder = async (
   id: string,

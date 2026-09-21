@@ -25,12 +25,12 @@ const INTENT_DIGEST = `0x${"2".repeat(64)}`;
 const HASHLOCK = `0x${"3".repeat(64)}`;
 const NONCE = `0x${"4".repeat(64)}`;
 const ETH = `0x${"5".repeat(40)}`;
-const QRL = `Q${"6".repeat(40)}`;
+const QRL = `Q${"6".repeat(128)}`;
 const MAKER_TOKEN = "a".repeat(64);
 
 const auth = {
-  version: "1" as const,
-  scheme: "qrl-eip712-v4" as const,
+  version: "2" as const,
+  scheme: "qrl-sign-message-v2" as const,
   issuedAt: NOW,
   expiresAt: NOW + 120,
   nonce: NONCE,
@@ -40,7 +40,10 @@ const auth = {
 };
 const orderAuth = {
   ...auth,
-  makerTokenCommitment: capabilityCommitment(MAKER_CAPABILITY_DOMAIN, MAKER_TOKEN),
+  makerTokenCommitment: capabilityCommitment(
+    MAKER_CAPABILITY_DOMAIN,
+    MAKER_TOKEN,
+  ),
   shareTokenCommitment: EMPTY_CAPABILITY_COMMITMENT,
 };
 
@@ -109,7 +112,9 @@ describe("portable order book client", () => {
           headers: { "Content-Type": "application/json" },
         }),
       async () => {
-        const rows = await new OrderBookClient("https://book.test/api").intents(orderView.id);
+        const rows = await new OrderBookClient("https://book.test/api").intents(
+          orderView.id,
+        );
         assert.deepEqual(rows, [selected]);
       },
     );
@@ -118,10 +123,13 @@ describe("portable order book client", () => {
   it("rejects a malformed intent row instead of passing it to the signer", async () => {
     await withFetch(
       () =>
-        new Response(JSON.stringify({ intents: [{ ...selected, injected: true }] }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ intents: [{ ...selected, injected: true }] }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
       async () => {
         await assert.rejects(
           new OrderBookClient("https://book.test/api").intents(orderView.id),
@@ -138,11 +146,15 @@ describe("portable order book client", () => {
         assert.equal(init.redirect, "error");
         calls.push({
           url,
-          body: typeof init.body === "string" ? (JSON.parse(init.body) as unknown) : undefined,
+          body:
+            typeof init.body === "string"
+              ? (JSON.parse(init.body) as unknown)
+              : undefined,
         });
-        const request = typeof init.body === "string"
-          ? JSON.parse(init.body) as Record<string, unknown>
-          : {};
+        const request =
+          typeof init.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {};
         let responseOrder: OrderView = orderView;
         if (url.endsWith("/fill")) {
           const proof = request as unknown as SignedFillV1 & {
@@ -169,7 +181,11 @@ describe("portable order book client", () => {
             status: "cancelled",
             cancelProof: proof.cancel,
             cancelAuth: proof.auth,
-            cancelDigest: computeCancelDigest(proof.cancel, orderAuth, proof.auth),
+            cancelDigest: computeCancelDigest(
+              proof.cancel,
+              orderAuth,
+              proof.auth,
+            ),
           };
         }
         const payload = url.endsWith("/orders/signed")
@@ -233,7 +249,10 @@ describe("portable order book client", () => {
 
   it("rejects redirects, non-JSON responses, and advertised oversized bodies", async () => {
     for (const response of [
-      new Response("redirect", { status: 200, headers: { "Content-Type": "text/plain" } }),
+      new Response("redirect", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      }),
       new Response("{}", {
         status: 200,
         headers: {
@@ -249,7 +268,10 @@ describe("portable order book client", () => {
         },
         async () => {
           await assert.rejects(
-            new OrderBookClient("https://book.test/api").getSigned(orderView.id, signedOrder),
+            new OrderBookClient("https://book.test/api").getSigned(
+              orderView.id,
+              signedOrder,
+            ),
             /application\/json|size limit/,
           );
         },
@@ -270,7 +292,10 @@ describe("portable order book client", () => {
     ]) {
       await withFetch(handler, async () => {
         await assert.rejects(
-          new OrderBookClient("https://book.test/api").getSigned(orderView.id, signedOrder),
+          new OrderBookClient("https://book.test/api").getSigned(
+            orderView.id,
+            signedOrder,
+          ),
           OrderBookUnavailableError,
         );
       });
@@ -311,7 +336,10 @@ describe("portable order book client", () => {
             order: {
               ...validFillView,
               released: true,
-              selectedIntent: { ...selected, receivedAt: selected.receivedAt + 999 },
+              selectedIntent: {
+                ...selected,
+                receivedAt: selected.receivedAt + 999,
+              },
             },
           }),
           {
@@ -320,17 +348,25 @@ describe("portable order book client", () => {
           },
         ),
       async () => {
-        const released = await new OrderBookClient("https://book.test/api").getSigned(
-          orderView.id,
-          signedOrder,
-          { fill: fillProof, intent: selected },
-        );
+        const released = await new OrderBookClient(
+          "https://book.test/api",
+        ).getSigned(orderView.id, signedOrder, {
+          fill: fillProof,
+          intent: selected,
+        });
         assert.equal(released.released, true);
-        assert.equal(released.selectedIntent?.receivedAt, selected.receivedAt + 999);
+        assert.equal(
+          released.selectedIntent?.receivedAt,
+          selected.receivedAt + 999,
+        );
       },
     );
     for (const malicious of [
-      { ...validFillView, equivocated: true, conflictDigests: [`0x${"9".repeat(64)}`] },
+      {
+        ...validFillView,
+        equivocated: true,
+        conflictDigests: [`0x${"9".repeat(64)}`],
+      },
       { ...validFillView, toAmount: "2000000000000001" },
       { ...validFillView, fillDigest: `0x${"8".repeat(64)}` },
       {
@@ -340,13 +376,17 @@ describe("portable order book client", () => {
           auth: { ...selected.auth, nonce: `0x${"9".repeat(64)}` },
         },
       },
-      { ...validFillView, selectedIntent: { ...selected, receivedAt: "invalid" } },
+      {
+        ...validFillView,
+        selectedIntent: { ...selected, receivedAt: "invalid" },
+      },
     ]) {
       await withFetch(
-        () => new Response(JSON.stringify({ order: malicious }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+        () =>
+          new Response(JSON.stringify({ order: malicious }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
         async () => {
           await assert.rejects(
             new OrderBookClient("https://book.test/api").getSigned(

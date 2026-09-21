@@ -4,7 +4,8 @@ services:
   orderbook:
     image: ${ORDERBOOK_IMAGE:-quantaswap-orderbook:local}
     build:
-      context: .
+      context: ..
+      dockerfile: server/Dockerfile
     environment:
       ORDERBOOK_HOST: 0.0.0.0
       PORT: "8091"

@@ -1,5 +1,12 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -24,7 +31,7 @@ const orderBody = (index = 1): Record<string, unknown> => ({
   fromAmount: ONE,
   toAmount: ONE,
   makerEthAccount: `0x${index.toString(16).padStart(40, "0")}`,
-  makerQrlAccount: `Q${index.toString(16).padStart(40, "0")}`,
+  makerQrlAccount: `Q${index.toString(16).padStart(128, "0")}`,
 });
 
 describe("order-store persistence", () => {
@@ -35,7 +42,9 @@ describe("order-store persistence", () => {
     const created = store.create(orderBody(), "203.0.113.1");
     assert.equal("creatorIpHash" in created.order, false);
     assert.equal(statSync(dataFile).mode & 0o777, 0o600);
-    const persisted = JSON.parse(readFileSync(dataFile, "utf8")) as Array<Record<string, unknown>>;
+    const persisted = JSON.parse(readFileSync(dataFile, "utf8")) as Array<
+      Record<string, unknown>
+    >;
     assert.match(String(persisted[0]?.["creatorIpHash"]), /^[0-9a-f]{64}$/);
   });
 
@@ -60,6 +69,20 @@ describe("order-store persistence", () => {
     const rows = JSON.parse(readFileSync(duplicate, "utf8")) as unknown[];
     writeFileSync(duplicate, JSON.stringify([rows[0], rows[0]]));
     assert.throws(() => new OrderStore(duplicate), /duplicate id/);
+  });
+
+  it("preserves legacy-width records and refuses to reinterpret them on v3", () => {
+    const file = join(makeTemp(), "legacy.json");
+    const source = new OrderStore(file);
+    source.create(orderBody(), "203.0.113.1");
+    const records = JSON.parse(readFileSync(file, "utf8")) as Array<
+      Record<string, unknown>
+    >;
+    records[0]!["makerQrlAccount"] = `Q${"1".repeat(40)}`;
+    const original = JSON.stringify(records);
+    writeFileSync(file, original);
+    assert.throws(() => new OrderStore(file), /invalid makerQrlAccount/);
+    assert.equal(readFileSync(file, "utf8"), original);
   });
 
   it("caps unsigned open listings per maker and source", () => {

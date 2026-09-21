@@ -18,11 +18,7 @@ import {
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
-import {
-  makeLegSender,
-  makePreflightedClaimSender,
-  sendEthTokenLock,
-} from "@/lib/legSender";
+import { makeLegSender, makePreflightedClaimSender, sendEthTokenLock } from "@/lib/legSender";
 import {
   hasCurrentTermBinding,
   initiatorLeg,
@@ -40,6 +36,7 @@ import {
 } from "@/lib/swapMachine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
@@ -58,7 +55,7 @@ interface Props {
 
 const pillStyles: Record<string, string> = {
   none: "bg-muted/40 text-muted-foreground",
-  open: "bg-blue-accent/10 text-blue-accent",
+  open: "bg-identity-accent/10 text-identity-accent",
   claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
@@ -122,10 +119,7 @@ export function SwapFlow({
   const refresh = useCallback(async () => {
     if (!hashlock) return;
     try {
-      const [i, r] = await Promise.all([
-        getLegState(iLeg, hashlock),
-        getLegState(rLeg, hashlock),
-      ]);
+      const [i, r] = await Promise.all([getLegState(iLeg, hashlock), getLegState(rLeg, hashlock)]);
       setLegs({ [iLeg]: i, [rLeg]: r });
       setNowS(Math.floor(Date.now() / 1000));
     } catch {
@@ -272,7 +266,8 @@ export function SwapFlow({
   // closed, or the maker could delete the only copy of the hashlock while
   // the escrow is still Open. Once loaded, an Open escrow flows into
   // ownLockedLegs (warning + release) and a settled one frees the discard.
-  const prelockChainUnknown = swap.prelocked === true && swap.role === "maker" && iState === undefined;
+  const prelockChainUnknown =
+    swap.prelocked === true && swap.role === "maker" && iState === undefined;
   const ethAsset = ETH_ASSETS[swap.ethAsset];
   const iPlan = legPlan[iLeg];
   const rPlan = legPlan[rLeg];
@@ -353,7 +348,11 @@ export function SwapFlow({
           onStage: setLockStage,
         });
       } else {
-        await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
+        await sendOnLeg(
+          leg,
+          buildLockNativeData(leg, hashlock, plan.recipient, timeout),
+          plan.amount,
+        );
       }
     });
 
@@ -369,12 +368,12 @@ export function SwapFlow({
         revealedPreimage !== null &&
         preimage === revealedPreimage;
       if (!legacyPublicSecretRecovery) requireBoundTerms();
-      await sendClaimOnLeg(leg, buildClaimData(hashlock, preimage), 0n);
+      await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n);
     });
 
   const refundLeg = (leg: LegKey) =>
     runAction(`refund-${leg}`, async () => {
-      await sendOnLeg(leg, buildRefundData(hashlock), 0n);
+      await sendOnLeg(leg, buildRefundData(leg, hashlock), 0n);
     });
 
   // Prelocked swaps only: one-time recipient assignment on the maker's
@@ -386,12 +385,12 @@ export function SwapFlow({
       if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
         throw new Error(signedFillIssue);
       }
-      await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
+      await sendOnLeg(leg, buildAssignData(leg, hashlock, legPlan[leg].recipient), 0n);
     });
 
   const releaseLeg = (leg: LegKey) =>
     runAction(`release-${leg}`, async () => {
-      await sendOnLeg(leg, buildReleaseData(hashlock), 0n);
+      await sendOnLeg(leg, buildReleaseData(leg, hashlock), 0n);
     });
 
   /** Busy-state key for a step's own action button. */
@@ -490,9 +489,9 @@ export function SwapFlow({
       <CardContent className="space-y-1">
         {!termsBound ? (
           <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
-            This saved swap predates local term binding. New locks, assignments, and secret-revealing
-            claims are disabled. Keep this record for refund, release, or a taker's public-secret
-            claim recovery.
+            This saved swap predates local term binding. New locks, assignments, and
+            secret-revealing claims are disabled. Keep this record for refund, release, or a taker's
+            public-secret claim recovery.
           </p>
         ) : null}
         {signedFillIssue !== null ? (
@@ -507,11 +506,27 @@ export function SwapFlow({
         ) : null}
 
         {accountMismatch ? (
-          <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
-            A connected wallet differs from the address this swap was agreed with. Payouts still go
-            to the agreed addresses (<span className="font-data">{ownEth.slice(0, 8)}…</span> /{" "}
-            <span className="font-data">{ownQrl.slice(0, 8)}…</span>).
-          </p>
+          <div className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
+            <p>
+              A connected wallet differs from the address this swap was agreed with. Payouts still
+              go to the agreed addresses (
+              <AddressFingerprint address={ownEth} /> /{" "}
+              <AddressFingerprint address={ownQrl} />).
+            </p>
+            <details className="mt-2">
+              <summary className="cursor-pointer font-medium">Show full agreed addresses</summary>
+              <dl className="mt-1 space-y-1 font-data text-[11px]">
+                <div>
+                  <dt className="inline font-sans">Ethereum: </dt>
+                  <dd className="inline break-all select-text">{ownEth}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-sans">QRL: </dt>
+                  <dd className="inline break-all select-text">{ownQrl}</dd>
+                </div>
+              </dl>
+            </details>
+          </div>
         ) : null}
 
         {steps.map((step, i) => {
@@ -537,7 +552,7 @@ export function SwapFlow({
                   step.done
                     ? "border-success/60 bg-success/10 text-success"
                     : step.own && step.canRun
-                      ? "border-blue-accent/60 text-blue-accent"
+                      ? "border-identity-accent/60 text-identity-accent"
                       : "border-border text-muted-foreground",
                 )}
               >
@@ -609,9 +624,9 @@ export function SwapFlow({
                       </Button>
                     </div>
                   ) : step.canRun ? (
-                    <p className="text-xs text-blue-accent">{view.waitingText}</p>
+                    <p className="text-xs text-identity-accent">{view.waitingText}</p>
                   ) : step.key === "lock-responder" && awaitingAssign ? (
-                    <p className="text-xs text-blue-accent">
+                    <p className="text-xs text-identity-accent">
                       {presentation["assign-initiator"].waitingText}
                     </p>
                   ) : null)}

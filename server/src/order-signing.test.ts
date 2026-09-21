@@ -1,10 +1,8 @@
+import { protocolMessageBytes } from "./protocol-v2-wire.js";
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { keccak_256, shake256 } from "@noble/hashes/sha3.js";
-import {
-  SCHEME_TAG_TYPED,
-  computeTypedDataDigest,
-} from "@qrlwallet/connect";
+import { shake256 } from "@noble/hashes/sha3.js";
+import { SCHEME_TAG_MSG, computeMessageDigest } from "@qrlwallet/connect";
 import {
   CryptoBytes,
   CryptoPublicKeyBytes,
@@ -12,7 +10,6 @@ import {
   cryptoSignKeypair,
   cryptoSignSignature,
 } from "@theqrl/mldsa87";
-import { TypedDataEncoder, getBytes } from "ethers";
 import {
   CANCEL_V1_FIELDS,
   FILL_INTENT_V1_FIELDS,
@@ -30,7 +27,6 @@ import {
   deriveOrderV1Id,
   fillDigest,
   intentDigest,
-  orderDigest,
   verifyCancelV1,
   verifyFillIntentV1,
   verifyFillV1,
@@ -51,14 +47,14 @@ import {
 
 const NOW = 1_800_000_000;
 const DESCRIPTOR = new Uint8Array([1, 0, 0]);
-const ZOND_CONTEXT = new TextEncoder().encode("ZOND");
-const QRL_MESSAGE_PREFIX = new TextEncoder().encode("\x19QRL Signed Message:\n32");
 const MAKER_TOKEN = "ab".repeat(32);
 const MAKER_TOKEN_COMMITMENT = computeMakerTokenCommitment(MAKER_TOKEN);
 const ZERO_SHARE_COMMITMENT = `0x${"00".repeat(32)}`;
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  const result = new Uint8Array(
+    parts.reduce((length, part) => length + part.length, 0),
+  );
   let offset = 0;
   for (const part of parts) {
     result.set(part, offset);
@@ -75,14 +71,14 @@ const publicKey = new Uint8Array(CryptoPublicKeyBytes);
 const secretKey = new Uint8Array(CryptoSecretKeyBytes);
 cryptoSignKeypair(new Uint8Array(32).fill(7), publicKey, secretKey);
 const signer = `Q${Buffer.from(
-  shake256(concatBytes(DESCRIPTOR, publicKey), { dkLen: 20 }),
+  shake256(concatBytes(DESCRIPTOR, publicKey), { dkLen: 64 }),
 ).toString("hex")}`;
 
 const takerPublicKey = new Uint8Array(CryptoPublicKeyBytes);
 const takerSecretKey = new Uint8Array(CryptoSecretKeyBytes);
 cryptoSignKeypair(new Uint8Array(32).fill(8), takerPublicKey, takerSecretKey);
 const takerSigner = `Q${Buffer.from(
-  shake256(concatBytes(DESCRIPTOR, takerPublicKey), { dkLen: 20 }),
+  shake256(concatBytes(DESCRIPTOR, takerPublicKey), { dkLen: 64 }),
 ).toString("hex")}`;
 
 function signAuth<T extends ProtocolAuthV1>(
@@ -90,22 +86,8 @@ function signAuth<T extends ProtocolAuthV1>(
   payload: ReturnType<typeof buildOrderV1Payload>,
   signingKey: Uint8Array,
 ): T {
-  let digest: Uint8Array;
-  let context: Uint8Array;
-  if (auth.scheme === "qrl-sign-typed-v1") {
-    digest = computeTypedDataDigest(payload);
-    context = SCHEME_TAG_TYPED;
-  } else {
-    const fields = payload.types[payload.primaryType];
-    assert.ok(fields);
-    const eip712 = TypedDataEncoder.hash(
-      payload.domain,
-      { [payload.primaryType]: [...fields] },
-      payload.message,
-    );
-    digest = keccak_256(concatBytes(QRL_MESSAGE_PREFIX, getBytes(eip712)));
-    context = ZOND_CONTEXT;
-  }
+  const digest = computeMessageDigest(protocolMessageBytes(payload));
+  const context = SCHEME_TAG_MSG;
   const signature = new Uint8Array(CryptoBytes);
   cryptoSignSignature(signature, digest, signingKey, false, context);
   return { ...auth, signature: hex(signature) };
@@ -137,7 +119,7 @@ function fixture(
       : {}),
   };
   const auth: MakerOrderAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: NOW,
     expiresAt: NOW + 3600,
@@ -153,24 +135,27 @@ function fixture(
     asset: "ETH",
     fromAmount: "1000000000000000",
     toAmount: "1000000000000000",
-    makerEthAccount: "eip155:11155111:0x1111111111111111111111111111111111111111",
+    makerEthAccount:
+      "eip155:11155111:0x1111111111111111111111111111111111111111",
     makerQrlAccount: signer,
     visibility: "public",
     allowedTakerEth: "",
     allowedTakerQrl: "",
     prelocked: options.prelockTimeout !== undefined,
-    hashlock: options.prelockTimeout === undefined ? `0x${"00".repeat(32)}` : prelockHash,
+    hashlock:
+      options.prelockTimeout === undefined
+        ? `0x${"00".repeat(32)}`
+        : prelockHash,
     initiatorTimeout:
-      options.prelockTimeout === undefined ? "0" : String(options.prelockTimeout),
+      options.prelockTimeout === undefined
+        ? "0"
+        : String(options.prelockTimeout),
     issuedAt: String(auth.issuedAt),
     expiresAt: String(auth.expiresAt),
     nonce: auth.nonce,
     makerTokenCommitment: auth.makerTokenCommitment,
     shareTokenCommitment: auth.shareTokenCommitment,
-    ethChainId: "11155111",
-    ethHtlc: "eip155:11155111:0x910d5d4a7f2037c01f3b4c835167357e89909281",
-    qrlChainId: "1337",
-    qrlHtlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
+    ...ORDER_V1_DEPLOYMENT,
   };
   const payload = buildOrderV1Payload(terms, scheme);
   return { order, auth: signAuth(auth, payload, secretKey) };
@@ -192,7 +177,9 @@ function protocolFixture(
   options: { prelockTimeout?: number } = {},
 ): ProtocolFixture {
   const signedOrder = fixture(scheme, options);
-  const order = verifyOrderV1(signedOrder.order, signedOrder.auth, { now: NOW });
+  const order = verifyOrderV1(signedOrder.order, signedOrder.auth, {
+    now: NOW,
+  });
   const requestNonce = `0x${"43".repeat(32)}`;
   const releaseCommitment = computeReleaseCommitment(
     order.orderDigest,
@@ -206,7 +193,7 @@ function protocolFixture(
     releaseCommitment,
   };
   const unsignedIntentAuth: ProtocolAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: NOW + 10,
     expiresAt: NOW + 130,
@@ -230,7 +217,9 @@ function protocolFixture(
     buildFillIntentV1Payload(intentTerms, scheme),
     takerSecretKey,
   );
-  const intent = verifyFillIntentV1(intentBody, intentAuth, order, { now: NOW + 11 });
+  const intent = verifyFillIntentV1(intentBody, intentAuth, order, {
+    now: NOW + 11,
+  });
 
   const initiatorTimeout = options.prelockTimeout ?? NOW + 3_600;
   const responderTimeout =
@@ -249,7 +238,7 @@ function protocolFixture(
     responderTimeout,
   };
   const unsignedFillAuth: ProtocolAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: NOW + 20,
     expiresAt: NOW + 80,
@@ -284,7 +273,7 @@ function protocolFixture(
     reasonCode: 1,
   };
   const unsignedCancelAuth: ProtocolAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: NOW + 30,
     expiresAt: order.auth.expiresAt,
@@ -320,51 +309,24 @@ function protocolFixture(
 }
 
 describe("OrderV1 maker authorization", () => {
-  it("matches the official QRL web3 ABI 0.5.0 EIP-712 vector", () => {
-    const terms: SignedOrderTerms = {
-      direction: "eth->qrl",
-      asset: "ETH",
-      fromAmount: "1000000000000000",
-      toAmount: "2000000000000000",
-      makerEthAccount: "eip155:11155111:0x1111111111111111111111111111111111111111",
-      makerQrlAccount: "Q2222222222222222222222222222222222222222",
-      visibility: "public",
-      allowedTakerEth: "",
-      allowedTakerQrl: "",
-      prelocked: false,
-      hashlock: `0x${"00".repeat(32)}`,
-      initiatorTimeout: "0",
-      issuedAt: "1800000000",
-      expiresAt: "1800003600",
-      nonce: `0x${"42".repeat(32)}`,
-      makerTokenCommitment: MAKER_TOKEN_COMMITMENT,
-      shareTokenCommitment: ZERO_SHARE_COMMITMENT,
-      ethChainId: "11155111",
-      ethHtlc: "eip155:11155111:0x910d5d4a7f2037c01f3b4c835167357e89909281",
-      qrlChainId: "1337",
-      qrlHtlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
-    };
-    const payload = buildOrderV1Payload(terms, "qrl-eip712-v4");
-    const eip712Digest = TypedDataEncoder.hash(
-      payload.domain,
-      { OrderV1: [...ORDER_V1_FIELDS] },
-      payload.message,
+  it("rejects legacy V1 schemas and binds the configured V2 domain", () => {
+    const { order, auth } = fixture("qrl-sign-message-v2");
+    assert.throws(
+      () => verifyOrderV1(order, { ...auth, version: "1" }, { now: NOW }),
+      /version/,
     );
-    assert.equal(
-      eip712Digest,
-      "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48",
-    );
-    assert.equal(
-      hex(keccak_256(concatBytes(QRL_MESSAGE_PREFIX, getBytes(eip712Digest)))),
-      "0xc305e6936db7a0b374f936cb7058fde90963e39896f5d127f25bd87c147211d3",
-    );
-    assert.equal(
-      orderDigest(terms),
-      "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48",
+    assert.throws(
+      () =>
+        verifyOrderV1(
+          order,
+          { ...auth, scheme: "qrl-eip712-v4" },
+          { now: NOW },
+        ),
+      /scheme/,
     );
   });
 
-  for (const scheme of ["qrl-sign-typed-v1", "qrl-eip712-v4"] as const) {
+  for (const scheme of ["qrl-sign-message-v2"] as const) {
     it(`verifies and derives a stable id for ${scheme}`, () => {
       const { order, auth } = fixture(scheme);
       const verified = verifyOrderV1(order, auth, { now: NOW });
@@ -375,14 +337,17 @@ describe("OrderV1 maker authorization", () => {
     it(`rejects changed economic terms for ${scheme}`, () => {
       const { order, auth } = fixture(scheme);
       assert.throws(
-        () => verifyOrderV1({ ...order, toAmount: "2000000000000000" }, auth, { now: NOW }),
+        () =>
+          verifyOrderV1({ ...order, toAmount: "2000000000000000" }, auth, {
+            now: NOW,
+          }),
         /maker signature is invalid/,
       );
     });
   }
 
   it("rejects replay after the signed expiry", () => {
-    const { order, auth } = fixture("qrl-sign-typed-v1");
+    const { order, auth } = fixture("qrl-sign-message-v2");
     assert.throws(
       () => verifyOrderV1(order, auth, { now: auth.expiresAt }),
       /expired or too close to expiry/,
@@ -390,11 +355,14 @@ describe("OrderV1 maker authorization", () => {
   });
 
   it("rejects non-canonical addresses before signature verification", () => {
-    const { order, auth } = fixture("qrl-sign-typed-v1");
+    const { order, auth } = fixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyOrderV1(
-          { ...order, makerEthAccount: "0x111111111111111111111111111111111111111A" },
+          {
+            ...order,
+            makerEthAccount: "0x111111111111111111111111111111111111111A",
+          },
           auth,
           { now: NOW },
         ),
@@ -405,17 +373,26 @@ describe("OrderV1 maker authorization", () => {
   it("derives order identity from the maker and nonce", () => {
     const nonce = `0x${"42".repeat(32)}`;
     assert.equal(
-      deriveOrderV1Id("Q2222222222222222222222222222222222222222", nonce),
-      "cd84c99465b251d67a23548932b13fe84caa67d28c8331686e91774343552e0e",
+      deriveOrderV1Id(
+        "Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+        nonce,
+      ),
+      "680f1ac51008253a70792f659dfd37f2371ee2f3fcddf853605e8eea2711f079",
     );
     assert.notEqual(
-      deriveOrderV1Id("Q2222222222222222222222222222222222222222", nonce),
-      deriveOrderV1Id("Q3333333333333333333333333333333333333333", nonce),
+      deriveOrderV1Id(
+        "Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+        nonce,
+      ),
+      deriveOrderV1Id(
+        "Q33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+        nonce,
+      ),
     );
   });
 
   it("binds nonzero create capabilities to order visibility", () => {
-    const { order, auth } = fixture("qrl-sign-typed-v1");
+    const { order, auth } = fixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyOrderV1(
@@ -439,17 +416,13 @@ describe("OrderV1 maker authorization", () => {
     );
     assert.throws(
       () =>
-        verifyOrderV1(
-          { ...order, visibility: "private" },
-          auth,
-          { now: NOW },
-        ),
+        verifyOrderV1({ ...order, visibility: "private" }, auth, { now: NOW }),
       /shareTokenCommitment does not match order visibility/,
     );
   });
 
   it("rejects unsigned OrderV1 and prelock extension fields", () => {
-    const { order, auth } = fixture("qrl-sign-typed-v1");
+    const { order, auth } = fixture("qrl-sign-message-v2");
     assert.throws(
       () => verifyOrderV1({ ...order, note: "unsigned" }, auth, { now: NOW }),
       /order.note is not supported/,
@@ -459,7 +432,9 @@ describe("OrderV1 maker authorization", () => {
       /auth.note is not supported/,
     );
 
-    const prelocked = fixture("qrl-sign-typed-v1", { prelockTimeout: NOW + 7200 });
+    const prelocked = fixture("qrl-sign-message-v2", {
+      prelockTimeout: NOW + 7200,
+    });
     const prelock = prelocked.order["prelock"] as Record<string, unknown>;
     assert.throws(
       () =>
@@ -473,7 +448,7 @@ describe("OrderV1 maker authorization", () => {
   });
 
   it("rejects a prelocked order whose proof outlives its escrow", () => {
-    const { order, auth } = fixture("qrl-sign-typed-v1", {
+    const { order, auth } = fixture("qrl-sign-message-v2", {
       prelockTimeout: NOW + 1800,
     });
     assert.throws(
@@ -567,11 +542,11 @@ describe("federated order protocol signing", () => {
   it("computes a fixed-width release capability commitment", () => {
     assert.equal(
       computeMakerTokenCommitment("00".repeat(32)),
-      "0x9ca8274349471eadc293ebb7690d81e64ce538ad0d9d65646f9ff1af227709e6",
+      "0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549",
     );
     assert.equal(
       computeShareTokenCommitment("11".repeat(32)),
-      "0xe0e4441fa2456254d19815bb0b962e160e06027efe181f8f8887292f527590e2",
+      "0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30",
     );
     assert.equal(
       computeReleaseCommitment(
@@ -579,7 +554,7 @@ describe("federated order protocol signing", () => {
         `0x${"22".repeat(32)}`,
         `0x${"33".repeat(32)}`,
       ),
-      "0x5fc8c5fdfc3b3df859a6d0883c794662e325ff10147adb67f6ac7a677e442702",
+      "0x4f3673dd21bcb296e18dbaf410ea73a2a7dd0b367a72646b69646f3e31ccdd20",
     );
     assert.throws(
       () =>
@@ -594,7 +569,7 @@ describe("federated order protocol signing", () => {
 
   it("keeps semantic replay digest vectors stable", () => {
     const orderDigestValue =
-      "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48";
+      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4";
     const requestNonce = `0x${"43".repeat(32)}`;
     const releaseCommitment = computeReleaseCommitment(
       orderDigestValue,
@@ -604,8 +579,10 @@ describe("federated order protocol signing", () => {
     const intentTerms: FillIntentV1Terms = {
       orderDigest: orderDigestValue,
       requestNonce,
-      takerEthAccount: "eip155:11155111:0x2222222222222222222222222222222222222222",
-      takerQrlAccount: "Q3333333333333333333333333333333333333333",
+      takerEthAccount:
+        "eip155:11155111:0x2222222222222222222222222222222222222222",
+      takerQrlAccount:
+        "Q33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
       releaseCommitment,
       issuedAt: "1800000010",
       expiresAt: "1800000130",
@@ -637,19 +614,19 @@ describe("federated order protocol signing", () => {
     };
     assert.equal(
       releaseCommitment,
-      "0xa786c492a3707147bfa3277ddf44d49af0c794252e42dd05379f04b8c4621e0e",
+      "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
     );
     assert.equal(
       intentDigestValue,
-      "0x48f387eff4522d99a48f52ec0e9e8b146fa0deb119383c53ffbb7d134ca00a2b",
+      "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
     );
     assert.equal(
       fillDigest(fillTerms),
-      "0x6d4d7d0a3fb70062fc6897c9f402353536e3ffeefe7a6e698b5db78cedcb3c13",
+      "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
     );
     assert.equal(
       cancelDigest(cancelTerms),
-      "0xde9d19dc6dd94501ea1fb23ac89295ce139cc2f8566aee99f5b5ca5f83769214",
+      "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd",
     );
   });
 
@@ -663,7 +640,7 @@ describe("federated order protocol signing", () => {
     }
   >();
 
-  for (const scheme of ["qrl-sign-typed-v1", "qrl-eip712-v4"] as const) {
+  for (const scheme of ["qrl-sign-message-v2"] as const) {
     it(`verifies intent, fill, and cancellation for ${scheme}`, () => {
       const value = protocolFixture(scheme);
       const verifiedFill = verifyFillV1(
@@ -679,13 +656,25 @@ describe("federated order protocol signing", () => {
         value.order,
         { now: NOW + 31 },
       );
-      assert.equal(value.intent.terms.takerEthAccount, "eip155:11155111:0x2222222222222222222222222222222222222222");
-      assert.equal(verifiedFill.fill.takerEthAccount, value.intentBody.takerEthAccount);
-      assert.equal(verifiedFill.terms.respondBy, String(value.fillAuth.expiresAt));
+      assert.equal(
+        value.intent.terms.takerEthAccount,
+        "eip155:11155111:0x2222222222222222222222222222222222222222",
+      );
+      assert.equal(
+        verifiedFill.fill.takerEthAccount,
+        value.intentBody.takerEthAccount,
+      );
+      assert.equal(
+        verifiedFill.terms.respondBy,
+        String(value.fillAuth.expiresAt),
+      );
       assert.equal(verifiedCancel.terms.reasonCode, 1);
       assert.equal(intentDigest(value.intent.terms), value.intent.intentDigest);
       assert.equal(fillDigest(verifiedFill.terms), verifiedFill.fillDigest);
-      assert.equal(cancelDigest(verifiedCancel.terms), verifiedCancel.cancelDigest);
+      assert.equal(
+        cancelDigest(verifiedCancel.terms),
+        verifiedCancel.cancelDigest,
+      );
       verifiedByScheme.set(scheme, {
         orderDigest: value.order.orderDigest,
         intentDigest: value.intent.intentDigest,
@@ -696,15 +685,15 @@ describe("federated order protocol signing", () => {
   }
 
   it("uses scheme-independent semantic replay digests", () => {
-    const native = verifiedByScheme.get("qrl-sign-typed-v1");
-    const official = verifiedByScheme.get("qrl-eip712-v4");
+    const native = verifiedByScheme.get("qrl-sign-message-v2");
+    const official = verifiedByScheme.get("qrl-sign-message-v2");
     assert.ok(native);
     assert.ok(official);
     assert.deepEqual(native, official);
   });
 
   it("rejects terminal proofs that do not derive the OrderV1 maker", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     const foreignFillAuth = {
       ...value.fillAuth,
       publicKey: hex(takerPublicKey),
@@ -724,7 +713,7 @@ describe("federated order protocol signing", () => {
       () =>
         verifyCancelV1(
           value.cancelBody,
-          { ...value.cancelAuth, scheme: "qrl-eip712-v4" },
+          { ...value.cancelAuth, publicKey: hex(takerPublicKey) },
           value.order,
           { now: NOW + 31 },
         ),
@@ -733,8 +722,8 @@ describe("federated order protocol signing", () => {
   });
 
   it("accepts scheme-independent terminal proofs from the same maker", () => {
-    const native = protocolFixture("qrl-sign-typed-v1");
-    const official = protocolFixture("qrl-eip712-v4");
+    const native = protocolFixture("qrl-sign-message-v2");
+    const official = protocolFixture("qrl-sign-message-v2");
     assert.equal(native.order.orderDigest, official.order.orderDigest);
     assert.doesNotThrow(() =>
       verifyFillV1(
@@ -746,17 +735,14 @@ describe("federated order protocol signing", () => {
       ),
     );
     assert.doesNotThrow(() =>
-      verifyCancelV1(
-        official.cancelBody,
-        official.cancelAuth,
-        native.order,
-        { now: NOW + 31 },
-      ),
+      verifyCancelV1(official.cancelBody, official.cancelAuth, native.order, {
+        now: NOW + 31,
+      }),
     );
   });
 
   it("binds fill taker terms to the signed intent", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyFillV1(
@@ -774,7 +760,7 @@ describe("federated order protocol signing", () => {
   });
 
   it("enforces intent lifetime and fill deadline invariants", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyFillIntentV1(
@@ -824,7 +810,7 @@ describe("federated order protocol signing", () => {
   });
 
   it("requires exact signed prelock terms and runway", () => {
-    const value = protocolFixture("qrl-sign-typed-v1", {
+    const value = protocolFixture("qrl-sign-message-v2", {
       prelockTimeout: NOW + 12_000,
     });
     assert.doesNotThrow(() =>
@@ -843,11 +829,10 @@ describe("federated order protocol signing", () => {
         ),
       /must match the signed prelock/,
     );
-
   });
 
   it("binds cancel expiry to the original signed order", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyCancelV1(
@@ -861,7 +846,7 @@ describe("federated order protocol signing", () => {
   });
 
   it("rejects non-canonical extension fields", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyFillIntentV1(
@@ -885,7 +870,7 @@ describe("federated order protocol signing", () => {
   });
 
   it("allows expired artifacts only during hydration", () => {
-    const value = protocolFixture("qrl-sign-typed-v1");
+    const value = protocolFixture("qrl-sign-message-v2");
     assert.throws(
       () =>
         verifyFillIntentV1(value.intentBody, value.intentAuth, value.order, {

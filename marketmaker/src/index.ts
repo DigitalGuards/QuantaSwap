@@ -13,10 +13,11 @@ import type { Server } from "node:http";
 import { assetInfo, type AssetSymbol } from "./assets.js";
 import { loadConfig, type Config } from "./config.js";
 import { EthLeg, QrlLeg } from "./chains.js";
-import { assertRuntimeChainIds, makeDeploymentIdentity } from "./deployment.js";
+import { assertPortableDeployment, assertRuntimeChainIds, makeDeploymentIdentity } from "./deployment.js";
 import { cancelOpenListing } from "./drain.js";
 import {
   NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
   encodeApprove,
   encodeClaim,
   encodeLock,
@@ -50,7 +51,6 @@ import {
   type ManagedOrder,
 } from "./policy.js";
 import {
-  ORDER_V1_DEPLOYMENT,
   ProtocolSigner,
   computeOrderDigest,
   deriveOrderV1Id,
@@ -127,20 +127,6 @@ function privateMakerToken(managed: ManagedOrder): string | undefined {
   return managed.protocol?.order.visibility === "private"
     ? (managed.token ?? undefined)
     : undefined;
-}
-
-function assertPortableDeployment(): void {
-  const signedEthHtlc = ORDER_V1_DEPLOYMENT.ethHtlc.split(":").at(-1)?.toLowerCase();
-  if (
-    deployment.ethChainId !== ORDER_V1_DEPLOYMENT.ethChainId ||
-    deployment.qrlChainId !== ORDER_V1_DEPLOYMENT.qrlChainId ||
-    deployment.ethHtlc !== signedEthHtlc ||
-    deployment.qrlHtlc !== ORDER_V1_DEPLOYMENT.qrlHtlc
-  ) {
-    throw new Error(
-      "configured deployment does not match the portable protocol signing domain",
-    );
-  }
 }
 
 async function cancelManaged(managed: ManagedOrder): Promise<OrderView> {
@@ -565,7 +551,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     // ETH leg (direction qrl->eth); the QRL leg is always native. The
     // address comes from the compiled-in registry, never from the book.
     expectedToken:
-      rLeg === "eth" ? (assetInfo(managed.asset).tokenAddress ?? NATIVE_TOKEN) : NATIVE_TOKEN,
+      rLeg === "eth"
+        ? (assetInfo(managed.asset).tokenAddress ?? NATIVE_TOKEN)
+        : QRL_NATIVE_TOKEN,
     nowS: nowS(),
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
@@ -672,7 +660,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       managed.lockSentAt = nowS();
       state.upsert(managed);
       const hash = await sender(iLeg).send(
-        encodeLock(managed.hashlock, recipient, managed.initiatorTimeout),
+        encodeLock(iLeg, managed.hashlock, recipient, managed.initiatorTimeout),
         BigInt(managed.fromAmount),
       );
       log(`order ${short(managed.id)} locked ${iLeg} leg, tx ${hash}`);
@@ -681,7 +669,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
     case "claim": {
       if (managed.hashlock === null || managed.preimage === null) break;
-      const claimData = encodeClaim(managed.hashlock, managed.preimage);
+      const claimData = encodeClaim(rLeg, managed.hashlock, managed.preimage);
       // A reverted claim rolls the HTLC state back to Open while calldata
       // may expose the preimage. Simulate the exact transaction from the
       // actual sender against latest state immediately before submission,
@@ -706,7 +694,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       if (managed.hashlock === null) break;
       managed.refundSentAt = nowS();
       state.upsert(managed);
-      const hash = await sender(iLeg).send(encodeRefund(managed.hashlock), 0n);
+      const hash = await sender(iLeg).send(encodeRefund(iLeg, managed.hashlock), 0n);
       log(`order ${short(managed.id)} refunded ${iLeg} leg (taker never finished), tx ${hash}`);
       break;
     }
@@ -855,7 +843,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         deployment,
         token: makerToken,
         protocol: {
-          version: 1,
+          version: 2,
           orderDigest,
           order: signed.order,
           orderAuth: signed.auth,
@@ -937,7 +925,7 @@ async function main(): Promise<void> {
   if (protocolSigner.address.toLowerCase() !== qrl.address.toLowerCase()) {
     throw new Error("protocol signer address does not match the QRL transaction signer");
   }
-  assertPortableDeployment();
+  assertPortableDeployment(deployment);
   for (const managed of state.all()) {
     const order = managed.protocol?.order;
     if (

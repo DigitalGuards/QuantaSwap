@@ -3,7 +3,11 @@
 
 import type { AssetSymbol } from "./assets.js";
 import { isDeepStrictEqual } from "node:util";
-import type { Direction, FillIntentAuthV1, SelectedFillIntentV1 } from "./policy.js";
+import type {
+  Direction,
+  FillIntentAuthV1,
+  SelectedFillIntentV1,
+} from "./policy.js";
 import type {
   FillIntentV1Body,
   SignedCancelV1,
@@ -66,7 +70,8 @@ class OrderBookResponseError extends Error {}
 
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const ETH_ADDRESS_RE = /^0x[0-9a-f]{40}$/;
-const QRL_ADDRESS_RE = /^Q[0-9a-f]{40}$/;
+// Immutable V1 response width, retained for proof verification and recovery.
+const QRL_ADDRESS_RE = /^Q[0-9a-f]{128}$/;
 const HEX_RE = /^0x[0-9a-f]+$/;
 const DESCRIPTOR_RE = /^0x[0-9a-f]{6}$/;
 const ORDER_ID_RE = /^[0-9a-f]{64}$/;
@@ -81,7 +86,11 @@ function record(value: unknown, field: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exactKeys(value: Record<string, unknown>, keys: readonly string[], field: string): void {
+function exactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+  field: string,
+): void {
   const expected = new Set(keys);
   if (
     Object.keys(value).length !== expected.size ||
@@ -91,7 +100,11 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[], fiel
   }
 }
 
-function stringMatching(value: unknown, pattern: RegExp, field: string): string {
+function stringMatching(
+  value: unknown,
+  pattern: RegExp,
+  field: string,
+): string {
   if (typeof value !== "string" || !pattern.test(value)) {
     throw new Error(`${field} is malformed`);
   }
@@ -167,25 +180,40 @@ function parsePortableBase(raw: unknown, expected: SignedOrderV1): OrderView {
     throw new Error("order response asset is malformed");
   }
   const status = row["status"];
-  if (status !== "open" && status !== "accepted" && status !== "locking" && status !== "cancelled") {
+  if (
+    status !== "open" &&
+    status !== "accepted" &&
+    status !== "locking" &&
+    status !== "cancelled"
+  ) {
     throw new Error("order response status is malformed");
   }
   const visibility = row["visibility"];
   if (visibility !== "public" && visibility !== "private") {
     throw new Error("order response visibility is malformed");
   }
-  const initiatorTimeout = row["initiatorTimeout"] === null
-    ? null
-    : safeInteger(row["initiatorTimeout"], "order response initiatorTimeout");
-  const responderTimeout = row["responderTimeout"] === null
-    ? null
-    : safeInteger(row["responderTimeout"], "order response responderTimeout");
+  const initiatorTimeout =
+    row["initiatorTimeout"] === null
+      ? null
+      : safeInteger(row["initiatorTimeout"], "order response initiatorTimeout");
+  const responderTimeout =
+    row["responderTimeout"] === null
+      ? null
+      : safeInteger(row["responderTimeout"], "order response responderTimeout");
   const parsed: OrderView = {
     id: stringMatching(row["id"], ORDER_ID_RE, "order response id"),
     direction,
     asset,
-    fromAmount: stringMatching(row["fromAmount"], AMOUNT_RE, "order response fromAmount"),
-    toAmount: stringMatching(row["toAmount"], AMOUNT_RE, "order response toAmount"),
+    fromAmount: stringMatching(
+      row["fromAmount"],
+      AMOUNT_RE,
+      "order response fromAmount",
+    ),
+    toAmount: stringMatching(
+      row["toAmount"],
+      AMOUNT_RE,
+      "order response toAmount",
+    ),
     makerEthAccount: stringMatching(
       row["makerEthAccount"],
       ETH_ADDRESS_RE,
@@ -207,15 +235,25 @@ function parsePortableBase(raw: unknown, expected: SignedOrderV1): OrderView {
       QRL_ADDRESS_RE,
       "order response takerQrlAccount",
     ),
-    hashlock: nullableString(row["hashlock"], BYTES32_RE, "order response hashlock"),
+    hashlock: nullableString(
+      row["hashlock"],
+      BYTES32_RE,
+      "order response hashlock",
+    ),
     initiatorTimeout,
     responderTimeout,
     visibility,
     createdAt: safeInteger(row["createdAt"], "order response createdAt"),
     updatedAt: safeInteger(row["updatedAt"], "order response updatedAt"),
-    ...(row["released"] === undefined ? {} : { released: row["released"] === true }),
-    ...(row["makerSeen"] === undefined ? {} : { makerSeen: row["makerSeen"] === true }),
-    ...(row["prelocked"] === undefined ? {} : { prelocked: row["prelocked"] === true }),
+    ...(row["released"] === undefined
+      ? {}
+      : { released: row["released"] === true }),
+    ...(row["makerSeen"] === undefined
+      ? {}
+      : { makerSeen: row["makerSeen"] === true }),
+    ...(row["prelocked"] === undefined
+      ? {}
+      : { prelocked: row["prelocked"] === true }),
     ...(row["allowedTakerEth"] === undefined
       ? {}
       : {
@@ -236,15 +274,16 @@ function parsePortableBase(raw: unknown, expected: SignedOrderV1): OrderView {
         }),
   };
   if (
-    row["released"] !== undefined && typeof row["released"] !== "boolean" ||
-    row["makerSeen"] !== undefined && typeof row["makerSeen"] !== "boolean" ||
-    row["prelocked"] !== undefined && typeof row["prelocked"] !== "boolean"
+    (row["released"] !== undefined && typeof row["released"] !== "boolean") ||
+    (row["makerSeen"] !== undefined && typeof row["makerSeen"] !== "boolean") ||
+    (row["prelocked"] !== undefined && typeof row["prelocked"] !== "boolean")
   ) {
     throw new Error("order response boolean projection is malformed");
   }
   const digest = computeOrderDigest(expected.order, expected.auth);
   if (
-    parsed.id !== deriveOrderV1Id(expected.order.makerQrlAccount, expected.auth.nonce) ||
+    parsed.id !==
+      deriveOrderV1Id(expected.order.makerQrlAccount, expected.auth.nonce) ||
     parsed.direction !== expected.order.direction ||
     parsed.asset !== expected.order.asset ||
     parsed.fromAmount !== expected.order.fromAmount ||
@@ -257,7 +296,9 @@ function parsePortableBase(raw: unknown, expected: SignedOrderV1): OrderView {
     !sameJson(row["makerAuth"], expected.auth) ||
     row["orderDigest"] !== digest
   ) {
-    throw new Error("order response does not authenticate the expected OrderV1");
+    throw new Error(
+      "order response does not authenticate the expected OrderV1",
+    );
   }
   if (
     expected.order.prelock === undefined
@@ -273,24 +314,36 @@ function parsePortableBase(raw: unknown, expected: SignedOrderV1): OrderView {
   return parsed;
 }
 
-function assertUnconflicted(row: Record<string, unknown>, view: OrderView): void {
+function assertUnconflicted(
+  row: Record<string, unknown>,
+  view: OrderView,
+): void {
   if (
     row["equivocated"] === true ||
-    row["fill"] !== undefined && row["cancelProof"] !== undefined ||
-    Array.isArray(row["conflictDigests"]) && row["conflictDigests"].length > 0
+    (row["fill"] !== undefined && row["cancelProof"] !== undefined) ||
+    (Array.isArray(row["conflictDigests"]) && row["conflictDigests"].length > 0)
   ) {
     throw new Error("order response contains terminal conflict evidence");
   }
-  if (row["equivocated"] !== undefined && typeof row["equivocated"] !== "boolean") {
+  if (
+    row["equivocated"] !== undefined &&
+    typeof row["equivocated"] !== "boolean"
+  ) {
     throw new Error("order response equivocation flag is malformed");
   }
-  if (row["conflictDigests"] !== undefined && !Array.isArray(row["conflictDigests"])) {
+  if (
+    row["conflictDigests"] !== undefined &&
+    !Array.isArray(row["conflictDigests"])
+  ) {
     throw new Error("order response conflict digests are malformed");
   }
   view.equivocated = false;
 }
 
-function authenticateOpenView(raw: unknown, expected: SignedOrderV1): OrderView {
+function authenticateOpenView(
+  raw: unknown,
+  expected: SignedOrderV1,
+): OrderView {
   const row = record(raw, "order response");
   const view = parsePortableBase(row, expected);
   assertUnconflicted(row, view);
@@ -324,7 +377,11 @@ function authenticateFillView(
   const row = record(raw, "order response");
   const view = parsePortableBase(row, expectedOrder);
   assertUnconflicted(row, view);
-  const fillDigest = computeFillDigest(expectedFill.fill, expectedOrder.auth, expectedFill.auth);
+  const fillDigest = computeFillDigest(
+    expectedFill.fill,
+    expectedOrder.auth,
+    expectedFill.auth,
+  );
   const selectedIntent = parseIntentRow(row["selectedIntent"], 0);
   if (
     view.status !== "locking" ||
@@ -376,7 +433,9 @@ function authenticateCancelView(
     row["fillDigest"] !== undefined ||
     row["selectedIntent"] !== undefined
   ) {
-    throw new Error("order response does not authenticate the expected CancelV1");
+    throw new Error(
+      "order response does not authenticate the expected CancelV1",
+    );
   }
   view.cancelProof = expectedCancel.cancel;
   view.cancelAuth = expectedCancel.auth;
@@ -393,7 +452,11 @@ function parseIntent(value: unknown, index: number): FillIntentV1Body {
     field,
   );
   return {
-    orderDigest: stringMatching(body["orderDigest"], BYTES32_RE, `${field}.orderDigest`),
+    orderDigest: stringMatching(
+      body["orderDigest"],
+      BYTES32_RE,
+      `${field}.orderDigest`,
+    ),
     takerEthAccount: stringMatching(
       body["takerEthAccount"],
       ETH_ADDRESS_RE,
@@ -429,9 +492,9 @@ function parseIntentAuth(value: unknown, index: number): FillIntentAuthV1 {
     ],
     field,
   );
-  if (auth["version"] !== "1") throw new Error(`${field}.version is malformed`);
+  if (auth["version"] !== "2") throw new Error(`${field}.version is malformed`);
   const scheme = auth["scheme"];
-  if (scheme !== "qrl-sign-typed-v1" && scheme !== "qrl-eip712-v4") {
+  if (scheme !== "qrl-sign-message-v2") {
     throw new Error(`${field}.scheme is malformed`);
   }
   const issuedAt = safeInteger(auth["issuedAt"], `${field}.issuedAt`);
@@ -440,14 +503,18 @@ function parseIntentAuth(value: unknown, index: number): FillIntentAuthV1 {
     throw new Error(`${field} lifetime is malformed`);
   }
   return {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt,
     expiresAt,
     nonce: stringMatching(auth["nonce"], BYTES32_RE, `${field}.nonce`),
     signature: stringMatching(auth["signature"], HEX_RE, `${field}.signature`),
     publicKey: stringMatching(auth["publicKey"], HEX_RE, `${field}.publicKey`),
-    descriptor: stringMatching(auth["descriptor"], DESCRIPTOR_RE, `${field}.descriptor`),
+    descriptor: stringMatching(
+      auth["descriptor"],
+      DESCRIPTOR_RE,
+      `${field}.descriptor`,
+    ),
   };
 }
 
@@ -456,7 +523,11 @@ function parseIntentRow(value: unknown, index: number): SelectedFillIntentV1 {
   const row = record(value, field);
   exactKeys(row, ["intentDigest", "intent", "auth", "receivedAt"], field);
   return {
-    intentDigest: stringMatching(row["intentDigest"], BYTES32_RE, `${field}.intentDigest`),
+    intentDigest: stringMatching(
+      row["intentDigest"],
+      BYTES32_RE,
+      `${field}.intentDigest`,
+    ),
     intent: parseIntent(row["intent"], index),
     auth: parseIntentAuth(row["auth"], index),
     receivedAt: safeInteger(row["receivedAt"], `${field}.receivedAt`),
@@ -464,15 +535,27 @@ function parseIntentRow(value: unknown, index: number): SelectedFillIntentV1 {
 }
 
 async function readBookJson(res: Response): Promise<unknown> {
-  const mediaType = res.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  const mediaType = res.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
   if (mediaType !== "application/json") {
-    throw new OrderBookResponseError("order book response is not application/json");
+    throw new OrderBookResponseError(
+      "order book response is not application/json",
+    );
   }
   const advertised = res.headers.get("content-length");
   if (advertised !== null) {
     const length = Number(advertised);
-    if (!Number.isSafeInteger(length) || length < 0 || length > MAX_BOOK_RESPONSE_BYTES) {
-      throw new OrderBookResponseError("order book response exceeds the size limit");
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 0 ||
+      length > MAX_BOOK_RESPONSE_BYTES
+    ) {
+      throw new OrderBookResponseError(
+        "order book response exceeds the size limit",
+      );
     }
   }
   if (res.body === null) {
@@ -487,7 +570,9 @@ async function readBookJson(res: Response): Promise<unknown> {
     total += next.value.byteLength;
     if (total > MAX_BOOK_RESPONSE_BYTES) {
       await reader.cancel().catch(() => undefined);
-      throw new OrderBookResponseError("order book response exceeds the size limit");
+      throw new OrderBookResponseError(
+        "order book response exceeds the size limit",
+      );
     }
     chunks.push(next.value);
   }
@@ -498,9 +583,13 @@ async function readBookJson(res: Response): Promise<unknown> {
     offset += chunk.byteLength;
   }
   try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
   } catch {
-    throw new OrderBookResponseError("order book response contains invalid JSON");
+    throw new OrderBookResponseError(
+      "order book response contains invalid JSON",
+    );
   }
 }
 
@@ -512,7 +601,11 @@ export class OrderBookClient {
     private readonly timeoutMs = 20_000,
   ) {}
 
-  private async api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async api<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
@@ -523,28 +616,42 @@ export class OrderBookClient {
         redirect: "error",
       });
     } catch (error) {
-      throw new OrderBookUnavailableError("order book transport is unavailable", {
-        cause: error,
-      });
+      throw new OrderBookUnavailableError(
+        "order book transport is unavailable",
+        {
+          cause: error,
+        },
+      );
     }
     if (res.status >= 500) {
       await res.body?.cancel().catch(() => undefined);
-      throw new OrderBookUnavailableError(`order book is unavailable (HTTP ${res.status})`);
+      throw new OrderBookUnavailableError(
+        `order book is unavailable (HTTP ${res.status})`,
+      );
     }
     let payload: unknown;
     try {
       payload = await readBookJson(res);
     } catch (error) {
       if (error instanceof OrderBookResponseError) throw error;
-      throw new OrderBookUnavailableError("order book response transport failed", {
-        cause: error,
-      });
+      throw new OrderBookUnavailableError(
+        "order book response transport failed",
+        {
+          cause: error,
+        },
+      );
     }
     const payloadRecord = record(payload, "order book response");
-    const error = typeof payloadRecord["error"] === "string" ? payloadRecord["error"] : undefined;
-    if (res.status === 404) throw new OrderGoneError(error ?? "order not found");
+    const error =
+      typeof payloadRecord["error"] === "string"
+        ? payloadRecord["error"]
+        : undefined;
+    if (res.status === 404)
+      throw new OrderGoneError(error ?? "order not found");
     if (!res.ok) {
-      throw new Error(error ?? `order book request failed (HTTP ${res.status})`);
+      throw new Error(
+        error ?? `order book request failed (HTTP ${res.status})`,
+      );
     }
     return payload as T;
   }
@@ -569,9 +676,15 @@ export class OrderBookClient {
     makerToken: string,
   ): Promise<{ order: OrderView; makerToken: string }> {
     if (proof.order.visibility !== "public") {
-      throw new Error("headless market maker supports public signed orders only");
+      throw new Error(
+        "headless market maker supports public signed orders only",
+      );
     }
-    const canonicalToken = stringMatching(makerToken, MAKER_TOKEN_RE, "signed create makerToken");
+    const canonicalToken = stringMatching(
+      makerToken,
+      MAKER_TOKEN_RE,
+      "signed create makerToken",
+    );
     const payload = await this.api<unknown>("POST", "/orders/signed", {
       ...proof,
       makerToken: canonicalToken,
@@ -584,7 +697,9 @@ export class OrderBookClient {
       "signed create response makerToken",
     );
     if (returnedToken !== canonicalToken) {
-      throw new Error("signed create response changed the committed maker capability");
+      throw new Error(
+        "signed create response changed the committed maker capability",
+      );
     }
     return {
       order: authenticateOpenView(response["order"], proof),
@@ -595,7 +710,9 @@ export class OrderBookClient {
   async getSigned(
     id: string,
     order: SignedOrderV1,
-    terminal?: { fill: SignedFillV1; intent: SelectedFillIntentV1 } | { cancel: SignedCancelV1 },
+    terminal?:
+      | { fill: SignedFillV1; intent: SelectedFillIntentV1 }
+      | { cancel: SignedCancelV1 },
   ): Promise<OrderView> {
     const payload = await this.api<unknown>("GET", `/orders/${id}`);
     const response = record(payload, "signed get response");
@@ -605,7 +722,12 @@ export class OrderBookClient {
       return authenticateOpenView(rawOrder, order);
     }
     if (terminal !== undefined && "fill" in terminal) {
-      return authenticateFillView(rawOrder, order, terminal.fill, terminal.intent);
+      return authenticateFillView(
+        rawOrder,
+        order,
+        terminal.fill,
+        terminal.intent,
+      );
     }
     if (terminal !== undefined) {
       return authenticateCancelView(rawOrder, order, terminal.cancel);
@@ -614,8 +736,12 @@ export class OrderBookClient {
   }
 
   async intents(id: string): Promise<SelectedFillIntentV1[]> {
-    const payload = await this.api<{ intents?: unknown }>("GET", `/orders/${id}/intents`);
-    if (!Array.isArray(payload.intents)) throw new Error("fill intent response is malformed");
+    const payload = await this.api<{ intents?: unknown }>(
+      "GET",
+      `/orders/${id}/intents`,
+    );
+    if (!Array.isArray(payload.intents))
+      throw new Error("fill intent response is malformed");
     return payload.intents.map(parseIntentRow);
   }
 
@@ -644,10 +770,14 @@ export class OrderBookClient {
     order: SignedOrderV1,
     token?: string,
   ): Promise<OrderView> {
-    const payload = await this.api<unknown>("POST", `/orders/${id}/cancel/signed`, {
-      ...proof,
-      ...(token === undefined ? {} : { token }),
-    });
+    const payload = await this.api<unknown>(
+      "POST",
+      `/orders/${id}/cancel/signed`,
+      {
+        ...proof,
+        ...(token === undefined ? {} : { token }),
+      },
+    );
     const response = record(payload, "signed cancellation response");
     exactKeys(response, ["order"], "signed cancellation response");
     return authenticateCancelView(response["order"], order, proof);
@@ -655,18 +785,36 @@ export class OrderBookClient {
 
   async announceHashlock(
     id: string,
-    body: { token: string; hashlock: string; initiatorTimeout: number; responderTimeout: number },
+    body: {
+      token: string;
+      hashlock: string;
+      initiatorTimeout: number;
+      responderTimeout: number;
+    },
   ): Promise<OrderView> {
-    return (await this.api<{ order: OrderView }>("POST", `/orders/${id}/hashlock`, body)).order;
+    return (
+      await this.api<{ order: OrderView }>(
+        "POST",
+        `/orders/${id}/hashlock`,
+        body,
+      )
+    ).order;
   }
 
   async cancel(id: string, token: string): Promise<OrderView> {
-    return (await this.api<{ order: OrderView }>("POST", `/orders/${id}/cancel`, { token })).order;
+    return (
+      await this.api<{ order: OrderView }>("POST", `/orders/${id}/cancel`, {
+        token,
+      })
+    ).order;
   }
 
   /** Maker liveness ping; keeps our listings in the matchable set. */
   async heartbeat(id: string, token: string): Promise<OrderView> {
-    return (await this.api<{ order: OrderView }>("POST", `/orders/${id}/heartbeat`, { token }))
-      .order;
+    return (
+      await this.api<{ order: OrderView }>("POST", `/orders/${id}/heartbeat`, {
+        token,
+      })
+    ).order;
   }
 }

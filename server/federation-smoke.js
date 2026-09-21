@@ -1,3 +1,4 @@
+import { protocolMessageBytes } from "./dist/protocol-v2-wire.js";
 // Real HTTP acceptance for two independent mirrors. By default this boots two
 // built server processes with separate state, exercises bidirectional signed
 // federation, simulates a partition and restart, and tears everything down.
@@ -11,7 +12,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { SCHEME_TAG_TYPED, computeTypedDataDigest } from "@qrlwallet/connect";
+import { SCHEME_TAG_MSG, computeMessageDigest } from "@qrlwallet/connect";
 import {
   CryptoBytes,
   CryptoPublicKeyBytes,
@@ -37,7 +38,7 @@ import {
 } from "./dist/order-signing.js";
 
 const ZERO_BYTES32 = `0x${"00".repeat(32)}`;
-const SCHEME = "qrl-sign-typed-v1";
+const SCHEME = "qrl-sign-message-v2";
 const DESCRIPTOR_BYTES = new Uint8Array([1, 0, 0]);
 const DESCRIPTOR = hex(DESCRIPTOR_BYTES);
 const ETH_MAKER = `0x${"11".repeat(20)}`;
@@ -55,7 +56,9 @@ function hex(bytes) {
 }
 
 function concatBytes(...parts) {
-  const output = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  const output = new Uint8Array(
+    parts.reduce((size, part) => size + part.length, 0),
+  );
   let offset = 0;
   for (const part of parts) {
     output.set(part, offset);
@@ -77,7 +80,7 @@ function createSigner(seedByte) {
   const secretKey = new Uint8Array(CryptoSecretKeyBytes);
   cryptoSignKeypair(new Uint8Array(32).fill(seedByte), publicKey, secretKey);
   const address = `Q${Buffer.from(
-    shake256(concatBytes(DESCRIPTOR_BYTES, publicKey), { dkLen: 20 }),
+    shake256(concatBytes(DESCRIPTOR_BYTES, publicKey), { dkLen: 64 }),
   ).toString("hex")}`;
   return {
     address,
@@ -91,10 +94,10 @@ function signPayload(signer, payload) {
   const signature = new Uint8Array(CryptoBytes);
   cryptoSignSignature(
     signature,
-    computeTypedDataDigest(payload),
+    computeMessageDigest(protocolMessageBytes(payload)),
     signer.secretKey,
     false,
-    SCHEME_TAG_TYPED,
+    SCHEME_TAG_MSG,
   );
   return hex(signature);
 }
@@ -103,7 +106,8 @@ function signedOrder(signer, options = {}) {
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + 3600;
   const makerToken = capability();
-  const shareToken = options.visibility === "private" ? capability() : undefined;
+  const shareToken =
+    options.visibility === "private" ? capability() : undefined;
   const nonce = bytes32();
   const order = {
     direction: options.direction ?? "eth->qrl",
@@ -115,7 +119,7 @@ function signedOrder(signer, options = {}) {
     visibility: options.visibility ?? "public",
   };
   const unsignedAuth = {
-    version: "1",
+    version: "2",
     scheme: SCHEME,
     issuedAt,
     expiresAt,
@@ -124,7 +128,9 @@ function signedOrder(signer, options = {}) {
     descriptor: DESCRIPTOR,
     makerTokenCommitment: computeMakerTokenCommitment(makerToken),
     shareTokenCommitment:
-      shareToken === undefined ? ZERO_BYTES32 : computeShareTokenCommitment(shareToken),
+      shareToken === undefined
+        ? ZERO_BYTES32
+        : computeShareTokenCommitment(shareToken),
   };
   const terms = {
     direction: order.direction,
@@ -177,7 +183,7 @@ function signedIntent(signer, orderProof) {
     ),
   };
   const unsignedAuth = {
-    version: "1",
+    version: "2",
     scheme: SCHEME,
     issuedAt,
     expiresAt,
@@ -225,7 +231,7 @@ function signedFill(signer, orderProof, intentProof) {
   };
   secret.fill(0);
   const unsignedAuth = {
-    version: "1",
+    version: "2",
     scheme: SCHEME,
     issuedAt,
     expiresAt: respondBy,
@@ -260,7 +266,7 @@ function signedCancel(signer, orderProof) {
   const cancelNonce = bytes32();
   const cancel = { orderDigest: orderProof.orderDigest, reasonCode: 1 };
   const unsignedAuth = {
-    version: "1",
+    version: "2",
     scheme: SCHEME,
     issuedAt,
     expiresAt: orderProof.auth.expiresAt,
@@ -284,11 +290,17 @@ function signedCancel(signer, orderProof) {
 }
 
 function normalizeExternalBase(value, name) {
-  assert.equal(typeof value, "string", `${name} is required with the other external base`);
+  assert.equal(
+    typeof value,
+    "string",
+    `${name} is required with the other external base`,
+  );
   const url = new URL(value);
   assert.equal(url.protocol, "http:", `${name} must use loopback HTTP`);
   assert.ok(
-    url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]",
+    url.hostname === "127.0.0.1" ||
+      url.hostname === "localhost" ||
+      url.hostname === "[::1]",
     `${name} must stay on loopback`,
   );
   assert.equal(url.username, "", `${name} cannot contain credentials`);
@@ -307,7 +319,9 @@ async function freePort() {
   const address = socket.address();
   assert.ok(address && typeof address === "object");
   const port = address.port;
-  await new Promise((resolve, reject) => socket.close((error) => (error ? reject(error) : resolve())));
+  await new Promise((resolve, reject) =>
+    socket.close((error) => (error ? reject(error) : resolve())),
+  );
   return port;
 }
 
@@ -320,12 +334,15 @@ function spawnMirror(name, port, peerBase, directory) {
       ORDERBOOK_DATA: join(directory, "orders.json"),
       ORDERBOOK_FEDERATION_DATA: join(directory, "federation.json"),
       ORDERBOOK_FEDERATION_PEERS: peerBase,
-      ORDERBOOK_FEDERATION_PEER_IDS: name === "mirror-a" ? "mirror-b" : "mirror-a",
-      ORDERBOOK_FEDERATION_PEER_TOKENS: name === "mirror-a" ? READ_TOKEN_B : READ_TOKEN_A,
+      ORDERBOOK_FEDERATION_PEER_IDS:
+        name === "mirror-a" ? "mirror-b" : "mirror-a",
+      ORDERBOOK_FEDERATION_PEER_TOKENS:
+        name === "mirror-a" ? READ_TOKEN_B : READ_TOKEN_A,
       ORDERBOOK_FEDERATION_ONION_ONLY: "false",
       ORDERBOOK_FEDERATION_ONION_PROXY: "",
       ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "true",
-      ORDERBOOK_FEDERATION_READ_TOKEN: name === "mirror-a" ? READ_TOKEN_A : READ_TOKEN_B,
+      ORDERBOOK_FEDERATION_READ_TOKEN:
+        name === "mirror-a" ? READ_TOKEN_A : READ_TOKEN_B,
       ORDERBOOK_FEDERATION_SYNC_MS: "1000",
       ORDERBOOK_FEDERATION_REQUEST_TIMEOUT_MS: "1000",
       ORDERBOOK_TRUST_PROXY: "none",
@@ -378,23 +395,30 @@ async function eventually(name, probe, timeoutMs = 20_000) {
   while (Date.now() < deadline) {
     try {
       const value = await probe();
-      if (value !== false && value !== null && value !== undefined) return value;
+      if (value !== false && value !== null && value !== undefined)
+        return value;
     } catch (error) {
       lastError = error;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`${name} did not converge${lastError ? `: ${lastError.message}` : ""}`);
+  throw new Error(
+    `${name} did not converge${lastError ? `: ${lastError.message}` : ""}`,
+  );
 }
 
 async function waitForHealth(base) {
-  await eventually("mirror health", async () => (await api(base, "GET", "/health")).status === 200);
+  await eventually(
+    "mirror health",
+    async () => (await api(base, "GET", "/health")).status === 200,
+  );
 }
 
 async function waitForPeerState(base, expected) {
   return eventually(`federation peer state ${expected}`, async () => {
     const status = await api(base, "GET", "/status");
-    return status.status === 200 && status.body.federation?.peers?.[0]?.state === expected
+    return status.status === 200 &&
+      status.body.federation?.peers?.[0]?.state === expected
       ? status.body
       : false;
   });
@@ -426,7 +450,9 @@ const taker = createSigner(22);
 
 try {
   if ((externalA === undefined) !== (externalB === undefined)) {
-    throw new Error("both FEDERATION_SMOKE_BASE_A and FEDERATION_SMOKE_BASE_B are required");
+    throw new Error(
+      "both FEDERATION_SMOKE_BASE_A and FEDERATION_SMOKE_BASE_B are required",
+    );
   }
 
   let baseA;
@@ -440,7 +466,8 @@ try {
     directoryA = join(rootDirectory, "mirror-a");
     directoryB = join(rootDirectory, "mirror-b");
     portA = await freePort();
-    do portB = await freePort(); while (portB === portA);
+    do portB = await freePort();
+    while (portB === portA);
     baseA = `http://127.0.0.1:${portA}/api`;
     baseB = `http://127.0.0.1:${portB}/api`;
     mirrorA = spawnMirror("mirror-a", portA, baseB, directoryA);
@@ -455,7 +482,10 @@ try {
     waitForPeerState(baseA, "healthy"),
     waitForPeerState(baseB, "healthy"),
   ]);
-  for (const [status, peerBase] of [[statusA, baseB], [statusB, baseA]]) {
+  for (const [status, peerBase] of [
+    [statusA, baseB],
+    [statusB, baseA],
+  ]) {
     const publicStatus = JSON.stringify(status);
     assert.equal(publicStatus.includes(peerBase), false);
     assert.equal(publicStatus.includes("feedId"), false);
@@ -471,7 +501,7 @@ try {
     const response = await api(
       baseA,
       "GET",
-      `/federation/v1/events?cursor=foreign-${attempt}&limit=1`,
+      `/federation/v2/events?cursor=foreign-${attempt}&limit=1`,
     );
     publicResetStatuses.push(response.status);
   }
@@ -479,7 +509,7 @@ try {
   const authenticatedReset = await api(
     baseA,
     "GET",
-    "/federation/v1/events?cursor=authenticated-lane&limit=1",
+    "/federation/v2/events?cursor=authenticated-lane&limit=1",
     undefined,
     { Authorization: `Bearer ${READ_TOKEN_A}` },
   );
@@ -487,7 +517,9 @@ try {
   assert.equal(authenticatedReset.body.reset, true);
   const authenticatedCursor = authenticatedReset.body.cursor;
   assert.equal(typeof authenticatedCursor, "string");
-  console.log("  ok: authenticated peer capacity remains available after public exhaustion");
+  console.log(
+    "  ok: authenticated peer capacity remains available after public exhaustion",
+  );
 
   const orderA = signedOrder(maker);
   const createdA = await postSignedOrder(baseA, orderA);
@@ -497,17 +529,32 @@ try {
   console.log("  ok: public OrderV1 propagated from mirror A to mirror B");
 
   const intent = signedIntent(taker, orderA);
-  const submittedIntent = await api(baseB, "POST", `/orders/${orderA.orderId}/intents`, {
-    intent: intent.intent,
-    auth: intent.auth,
-  });
+  const submittedIntent = await api(
+    baseB,
+    "POST",
+    `/orders/${orderA.orderId}/intents`,
+    {
+      intent: intent.intent,
+      auth: intent.auth,
+    },
+  );
   assert.equal(submittedIntent.status, 201);
   await eventually("FillIntentV1 propagation", async () => {
-    const result = await api(baseA, "GET", `/orders/${orderA.orderId}/intents`, undefined, {
-      "X-Maker-Token": orderA.makerToken,
-    });
-    return result.status === 200 &&
-      result.body.intents?.some((candidate) => candidate.intentDigest === intent.intentDigest);
+    const result = await api(
+      baseA,
+      "GET",
+      `/orders/${orderA.orderId}/intents`,
+      undefined,
+      {
+        "X-Maker-Token": orderA.makerToken,
+      },
+    );
+    return (
+      result.status === 200 &&
+      result.body.intents?.some(
+        (candidate) => candidate.intentDigest === intent.intentDigest,
+      )
+    );
   });
   console.log("  ok: taker FillIntentV1 propagated back to the maker origin");
 
@@ -547,7 +594,9 @@ try {
   assert.equal(cancelled.status, 200);
   const mirroredCancel = await waitForOrder(baseA, orderB.orderId, "cancelled");
   assert.equal(mirroredCancel.cancelDigest, cancellation.cancelDigest);
-  console.log("  ok: reverse-direction OrderV1 and CancelV1 propagation passed");
+  console.log(
+    "  ok: reverse-direction OrderV1 and CancelV1 propagation passed",
+  );
 
   const privateOrder = signedOrder(maker, { visibility: "private" });
   assert.equal((await postSignedOrder(baseA, privateOrder)).status, 201);
@@ -560,17 +609,25 @@ try {
     makerQrlAccount: maker.address,
   });
   assert.equal(unsigned.status, 201);
-  const beforePoll = (await api(baseB, "GET", "/status")).body.federation.peers[0].lastAttemptAt;
+  const beforePoll = (await api(baseB, "GET", "/status")).body.federation
+    .peers[0].lastAttemptAt;
   await eventually("one exclusion sync cycle", async () => {
-    const after = (await api(baseB, "GET", "/status")).body.federation.peers[0].lastAttemptAt;
+    const after = (await api(baseB, "GET", "/status")).body.federation.peers[0]
+      .lastAttemptAt;
     return typeof after === "number" && after > beforePoll;
   });
-  assert.equal((await api(baseB, "GET", `/orders/${privateOrder.orderId}`)).status, 404);
-  assert.equal((await api(baseB, "GET", `/orders/${unsigned.body.order.id}`)).status, 404);
+  assert.equal(
+    (await api(baseB, "GET", `/orders/${privateOrder.orderId}`)).status,
+    404,
+  );
+  assert.equal(
+    (await api(baseB, "GET", `/orders/${unsigned.body.order.id}`)).status,
+    404,
+  );
   const feed = await api(
     baseA,
     "GET",
-    `/federation/v1/events?cursor=${encodeURIComponent(authenticatedCursor)}&limit=256`,
+    `/federation/v2/events?cursor=${encodeURIComponent(authenticatedCursor)}&limit=256`,
     undefined,
     { Authorization: `Bearer ${READ_TOKEN_A}` },
   );
@@ -589,7 +646,9 @@ try {
   for (const rawCapability of rawCapabilities) {
     assert.equal(publicFeed.includes(rawCapability), false);
   }
-  console.log("  ok: private, unsigned, and raw capability data stayed origin-local");
+  console.log(
+    "  ok: private, unsigned, and raw capability data stayed origin-local",
+  );
 
   const privateCancel = signedCancel(maker, privateOrder);
   assert.equal(
@@ -636,7 +695,10 @@ try {
       join(directoryA, "orders.json"),
       join(directoryA, "federation.json"),
     ]) {
-      assert.equal(readFileSync(file, "utf8").includes(catchup.makerToken), false);
+      assert.equal(
+        readFileSync(file, "utf8").includes(catchup.makerToken),
+        false,
+      );
     }
     await waitForPeerState(baseA, "degraded");
     mirrorB = spawnMirror("mirror-b", portB, baseA, directoryB);
@@ -647,9 +709,14 @@ try {
       join(directoryB, "orders.json"),
       join(directoryB, "federation.json"),
     ]) {
-      assert.equal(readFileSync(file, "utf8").includes(catchup.makerToken), false);
+      assert.equal(
+        readFileSync(file, "utf8").includes(catchup.makerToken),
+        false,
+      );
     }
-    console.log("  ok: a partitioned mirror recovered through a restart reset snapshot");
+    console.log(
+      "  ok: a partitioned mirror recovered through a restart reset snapshot",
+    );
 
     await stopMirror(mirrorA);
     mirrorA = null;
@@ -660,12 +727,15 @@ try {
   }
 } catch (error) {
   console.error("federation HTTP acceptance failed:", error);
-  if (mirrorA !== null && mirrorA.logs() !== "") console.error("mirror A logs:\n", mirrorA.logs());
-  if (mirrorB !== null && mirrorB.logs() !== "") console.error("mirror B logs:\n", mirrorB.logs());
+  if (mirrorA !== null && mirrorA.logs() !== "")
+    console.error("mirror A logs:\n", mirrorA.logs());
+  if (mirrorB !== null && mirrorB.logs() !== "")
+    console.error("mirror B logs:\n", mirrorB.logs());
   process.exitCode = 1;
 } finally {
   await Promise.all([stopMirror(mirrorA), stopMirror(mirrorB)]);
   maker.close();
   taker.close();
-  if (rootDirectory !== undefined) rmSync(rootDirectory, { recursive: true, force: true });
+  if (rootDirectory !== undefined)
+    rmSync(rootDirectory, { recursive: true, force: true });
 }

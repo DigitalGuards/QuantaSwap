@@ -45,7 +45,7 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
           ) : (
             <p className="rounded-md border border-border/60 bg-muted/20 p-3 text-sm text-muted-foreground">
               A market swap is in progress. Finish or discard it on the{" "}
-              <Link to="/" className="text-blue-accent hover:underline">
+              <Link to="/" className="text-identity-accent hover:underline">
                 Swap page
               </Link>{" "}
               before starting a sandbox run.

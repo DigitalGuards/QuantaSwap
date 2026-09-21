@@ -23,7 +23,7 @@ export function deriveVerdict(qrl: LegSnapshot, eth: LegSnapshot): SwapVerdict {
   const b = statusOf(eth);
 
   if (a === null || b === null) {
-    const down = a === null && b === null ? "either chain" : a === null ? "QRL v2" : "Sepolia";
+    const down = a === null && b === null ? "either chain" : a === null ? "QRL v3" : "Sepolia";
     return {
       headline: "Status incomplete",
       detail: `Could not read ${down} right now; this page keeps retrying.`,

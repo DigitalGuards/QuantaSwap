@@ -1,6 +1,6 @@
 // Persistence tests for the in-flight swap. The preimage in localStorage
 // is safety-critical (losing it strands funds until the refund path), so
-// roundtrips and the legacy sandbox migration are pinned here.
+// roundtrips and preserved legacy-chain records are pinned here.
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -8,6 +8,10 @@ import {
   clearPrelockStage,
   clearSignedOrderStage,
   hasCurrentTermBinding,
+  hasLegacySwapState,
+  SWAP_STORAGE_KEY,
+  ORDER_STORAGE_KEY,
+  PRELOCK_STORAGE_KEY,
   loadActiveSwap,
   loadMyOrder,
   loadPrelockStage,
@@ -46,9 +50,9 @@ const swap: ActiveSwap = {
   fromAmount: "1000000000000000000",
   toAmount: "5000000000000000000",
   makerEthAccount: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  makerQrlAccount: "Qcccccccccccccccccccccccccccccccccccccccc",
+  makerQrlAccount: `Q${"c".repeat(128)}`,
   takerEthAccount: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  takerQrlAccount: "Qdddddddddddddddddddddddddddddddddddddddd",
+  takerQrlAccount: `Q${"d".repeat(128)}`,
   preimage: `0x${"34".repeat(32)}`,
   hashlock: `0x${"12".repeat(32)}`,
   initiatorTimeout: 1_800_007_200,
@@ -69,7 +73,7 @@ describe("active swap persistence", () => {
   });
 
   it("returns null on corrupted JSON instead of throwing", () => {
-    localStorage.setItem("quantaswap.swap.v2", "{not json");
+    localStorage.setItem(SWAP_STORAGE_KEY, "{not json");
     expect(loadActiveSwap()).toBeNull();
   });
 
@@ -81,13 +85,13 @@ describe("active swap persistence", () => {
 
   it("normalizes swaps stored before the taker token existed", () => {
     const { takerToken: _omit, ...legacy } = swap;
-    localStorage.setItem("quantaswap.swap.v2", JSON.stringify(legacy));
+    localStorage.setItem(SWAP_STORAGE_KEY, JSON.stringify(legacy));
     expect(loadActiveSwap()).toEqual({ ...swap, takerToken: null });
   });
 
   it("hydrates swaps stored before the ETH-leg asset existed as native ETH", () => {
     const { ethAsset: _omit, ...legacy } = swap;
-    localStorage.setItem("quantaswap.swap.v2", JSON.stringify(legacy));
+    localStorage.setItem(SWAP_STORAGE_KEY, JSON.stringify(legacy));
     expect(loadActiveSwap()).toEqual({ ...swap, ethAsset: "ETH" });
   });
 
@@ -99,7 +103,7 @@ describe("active swap persistence", () => {
   });
 
   it("normalizes an unknown persisted asset to ETH (fails closed downstream)", () => {
-    localStorage.setItem("quantaswap.swap.v2", JSON.stringify({ ...swap, ethAsset: "DOGE" }));
+    localStorage.setItem(SWAP_STORAGE_KEY, JSON.stringify({ ...swap, ethAsset: "DOGE" }));
     expect(loadActiveSwap()?.ethAsset).toBe("ETH");
   });
 
@@ -107,7 +111,7 @@ describe("active swap persistence", () => {
     saveActiveSwap({ ...swap, bookId: "community" });
     expect(loadActiveSwap()?.bookId).toBe("community");
     localStorage.setItem(
-      "quantaswap.swap.v2",
+      SWAP_STORAGE_KEY,
       JSON.stringify({ ...swap, bookId: "../not-an-origin" }),
     );
     expect(loadActiveSwap()?.bookId).toBe("primary");
@@ -128,8 +132,8 @@ describe("active swap persistence", () => {
   });
 });
 
-describe("legacy demo.v1 migration", () => {
-  it("maps the single-account sandbox shape into a sandbox ActiveSwap and removes the old key", () => {
+describe("legacy testnet preservation", () => {
+  it("preserves the old sandbox record without adopting it on v3", () => {
     localStorage.setItem(
       "quantaswap.demo.v1",
       JSON.stringify({
@@ -145,28 +149,30 @@ describe("legacy demo.v1 migration", () => {
         createdAt: swap.createdAt,
       }),
     );
-    const migrated = loadActiveSwap();
-    expect(migrated).not.toBeNull();
-    expect(migrated?.role).toBe("sandbox");
-    expect(migrated?.orderId).toBeNull();
-    expect(migrated?.direction).toBe("qrl->eth");
-    // The demo predates ERC-20 legs: always native ETH.
-    expect(migrated?.ethAsset).toBe("ETH");
-    expect(migrated?.preimage).toBe(swap.preimage);
-    // Sandbox plays both parties with the same accounts.
-    expect(migrated?.makerEthAccount).toBe(swap.makerEthAccount);
-    expect(migrated?.takerEthAccount).toBe(swap.makerEthAccount);
-    expect(migrated?.makerQrlAccount).toBe(swap.makerQrlAccount);
-    expect(migrated?.takerQrlAccount).toBe(swap.makerQrlAccount);
-    // Old key gone, new key present: migration happens once.
-    expect(localStorage.getItem("quantaswap.demo.v1")).toBeNull();
-    expect(localStorage.getItem("quantaswap.swap.v2")).not.toBeNull();
-    expect(loadActiveSwap()).toEqual(migrated);
+    const original = localStorage.getItem("quantaswap.demo.v1");
+    expect(loadActiveSwap()).toBeNull();
+    expect(hasLegacySwapState()).toBe(true);
+    expect(localStorage.getItem("quantaswap.demo.v1")).toBe(original);
+    expect(localStorage.getItem(SWAP_STORAGE_KEY)).toBeNull();
   });
 
   it("ignores a corrupted legacy payload", () => {
     localStorage.setItem("quantaswap.demo.v1", "][");
     expect(loadActiveSwap()).toBeNull();
+  });
+
+  it("keeps previous swap, order, and staged secrets intact across v3 clear", () => {
+    const legacyKeys = ["quantaswap.swap.v2", "quantaswap.myorder.v1", "quantaswap.signedorderstage.v1", "quantaswap.prelockstage.v1"];
+    for (const key of legacyKeys) localStorage.setItem(key, "preserved-recovery-state");
+    expect(loadActiveSwap()).toBeNull();
+    expect(loadMyOrder()).toBeNull();
+    expect(loadSignedOrderStage()).toBeNull();
+    expect(loadPrelockStage()).toBeNull();
+    saveActiveSwap(swap);
+    clearActiveSwap();
+    clearSignedOrderStage();
+    clearPrelockStage();
+    for (const key of legacyKeys) expect(localStorage.getItem(key)).toBe("preserved-recovery-state");
   });
 });
 
@@ -185,7 +191,7 @@ describe("my-order handle", () => {
     };
     saveMyOrder(ref);
     expect(loadMyOrder()).toEqual(ref);
-    localStorage.setItem("quantaswap.myorder.v1", "?");
+    localStorage.setItem(ORDER_STORAGE_KEY, "?");
     expect(loadMyOrder()).toBeNull();
   });
 
@@ -211,7 +217,7 @@ describe("my-order handle", () => {
   });
 
   it("hydrates handles stored before the asset existed as native ETH", () => {
-    localStorage.setItem("quantaswap.myorder.v1", JSON.stringify({ id: "o1", token: "t1" }));
+    localStorage.setItem(ORDER_STORAGE_KEY, JSON.stringify({ id: "o1", token: "t1" }));
     // Pre-asset handles also predate amount anchoring: both hydrate null
     // and the match flow falls back to the book copy for those.
     expect(loadMyOrder()).toEqual({
@@ -229,7 +235,7 @@ describe("my-order handle", () => {
 
   it("hydrates handles stored before amount anchoring with null amounts", () => {
     localStorage.setItem(
-      "quantaswap.myorder.v1",
+      ORDER_STORAGE_KEY,
       JSON.stringify({ id: "o1", token: "t1", asset: "USDC" }),
     );
     expect(loadMyOrder()).toEqual({
@@ -268,7 +274,7 @@ describe("prelock staging record", () => {
     expect(loadPrelockStage()).toEqual(stage);
     clearPrelockStage();
     expect(loadPrelockStage()).toBeNull();
-    localStorage.setItem("quantaswap.prelockstage.v1", "{nope");
+    localStorage.setItem(PRELOCK_STORAGE_KEY, "{nope");
     expect(loadPrelockStage()).toBeNull();
   });
 });
@@ -281,12 +287,12 @@ describe("signed order publication staging", () => {
       fromAmount: "1000000000000000000",
       toAmount: "5000000000000000000",
       makerEthAccount: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      makerQrlAccount: "Qcccccccccccccccccccccccccccccccccccccccc",
+      makerQrlAccount: `Q${"c".repeat(128)}`,
       visibility: "private" as const,
     },
     auth: {
-      version: "1" as const,
-      scheme: "qrl-sign-typed-v1" as const,
+      version: "2" as const,
+      scheme: "qrl-sign-message-v2" as const,
       issuedAt: 1_800_000_000,
       expiresAt: 1_800_003_600,
       nonce: `0x${"11".repeat(32)}`,

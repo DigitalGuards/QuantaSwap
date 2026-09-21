@@ -43,12 +43,13 @@ import {
   buildLockTokenOpenData,
   buildReleaseData,
   getLegState,
-  shortAddr,
 } from "@/lib/htlc";
 import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
+import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { errorMessage, isUserRejection } from "@/utils/errorMessage";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
 
@@ -93,7 +94,6 @@ const parseAmount = (value: string, decimals: number, symbol: string): bigint =>
 };
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -168,9 +168,9 @@ export function PostOrderCard({
    *  discard a rejected one) instead of making the maker click Release to
    *  discover there is nothing there. `absent` == None (not proof the lock
    *  is dead; a pending broadcast also reads None). */
-  const [stagedChain, setStagedChain] = useState<
-    "checking" | "open" | "absent" | "unknown"
-  >("checking");
+  const [stagedChain, setStagedChain] = useState<"checking" | "open" | "absent" | "unknown">(
+    "checking",
+  );
   /** True while a fresh pre-fund post is actively running (lock + confirm +
    *  list). Suppresses the recovery banner so an in-flight post does not
    *  flash a "no escrow, discard?" prompt while its own lock is still
@@ -187,28 +187,25 @@ export function PostOrderCard({
   // real funds to finish or release; None (absent) leads with discard but
   // never auto-clears (a pending lock also reads None). Re-runs when the
   // record identity changes, and on the banner's Re-check button.
-  const probeStaged = useCallback(
-    async (rec: PrelockStage) => {
-      setStagedChain("checking");
-      try {
-        const s = await getLegState(rec.leg, rec.hashlock);
-        if (s.status === SwapStatus.Open) setStagedChain("open");
-        else if (s.status === SwapStatus.None) {
-          setStagedChain("absent");
-          setNoEscrowSeen(true);
-        } else {
-          // Claimed/Refunded: an unassigned staged escrow can only reach a
-          // terminal state by release/refund, so the funds are already
-          // back with the maker. Safe to drop the record.
-          clearPrelockStage();
-          setStaged(null);
-        }
-      } catch {
-        setStagedChain("unknown");
+  const probeStaged = useCallback(async (rec: PrelockStage) => {
+    setStagedChain("checking");
+    try {
+      const s = await getLegState(rec.leg, rec.hashlock);
+      if (s.status === SwapStatus.Open) setStagedChain("open");
+      else if (s.status === SwapStatus.None) {
+        setStagedChain("absent");
+        setNoEscrowSeen(true);
+      } else {
+        // Claimed/Refunded: an unassigned staged escrow can only reach a
+        // terminal state by release/refund, so the funds are already
+        // back with the maker. Safe to drop the record.
+        clearPrelockStage();
+        setStaged(null);
       }
-    },
-    [],
-  );
+    } catch {
+      setStagedChain("unknown");
+    }
+  }, []);
 
   const stagedKey = staged ? `${staged.leg}:${staged.hashlock}` : null;
   useEffect(() => {
@@ -277,7 +274,7 @@ export function PostOrderCard({
       setSignedStage(unresolved);
       throw new Error("An earlier signed order is still awaiting publication recovery");
     }
-    setStageLabel("Authorizing OrderV1 in your QRL wallet");
+    setStageLabel("Authorizing OrderV2 in your QRL wallet");
     const signed = await signOrderV1({ body, walletRdns: qrlWalletRdns, request: qrlRequest });
     const stage: SignedOrderStage = {
       order: signed.order,
@@ -372,6 +369,7 @@ export function PostOrderCard({
     setError(null);
     setBusy(true);
     try {
+      assertPortableOrderV1CanSign(qrlAccount);
       const unresolved = signedStage ?? loadSignedOrderStage();
       if (unresolved !== null) {
         setSignedStage(unresolved);
@@ -397,8 +395,8 @@ export function PostOrderCard({
         if (restrictEth && !ETH_ADDR_RE.test(restrictEth)) {
           throw new Error("Taker ETH address must be a 0x-prefixed 20-byte address");
         }
-        if (restrictQrl && !QRL_ADDR_RE.test(restrictQrl)) {
-          throw new Error("Taker QRL address must be a Q-prefixed 20-byte address");
+        if (restrictQrl && !isQip55QrlAddress(restrictQrl)) {
+          throw new Error("Taker QRL address must be a Q-prefixed 64-byte address with a valid checksum");
         }
       }
 
@@ -459,7 +457,7 @@ export function PostOrderCard({
             setStageLabel(`Lock ${fromSymbol}`);
             await sendOnLeg(
               leg,
-              buildLockNativeOpenData(secret.hashlock, stage.initiatorTimeout),
+              buildLockNativeOpenData(leg, secret.hashlock, stage.initiatorTimeout),
               fromUnits,
             );
           }
@@ -597,7 +595,7 @@ export function PostOrderCard({
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.Open) {
         setStageLabel("Releasing the escrow");
-        await sendOnLeg(staged.leg, buildReleaseData(staged.hashlock), 0n);
+        await sendOnLeg(staged.leg, buildReleaseData(staged.leg, staged.hashlock), 0n);
         for (let i = 0; i < 40; i += 1) {
           const cur = await getLegState(staged.leg, staged.hashlock).catch(() => null);
           if (cur && cur.status !== SwapStatus.Open) break;
@@ -748,7 +746,7 @@ export function PostOrderCard({
         {signedStage && !activePost ? (
           <div className="space-y-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
             <p className="text-xs leading-relaxed text-amber-400">
-              A signed order is awaiting a confirmed publication response. Its exact OrderV1 and
+              A signed order is awaiting a confirmed publication response. Its exact OrderV2 and
               private capabilities are saved in this browser, so retrying does not require another
               wallet signature and cannot create a different order.
             </p>
@@ -842,15 +840,19 @@ export function PostOrderCard({
         {legBox("You want", direction === "eth->qrl" ? "qrl" : "eth", toAmount, setToAmount)}
 
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-          <div className="flex justify-between">
+          <div className="flex items-start justify-between gap-4">
             <span className="text-muted-foreground">Receive {toSymbol} to</span>
-            <span className="font-data text-xs text-blue-accent">
+            <span className="min-w-0 text-right text-xs text-blue-accent">
               {direction === "eth->qrl"
                 ? qrlAccount
-                  ? shortAddr(qrlAccount)
+                  ? (
+                      <AddressFingerprint address={qrlAccount} />
+                    )
                   : "connect QRL wallet"
                 : ethAccount
-                  ? shortAddr(ethAccount)
+                  ? (
+                      <AddressFingerprint address={ethAccount} />
+                    )
                   : "connect ETH wallet"}
             </span>
           </div>
@@ -897,7 +899,7 @@ export function PostOrderCard({
               onChange={(e) => setIsPrivate(e.target.checked)}
               className="h-4 w-4 accent-[hsl(var(--primary))]"
             />
-            <span className="font-medium">Private swap</span>
+            <span className="whitespace-nowrap font-medium">Private swap</span>
             <span className="text-xs text-muted-foreground">
               hidden from the book, shared by link
             </span>
@@ -905,9 +907,8 @@ export function PostOrderCard({
           {isPrivate ? (
             <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-3">
               <p className="text-xs leading-relaxed text-muted-foreground">
-                You get a one-off link to hand to your counterparty (OTC style). Optionally
-                reserve the order for their addresses; leave blank to let anyone with the link
-                take it.
+                You get a one-off link to hand to your counterparty (OTC style). Optionally reserve
+                the order for their addresses; leave blank to let anyone with the link take it.
               </p>
               <Input
                 placeholder="Taker ETH address (optional, 0x…)"
@@ -959,11 +960,10 @@ export function PostOrderCard({
             : "Posting is free and holds no funds. When a taker accepts, you lock first and the swap settles atomically through the HTLCs, or refunds after the timelocks."}
         </p>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          Your QRL wallet signs the complete OrderV1 terms with ML-DSA-87 before publishing.
-          MyQRLWallet Extension is the recommended signer for this beta. MyQRLWallet uses its
-          native PQ typed-data scheme; the official QRL Web3 Wallet uses its EIP-712 v4
-          compatibility scheme. Both proof formats are verified in the browser. No transaction or
-          funds move during signing.
+          MyQRLWallet signs the complete OrderV2 terms with ML-DSA-87 before publishing.
+          Connect MyQRLWallet Extension or the MyQRLWallet web wallet. The signed message binds
+          both chains, the private v3 genesis, and this deployment's contracts. Your browser
+          verifies the proof. No transaction or funds move during signing.
         </p>
       </CardContent>
     </Card>

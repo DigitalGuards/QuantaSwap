@@ -35,15 +35,15 @@ export function WalletPickerModal({ open, wallets, onSelect, onClose }: Props) {
             </button>
           </div>
           <p className="text-xs text-muted-foreground">
-            The QRL browser extension and MyQRLWallet (mobile and desktop) are detected
-            automatically via EIP-6963.
+            Compatible QRL wallets are detected automatically. Portable V2 orders support
+            MyQRLWallet Extension and the MyQRLWallet web wallet.
           </p>
         </CardHeader>
         <CardContent className="space-y-2">
           {wallets.length === 0 ? (
             <p className="rounded-md border border-border bg-muted/40 p-3 text-center text-sm text-muted-foreground">
-              No QRL wallets detected. Install the QRL Web3 Wallet extension, or use MyQRLWallet
-              on mobile or desktop.
+              No QRL wallets detected. Install MyQRLWallet Extension or connect the MyQRLWallet
+              web wallet.
             </p>
           ) : (
             wallets.map((w) => (

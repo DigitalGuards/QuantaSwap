@@ -3,6 +3,7 @@ name: Order book CI
 on:
   pull_request:
     paths:
+      - 'config/protocol-v2*.json'
       - 'server/**'
       - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
@@ -11,6 +12,7 @@ on:
     branches:
       - dev
     paths:
+      - 'config/protocol-v2*.json'
       - 'server/**'
       - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
@@ -114,7 +116,7 @@ jobs:
 
       - name: Build runtime image
         working-directory: server
-        run: docker build --tag quantaswap-orderbook:ci .
+        run: docker build --file Dockerfile --tag quantaswap-orderbook:ci ..
 
       - name: Build Tor sidecars
         working-directory: server
@@ -168,7 +170,7 @@ jobs:
 
           order_id="$(curl --fail-with-body --silent \
             -H 'Content-Type: application/json' \
-            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q2222222222222222222222222222222222222222"}' \
+            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"}' \
             http://127.0.0.1:8091/api/orders | jq -er '.order.id')"
           test "$(docker compose exec -T orderbook stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
 

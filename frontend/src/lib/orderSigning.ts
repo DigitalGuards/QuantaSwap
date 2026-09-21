@@ -1,26 +1,26 @@
-import { shake256 } from "@noble/hashes/sha3.js";
+import {
+  ORDER_V2_DOMAIN,
+  ORDER_V2_DEPLOYMENT,
+  protocolMessageBytes,
+  assertV2Deployment,
+} from "./protocol-v2-wire.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
-  isQrlSignedTypedDataResult,
-  verifyTypedDataForSigner,
+  isQrlSignedMessageResult,
+  computeMessageDigest,
+  verifyMessageForSigner,
   type QrlTypedDataPayload,
 } from "@qrlwallet/connect";
-import { cryptoSignVerify } from "@theqrl/mldsa87";
-import {
-  TypedDataEncoder,
-  concat,
-  getBytes,
-  keccak256,
-  toUtf8Bytes,
-} from "ethers";
-import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "@/lib/orderbook";
+import { getBytes, toUtf8Bytes, hexlify } from "ethers";
+import type {
+  CreateOrderBody,
+  MakerOrderAuthV1,
+  OrderView,
+} from "@/lib/orderbook";
+import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
 
-export const ORDER_V1_DOMAIN = {
-  name: "QuantaSwap",
-  version: "1",
-  chainId: "1337",
-  salt: "0x1ed0597b5e221ddfd0e541d33a5c14d663f5261645be67c4ee3a4be4d804a740",
-} as const;
+/** Source compatibility name; the wire domain is exclusively V2. */
+export const ORDER_V1_DOMAIN = ORDER_V2_DOMAIN;
 
 export const ORDER_V1_FIELDS = [
   { name: "direction", type: "string" },
@@ -91,14 +91,9 @@ export const CANCEL_V1_FIELDS = [
   { name: "qrlHtlc", type: "string" },
 ] as const;
 
-export const ORDER_V1_DEPLOYMENT = {
-  ethChainId: "11155111",
-  ethHtlc: "eip155:11155111:0x910d5d4a7f2037c01f3b4c835167357e89909281",
-  qrlChainId: "1337",
-  qrlHtlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
-} as const;
+export const ORDER_V1_DEPLOYMENT = ORDER_V2_DEPLOYMENT;
 
-export type OrderSigningScheme = "qrl-sign-typed-v1" | "qrl-eip712-v4";
+export type OrderSigningScheme = "qrl-sign-message-v2";
 
 export type ProtocolAuthV1 = Omit<
   MakerOrderAuthV1,
@@ -143,8 +138,7 @@ export interface FillIntentV1Body {
 }
 
 export interface FillIntentV1Terms
-  extends FillIntentV1Body,
-    ProtocolDeploymentTerms {
+  extends FillIntentV1Body, ProtocolDeploymentTerms {
   requestNonce: string;
   issuedAt: string;
   expiresAt: string;
@@ -166,7 +160,8 @@ export interface FillV1Body {
 }
 
 export interface FillV1Terms
-  extends Omit<FillV1Body, "initiatorTimeout" | "responderTimeout">,
+  extends
+    Omit<FillV1Body, "initiatorTimeout" | "responderTimeout">,
     ProtocolDeploymentTerms {
   orderNonce: string;
   fillNonce: string;
@@ -219,7 +214,6 @@ const CUSTOM_SIGNING_RDNS = new Set([
   "com.qrlwallet.connect",
   "com.qrlwallet.extension",
 ]);
-const OFFICIAL_SIGNING_RDNS = "theqrl.org";
 const SIGNATURE_BYTES = 4627;
 const PUBLIC_KEY_BYTES = 2592;
 const ORDER_LIFETIME_S = 48 * 3600;
@@ -235,39 +229,39 @@ const MIN_ORDER_PRELOCK_RUNWAY_S = 3 * 3600;
 const MAX_ORDER_PRELOCK_RUNWAY_S = 72 * 3600;
 const MAX_CLOCK_SKEW_S = 5 * 60;
 const ZERO_HASHLOCK = `0x${"00".repeat(32)}`;
-const ZOND_CONTEXT = new TextEncoder().encode("ZOND");
-const QRL_MESSAGE_PREFIX = toUtf8Bytes("\x19QRL Signed Message:\n32");
 const ETH_ADDR_INPUT_RE = /^0x[0-9a-fA-F]{40}$/;
-const QRL_ADDR_INPUT_RE = /^Q[0-9a-fA-F]{40}$/;
+// Portable V2 binds the full 64-byte QRL identity.
+const QRL_ADDR_INPUT_RE = /^Q[0-9a-fA-F]{128}$/;
 const BYTES32_INPUT_RE = /^0x[0-9a-fA-F]{64}$/;
 const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-f]{40}$/;
+const QRL_ADDR_RE = /^Q[0-9a-f]{128}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const SIGNATURE_RE = new RegExp(`^0x[0-9a-f]{${SIGNATURE_BYTES * 2}}$`);
 const PUBLIC_KEY_RE = new RegExp(`^0x[0-9a-f]{${PUBLIC_KEY_BYTES * 2}}$`);
 const DESCRIPTOR_RE = /^0x[0-9a-f]{6}$/;
 const RELEASE_SECRET_RE = /^0x[0-9a-f]{64}$/;
-const RELEASE_COMMITMENT_DOMAIN = toUtf8Bytes("QuantaSwap ReleaseV1\0");
-const ORDER_ID_DOMAIN = toUtf8Bytes("QuantaSwap OrderV1 id\0");
-const MAKER_CAPABILITY_DOMAIN = toUtf8Bytes("QuantaSwap Maker capability V1\0");
-const SHARE_CAPABILITY_DOMAIN = toUtf8Bytes("QuantaSwap Share capability V1\0");
+const RELEASE_COMMITMENT_DOMAIN = toUtf8Bytes("QuantaSwap ReleaseV2\0");
+const ORDER_ID_DOMAIN = toUtf8Bytes("QuantaSwap OrderV2 id\0");
+const MAKER_CAPABILITY_DOMAIN = toUtf8Bytes("QuantaSwap Maker capability V2\0");
+const SHARE_CAPABILITY_DOMAIN = toUtf8Bytes("QuantaSwap Share capability V2\0");
 export const EMPTY_CAPABILITY_COMMITMENT = `0x${"00".repeat(32)}`;
 const CAPABILITY_RE = /^[0-9a-f]{64}$/;
 
 type TypedField = { readonly name: string; readonly type: string };
 
-export function orderSigningSchemeForWallet(rdns: string | null): OrderSigningScheme | null {
-  if (rdns === OFFICIAL_SIGNING_RDNS) return "qrl-eip712-v4";
-  if (rdns !== null && CUSTOM_SIGNING_RDNS.has(rdns)) return "qrl-sign-typed-v1";
-  return null;
+export function orderSigningSchemeForWallet(
+  rdns: string | null,
+): OrderSigningScheme | null {
+  return rdns !== null && CUSTOM_SIGNING_RDNS.has(rdns)
+    ? "qrl-sign-message-v2"
+    : null;
 }
 
 export function orderSigningLabel(rdns: string | null): string {
-  const scheme = orderSigningSchemeForWallet(rdns);
-  if (scheme === "qrl-eip712-v4") return "Official QRL wallet · EIP-712 v4";
-  if (scheme === "qrl-sign-typed-v1") return "MyQRLWallet · PQ typed data v1";
-  return "Connect a compatible QRL wallet";
+  return orderSigningSchemeForWallet(rdns) === null
+    ? "Connect MyQRLWallet for portable V2 orders"
+    : "MyQRLWallet · PQ message signing V2";
 }
 
 function canonicalEthAddress(value: string, field: string): string {
@@ -278,7 +272,7 @@ function canonicalEthAddress(value: string, field: string): string {
 }
 
 function canonicalQrlAddress(value: string, field: string): string {
-  if (!QRL_ADDR_INPUT_RE.test(value)) {
+  if (!QRL_ADDR_INPUT_RE.test(value) || !isQip55QrlAddress(value)) {
     throw new Error(`${field} must be a QRL address`);
   }
   return `Q${value.slice(1).toLowerCase()}`;
@@ -299,7 +293,7 @@ function canonicalAmount(value: string, field: string): string {
 }
 
 function safeUint(value: number, field: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
+  if (!Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
     throw new Error(`${field} must be a non-negative safe integer`);
   }
   return value;
@@ -327,8 +321,14 @@ function normalizeOrderBody(body: CreateOrderBody): CreateOrderBody {
     asset: body.asset,
     fromAmount: canonicalAmount(body.fromAmount, "order.fromAmount"),
     toAmount: canonicalAmount(body.toAmount, "order.toAmount"),
-    makerEthAccount: canonicalEthAddress(body.makerEthAccount, "order.makerEthAccount"),
-    makerQrlAccount: canonicalQrlAddress(body.makerQrlAccount, "order.makerQrlAccount"),
+    makerEthAccount: canonicalEthAddress(
+      body.makerEthAccount,
+      "order.makerEthAccount",
+    ),
+    makerQrlAccount: canonicalQrlAddress(
+      body.makerQrlAccount,
+      "order.makerQrlAccount",
+    ),
     visibility,
     ...(body.allowedTakerEth === undefined
       ? {}
@@ -382,7 +382,8 @@ export function capabilityCommitment(
   if (!CAPABILITY_RE.test(token)) {
     throw new Error("Capability token must be 32 raw bytes as lowercase hex");
   }
-  const prefix = domain === "maker" ? MAKER_CAPABILITY_DOMAIN : SHARE_CAPABILITY_DOMAIN;
+  const prefix =
+    domain === "maker" ? MAKER_CAPABILITY_DOMAIN : SHARE_CAPABILITY_DOMAIN;
   return `0x${Array.from(
     sha256(concatBytes(prefix, getBytes(`0x${token}`))),
     (byte) => byte.toString(16).padStart(2, "0"),
@@ -404,7 +405,10 @@ export function verifyOrderCapabilities(
       return false;
     }
     if ((order.visibility ?? "public") === "public") {
-      return shareToken === undefined && auth.shareTokenCommitment === EMPTY_CAPABILITY_COMMITMENT;
+      return (
+        shareToken === undefined &&
+        auth.shareTokenCommitment === EMPTY_CAPABILITY_COMMITMENT
+      );
     }
     return (
       shareToken !== undefined &&
@@ -417,33 +421,18 @@ export function verifyOrderCapabilities(
   }
 }
 
-function canonicalWalletHex(raw: unknown, bytes: number, field: string): string {
-  if (typeof raw !== "string") throw new Error(`Wallet returned no ${field}`);
-  const value = raw.startsWith("0x") ? raw.slice(2) : raw;
-  if (value.length !== bytes * 2 || !/^[0-9a-fA-F]+$/.test(value)) {
-    throw new Error(`Wallet returned an invalid ${field}`);
-  }
-  return `0x${value.toLowerCase()}`;
-}
-
 function typedDataPayload(
   primaryType: string,
   fields: readonly TypedField[],
   message: Record<string, unknown>,
   scheme: OrderSigningScheme,
 ): QrlTypedDataPayload {
+  if (scheme !== "qrl-sign-message-v2")
+    throw new Error("Unsupported portable V2 scheme");
   return {
-    types: {
-      [scheme === "qrl-sign-typed-v1" ? "QRLDomain" : "EIP712Domain"]: [
-        { name: "name", type: "string" },
-        { name: "version", type: "string" },
-        { name: "chainId", type: "uint256" },
-        { name: "salt", type: "bytes32" },
-      ],
-      [primaryType]: [...fields],
-    },
+    types: { [primaryType]: [...fields] },
     primaryType,
-    domain: { ...ORDER_V1_DOMAIN },
+    domain: { ...ORDER_V2_DOMAIN },
     message,
   };
 }
@@ -451,12 +440,14 @@ function typedDataPayload(
 function semanticDigest(
   primaryType: string,
   fields: readonly TypedField[],
-  message: Record<string, unknown>,
+  terms: Record<string, unknown>,
 ): string {
-  return TypedDataEncoder.hash(
-    ORDER_V1_DOMAIN,
-    { [primaryType]: [...fields] },
-    message,
+  return hexlify(
+    sha256(
+      protocolMessageBytes(
+        typedDataPayload(primaryType, fields, terms, "qrl-sign-message-v2"),
+      ),
+    ),
   );
 }
 
@@ -520,7 +511,9 @@ export function computeReleaseCommitment(
     !BYTES32_RE.test(requestNonce) ||
     !RELEASE_SECRET_RE.test(releaseSecret)
   ) {
-    throw new Error("Release commitment inputs must be lowercase bytes32 values");
+    throw new Error(
+      "Release commitment inputs must be lowercase bytes32 values",
+    );
   }
   return `0x${Array.from(
     sha256(
@@ -535,9 +528,14 @@ export function computeReleaseCommitment(
   ).join("")}`;
 }
 
-export function deriveOrderV1Id(makerQrlAccount: string, nonce: string): string {
+export function deriveOrderV1Id(
+  makerQrlAccount: string,
+  nonce: string,
+): string {
   if (!QRL_ADDR_RE.test(makerQrlAccount) || !BYTES32_RE.test(nonce)) {
-    throw new Error("OrderV1 id inputs must use canonical QRL and bytes32 values");
+    throw new Error(
+      "OrderV1 id inputs must use canonical QRL and bytes32 values",
+    );
   }
   return Array.from(
     sha256(
@@ -619,8 +617,9 @@ export function buildOrderV1Payload(
     typeof authOrScheme === "string"
       ? (orderOrTerms as SignedOrderTerms)
       : signedOrderTerms(orderOrTerms as CreateOrderBody, authOrScheme);
-  const scheme = typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
-  return typedDataPayload("OrderV1", ORDER_V1_FIELDS, terms, scheme);
+  const scheme =
+    typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
+  return typedDataPayload("OrderV2", ORDER_V1_FIELDS, terms, scheme);
 }
 
 export function buildFillIntentV1Payload(
@@ -641,13 +640,9 @@ export function buildFillIntentV1Payload(
     typeof authOrScheme === "string"
       ? (intentOrTerms as FillIntentV1Terms)
       : fillIntentTerms(intentOrTerms as FillIntentV1Body, authOrScheme);
-  const scheme = typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
-  return typedDataPayload(
-    "FillIntentV1",
-    FILL_INTENT_V1_FIELDS,
-    terms,
-    scheme,
-  );
+  const scheme =
+    typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
+  return typedDataPayload("FillIntentV2", FILL_INTENT_V1_FIELDS, terms, scheme);
 }
 
 export function buildFillV1Payload(
@@ -670,12 +665,7 @@ export function buildFillV1Payload(
       : fillTerms(fillOrTerms as FillV1Body, orderAuthOrScheme, auth!);
   const scheme =
     typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : auth!.scheme;
-  return typedDataPayload(
-    "FillV1",
-    FILL_V1_FIELDS,
-    terms,
-    scheme,
-  );
+  return typedDataPayload("FillV2", FILL_V1_FIELDS, terms, scheme);
 }
 
 export function buildCancelV1Payload(
@@ -698,12 +688,7 @@ export function buildCancelV1Payload(
       : cancelTerms(cancelOrTerms as CancelV1Body, orderAuthOrScheme, auth!);
   const scheme =
     typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : auth!.scheme;
-  return typedDataPayload(
-    "CancelV1",
-    CANCEL_V1_FIELDS,
-    terms,
-    scheme,
-  );
+  return typedDataPayload("CancelV2", CANCEL_V1_FIELDS, terms, scheme);
 }
 
 export function orderDigest(terms: SignedOrderTerms): string;
@@ -733,7 +718,7 @@ export function orderDigest(
     auth === undefined
       ? (orderOrTerms as SignedOrderTerms)
       : signedOrderTerms(orderOrTerms as CreateOrderBody, auth);
-  return semanticDigest("OrderV1", ORDER_V1_FIELDS, terms);
+  return semanticDigest("OrderV2", ORDER_V1_FIELDS, terms);
 }
 
 export function intentDigest(terms: FillIntentV1Terms): string;
@@ -749,7 +734,7 @@ export function intentDigest(
     auth === undefined
       ? (intentOrTerms as FillIntentV1Terms)
       : fillIntentTerms(intentOrTerms as FillIntentV1Body, auth);
-  return semanticDigest("FillIntentV1", FILL_INTENT_V1_FIELDS, terms);
+  return semanticDigest("FillIntentV2", FILL_INTENT_V1_FIELDS, terms);
 }
 
 export function fillDigest(terms: FillV1Terms): string;
@@ -767,7 +752,7 @@ export function fillDigest(
     orderAuth === undefined || auth === undefined
       ? (fillOrTerms as FillV1Terms)
       : fillTerms(fillOrTerms as FillV1Body, orderAuth, auth);
-  return semanticDigest("FillV1", FILL_V1_FIELDS, terms);
+  return semanticDigest("FillV2", FILL_V1_FIELDS, terms);
 }
 
 export function cancelDigest(terms: CancelV1Terms): string;
@@ -785,7 +770,7 @@ export function cancelDigest(
     orderAuth === undefined || auth === undefined
       ? (cancelOrTerms as CancelV1Terms)
       : cancelTerms(cancelOrTerms as CancelV1Body, orderAuth, auth);
-  return semanticDigest("CancelV1", CANCEL_V1_FIELDS, terms);
+  return semanticDigest("CancelV2", CANCEL_V1_FIELDS, terms);
 }
 
 export async function signOrderV1({
@@ -804,15 +789,16 @@ export async function signOrderV1({
   makerToken: string;
   shareToken?: string;
 }> {
+  assertPortableOrderV1CanSign(body.makerQrlAccount);
   const scheme = orderSigningSchemeForWallet(walletRdns);
   if (scheme === null) {
     throw new Error(
-      "This QRL wallet cannot sign portable orders. Use MyQRLWallet or the official QRL Web3 Wallet.",
+      "This QRL wallet cannot sign portable orders. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
     );
   }
   const requestedSigner = body.makerQrlAccount;
   const order = normalizeOrderBody(body);
-  if (!Number.isSafeInteger(now) || now < 0) {
+  if (!Number.isSafeInteger(now) || Object.is(now, -0) || now < 0) {
     throw new Error("Order issuance must be a non-negative safe integer");
   }
   if (
@@ -830,10 +816,13 @@ export async function signOrderV1({
     !Number.isSafeInteger(expiresAt) ||
     expiresAt - now < MIN_ORDER_LIFETIME_S
   ) {
-    throw new Error("A signed order must provide at least 60 seconds of safe validity");
+    throw new Error(
+      "A signed order must provide at least 60 seconds of safe validity",
+    );
   }
   const makerToken = capabilityToken();
-  const shareToken = order.visibility === "private" ? capabilityToken() : undefined;
+  const shareToken =
+    order.visibility === "private" ? capabilityToken() : undefined;
   const unsignedAuth = {
     scheme,
     issuedAt: now,
@@ -847,78 +836,18 @@ export async function signOrderV1({
   } as const;
   const payload = buildOrderV1Payload(order, unsignedAuth);
 
-  if (scheme === "qrl-sign-typed-v1") {
-    const result = await request({
-      method: "qrl_signTypedData",
-      params: [requestedSigner, payload],
-    });
-    if (!isQrlSignedTypedDataResult(result) || result.descriptor === undefined) {
-      throw new Error("Wallet returned an unsupported typed-data signature");
-    }
-    if (
-      !verifyTypedDataForSigner({
-        expectedSigner: order.makerQrlAccount,
-        descriptor: result.descriptor,
-        signature: result.signature,
-        publicKey: result.publicKey,
-        payload,
-      })
-    ) {
-      throw new Error("Wallet returned a signature that does not match this order");
-    }
-    return {
-      order,
-      makerToken,
-      ...(shareToken === undefined ? {} : { shareToken }),
-      auth: {
-        version: "1",
-        ...unsignedAuth,
-        signature: result.signature.toLowerCase(),
-        publicKey: result.publicKey.toLowerCase(),
-        descriptor: result.descriptor.toLowerCase(),
-      },
-    };
-  }
-
-  const result = await request({
-    method: "qrl_signTypedData_v4",
-    params: [requestedSigner, payload],
-  });
-  if (typeof result !== "object" || result === null || Array.isArray(result)) {
-    throw new Error("Official QRL wallet returned an invalid typed-data signature");
-  }
-  const response = result as Record<string, unknown>;
-  const auth: MakerOrderAuthV1 = {
-    version: "1",
-    ...unsignedAuth,
-    signature: canonicalWalletHex(
-      response["signature"],
-      SIGNATURE_BYTES,
-      "signature",
-    ),
-    publicKey: canonicalWalletHex(
-      response["publicKey"],
-      PUBLIC_KEY_BYTES,
-      "public key",
-    ),
-    descriptor: "0x010000",
-  };
-  if (
-    !officialProofIsValid(
-      order.makerQrlAccount,
-      auth,
-      payload,
-      "OrderV1",
-      ORDER_V1_FIELDS,
-    )
-  ) {
-    throw new Error("Official QRL wallet returned a signature that does not match this order");
-  }
+  const result = await requestMessageProof(requestedSigner, payload, request);
   return {
     order,
     makerToken,
     ...(shareToken === undefined ? {} : { shareToken }),
-    auth,
+    auth: {
+      version: "2",
+      ...unsignedAuth,
+      signature: result.signature.toLowerCase(),
+      publicKey: result.publicKey.toLowerCase(),
+      descriptor: result.descriptor.toLowerCase(),
+    },
   };
 }
 
@@ -948,57 +877,55 @@ async function signProtocolAuth({
   const scheme = orderSigningSchemeForWallet(walletRdns);
   if (scheme === null) {
     throw new Error(
-      "This QRL wallet cannot sign portable order-book messages. Use MyQRLWallet or the official QRL Web3 Wallet.",
+      "This QRL wallet cannot sign portable order-book messages. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
     );
   }
   const unsignedAuth = { scheme, issuedAt, expiresAt, nonce } as const;
   const payload = payloadFor(unsignedAuth);
-  let auth: ProtocolAuthV1;
+  if (
+    payload.primaryType !== primaryType ||
+    JSON.stringify(payload.types[primaryType]) !== JSON.stringify(fields)
+  )
+    throw new Error("Portable V2 signing schema mismatch");
+  const result = await requestMessageProof(signer, payload, request);
+  return {
+    version: "2",
+    ...unsignedAuth,
+    signature: result.signature.toLowerCase(),
+    publicKey: result.publicKey.toLowerCase(),
+    descriptor: result.descriptor.toLowerCase(),
+  };
+}
 
-  if (scheme === "qrl-sign-typed-v1") {
-    const result = await request({ method: "qrl_signTypedData", params: [signer, payload] });
-    if (
-      !isQrlSignedTypedDataResult(result) ||
-      result.descriptor === undefined ||
-      !verifyTypedDataForSigner({
-        expectedSigner: signer,
-        descriptor: result.descriptor,
-        signature: result.signature,
-        publicKey: result.publicKey,
-        payload,
-      })
-    ) {
-      throw new Error("Wallet returned a signature that does not match this message");
-    }
-    auth = {
-      version: "1",
-      ...unsignedAuth,
-      signature: result.signature.toLowerCase(),
-      publicKey: result.publicKey.toLowerCase(),
-      descriptor: result.descriptor.toLowerCase(),
-    };
-  } else {
-    const result = await request({
-      method: "qrl_signTypedData_v4",
-      params: [signer, payload],
-    });
-    if (typeof result !== "object" || result === null || Array.isArray(result)) {
-      throw new Error("Official QRL wallet returned an invalid typed-data signature");
-    }
-    const response = result as Record<string, unknown>;
-    auth = {
-      version: "1",
-      ...unsignedAuth,
-      signature: canonicalWalletHex(response["signature"], SIGNATURE_BYTES, "signature"),
-      publicKey: canonicalWalletHex(response["publicKey"], PUBLIC_KEY_BYTES, "public key"),
-      descriptor: "0x010000",
-    };
-    if (!officialProofIsValid(signer, auth, payload, primaryType, fields)) {
-      throw new Error("Official QRL wallet returned a signature that does not match this message");
-    }
-  }
-
-  return auth;
+async function requestMessageProof(
+  signer: string,
+  payload: QrlTypedDataPayload,
+  request: (args: SigningRequest) => Promise<unknown>,
+) {
+  assertV2Deployment();
+  const messageBytes = protocolMessageBytes(payload);
+  const result = await request({
+    method: "qrl_signMessage",
+    params: [signer, hexlify(messageBytes)],
+  });
+  if (
+    !isQrlSignedMessageResult(result) ||
+    result.descriptor === undefined ||
+    result.signer.toLowerCase() !== signer.toLowerCase() ||
+    result.digest.toLowerCase() !==
+      hexlify(computeMessageDigest(messageBytes)) ||
+    !verifyMessageForSigner({
+      expectedSigner: signer,
+      descriptor: result.descriptor,
+      signature: result.signature,
+      publicKey: result.publicKey,
+      messageBytes,
+    })
+  )
+    throw new Error(
+      "Wallet returned a signature that does not match this V2 message",
+    );
+  return { ...result, descriptor: result.descriptor };
 }
 
 export async function signFillIntentV1({
@@ -1018,8 +945,10 @@ export async function signFillIntentV1({
   now?: number;
   expiresAt?: number;
 }): Promise<{ intent: FillIntentV1Body; auth: ProtocolAuthV1 }> {
+  assertPortableOrderV1CanSign(body.takerQrlAccount);
   if (
     !Number.isSafeInteger(now) ||
+    Object.is(now, -0) ||
     !Number.isSafeInteger(expiresAt) ||
     expiresAt <= now ||
     expiresAt - now > FILL_INTENT_LIFETIME_S
@@ -1031,7 +960,10 @@ export async function signFillIntentV1({
     throw new Error("This order is not valid yet");
   }
   const expectedOrderDigest = verifiedOrderDigest(order, now, false);
-  const canonicalOrderDigest = canonicalBytes32(body.orderDigest, "intent.orderDigest");
+  const canonicalOrderDigest = canonicalBytes32(
+    body.orderDigest,
+    "intent.orderDigest",
+  );
   if (
     orderAuth === undefined ||
     expectedOrderDigest === null ||
@@ -1068,7 +1000,7 @@ export async function signFillIntentV1({
     expiresAt: boundedExpiresAt,
     nonce: requestNonce,
     payloadFor: (unsigned) => buildFillIntentV1Payload(intent, unsigned),
-    primaryType: "FillIntentV1",
+    primaryType: "FillIntentV2",
     fields: FILL_INTENT_V1_FIELDS,
   });
   return { intent, auth };
@@ -1089,22 +1021,33 @@ export async function signFillV1({
   respondBy: number;
   now?: number;
 }): Promise<{ fill: FillV1Body; auth: ProtocolAuthV1 }> {
+  assertPortableOrderV1CanSign(order.makerQrlAccount);
   const orderAuth = order.makerAuth;
-  if (orderAuth === undefined) throw new Error("This order has no portable maker proof");
+  if (orderAuth === undefined)
+    throw new Error("This order has no portable maker proof");
   if (
     !Number.isSafeInteger(now) ||
+    Object.is(now, -0) ||
     !Number.isSafeInteger(respondBy) ||
     respondBy - now < MIN_FILL_RESPONSE_S ||
     respondBy - now > MAX_FILL_RESPONSE_S ||
     respondBy > orderAuth.expiresAt
   ) {
-    throw new Error("Fill responses must allow 60 to 900 seconds and end before the order expires");
+    throw new Error(
+      "Fill responses must allow 60 to 900 seconds and end before the order expires",
+    );
   }
   const fill: FillV1Body = {
     orderDigest: canonicalBytes32(body.orderDigest, "fill.orderDigest"),
     intentDigest: canonicalBytes32(body.intentDigest, "fill.intentDigest"),
-    takerEthAccount: canonicalEthAddress(body.takerEthAccount, "fill.takerEthAccount"),
-    takerQrlAccount: canonicalQrlAddress(body.takerQrlAccount, "fill.takerQrlAccount"),
+    takerEthAccount: canonicalEthAddress(
+      body.takerEthAccount,
+      "fill.takerEthAccount",
+    ),
+    takerQrlAccount: canonicalQrlAddress(
+      body.takerQrlAccount,
+      "fill.takerQrlAccount",
+    ),
     releaseCommitment: canonicalBytes32(
       body.releaseCommitment,
       "fill.releaseCommitment",
@@ -1113,15 +1056,20 @@ export async function signFillV1({
     initiatorTimeout: safeUint(body.initiatorTimeout, "fill.initiatorTimeout"),
     responderTimeout: safeUint(body.responderTimeout, "fill.responderTimeout"),
   };
-  if (fill.hashlock === ZERO_HASHLOCK) throw new Error("fill.hashlock cannot be zero");
+  if (fill.hashlock === ZERO_HASHLOCK)
+    throw new Error("fill.hashlock cannot be zero");
   if (fill.responderTimeout - now > MAX_RESPONDER_TIMEOUT_WINDOW_S) {
-    throw new Error("Fill responder timeout cannot exceed 2 hours after issuance");
+    throw new Error(
+      "Fill responder timeout cannot exceed 2 hours after issuance",
+    );
   }
   if (
     order.prelocked !== true &&
     fill.initiatorTimeout - now > MAX_INITIATOR_TIMEOUT_WINDOW_S
   ) {
-    throw new Error("Fill initiator timeout cannot exceed 4 hours after issuance");
+    throw new Error(
+      "Fill initiator timeout cannot exceed 4 hours after issuance",
+    );
   }
   const auth = await signProtocolAuth({
     signer: order.makerQrlAccount,
@@ -1131,7 +1079,7 @@ export async function signFillV1({
     expiresAt: respondBy,
     nonce: nonceHex(),
     payloadFor: (unsigned) => buildFillV1Payload(fill, orderAuth, unsigned),
-    primaryType: "FillV1",
+    primaryType: "FillV2",
     fields: FILL_V1_FIELDS,
   });
   return { fill, auth };
@@ -1150,16 +1098,23 @@ export async function signCancelV1({
   request: (args: SigningRequest) => Promise<unknown>;
   now?: number;
 }): Promise<{ cancel: CancelV1Body; auth: ProtocolAuthV1 }> {
+  assertPortableOrderV1CanSign(order.makerQrlAccount);
   const orderAuth = order.makerAuth;
-  if (orderAuth === undefined) throw new Error("This order has no portable maker proof");
-  if (!Number.isSafeInteger(now) || now >= orderAuth.expiresAt) {
+  if (orderAuth === undefined)
+    throw new Error("This order has no portable maker proof");
+  if (
+    !Number.isSafeInteger(now) ||
+    Object.is(now, -0) ||
+    now >= orderAuth.expiresAt
+  ) {
     throw new Error("This order has already expired");
   }
   const cancel: CancelV1Body = {
     orderDigest: canonicalBytes32(body.orderDigest, "cancel.orderDigest"),
     reasonCode: safeUint(body.reasonCode, "cancel.reasonCode"),
   };
-  if (cancel.reasonCode > 255) throw new Error("cancel.reasonCode must fit uint8");
+  if (cancel.reasonCode > 255)
+    throw new Error("cancel.reasonCode must fit uint8");
   const auth = await signProtocolAuth({
     signer: order.makerQrlAccount,
     walletRdns,
@@ -1168,54 +1123,22 @@ export async function signCancelV1({
     expiresAt: orderAuth.expiresAt,
     nonce: nonceHex(),
     payloadFor: (unsigned) => buildCancelV1Payload(cancel, orderAuth, unsigned),
-    primaryType: "CancelV1",
+    primaryType: "CancelV2",
     fields: CANCEL_V1_FIELDS,
   });
   return { cancel, auth };
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
+  const result = new Uint8Array(
+    parts.reduce((length, part) => length + part.length, 0),
+  );
   let offset = 0;
   for (const part of parts) {
     result.set(part, offset);
     offset += part.length;
   }
   return result;
-}
-
-function officialDigest(
-  payload: QrlTypedDataPayload,
-  primaryType: string,
-  fields: readonly TypedField[],
-): Uint8Array {
-  const eip712 = TypedDataEncoder.hash(
-    payload.domain,
-    { [primaryType]: [...fields] },
-    payload.message,
-  );
-  return getBytes(keccak256(concat([QRL_MESSAGE_PREFIX, getBytes(eip712)])));
-}
-
-function officialProofIsValid(
-  signer: string,
-  auth: ProtocolAuthV1,
-  payload: QrlTypedDataPayload,
-  primaryType: string,
-  fields: readonly TypedField[],
-): boolean {
-  if (auth.descriptor !== "0x010000") return false;
-  const descriptor = getBytes(auth.descriptor);
-  const publicKey = getBytes(auth.publicKey);
-  const address = shake256(concatBytes(descriptor, publicKey), { dkLen: 20 });
-  const derived = `Q${Array.from(address, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-  if (derived !== signer) return false;
-  return cryptoSignVerify(
-    getBytes(auth.signature),
-    officialDigest(payload, primaryType, fields),
-    publicKey,
-    ZOND_CONTEXT,
-  );
 }
 
 function protocolProofIsValid(
@@ -1225,16 +1148,23 @@ function protocolProofIsValid(
   primaryType: string,
   fields: readonly TypedField[],
 ): boolean {
-  if (auth.scheme === "qrl-sign-typed-v1") {
-    return verifyTypedDataForSigner({
+  assertV2Deployment();
+  if (
+    payload.primaryType !== primaryType ||
+    JSON.stringify(payload.types[primaryType]) !== JSON.stringify(fields)
+  )
+    return false;
+  return (
+    auth.version === "2" &&
+    auth.scheme === "qrl-sign-message-v2" &&
+    verifyMessageForSigner({
       expectedSigner: signer,
       descriptor: auth.descriptor,
       signature: auth.signature,
       publicKey: auth.publicKey,
-      payload,
-    });
-  }
-  return officialProofIsValid(signer, auth, payload, primaryType, fields);
+      messageBytes: protocolMessageBytes(payload),
+    })
+  );
 }
 
 /** Independently authenticate an order returned by a book. This is run
@@ -1264,10 +1194,12 @@ export function verifyOrderV1Auth(
         "publicKey",
         "descriptor",
       ]) ||
-      auth.version !== "1" ||
-      (auth.scheme !== "qrl-sign-typed-v1" && auth.scheme !== "qrl-eip712-v4") ||
+      auth.version !== "2" ||
+      auth.scheme !== "qrl-sign-message-v2" ||
       !Number.isSafeInteger(auth.issuedAt) ||
+      Object.is(auth.issuedAt, -0) ||
       !Number.isSafeInteger(auth.expiresAt) ||
+      Object.is(auth.expiresAt, -0) ||
       auth.issuedAt < 0 ||
       auth.expiresAt <= auth.issuedAt ||
       auth.expiresAt - auth.issuedAt > ORDER_LIFETIME_S ||
@@ -1282,7 +1214,9 @@ export function verifyOrderV1Auth(
       !PUBLIC_KEY_RE.test(auth.publicKey) ||
       !DESCRIPTOR_RE.test(auth.descriptor) ||
       (order.direction !== "eth->qrl" && order.direction !== "qrl->eth") ||
-      (order.asset !== "ETH" && order.asset !== "USDC" && order.asset !== "tUSDT") ||
+      (order.asset !== "ETH" &&
+        order.asset !== "USDC" &&
+        order.asset !== "tUSDT") ||
       !AMOUNT_RE.test(order.fromAmount) ||
       !AMOUNT_RE.test(order.toAmount) ||
       !ETH_ADDR_RE.test(order.makerEthAccount) ||
@@ -1311,7 +1245,8 @@ export function verifyOrderV1Auth(
     }
     if (
       order.visibility === "public" &&
-      (order.allowedTakerEth !== undefined || order.allowedTakerQrl !== undefined)
+      (order.allowedTakerEth !== undefined ||
+        order.allowedTakerQrl !== undefined)
     ) {
       return false;
     }
@@ -1354,20 +1289,11 @@ export function verifyOrderV1Auth(
     }
 
     const payload = buildOrderV1Payload(body, auth);
-    if (auth.scheme === "qrl-sign-typed-v1") {
-      return verifyTypedDataForSigner({
-        expectedSigner: order.makerQrlAccount,
-        descriptor: auth.descriptor,
-        signature: auth.signature,
-        publicKey: auth.publicKey,
-        payload,
-      });
-    }
-    return officialProofIsValid(
+    return protocolProofIsValid(
       order.makerQrlAccount,
       auth,
       payload,
-      "OrderV1",
+      "OrderV2",
       ORDER_V1_FIELDS,
     );
   } catch {
@@ -1391,10 +1317,12 @@ function authShapeIsValid(
       "publicKey",
       "descriptor",
     ]) &&
-    auth.version === "1" &&
-    (auth.scheme === "qrl-sign-typed-v1" || auth.scheme === "qrl-eip712-v4") &&
+    auth.version === "2" &&
+    auth.scheme === "qrl-sign-message-v2" &&
     Number.isSafeInteger(auth.issuedAt) &&
+    !Object.is(auth.issuedAt, -0) &&
     Number.isSafeInteger(auth.expiresAt) &&
+    !Object.is(auth.expiresAt, -0) &&
     auth.issuedAt >= 0 &&
     auth.expiresAt - auth.issuedAt >= options.minLifetime &&
     auth.expiresAt - auth.issuedAt <= options.maxLifetime &&
@@ -1403,14 +1331,15 @@ function authShapeIsValid(
     BYTES32_RE.test(auth.nonce) &&
     SIGNATURE_RE.test(auth.signature) &&
     PUBLIC_KEY_RE.test(auth.publicKey) &&
-    DESCRIPTOR_RE.test(auth.descriptor) &&
-    (auth.scheme !== "qrl-eip712-v4" || auth.descriptor === "0x010000")
+    DESCRIPTOR_RE.test(auth.descriptor)
   );
 }
 
 function hasExactKeys(value: object, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
-  return actual.length === keys.length && keys.every((key) => actual.includes(key));
+  return (
+    actual.length === keys.length && keys.every((key) => actual.includes(key))
+  );
 }
 
 function orderBodyFromView(order: OrderView): CreateOrderBody {
@@ -1449,7 +1378,9 @@ function verifiedOrderDigest(
   return orderDigest(orderBodyFromView(order), auth);
 }
 
-type ProtocolVerificationOptions = number | { now?: number; allowExpired?: boolean };
+type ProtocolVerificationOptions =
+  | number
+  | { now?: number; allowExpired?: boolean };
 
 function protocolVerificationOptions(options: ProtocolVerificationOptions): {
   now: number;
@@ -1503,7 +1434,10 @@ function fillBodyIsCanonical(fill: FillV1Body): boolean {
   );
 }
 
-function privateTakerMatches(order: OrderView, intent: FillIntentV1Body): boolean {
+function privateTakerMatches(
+  order: OrderView,
+  intent: FillIntentV1Body,
+): boolean {
   return (
     (order.allowedTakerEth === undefined ||
       order.allowedTakerEth === intent.takerEthAccount) &&
@@ -1543,7 +1477,7 @@ export function verifyFillIntentV1(
       intent.takerQrlAccount,
       auth,
       payload,
-      "FillIntentV1",
+      "FillIntentV2",
       FILL_INTENT_V1_FIELDS,
     );
   } catch {
@@ -1576,7 +1510,8 @@ export function verifyFillV1(
         allowExpired,
       }) ||
       fill.orderDigest !== expectedOrderDigest ||
-      fill.intentDigest !== intentDigest(signedIntent.intent, signedIntent.auth) ||
+      fill.intentDigest !==
+        intentDigest(signedIntent.intent, signedIntent.auth) ||
       fill.takerEthAccount !== signedIntent.intent.takerEthAccount ||
       fill.takerQrlAccount !== signedIntent.intent.takerQrlAccount ||
       fill.releaseCommitment !== signedIntent.intent.releaseCommitment ||
@@ -1590,14 +1525,16 @@ export function verifyFillV1(
       fill.initiatorTimeout - auth.issuedAt <
         fill.responderTimeout - auth.issuedAt ||
       (order.prelocked !== true &&
-        fill.initiatorTimeout - auth.issuedAt > MAX_INITIATOR_TIMEOUT_WINDOW_S) ||
+        fill.initiatorTimeout - auth.issuedAt >
+          MAX_INITIATOR_TIMEOUT_WINDOW_S) ||
       fill.responderTimeout - auth.issuedAt >
         Math.floor((fill.initiatorTimeout - auth.issuedAt) / 2) ||
       (order.prelocked === true &&
         (fill.hashlock !== order.hashlock ||
           fill.initiatorTimeout !== order.initiatorTimeout ||
           fill.initiatorTimeout - auth.issuedAt < MIN_PRELOCK_RUNWAY_S ||
-          (!allowExpired && fill.initiatorTimeout - now < MIN_PRELOCK_RUNWAY_S)))
+          (!allowExpired &&
+            fill.initiatorTimeout - now < MIN_PRELOCK_RUNWAY_S)))
     ) {
       return false;
     }
@@ -1606,7 +1543,7 @@ export function verifyFillV1(
       order.makerQrlAccount,
       auth,
       payload,
-      "FillV1",
+      "FillV2",
       FILL_V1_FIELDS,
     );
   } catch {
@@ -1649,7 +1586,7 @@ export function verifyCancelV1(
       order.makerQrlAccount,
       auth,
       payload,
-      "CancelV1",
+      "CancelV2",
       CANCEL_V1_FIELDS,
     );
   } catch {
@@ -1660,3 +1597,18 @@ export function verifyCancelV1(
 export const verifyFillIntentV1Auth = verifyFillIntentV1;
 export const verifyFillV1Auth = verifyFillV1;
 export const verifyCancelV1Auth = verifyCancelV1;
+
+// V2 entry points. The V1-suffixed exports above are source-compatibility names only.
+export { ORDER_V2_DOMAIN, ORDER_V2_DEPLOYMENT, protocolMessageBytes };
+export {
+  signOrderV1 as signOrderV2,
+  signFillIntentV1 as signFillIntentV2,
+  signFillV1 as signFillV2,
+  signCancelV1 as signCancelV2,
+  verifyOrderV1Auth as verifyOrderV2Auth,
+  verifyFillIntentV1 as verifyFillIntentV2,
+  verifyFillV1 as verifyFillV2,
+  verifyCancelV1 as verifyCancelV2,
+  deriveOrderV1Id as deriveOrderV2Id,
+};
+export type ProtocolAuthV2 = ProtocolAuthV1;

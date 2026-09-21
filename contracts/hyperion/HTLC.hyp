@@ -4,9 +4,9 @@ pragma hyperion >=0.0;
 /**
  * @title QuantaSwap HTLC
  * @notice Hashed timelock contract for cross-chain atomic swaps between
- *         Ethereum and QRL v2. The same hypc-compiled artifact is deployed
- *         on both chains (both are EVM-compatible), so the two legs run
- *         byte-identical bytecode linked by one shared sha256 hashlock.
+ *         Ethereum and QRL v2. One reviewed source compiles into target-bound
+ *         EVM-256 and QRVM-512 artifacts with the same ABI. The two legs are
+ *         linked by one shared sha256 hashlock.
  *
  * @dev Design invariants (see docs/ARCHITECTURE.md):
  *   - No owner, no pause, no upgrade path. What is deployed is final.

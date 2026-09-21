@@ -4,7 +4,8 @@ services:
   marketmaker:
     image: quantaswap-marketmaker:${LP_KIT_VERSION:-local}
     build:
-      context: .
+      context: ..
+      dockerfile: marketmaker/Dockerfile
     env_file:
       - .env
     environment:

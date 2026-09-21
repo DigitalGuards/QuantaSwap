@@ -11,9 +11,8 @@
 // Required env (.env): ETH_RPC_URL, ETH_PRIVATE_KEY
 
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
 const { ethers } = require("ethers");
+const { loadArtifact } = require("./artifacts");
 
 const rpc = process.env.ETH_RPC_URL;
 const key = process.env.ETH_PRIVATE_KEY;
@@ -25,8 +24,7 @@ if (!rpc || !key || !htlcAddress || !tokenAddress) {
   process.exit(1);
 }
 
-const artifactPath = path.join(__dirname, "..", "build", "hyperion", "HTLC.json");
-const { abi } = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+const { abi } = loadArtifact("evm", "HTLC");
 
 // Minimal ERC-20 surface. Return values are only decoded on views, so the
 // same ABI drives both standard tokens and USDT-style no-return tokens.

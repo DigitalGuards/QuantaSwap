@@ -18,7 +18,7 @@ import {
 import { MAX_PUBLIC_PORTABLE_ORDERS } from "./store.js";
 
 const orderEvent = (id: string): FederationEvent => ({
-  kind: "order-v1",
+  kind: "order-v2",
   payload: { auth: { nonce: id }, order: { asset: "ETH", amount: "1" } },
 });
 
@@ -34,12 +34,18 @@ function withTempFile(run: (file: string) => void): void {
 describe("federation event feed", () => {
   it("uses canonical content ids independent of object insertion order", () => {
     const left: FederationEvent = {
-      kind: "cancel-v1",
-      payload: { cancel: { reasonCode: 1, orderDigest: `0x${"11".repeat(32)}` }, auth: {} },
+      kind: "cancel-v2",
+      payload: {
+        cancel: { reasonCode: 1, orderDigest: `0x${"11".repeat(32)}` },
+        auth: {},
+      },
     };
     const right: FederationEvent = {
-      payload: { auth: {}, cancel: { orderDigest: `0x${"11".repeat(32)}`, reasonCode: 1 } },
-      kind: "cancel-v1",
+      payload: {
+        auth: {},
+        cancel: { orderDigest: `0x${"11".repeat(32)}`, reasonCode: 1 },
+      },
+      kind: "cancel-v2",
     };
     assert.equal(canonicalFederationJson(left), canonicalFederationJson(right));
     assert.equal(federationEventId(left), federationEventId(right));
@@ -64,9 +70,16 @@ describe("federation event feed", () => {
       const reset = feed.page(null, 8, () => [orderEvent("snapshot")]);
       assert.equal(reset.reset, true);
       assert.equal(reset.snapshot?.length, 1);
-      const page = feed.page(reset.cursor.replace(/:[0-9]+$/, `:${first.seq}`), 8, () => []);
+      const page = feed.page(
+        reset.cursor.replace(/:[0-9]+$/, `:${first.seq}`),
+        8,
+        () => [],
+      );
       assert.equal(page.reset, false);
-      assert.deepEqual(page.events.map((entry) => entry.eventId), [second.eventId]);
+      assert.deepEqual(
+        page.events.map((entry) => entry.eventId),
+        [second.eventId],
+      );
       assert.equal(page.cursor.endsWith(`:${second.seq}`), true);
     });
   });
@@ -80,7 +93,7 @@ describe("federation event feed", () => {
       feed.append(orderEvent("three"), 102);
       const stale = feed.page(initial.cursor, 2, () => [orderEvent("current")]);
       assert.equal(stale.reset, true);
-      assert.equal(stale.snapshot?.[0]?.event.kind, "order-v1");
+      assert.equal(stale.snapshot?.[0]?.event.kind, "order-v2");
     });
   });
 
@@ -90,7 +103,7 @@ describe("federation event feed", () => {
       const cursor = feed.page(null, 8, () => []).cursor;
       for (let index = 0; index < 72; index += 1) {
         feed.append({
-          kind: "order-v1",
+          kind: "order-v2",
           payload: { id: String(index), padding: "x".repeat(60 * 1024) },
         });
       }
@@ -127,7 +140,10 @@ describe("federation event feed", () => {
       assert.equal(stillCached.cursor, first.cursor);
       const incremental = feed.page(stillCached.cursor, 4, snapshot);
       assert.equal(incremental.reset, false);
-      assert.deepEqual(incremental.events.map((entry) => entry.eventId), [appended.eventId]);
+      assert.deepEqual(
+        incremental.events.map((entry) => entry.eventId),
+        [appended.eventId],
+      );
 
       now += 5_000;
       const refreshed = feed.page(null, 4, snapshot);
@@ -245,7 +261,7 @@ describe("federation event feed", () => {
       assert.throws(
         () =>
           feed.append({
-            kind: "order-v1",
+            kind: "order-v2",
             payload: { unsafe: Number.NaN },
           }),
         /safe integer/,
@@ -254,7 +270,7 @@ describe("federation event feed", () => {
       assert.throws(
         () =>
           feed.append({
-            kind: "order-v1",
+            kind: "order-v2",
             payload: {},
             padding: "ignored",
           } as FederationEvent),
@@ -290,8 +306,8 @@ describe("federation event feed", () => {
 
   it("fits the admitted maximum portable state in one reset response", () => {
     const auth = {
-      version: "1",
-      scheme: "qrl-sign-typed-v1",
+      version: "2",
+      scheme: "qrl-sign-message-v2",
       issuedAt: 1,
       expiresAt: 2,
       nonce: `0x${"11".repeat(32)}`,
@@ -322,7 +338,7 @@ describe("federation event feed", () => {
         visibility: "public",
       };
       for (let variant = 0; variant < 3; variant += 1) {
-        add({ kind: "order-v1", payload: { order, auth } });
+        add({ kind: "order-v2", payload: { order, auth } });
       }
       for (let intentIndex = 0; intentIndex < 8; intentIndex += 1) {
         const intentDigest = `0x${intentIndex.toString(16).padStart(64, "0")}`;
@@ -333,11 +349,11 @@ describe("federation event feed", () => {
           releaseCommitment: `0x${"99".repeat(32)}`,
         };
         add({
-          kind: "fill-intent-v1",
+          kind: "fill-intent-v2",
           payload: { orderId, intent, auth },
         });
         add({
-          kind: "release-v1",
+          kind: "release-v2",
           payload: {
             orderId,
             intentDigest,
@@ -363,12 +379,12 @@ describe("federation event feed", () => {
       };
       for (let terminal = 0; terminal < 3; terminal += 1) {
         add({
-          kind: "fill-v1",
+          kind: "fill-v2",
           payload: { orderId, fill, auth, intent, intentAuth: auth },
         });
       }
       add({
-        kind: "release-v1",
+        kind: "release-v2",
         payload: {
           orderId,
           fillDigest: `0x${"dd".repeat(32)}`,
@@ -384,6 +400,8 @@ describe("federation event feed", () => {
       events: [],
       snapshot,
     });
-    assert.ok(Buffer.byteLength(serialized, "utf8") < MAX_FEDERATION_RESPONSE_BYTES);
+    assert.ok(
+      Buffer.byteLength(serialized, "utf8") < MAX_FEDERATION_RESPONSE_BYTES,
+    );
   });
 });

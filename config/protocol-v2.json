@@ -1,0 +1,9 @@
+{
+  "version": "2",
+  "networkName": "Private v3 testnet",
+  "ethChainId": "11155111",
+  "qrlChainId": "3151909",
+  "qrlGenesisHash": "0xd15407991193e6c23b733dc6bf9c628deaff8f9b6e252aa0d60030952b3e3ea4",
+  "ethHtlc": "0x4D9D3adAe3e479CA8a9e13c6E5eE4E4E7Bc4f9B5",
+  "qrlHtlc": "Q71D5194EaaBF33e753b9F5ae7375C9c77F063Ed0CB2908De65D0ba00354da0bf40403Eb0247A536760625Ca6AB9bBB58B875A72c8DCdB67FEDA2266580D05405"
+}

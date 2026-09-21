@@ -73,7 +73,8 @@ const MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_LIST_ORDERS = 200;
 const ID_RE = /^[0-9a-z-]{1,128}$/;
 const ETH_ADDR_RE = /^0x[0-9a-f]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-f]{40}$/;
+// Parse the immutable OrderV1 response shape for recovery and verification.
+const QRL_ADDR_RE = /^Q[0-9a-f]{128}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 

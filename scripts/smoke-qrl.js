@@ -4,10 +4,10 @@
 // Required env (.env): QRL_RPC_URL, QRL_HEXSEED
 
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
 const { Web3 } = require("@theqrl/web3");
+const { loadArtifact } = require("./artifacts");
+const { assertQip55Deployment, assertQip55ToolingAccount } = require("./qip55");
 
 const rpc = process.env.QRL_RPC_URL;
 const hexseed = process.env.QRL_HEXSEED;
@@ -17,11 +17,12 @@ if (!rpc || !hexseed || !htlcAddress) {
   process.exit(1);
 }
 
-const artifactPath = path.join(__dirname, "..", "build", "hyperion", "HTLC.json");
-const { abi } = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+const { abi } = loadArtifact("qrl", "HTLC");
 
 const web3 = new Web3(new Web3.providers.HttpProvider(rpc));
 const acc = web3.qrl.accounts.seedToAccount(hexseed);
+assertQip55ToolingAccount(acc.address);
+assertQip55Deployment(htlcAddress);
 web3.qrl.wallet?.add(hexseed);
 web3.qrl.transactionConfirmationBlocks = 1;
 

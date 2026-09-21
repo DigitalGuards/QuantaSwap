@@ -3,6 +3,7 @@ name: Market maker CI
 on:
   pull_request:
     paths:
+      - 'config/protocol-v2*.json'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
       - '.github/workflows/marketmaker-release.yml'
@@ -10,6 +11,7 @@ on:
     branches:
       - dev
     paths:
+      - 'config/protocol-v2*.json'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
       - '.github/workflows/marketmaker-release.yml'
@@ -59,7 +61,7 @@ jobs:
 
       - name: Build runtime image
         working-directory: marketmaker
-        run: docker build --tag quantaswap-marketmaker:ci .
+        run: docker build --file Dockerfile --tag quantaswap-marketmaker:ci ..
 
       - name: Verify hardened runtime and packaged tests
         run: |

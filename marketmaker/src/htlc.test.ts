@@ -65,16 +65,12 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
     });
   });
 
-  it("uses the QRL namespace and preserves the actual Q-prefixed sender", async () => {
-    const sender = `Q${"4".repeat(40)}`;
+  it("blocks the legacy Q40 HTLC before a QRL simulation request", async () => {
+    const sender = `Q${"4".repeat(128)}`;
     const claimData = `0x${"cd".repeat(68)}`;
     await withRpcResponse({ result: "0x" }, async (requests) => {
-      await simulateHtlcCall(QRL_LEG, sender, claimData);
-      assert.equal(requests[0]?.method, "qrl_call");
-      assert.deepEqual(requests[0]?.params, [
-        { from: sender, to: QRL_LEG.htlc, data: claimData, value: "0x0" },
-        "latest",
-      ]);
+      await assert.rejects(simulateHtlcCall(QRL_LEG, sender, claimData), /fresh 64-byte/);
+      assert.equal(requests.length, 0);
     });
   });
 
@@ -139,8 +135,8 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
     await withRpcResponse({ result: "0x" }, async () => {
       await assert.rejects(
         submitPreflightedClaim(
-          QRL_LEG,
-          `Q${"8".repeat(40)}`,
+          ETH_LEG,
+          `0x${"8".repeat(40)}`,
           claimData,
           async () => {
             throw new Error(`send failed with transaction data ${claimData}`);
@@ -150,7 +146,7 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
           assert.ok(error instanceof Error);
           assert.equal(
             error.message,
-            "qrl claim submission failed; reconcile chain state before retry",
+            "eth claim submission failed; reconcile chain state before retry",
           );
           assert.ok(!error.message.includes(claimData));
           return true;
