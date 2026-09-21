@@ -80,11 +80,14 @@ async function withTest(name, fn) {
 
 async function main() {
   console.log("[test] compiling contracts + mocks with hypc");
-  const artifacts = compileDirs([
-    path.join(repoRoot, "contracts", "hyperion"),
-    path.join(repoRoot, "contracts", "test"),
-    path.join(repoRoot, "contracts", "testnet"),
-  ]);
+  const artifacts = compileDirs(
+    [
+      path.join(repoRoot, "contracts", "hyperion"),
+      path.join(repoRoot, "contracts", "test"),
+      path.join(repoRoot, "contracts", "testnet"),
+    ],
+    "evm"
+  );
   for (const required of [
     "HTLC",
     "MockERC20",
@@ -97,6 +100,47 @@ async function main() {
   ]) {
     if (!artifacts[required]) throw new Error(`missing artifact ${required}`);
   }
+
+  for (const [name, artifact] of Object.entries(artifacts)) {
+    assert(artifact.target === "evm", `${name} artifact selects the EVM target`);
+    assert(artifact.runtime === "evm-256", `${name} artifact records the EVM runtime`);
+    assert(artifact.addressBytes === 20, `${name} artifact records 20-byte EVM addresses`);
+    assert(artifact.compilerSettings.viaIR === true, `${name} artifact selects viaIR`);
+    assert(artifact.metadata.settings.viaIR === true, `${name} metadata records viaIR`);
+    assert(
+      artifact.metadata.settings.optimizer.enabled === true &&
+        artifact.metadata.settings.optimizer.runs === 200,
+      `${name} metadata records optimizer settings`
+    );
+  }
+
+  for (const tokenName of [
+    "MockERC20",
+    "NoReturnToken",
+    "ApprovalRaceToken",
+    "BlocklistToken",
+    "FeeToken",
+    "TestStable",
+  ]) {
+    const functions = artifacts[tokenName].abi.filter((entry) => entry.type === "function");
+    const balanceOf = functions.find((entry) => entry.name === "balanceOf");
+    const allowance = functions.find((entry) => entry.name === "allowance");
+    assert(
+      balanceOf?.inputs.length === 1 && balanceOf.inputs[0].type === "address",
+      `${tokenName} preserves balanceOf(address)`
+    );
+    assert(
+      allowance?.inputs.length === 2 && allowance.inputs.every((input) => input.type === "address"),
+      `${tokenName} preserves allowance(address,address)`
+    );
+  }
+  const blocked = artifacts.BlocklistToken.abi.find(
+    (entry) => entry.type === "function" && entry.name === "blocked"
+  );
+  assert(
+    blocked?.inputs.length === 1 && blocked.inputs[0].type === "address",
+    "BlocklistToken preserves blocked(address)"
+  );
 
   console.log("[test] starting anvil");
   const anvil = spawn("anvil", ["--port", String(ANVIL_PORT), "--silent"], { stdio: "ignore" });

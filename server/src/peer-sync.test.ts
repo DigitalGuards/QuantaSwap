@@ -13,7 +13,7 @@ import {
 } from "./peer-sync.js";
 
 const event: FederationEvent = {
-  kind: "release-v1",
+  kind: "release-v2",
   payload: {
     fillDigest: `0x${"11".repeat(32)}`,
     releaseSecret: `0x${"22".repeat(32)}`,
@@ -26,9 +26,12 @@ const record = {
   event,
 };
 
-function releaseEvent(index: number, orderId = "a".repeat(64)): FederationEvent {
+function releaseEvent(
+  index: number,
+  orderId = "a".repeat(64),
+): FederationEvent {
   return {
-    kind: "release-v1",
+    kind: "release-v2",
     payload: {
       orderId,
       intentDigest: `0x${index.toString(16).padStart(64, "0")}`,
@@ -174,7 +177,12 @@ describe("federation peer pages", () => {
   });
 
   it("requires canonical safe-integer cursor sequences", () => {
-    for (const sequence of ["00", "01", "9007199254740992", "10000000000000000"]) {
+    for (const sequence of [
+      "00",
+      "01",
+      "9007199254740992",
+      "10000000000000000",
+    ]) {
       assert.throws(
         () =>
           parseFederationPage({
@@ -406,7 +414,9 @@ describe("federation peer pages", () => {
         ? authenticatedPeer
         : publicPeer;
       const captured: Array<[string, string]> = [];
-      new Headers(init?.headers).forEach((value, key) => captured.push([key, value]));
+      new Headers(init?.headers).forEach((value, key) =>
+        captured.push([key, value]),
+      );
       requestHeaders.set(peer, captured);
       const feedId = peer === authenticatedPeer ? "ab" : "cd";
       return federationResponse({
@@ -533,7 +543,10 @@ describe("federation peer pages", () => {
       assert.equal(failedStatus.peers[0]?.lastAttemptAt, 1_000);
       assert.equal(failedStatus.peers[0]?.lastSuccessAt, null);
       assert.equal(failedStatus.peers[0]?.nextAttemptAt, 11_000);
-      assert.equal(JSON.stringify(failedStatus).includes("mirror.example"), false);
+      assert.equal(
+        JSON.stringify(failedStatus).includes("mirror.example"),
+        false,
+      );
       await sync.syncAll();
       assert.equal(calls, 1);
       clock += 10_000;
@@ -703,11 +716,16 @@ describe("federation peer pages", () => {
       await sync.syncAll();
       assert.equal(applied, 1);
       assert.equal(sync.status(clock).peers[0]?.state, "degraded");
-      assert.deepEqual(errors, ["federation peer repeated an event id across pages"]);
+      assert.deepEqual(errors, [
+        "federation peer repeated an event id across pages",
+      ]);
 
       clock += 10_000;
       await sync.syncAll();
-      assert.equal(new URL(urls[3]!).searchParams.get("cursor"), `${"ab".repeat(16)}:1`);
+      assert.equal(
+        new URL(urls[3]!).searchParams.get("cursor"),
+        `${"ab".repeat(16)}:1`,
+      );
       assert.equal(applied, 2);
       assert.equal(sync.status(clock).peers[0]?.state, "healthy");
     } finally {
@@ -751,7 +769,11 @@ describe("federation peer pages", () => {
         hasMore: false,
         events: [],
         snapshot: [
-          { seq: 1, eventId: federationEventId(replacement), event: replacement },
+          {
+            seq: 1,
+            eventId: federationEventId(replacement),
+            event: replacement,
+          },
         ],
       });
     };
@@ -780,7 +802,7 @@ describe("federation peer pages", () => {
 
   it("retries dependency-missing events after their prerequisite arrives", async () => {
     const release: FederationEvent = {
-      kind: "release-v1",
+      kind: "release-v2",
       payload: {
         orderId: "a".repeat(64),
         intentDigest: `0x${"11".repeat(32)}`,
@@ -788,7 +810,7 @@ describe("federation peer pages", () => {
       },
     };
     const order: FederationEvent = {
-      kind: "order-v1",
+      kind: "order-v2",
       payload: { order: { marker: "order" }, auth: { marker: "auth" } },
     };
     const records = [release, order].map((entry) => ({
@@ -815,8 +837,8 @@ describe("federation peer pages", () => {
         peers: ["https://mirror.example/api"],
         timeoutMs: 1_000,
         apply: (candidate) => {
-          if (candidate.kind === "release-v1" && !hasOrder) return "deferred";
-          if (candidate.kind === "order-v1") hasOrder = true;
+          if (candidate.kind === "release-v2" && !hasOrder) return "deferred";
+          if (candidate.kind === "order-v2") hasOrder = true;
           applied.push(candidate.kind);
           return "applied";
         },
@@ -825,7 +847,7 @@ describe("federation peer pages", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
-    assert.deepEqual(applied, ["order-v1", "release-v1"]);
+    assert.deepEqual(applied, ["order-v2", "release-v2"]);
   });
 
   it("collapses a shared deferred event to one apply attempt per pass", async () => {
@@ -923,7 +945,9 @@ describe("federation peer pages", () => {
     let cycle = 0;
     let applyCalls = 0;
     globalThis.fetch = async (input) => {
-      const peerIndex = peers.findIndex((peer) => String(input).startsWith(peer));
+      const peerIndex = peers.findIndex((peer) =>
+        String(input).startsWith(peer),
+      );
       const feedId = (peerIndex + 1).toString(16).padStart(2, "0").repeat(16);
       if (cycle === 0) {
         return federationResponse({
@@ -965,7 +989,10 @@ describe("federation peer pages", () => {
   });
 
   it("degrades every source when a shared deferred event is later rejected", async () => {
-    const peers = ["https://mirror-a.example/api", "https://mirror-b.example/api"];
+    const peers = [
+      "https://mirror-a.example/api",
+      "https://mirror-b.example/api",
+    ];
     const originalFetch = globalThis.fetch;
     const originalNow = Date.now;
     const errors: Array<{ peer: string; message: string }> = [];
@@ -1132,7 +1159,7 @@ describe("federation peer pages", () => {
     const honestPeer = "https://honest.example/api";
     const rejectedRecords = Array.from({ length: 12 }, (_, index) => {
       const candidate: FederationEvent = {
-        kind: "release-v1",
+        kind: "release-v2",
         payload: {
           orderId: "a".repeat(64),
           intentDigest: `0x${index.toString(16).padStart(64, "0")}`,
@@ -1175,7 +1202,9 @@ describe("federation peer pages", () => {
           return "applied";
         },
         onError: (peer, error) => {
-          errors.push(`${peer}: ${error instanceof Error ? error.message : String(error)}`);
+          errors.push(
+            `${peer}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         },
       });
       await sync.syncAll();
@@ -1193,7 +1222,9 @@ describe("federation peer pages", () => {
 
   it("replays a rejected reset snapshot before reporting the peer healthy", async () => {
     const peer = "https://hostile.example/api";
-    const candidates = Array.from({ length: 10 }, (_, index) => releaseEvent(index + 100));
+    const candidates = Array.from({ length: 10 }, (_, index) =>
+      releaseEvent(index + 100),
+    );
     const records = candidates.map((candidate) => ({
       seq: 10,
       eventId: federationEventId(candidate),
@@ -1241,7 +1272,9 @@ describe("federation peer pages", () => {
       assert.equal(rejected.peers[0]?.state, "degraded");
       assert.equal(rejected.peers[0]?.lastSuccessAt, null);
       assert.equal(rejected.peers[0]?.nextAttemptAt, 11_000);
-      assert.deepEqual(errors, ["federation peer reached the rejected-event quota"]);
+      assert.deepEqual(errors, [
+        "federation peer reached the rejected-event quota",
+      ]);
 
       await sync.syncAll();
       assert.equal(urls.length, 1);
@@ -1259,7 +1292,9 @@ describe("federation peer pages", () => {
 
   it("aggregates and caps rejected deferred-event retries", async () => {
     const peer = "https://hostile.example/api";
-    const candidates = Array.from({ length: 12 }, (_, index) => releaseEvent(index + 200));
+    const candidates = Array.from({ length: 12 }, (_, index) =>
+      releaseEvent(index + 200),
+    );
     const records = candidates.map((candidate) => ({
       seq: 12,
       eventId: federationEventId(candidate),
@@ -1295,8 +1330,14 @@ describe("federation peer pages", () => {
       });
       await sync.syncAll();
       const status = sync.status(clock);
-      assert.equal([...attempts.values()].filter((count) => count === 2).length, 8);
-      assert.equal([...attempts.values()].filter((count) => count === 1).length, 4);
+      assert.equal(
+        [...attempts.values()].filter((count) => count === 2).length,
+        8,
+      );
+      assert.equal(
+        [...attempts.values()].filter((count) => count === 1).length,
+        4,
+      );
       assert.equal(status.deferredEvents, 4);
       assert.equal(status.peers[0]?.state, "degraded");
       assert.equal(status.peers[0]?.nextAttemptAt, 11_000);
@@ -1348,7 +1389,9 @@ describe("federation peer pages", () => {
       });
     };
     try {
-      const directIds = new Set(directCandidates.map((candidate) => federationEventId(candidate)));
+      const directIds = new Set(
+        directCandidates.map((candidate) => federationEventId(candidate)),
+      );
       const sync = new FederationPeerSync({
         peers: [peer],
         timeoutMs: 1_000,
@@ -1370,8 +1413,13 @@ describe("federation peer pages", () => {
       clock += 501;
       await sync.syncAll();
       assert.equal(sync.status(clock).deferredEvents, 2);
-      assert.equal([...attempts.values()].filter((count) => count === 3).length, 0);
-      assert.deepEqual(errors, ["federation peer reached the rejected-event quota"]);
+      assert.equal(
+        [...attempts.values()].filter((count) => count === 3).length,
+        0,
+      );
+      assert.deepEqual(errors, [
+        "federation peer reached the rejected-event quota",
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
       Date.now = originalNow;
@@ -1394,7 +1442,9 @@ describe("federation peer pages", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       active -= 1;
       const match = /mirror-([1-5])/.exec(String(input));
-      const byte = Number(match?.[1] ?? "0").toString(16).padStart(2, "0");
+      const byte = Number(match?.[1] ?? "0")
+        .toString(16)
+        .padStart(2, "0");
       return federationResponse({
         reset: true,
         cursor: `${byte.repeat(16)}:0`,
@@ -1419,7 +1469,10 @@ describe("federation peer pages", () => {
   });
 
   it("bounds a multipage peer by one total deadline and reaches the queued peer", async () => {
-    const slowPeers = ["https://slow-a.example/api", "https://slow-b.example/api"];
+    const slowPeers = [
+      "https://slow-a.example/api",
+      "https://slow-b.example/api",
+    ];
     const honestPeer = "https://honest.example/api";
     const peers = [...slowPeers, honestPeer];
     const feedIds = new Map([
@@ -1481,7 +1534,9 @@ describe("federation peer pages", () => {
         }, 30);
         signal?.addEventListener("abort", onAbort, { once: true });
       });
-      const candidate = releaseEvent((peer === slowPeers[0] ? 1_000 : 2_000) + page);
+      const candidate = releaseEvent(
+        (peer === slowPeers[0] ? 1_000 : 2_000) + page,
+      );
       return federationResponse({
         reset: false,
         cursor: `${feedId}:${page}`,
@@ -1535,7 +1590,7 @@ describe("federation peer pages", () => {
     const honestPeer = "https://honest.example/api";
     const hostileEvents = Array.from({ length: 513 }, (_, index) => {
       const candidate: FederationEvent = {
-        kind: "release-v1",
+        kind: "release-v2",
         payload: {
           orderId: "a".repeat(64),
           intentDigest: `0x${index.toString(16).padStart(64, "0")}`,
@@ -1609,7 +1664,9 @@ describe("federation peer pages", () => {
       clock += 9_499;
       await sync.syncAll();
       assert.equal(
-        new URL(hostileUrls[firstRunHostileRequests]!).searchParams.has("cursor"),
+        new URL(hostileUrls[firstRunHostileRequests]!).searchParams.has(
+          "cursor",
+        ),
         false,
       );
     } finally {
@@ -1623,6 +1680,9 @@ describe("federation peer pages", () => {
           peer === hostilePeer && message.includes("deferred-event quota"),
       ),
     );
-    assert.equal(errors.some(({ peer }) => peer === honestPeer), false);
+    assert.equal(
+      errors.some(({ peer }) => peer === honestPeer),
+      false,
+    );
   });
 });

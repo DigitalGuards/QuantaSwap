@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import deployment from "../../config/protocol-v2.json";
 
 // `confirmations`: extra block depth a counterparty lock must reach
 // before this client acts on it irreversibly (taker locking, maker
@@ -10,15 +11,15 @@
 // section 2 sizes the timelock margins for full ~13 min finality).
 export const QRL_LEG = {
   key: "qrl" as const,
-  name: "QRL v2 testnet",
+  name: "QRL Testnet v3 (Private)",
   asset: "QRL",
   // Unit label for amount displays. Ecosystem convention: amounts show as
   // "Quanta"; "QRL" stays the ticker in pair labels (QRL/USDC) and the
   // protocol-level `asset` identifier above.
   display: "Quanta",
-  chainIdHex: "0x539",
-  // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
-  htlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
+  chainIdHex: `0x${BigInt(deployment.qrlChainId).toString(16)}`,
+  genesisHash: deployment.qrlGenesisHash,
+  htlc: deployment.qrlHtlc,
   rpc: "/rpc/qrl",
   confirmations: 0,
   explorerTx: "https://zondscan.com/tx/",
@@ -32,14 +33,16 @@ export const ETH_LEG = {
   // and the persisted swap (see lib/assetRegistry.ts).
   asset: "ETH",
   display: "ETH",
-  chainIdHex: "0xaa36a7",
-  // 2026-07-13 redeploy (HTLCv2 open-recipient locks: assign + release).
-  htlc: "0x910D5d4a7f2037c01F3B4C835167357e89909281",
+  chainIdHex: `0x${BigInt(deployment.ethChainId).toString(16)}`,
+  htlc: deployment.ethHtlc,
   rpc: "/rpc/sepolia",
   confirmations: 0,
   explorerTx: "https://sepolia.etherscan.io/tx/",
   explorerAddress: "https://sepolia.etherscan.io/address/",
 };
+
+// New deployments never adopt prior-chain swap secrets, orders, or stages.
+export const DEPLOYMENT_STORAGE_PREFIX = `quantaswap.v3.${deployment.qrlChainId}.${deployment.qrlGenesisHash}.${deployment.ethHtlc.toLowerCase()}.${deployment.qrlHtlc.toLowerCase()}`;
 
 // The ETH-leg asset model: the Sepolia leg can escrow native ETH or a
 // registry ERC-20 (USDC, tUSDT); the QRL leg is always native QRL.

@@ -10,6 +10,7 @@ import { resolve, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { MLDSA87 } from "@theqrl/wallet.js";
 import { Wallet } from "ethers";
+import { canonicalQip55QrlAddress } from "./qip55.js";
 
 export interface OperatorKeys {
   ethPrivateKey: string;
@@ -40,7 +41,7 @@ export function generateOperatorKeys(): OperatorKeys {
       ethPrivateKey: eth.privateKey,
       ethAddress: eth.address,
       qrlHexseed: qrl.getHexExtendedSeed(),
-      qrlAddress: qrl.getAddressStr(),
+      qrlAddress: canonicalQip55QrlAddress(qrl.getAddressStr()),
     };
   } finally {
     // wallet.js 2.0.2 implements zeroize(), but its generated declaration
@@ -59,6 +60,7 @@ export function writeOperatorSecrets(directory: string, keys: OperatorKeys): Sec
   if (!/^0x[0-9a-fA-F]{102}$/.test(keys.qrlHexseed)) {
     throw new Error("generated QRL extended seed has an unexpected format");
   }
+  canonicalQip55QrlAddress(keys.qrlAddress);
 
   const dir = resolve(directory);
   const stat = existing(dir);

@@ -1,0 +1,68 @@
+==== ExternalSource: _canonical/HTLC.hyp ====
+==== Source: Q128HTLC.hyp ====
+import {HTLC} from "_canonical/HTLC.hyp";
+
+contract Q128HTLC {
+    HTLC private htlc;
+
+    constructor() {
+        htlc = new HTLC();
+    }
+
+    function exerciseRecipientAliases(address firstRecipient, address secondRecipient)
+        external
+        payable
+        returns (bool)
+    {
+        require(msg.value >= 2, "value");
+        bytes32 firstHashlock = bytes32(uint256(1));
+        bytes32 secondHashlock = bytes32(uint256(2));
+        uint256 timeout = type(uint256).max;
+
+        htlc.lockNative{value: 1}(firstHashlock, firstRecipient, timeout);
+        htlc.lockNative{value: 1}(secondHashlock, secondRecipient, timeout);
+
+        HTLC.Swap memory firstSwap = htlc.getSwap(firstHashlock);
+        HTLC.Swap memory secondSwap = htlc.getSwap(secondHashlock);
+        require(firstSwap.recipient == firstRecipient, "first recipient aliased");
+        require(secondSwap.recipient == secondRecipient, "second recipient aliased");
+        require(firstSwap.recipient != secondSwap.recipient, "recipient identities collapsed");
+        require(firstSwap.initiator == address(this), "first initiator");
+        require(secondSwap.initiator == address(this), "second initiator");
+        return true;
+    }
+
+    function exerciseAssignedAliases(address firstRecipient, address secondRecipient)
+        external
+        payable
+        returns (bool)
+    {
+        require(msg.value >= 2, "value");
+        bytes32 firstHashlock = bytes32(uint256(3));
+        bytes32 secondHashlock = bytes32(uint256(4));
+        uint256 timeout = type(uint256).max;
+
+        htlc.lockNativeOpen{value: 1}(firstHashlock, timeout);
+        htlc.lockNativeOpen{value: 1}(secondHashlock, timeout);
+        htlc.assign(firstHashlock, firstRecipient);
+        htlc.assign(secondHashlock, secondRecipient);
+
+        HTLC.Swap memory firstSwap = htlc.getSwap(firstHashlock);
+        HTLC.Swap memory secondSwap = htlc.getSwap(secondHashlock);
+        require(firstSwap.recipient == firstRecipient, "first assignment aliased");
+        require(secondSwap.recipient == secondRecipient, "second assignment aliased");
+        require(firstSwap.recipient != secondSwap.recipient, "assigned identities collapsed");
+        return true;
+    }
+}
+// ====
+// compileViaYul: also
+// ----
+// exerciseRecipientAliases(address,address), 2 quanta: Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x01, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Q00, 0x01, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x02, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Q00, 0x01, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// exerciseAssignedAliases(address,address), 2 quanta: Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x03, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, Q00, 0x01, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x04, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, Q00, 0x01, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Assigned(bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x03, #Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+// ~ emit Assigned(bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x04, #Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3

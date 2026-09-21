@@ -3,6 +3,7 @@
 // for the native coins, token units for ERC-20 assets).
 
 import { readFileSync } from "node:fs";
+import { protocolV2Config } from "./protocol-v2-config.js";
 import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
 
 /** Ladder policy for one ETH-leg asset. */
@@ -215,14 +216,11 @@ export function loadConfig(): Config {
     }),
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
     ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
-    qrlRpcUrl: env("MM_QRL_RPC_URL", "http://127.0.0.1:8545"),
-    ethChainId: envChainId("MM_ETH_CHAIN_ID", "11155111"),
-    qrlChainId: envChainId("MM_QRL_CHAIN_ID", "1337"),
-    // 2026-07-13 redeploy: HTLCv2 open-recipient locks (assign + release) on
-    // both legs (docs/DEPLOYMENTS.md). The MM does not prelock, so its own
-    // flow is unchanged; it just points at the new addresses.
-    ethHtlc: env("MM_ETH_HTLC", "0x910D5d4a7f2037c01F3B4C835167357e89909281"),
-    qrlHtlc: env("MM_QRL_HTLC", "Q238322ad2e8f935b4481fcc379779c31b84decb0"),
+    qrlRpcUrl: env("MM_QRL_RPC_URL", "https://qrlwallet.com/api/qrl-rpc/testnet"),
+    ethChainId: envChainId("MM_ETH_CHAIN_ID", protocolV2Config.ethChainId),
+    qrlChainId: envChainId("MM_QRL_CHAIN_ID", protocolV2Config.qrlChainId),
+    ethHtlc: env("MM_ETH_HTLC", protocolV2Config.ethHtlc),
+    qrlHtlc: env("MM_QRL_HTLC", protocolV2Config.qrlHtlc),
     ethPrivateKey: readRequiredSecret("MM_ETH_PRIVATE_KEY"),
     qrlHexseed: readRequiredSecret("MM_QRL_HEXSEED"),
     ordersPerDirection,
@@ -247,7 +245,7 @@ export function loadConfig(): Config {
     lockGraceS: envInt("MM_LOCK_GRACE_S", 30),
     initiatorWindowS: envInt("MM_INITIATOR_WINDOW_S", 7200),
     responderWindowS: envInt("MM_RESPONDER_WINDOW_S", 3600),
-    stateFile: env("MM_STATE_FILE", new URL("../data/state.json", import.meta.url).pathname),
+    stateFile: env("MM_STATE_FILE", new URL("../data/v3-private-state.json", import.meta.url).pathname),
     healthHost: env("MM_HEALTH_HOST", "127.0.0.1"),
     healthPort,
     healthStaleS: envInt("MM_HEALTH_STALE_S", 600),

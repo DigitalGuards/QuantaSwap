@@ -3,7 +3,7 @@
 // refund path, so it stays in localStorage until the swap reaches a
 // terminal state on both legs. The taker never holds the preimage.
 
-import { PRIMARY_ORDERBOOK_ID, type LegKey } from "../config";
+import { DEPLOYMENT_STORAGE_PREFIX, PRIMARY_ORDERBOOK_ID, type LegKey } from "../config";
 import { ethAssetSymbolOrNull, type EthAssetSymbol } from "./assetRegistry";
 import type { CreateOrderBody, MakerOrderAuthV1 } from "./orderbook";
 import type { FillIntentView } from "./orderbookClient";
@@ -85,8 +85,8 @@ export interface ActiveSwap {
   createdAt: number;
 }
 
-const KEY = "quantaswap.swap.v2";
-const LEGACY_KEY = "quantaswap.demo.v1";
+export const SWAP_STORAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.swap`;
+const KEY = SWAP_STORAGE_KEY;
 const BOOK_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 function persistedBookId(value: unknown): string {
@@ -100,50 +100,13 @@ export const initiatorLeg = (direction: Direction): LegKey =>
 export const responderLeg = (direction: Direction): LegKey =>
   direction === "eth->qrl" ? "qrl" : "eth";
 
-interface LegacyDemoSwap {
-  direction: Direction;
-  preimage: string;
-  hashlock: string;
-  fromAmount: string;
-  toAmount: string;
-  ethAccount: string;
-  qrlAccount: string;
-  initiatorTimeout: number;
-  responderTimeout: number;
-  createdAt: number;
-}
-
-function migrateLegacy(): ActiveSwap | null {
+export function hasLegacySwapState(): boolean {
   try {
-    const raw = localStorage.getItem(LEGACY_KEY);
-    if (!raw) return null;
-    const old = JSON.parse(raw) as LegacyDemoSwap;
-    const swap: ActiveSwap = {
-      role: "sandbox",
-      orderId: null,
-      bookId: PRIMARY_ORDERBOOK_ID,
-      takerToken: null,
-      direction: old.direction,
-      // The demo predates ERC-20 legs: always native ETH.
-      ethAsset: "ETH",
-      fromAmount: old.fromAmount,
-      toAmount: old.toAmount,
-      makerEthAccount: old.ethAccount,
-      makerQrlAccount: old.qrlAccount,
-      takerEthAccount: old.ethAccount,
-      takerQrlAccount: old.qrlAccount,
-      preimage: old.preimage,
-      hashlock: old.hashlock,
-      initiatorTimeout: old.initiatorTimeout,
-      responderTimeout: old.responderTimeout,
-      createdAt: old.createdAt,
-    };
-    localStorage.removeItem(LEGACY_KEY);
-    saveActiveSwap(swap);
-    return swap;
-  } catch {
-    return null;
-  }
+    return ["quantaswap.demo.v1", "quantaswap.swap.v2", "quantaswap.myorder.v1",
+      "quantaswap.signedorderstage.v1", "quantaswap.prelockstage.v1"].some(
+      key => localStorage.getItem(key) !== null,
+    );
+  } catch { return false; }
 }
 
 export function loadActiveSwap(): ActiveSwap | null {
@@ -160,7 +123,7 @@ export function loadActiveSwap(): ActiveSwap | null {
       swap.ethAsset = ethAssetSymbolOrNull(swap.ethAsset) ?? "ETH";
       return swap;
     }
-    return migrateLegacy();
+    return null;
   } catch {
     return null;
   }
@@ -233,7 +196,8 @@ export interface MyOrderRef {
   prelock: PrelockRef | null;
 }
 
-const ORDER_KEY = "quantaswap.myorder.v1";
+export const ORDER_STORAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.order`;
+const ORDER_KEY = ORDER_STORAGE_KEY;
 
 export function loadMyOrder(): MyOrderRef | null {
   try {
@@ -283,7 +247,7 @@ export interface SignedOrderStage {
   createdAt: number;
 }
 
-const SIGNED_ORDER_STAGE_KEY = "quantaswap.signedorderstage.v1";
+const SIGNED_ORDER_STAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.signedorderstage`;
 
 export function loadSignedOrderStage(): SignedOrderStage | null {
   try {
@@ -330,7 +294,8 @@ export interface PrelockStage extends PrelockRef {
   createdAt: number;
 }
 
-const STAGE_KEY = "quantaswap.prelockstage.v1";
+export const PRELOCK_STORAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.prelockstage`;
+const STAGE_KEY = PRELOCK_STORAGE_KEY;
 
 export function loadPrelockStage(): PrelockStage | null {
   try {

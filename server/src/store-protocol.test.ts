@@ -1,3 +1,4 @@
+import { protocolMessageBytes } from "./protocol-v2-wire.js";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,8 +6,8 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { shake256 } from "@noble/hashes/sha3.js";
 import {
-  SCHEME_TAG_TYPED,
-  computeTypedDataDigest,
+  SCHEME_TAG_MSG,
+  computeMessageDigest,
   type TypedDataPayload,
 } from "@qrlwallet/connect";
 import {
@@ -47,7 +48,9 @@ const shareToken = "cd".repeat(32);
 const zeroShareCommitment = `0x${"00".repeat(32)}`;
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(parts.reduce((size, part) => size + part.length, 0));
+  const output = new Uint8Array(
+    parts.reduce((size, part) => size + part.length, 0),
+  );
   let offset = 0;
   for (const part of parts) {
     output.set(part, offset);
@@ -69,7 +72,7 @@ function keypair(seedByte: number): {
   const secretKey = new Uint8Array(CryptoSecretKeyBytes);
   cryptoSignKeypair(new Uint8Array(32).fill(seedByte), publicKey, secretKey);
   const address = `Q${Buffer.from(
-    shake256(concatBytes(descriptor, publicKey), { dkLen: 20 }),
+    shake256(concatBytes(descriptor, publicKey), { dkLen: 64 }),
   ).toString("hex")}`;
   return { publicKey, secretKey, address };
 }
@@ -85,10 +88,10 @@ function signedAuth(
   const signature = new Uint8Array(CryptoBytes);
   cryptoSignSignature(
     signature,
-    computeTypedDataDigest(payload),
+    computeMessageDigest(protocolMessageBytes(payload)),
     signer.secretKey,
     false,
-    SCHEME_TAG_TYPED,
+    SCHEME_TAG_MSG,
   );
   return {
     ...base,
@@ -126,8 +129,8 @@ function makeOrder(
     visibility,
   };
   const baseAuth = {
-    version: "1" as const,
-    scheme: "qrl-sign-typed-v1" as const,
+    version: "2" as const,
+    scheme: "qrl-sign-message-v2" as const,
     issuedAt: options.issuedAt ?? now - 10,
     expiresAt: options.expiresAt ?? now + 3600,
     nonce: orderNonce,
@@ -144,7 +147,8 @@ function makeOrder(
     asset: "ETH",
     fromAmount,
     toAmount: "1000000000000000",
-    makerEthAccount: "eip155:11155111:0x1111111111111111111111111111111111111111",
+    makerEthAccount:
+      "eip155:11155111:0x1111111111111111111111111111111111111111",
     makerQrlAccount: maker.address,
     visibility,
     allowedTakerEth: "",
@@ -159,7 +163,11 @@ function makeOrder(
     shareTokenCommitment: baseAuth.shareTokenCommitment,
     ...ORDER_V1_DEPLOYMENT,
   };
-  const auth = signedAuth(baseAuth, buildOrderV1Payload(terms, baseAuth.scheme), maker);
+  const auth = signedAuth(
+    baseAuth,
+    buildOrderV1Payload(terms, baseAuth.scheme),
+    maker,
+  );
   return verifyOrderV1(body, auth, { now });
 }
 
@@ -207,8 +215,8 @@ function makeFill(
     releaseCommitment,
   };
   const intentBase = {
-    version: "1" as const,
-    scheme: "qrl-sign-typed-v1" as const,
+    version: "2" as const,
+    scheme: "qrl-sign-message-v2" as const,
     issuedAt: timing.intentIssuedAt ?? now - 5,
     expiresAt: timing.intentExpiresAt ?? now + 115,
     nonce: requestNonce,
@@ -247,8 +255,8 @@ function makeFill(
     responderTimeout: fillIssuedAt + 3600,
   };
   const fillBase = {
-    version: "1" as const,
-    scheme: "qrl-sign-typed-v1" as const,
+    version: "2" as const,
+    scheme: "qrl-sign-message-v2" as const,
     issuedAt: fillIssuedAt,
     expiresAt: timing.fillExpiresAt ?? fillIssuedAt + 60,
     nonce: nonce(fillNonceByte),
@@ -281,10 +289,13 @@ function makeCancel(
   order: VerifiedOrderV1,
   cancelNonceByte = 45,
 ): { cancel: CancelV1Body; auth: ProtocolAuthV1 } {
-  const cancel: CancelV1Body = { orderDigest: order.orderDigest, reasonCode: 1 };
+  const cancel: CancelV1Body = {
+    orderDigest: order.orderDigest,
+    reasonCode: 1,
+  };
   const base = {
-    version: "1" as const,
-    scheme: "qrl-sign-typed-v1" as const,
+    version: "2" as const,
+    scheme: "qrl-sign-message-v2" as const,
     issuedAt: now,
     expiresAt: order.auth.expiresAt,
     nonce: nonce(cancelNonceByte),
@@ -340,35 +351,47 @@ describe("single-use signed order store", () => {
     source.subscribeFederation(() => {
       source.federationSnapshot();
     });
-    source.applyFederationEvent({
-      kind: "order-v1",
-      payload: { order: order.order, auth: order.auth },
-    }, "origin");
+    source.applyFederationEvent(
+      {
+        kind: "order-v2",
+        payload: { order: order.order, auth: order.auth },
+      },
+      "origin",
+    );
     for (const artifact of artifacts) {
-      source.applyFederationEvent({
-        kind: "fill-intent-v1",
+      source.applyFederationEvent(
+        {
+          kind: "fill-intent-v2",
+          payload: {
+            orderId: order.orderId,
+            intent: artifact.intentBody,
+            auth: artifact.intentAuth,
+          },
+        },
+        "origin",
+      );
+    }
+    source.applyFederationEvent(
+      {
+        kind: "fill-v2",
         payload: {
           orderId: order.orderId,
-          intent: artifact.intentBody,
-          auth: artifact.intentAuth,
+          fill: selected.fillBody,
+          auth: selected.fillAuth,
+          intent: selected.intentBody,
+          intentAuth: selected.intentAuth,
         },
-      }, "origin");
-    }
-    source.applyFederationEvent({
-      kind: "fill-v1",
-      payload: {
-        orderId: order.orderId,
-        fill: selected.fillBody,
-        auth: selected.fillAuth,
-        intent: selected.intentBody,
-        intentAuth: selected.intentAuth,
       },
-    }, "origin");
+      "origin",
+    );
     assert.equal(source.get(order.orderId).status, "locking");
 
     const snapshot = source.federationSnapshot();
-    assert.equal(snapshot.filter((event) => event.kind === "fill-intent-v1").length, 8);
-    assert.equal(snapshot[0]?.kind, "order-v1");
+    assert.equal(
+      snapshot.filter((event) => event.kind === "fill-intent-v2").length,
+      8,
+    );
+    assert.equal(snapshot[0]?.kind, "order-v2");
 
     const receiverFile = storeFile();
     const receiver = new OrderStore(receiverFile);
@@ -409,7 +432,8 @@ describe("single-use signed order store", () => {
           } catch (error) {
             if (
               error instanceof ApiError &&
-              (error.code === "federation_dependency" || error.code === "transient_capacity")
+              (error.code === "federation_dependency" ||
+                error.code === "transient_capacity")
             ) {
               return "deferred";
             }
@@ -429,7 +453,10 @@ describe("single-use signed order store", () => {
       cycle = 1;
       await sync.syncAll();
       assert.equal(receiver.get(order.orderId).status, "locking");
-      assert.equal(new OrderStore(receiverFile).get(order.orderId).status, "locking");
+      assert.equal(
+        new OrderStore(receiverFile).get(order.orderId).status,
+        "locking",
+      );
     } finally {
       globalThis.fetch = originalFetch;
       Date.now = originalNow;
@@ -453,7 +480,10 @@ describe("single-use signed order store", () => {
       () => new OrderStore(legacyFile),
       /more than 64 portable public orders/,
     );
-    assert.equal((JSON.parse(readFileSync(legacyFile, "utf8")) as unknown[]).length, 65);
+    assert.equal(
+      (JSON.parse(readFileSync(legacyFile, "utf8")) as unknown[]).length,
+      65,
+    );
   });
 
   it("caps one federation source while preserving capacity for another peer and local maker", () => {
@@ -514,7 +544,11 @@ describe("single-use signed order store", () => {
 
     assert.throws(
       () =>
-        store.createVerified(order, { makerToken: "00".repeat(32) }, "203.0.113.40"),
+        store.createVerified(
+          order,
+          { makerToken: "00".repeat(32) },
+          "203.0.113.40",
+        ),
       (error) => error instanceof ApiError && error.status === 401,
     );
     assert.throws(
@@ -529,7 +563,11 @@ describe("single-use signed order store", () => {
 
     const imported = new OrderStore(storeFile());
     imported.importVerifiedOrder(order);
-    const recovered = imported.createVerified(order, capabilities, "203.0.113.39");
+    const recovered = imported.createVerified(
+      order,
+      capabilities,
+      "203.0.113.39",
+    );
     assert.equal(recovered.order.id, order.orderId);
     assert.equal(recovered.makerToken, makerToken);
   });
@@ -599,7 +637,10 @@ describe("single-use signed order store", () => {
     });
     assert.equal(released.released, true);
     assert.equal("releaseSecret" in released, false);
-    assert.equal(store.federationSnapshot().some((event) => event.kind === "release-v1"), true);
+    assert.equal(
+      store.federationSnapshot().some((event) => event.kind === "release-v2"),
+      true,
+    );
 
     const hydrated = new OrderStore(file).get(order.orderId);
     assert.equal(hydrated.status, "locking");
@@ -622,12 +663,12 @@ describe("single-use signed order store", () => {
       fillExpiresAt: now + 300,
     });
     const source = new OrderStore(file);
-    source.createVerified(
-      order,
-      createCapabilities(order),
-      "203.0.113.47",
+    source.createVerified(order, createCapabilities(order), "203.0.113.47");
+    source.importFillIntent(
+      order.orderId,
+      artifacts.intentBody,
+      artifacts.intentAuth,
     );
-    source.importFillIntent(order.orderId, artifacts.intentBody, artifacts.intentAuth);
     const verifiedIntent = verifyFillIntentV1(
       artifacts.intentBody,
       artifacts.intentAuth,
@@ -667,7 +708,12 @@ describe("single-use signed order store", () => {
     const artifacts = makeFill(now, order);
     const cancellation = makeCancel(now, order);
     store.createVerified(order, createCapabilities(order));
-    store.submitFillIntent(order.orderId, artifacts.intentBody, artifacts.intentAuth, "taker");
+    store.submitFillIntent(
+      order.orderId,
+      artifacts.intentBody,
+      artifacts.intentAuth,
+      "taker",
+    );
     store.cancelSigned(order.orderId, cancellation.cancel, cancellation.auth);
     store.fillOrder(
       order.orderId,
@@ -681,10 +727,13 @@ describe("single-use signed order store", () => {
     assert.equal(quarantined.equivocated, true);
     assert.equal(quarantined.status, "cancelled");
     assert.equal(quarantined.conflictDigests?.length, 1);
-    assert.equal(store.listOpen().some((candidate) => candidate.id === order.orderId), false);
+    assert.equal(
+      store.listOpen().some((candidate) => candidate.id === order.orderId),
+      false,
+    );
     const kinds = store.federationSnapshot().map((event) => event.kind);
-    assert.equal(kinds.includes("cancel-v1"), true);
-    assert.equal(kinds.includes("fill-v1"), true);
+    assert.equal(kinds.includes("cancel-v2"), true);
+    assert.equal(kinds.includes("fill-v2"), true);
 
     const hydrated = new OrderStore(file).get(order.orderId);
     assert.equal(hydrated.equivocated, true);
@@ -703,7 +752,10 @@ describe("single-use signed order store", () => {
     const result = store.importVerifiedOrder(second);
     assert.equal(result.equivocated, true);
     assert.equal(result.conflictDigests?.includes(second.orderDigest), true);
-    assert.equal(store.listOpen().some((candidate) => candidate.id === first.orderId), false);
+    assert.equal(
+      store.listOpen().some((candidate) => candidate.id === first.orderId),
+      false,
+    );
   });
 
   it("retains terminal evidence for the referenced OrderV1 variant in either arrival order", () => {
@@ -752,11 +804,15 @@ describe("single-use signed order store", () => {
     assert.equal(right.equivocated, true);
     assert.equal(left.fillDigest, right.fillDigest);
     assert.equal(
-      firstThenSecond.federationSnapshot().filter((event) => event.kind === "order-v1").length,
+      firstThenSecond
+        .federationSnapshot()
+        .filter((event) => event.kind === "order-v2").length,
       2,
     );
     assert.equal(
-      secondThenFirst.federationSnapshot().some((event) => event.kind === "fill-v1"),
+      secondThenFirst
+        .federationSnapshot()
+        .some((event) => event.kind === "fill-v2"),
       true,
     );
   });
@@ -764,7 +820,10 @@ describe("single-use signed order store", () => {
   it("keeps private signed orders out of federation", () => {
     const now = Math.floor(Date.now() / 1000);
     const store = new OrderStore(storeFile());
-    const privateOrder = makeOrder(now, { nonceByte: 71, visibility: "private" });
+    const privateOrder = makeOrder(now, {
+      nonceByte: 71,
+      visibility: "private",
+    });
     store.createVerified(privateOrder, createCapabilities(privateOrder));
     assert.deepEqual(store.federationSnapshot(), []);
     assert.throws(
@@ -782,7 +841,12 @@ describe("single-use signed order store", () => {
     const order = makeOrder(now, { nonceByte: 81 });
     const artifacts = makeFill(now, order);
     source.createVerified(order, createCapabilities(order));
-    source.submitFillIntent(order.orderId, artifacts.intentBody, artifacts.intentAuth, "taker");
+    source.submitFillIntent(
+      order.orderId,
+      artifacts.intentBody,
+      artifacts.intentAuth,
+      "taker",
+    );
     const filled = source.fillOrder(
       order.orderId,
       artifacts.fillBody,
@@ -797,7 +861,7 @@ describe("single-use signed order store", () => {
 
     assert.deepEqual(
       events.map((event) => event.kind),
-      ["order-v1", "fill-intent-v1", "fill-v1", "release-v1"],
+      ["order-v2", "fill-intent-v2", "fill-v2", "release-v2"],
     );
     for (const event of events) mirror.applyFederationEvent(event);
     for (const event of events) mirror.applyFederationEvent(event);
@@ -813,8 +877,12 @@ describe("single-use signed order store", () => {
     const initial = new OrderStore(file);
     const order = makeOrder(now, { nonceByte: 91 });
     initial.createVerified(order, createCapabilities(order));
-    const rows = JSON.parse(readFileSync(file, "utf8")) as Array<Record<string, unknown>>;
-    const rawAuth = rows[0]?.["makerAuth"] as Record<string, unknown> | undefined;
+    const rows = JSON.parse(readFileSync(file, "utf8")) as Array<
+      Record<string, unknown>
+    >;
+    const rawAuth = rows[0]?.["makerAuth"] as
+      | Record<string, unknown>
+      | undefined;
     delete rawAuth?.["makerTokenCommitment"];
     delete rawAuth?.["shareTokenCommitment"];
     writeFileSync(file, JSON.stringify(rows));

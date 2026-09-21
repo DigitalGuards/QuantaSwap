@@ -5,7 +5,12 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import { makeDeploymentIdentity } from "./deployment.js";
-import { NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc.js";
+import {
+  NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
+  SwapStatus,
+  type LegState,
+} from "./htlc.js";
 import {
   canContinueWithoutBook,
   decide,
@@ -20,7 +25,7 @@ import {
 const NOW = 1_800_000_000;
 const T1 = NOW + 7200;
 const T2 = NOW + 3600;
-const MY_QRL = "Qcccccccccccccccccccccccccccccccccccccccc";
+const MY_QRL = `Q${"c".repeat(128)}`;
 const TAKER_ETH = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const AMOUNT = 2n * 10n ** 18n;
 const ZERO32 = `0x${"0".repeat(64)}`;
@@ -28,7 +33,7 @@ const DEPLOYMENT = makeDeploymentIdentity({
   ethChainId: "11155111",
   qrlChainId: "1337",
   ethHtlc: `0x${"1".repeat(40)}`,
-  qrlHtlc: `Q${"2".repeat(40)}`,
+  qrlHtlc: `Q${"2".repeat(128)}`,
 });
 
 function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
@@ -48,7 +53,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     responderTimeout: T2,
     announcedAt: null,
     takerEthAccount: TAKER_ETH,
-    takerQrlAccount: `Q${"d".repeat(40)}`,
+    takerQrlAccount: `Q${"d".repeat(128)}`,
     lockSentAt: null,
     claimSentAt: null,
     refundSentAt: null,
@@ -75,7 +80,7 @@ const leg = (status: number, overrides: Partial<LegState> = {}): LegState => ({
   status: status as LegState["status"],
   initiator: TAKER_ETH,
   recipient: `0x${MY_QRL.slice(1)}`,
-  token: NATIVE_TOKEN,
+  token: QRL_NATIVE_TOKEN,
   amount: AMOUNT,
   timeout: T2,
   preimage: ZERO32,
@@ -94,7 +99,7 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     rConfirmed: null,
     expectedRecipient: MY_QRL,
     expectedAmountWei: AMOUNT,
-    expectedToken: NATIVE_TOKEN,
+    expectedToken: QRL_NATIVE_TOKEN,
     nowS: NOW,
     resendAfterS: 240,
     claimSafetyS: 600,
@@ -113,12 +118,12 @@ function fillIntent(
     intent: {
       orderDigest: `0x${"a".repeat(64)}`,
       takerEthAccount: TAKER_ETH,
-      takerQrlAccount: `Q${"d".repeat(40)}`,
+      takerQrlAccount: `Q${"d".repeat(128)}`,
       releaseCommitment: `0x${"b".repeat(64)}`,
     },
     auth: {
-      version: "1",
-      scheme: "qrl-eip712-v4",
+      version: "2",
+      scheme: "qrl-sign-message-v2",
       issuedAt: NOW - 10,
       expiresAt: NOW + 100,
       nonce: `0x${"c".repeat(64)}`,
@@ -142,7 +147,8 @@ describe("portable fill intent selection", () => {
       auth: { ...fillIntent("1", NOW + 2).auth, issuedAt: NOW - 10 },
     });
     assert.equal(
-      earliestValidFillIntent([later, earliest], orderDigest, NOW, () => true)?.intentDigest,
+      earliestValidFillIntent([later, earliest], orderDigest, NOW, () => true)
+        ?.intentDigest,
       earliest.intentDigest,
     );
   });
@@ -170,7 +176,10 @@ describe("portable fill intent selection", () => {
       auth: { ...fillIntent("3", NOW + 2).auth, issuedAt: NOW + 1 },
     });
     const crossOrder = fillIntent("4", NOW + 3, {
-      intent: { ...fillIntent("4", NOW + 3).intent, orderDigest: `0x${"f".repeat(64)}` },
+      intent: {
+        ...fillIntent("4", NOW + 3).intent,
+        orderDigest: `0x${"f".repeat(64)}`,
+      },
     });
     const valid = fillIntent("5", NOW + 4);
     const selected = earliestValidFillIntent(
@@ -190,8 +199,14 @@ describe("listing lifecycle", () => {
   });
 
   it("forgets an order that vanished before any funds moved", () => {
-    assert.equal(decide(input({ bookStatus: "gone", iState: leg(SwapStatus.None) })), "abort");
-    assert.equal(decide(input({ bookStatus: "cancelled", iState: leg(SwapStatus.None) })), "abort");
+    assert.equal(
+      decide(input({ bookStatus: "gone", iState: leg(SwapStatus.None) })),
+      "abort",
+    );
+    assert.equal(
+      decide(input({ bookStatus: "cancelled", iState: leg(SwapStatus.None) })),
+      "abort",
+    );
   });
 
   it("keeps managing a vanished order once funds are on chain", () => {
@@ -210,7 +225,12 @@ describe("listing lifecycle", () => {
       initiatorTimeout: null,
       responderTimeout: null,
     });
-    assert.equal(decide(input({ bookStatus: "gone", managed: neverSelected, iState: null })), "abort");
+    assert.equal(
+      decide(
+        input({ bookStatus: "gone", managed: neverSelected, iState: null }),
+      ),
+      "abort",
+    );
   });
 });
 
@@ -231,10 +251,7 @@ describe("coordination outage continuity", () => {
       canContinueWithoutBook(managed({ lockSentAt: NOW - 10 }), null),
       true,
     );
-    assert.equal(
-      canContinueWithoutBook(managed(), leg(SwapStatus.Open)),
-      true,
-    );
+    assert.equal(canContinueWithoutBook(managed(), leg(SwapStatus.Open)), true);
   });
 });
 
@@ -260,15 +277,26 @@ describe("locking our leg", () => {
   });
 
   it("does not resend a fresh lock, but retries a stale one", () => {
-    assert.equal(decide(input({ managed: managed({ lockSentAt: NOW - 60 }) })), "wait");
-    assert.equal(decide(input({ managed: managed({ lockSentAt: NOW - 600 }) })), "lock");
+    assert.equal(
+      decide(input({ managed: managed({ lockSentAt: NOW - 60 }) })),
+      "wait",
+    );
+    assert.equal(
+      decide(input({ managed: managed({ lockSentAt: NOW - 600 }) })),
+      "lock",
+    );
   });
 
   it("waits out the announce grace before locking, so an instant walk-away can release", () => {
     const justAnnounced = managed({ announcedAt: NOW - 10 });
-    assert.equal(decide(input({ managed: justAnnounced, lockGraceS: 30 })), "wait");
     assert.equal(
-      decide(input({ managed: managed({ announcedAt: NOW - 40 }), lockGraceS: 30 })),
+      decide(input({ managed: justAnnounced, lockGraceS: 30 })),
+      "wait",
+    );
+    assert.equal(
+      decide(
+        input({ managed: managed({ announcedAt: NOW - 40 }), lockGraceS: 30 }),
+      ),
       "lock",
     );
   });
@@ -279,8 +307,26 @@ describe("locking our leg", () => {
 
   it("retains a lock attempt past t1 while its chain inclusion remains uncertain", () => {
     const zombie = managed({ lockSentAt: NOW - 6000 });
-    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T2 + 100 })), "wait");
-    assert.equal(decide(input({ managed: zombie, iState: leg(SwapStatus.None), nowS: T1 + 100 })), "wait");
+    assert.equal(
+      decide(
+        input({
+          managed: zombie,
+          iState: leg(SwapStatus.None),
+          nowS: T2 + 100,
+        }),
+      ),
+      "wait",
+    );
+    assert.equal(
+      decide(
+        input({
+          managed: zombie,
+          iState: leg(SwapStatus.None),
+          nowS: T1 + 100,
+        }),
+      ),
+      "wait",
+    );
   });
 });
 
@@ -290,12 +336,18 @@ describe("taker release", () => {
   });
 
   it("never re-locks a released take even after a stale lock attempt", () => {
-    const x = input({ released: true, managed: managed({ lockSentAt: NOW - 600 }) });
+    const x = input({
+      released: true,
+      managed: managed({ lockSentAt: NOW - 600 }),
+    });
     assert.equal(decide(x), "wait");
   });
 
   it("treats a persisted release observation as sticky", () => {
-    const released = portableManaged({ fillAcknowledged: true, releaseObserved: true });
+    const released = portableManaged({
+      fillAcknowledged: true,
+      releaseObserved: true,
+    });
     assert.equal(decide(input({ managed: released })), "abort");
 
     const attempted = portableManaged({
@@ -307,7 +359,10 @@ describe("taker release", () => {
   });
 
   it("retains a released record while RPC cannot exclude initiator exposure", () => {
-    const released = portableManaged({ fillAcknowledged: true, releaseObserved: true });
+    const released = portableManaged({
+      fillAcknowledged: true,
+      releaseObserved: true,
+    });
     assert.equal(decide(input({ managed: released, iState: null })), "wait");
   });
 
@@ -329,8 +384,10 @@ describe("taker release", () => {
 });
 
 describe("claiming the taker's lock (irreversible)", () => {
-  const lockedInputs = (rConfirmed: LegState | null, rState: LegState | null = leg(SwapStatus.Open)) =>
-    input({ iState: leg(SwapStatus.Open), rState, rConfirmed });
+  const lockedInputs = (
+    rConfirmed: LegState | null,
+    rState: LegState | null = leg(SwapStatus.Open),
+  ) => input({ iState: leg(SwapStatus.Open), rState, rConfirmed });
 
   it("claims a depth-confirmed, exactly-as-agreed lock", () => {
     assert.equal(decide(lockedInputs(leg(SwapStatus.Open))), "claim");
@@ -364,7 +421,9 @@ describe("claiming the taker's lock (irreversible)", () => {
   });
 
   it("accepts hex/Q-prefix and case differences in the recipient", () => {
-    const shouted = leg(SwapStatus.Open, { recipient: `0x${MY_QRL.slice(1).toUpperCase()}` });
+    const shouted = leg(SwapStatus.Open, {
+      recipient: `0x${MY_QRL.slice(1).toUpperCase()}`,
+    });
     assert.equal(decide(lockedInputs(shouted, shouted)), "claim");
   });
 
@@ -384,7 +443,11 @@ describe("claiming the taker's lock (irreversible)", () => {
 
   it("never reveals the secret before our own leg is locked", () => {
     const lock = leg(SwapStatus.Open);
-    const x = input({ iState: leg(SwapStatus.None), rState: lock, rConfirmed: lock });
+    const x = input({
+      iState: leg(SwapStatus.None),
+      rState: lock,
+      rConfirmed: lock,
+    });
     assert.notEqual(decide(x), "claim");
   });
 });
@@ -394,7 +457,11 @@ describe("claiming the taker's lock on a token pair (expectedToken gate)", () =>
   const USDC_AMOUNT = 5_000_000n; // 5 USDC in 6-decimal base units
   const tokenInput = (rConfirmed: LegState | null): DecideInput =>
     input({
-      managed: managed({ direction: "qrl->eth", asset: "USDC", toAmount: USDC_AMOUNT.toString() }),
+      managed: managed({
+        direction: "qrl->eth",
+        asset: "USDC",
+        toAmount: USDC_AMOUNT.toString(),
+      }),
       expectedToken: USDC,
       expectedAmountWei: USDC_AMOUNT,
       iState: leg(SwapStatus.Open),
@@ -408,17 +475,26 @@ describe("claiming the taker's lock on a token pair (expectedToken gate)", () =>
   });
 
   it("accepts case differences in the escrowed token address", () => {
-    const good = leg(SwapStatus.Open, { token: USDC.toLowerCase(), amount: USDC_AMOUNT });
+    const good = leg(SwapStatus.Open, {
+      token: USDC.toLowerCase(),
+      amount: USDC_AMOUNT,
+    });
     assert.equal(decide(tokenInput(good)), "claim");
   });
 
   it("never claims a native lock when a token was agreed", () => {
-    const bad = leg(SwapStatus.Open, { token: NATIVE_TOKEN, amount: USDC_AMOUNT });
+    const bad = leg(SwapStatus.Open, {
+      token: NATIVE_TOKEN,
+      amount: USDC_AMOUNT,
+    });
     assert.equal(decide(tokenInput(bad)), "wait");
   });
 
   it("never claims a different token", () => {
-    const bad = leg(SwapStatus.Open, { token: SCAM_TOKEN, amount: USDC_AMOUNT });
+    const bad = leg(SwapStatus.Open, {
+      token: SCAM_TOKEN,
+      amount: USDC_AMOUNT,
+    });
     assert.equal(decide(tokenInput(bad)), "wait");
   });
 
@@ -437,8 +513,14 @@ describe("claiming the taker's lock on a token pair (expectedToken gate)", () =>
 
 describe("refund and settlement", () => {
   it("refunds an open lock only once past our timeout", () => {
-    assert.equal(decide(input({ iState: leg(SwapStatus.Open), nowS: T1 })), "refund");
-    assert.equal(decide(input({ iState: leg(SwapStatus.Open), nowS: T1 - 10 })), "wait");
+    assert.equal(
+      decide(input({ iState: leg(SwapStatus.Open), nowS: T1 })),
+      "refund",
+    );
+    assert.equal(
+      decide(input({ iState: leg(SwapStatus.Open), nowS: T1 - 10 })),
+      "wait",
+    );
   });
 
   it("settles when both legs are terminal", () => {
@@ -558,8 +640,14 @@ describe("refill policy", () => {
   });
 
   it("scales the target by listings per rung", () => {
-    assert.equal(shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 2 }), true);
-    assert.equal(shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 4 }), false);
+    assert.equal(
+      shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 2 }),
+      true,
+    );
+    assert.equal(
+      shouldPost({ ...base, ordersPerLevel: 2, myOpenCount: 4 }),
+      false,
+    );
   });
 
   it("stops when in-flight exposure is maxed (griefing cap)", () => {
@@ -596,6 +684,9 @@ describe("refill policy, 6-decimal inventory (USDC)", () => {
   });
 
   it("stops when the ETH gas budget is below its reserve, tokens notwithstanding", () => {
-    assert.equal(shouldPost({ ...base, gasBalanceWei: 4n * 10n ** 16n }), false);
+    assert.equal(
+      shouldPost({ ...base, gasBalanceWei: 4n * 10n ** 16n }),
+      false,
+    );
   });
 });

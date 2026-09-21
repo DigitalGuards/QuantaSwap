@@ -3,6 +3,7 @@
 // source and never enter the signed payload.
 
 import {
+  DEPLOYMENT_STORAGE_PREFIX,
   ORDERBOOK_MIRRORS,
   PRIMARY_ORDERBOOK_ID,
   type OrderbookMirror,
@@ -95,7 +96,7 @@ export interface QuarantineEventSource {
   ): void;
 }
 
-const QUARANTINE_STORAGE_KEY = "quantaswap.orderbook.quarantines.v1";
+export const QUARANTINE_STORAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.orderbook-quarantines`;
 const PORTABLE_ORDER_ID_RE = /^[0-9a-f]{64}$/;
 const MAX_RETAINED_QUARANTINES = 1024;
 const QUARANTINE_RETENTION_MS = 49 * 60 * 60 * 1000;

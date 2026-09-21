@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DEPLOYMENT_STORAGE_PREFIX } from "../config";
 import type { MakerOrderAuthV1, OrderView } from "./orderbook";
 import {
   FederatedOrderBook,
@@ -12,8 +13,8 @@ const DIGEST_A = `0x${"aa".repeat(32)}`;
 const DIGEST_B = `0x${"bb".repeat(32)}`;
 
 const auth = (signature = "valid"): MakerOrderAuthV1 => ({
-  version: "1",
-  scheme: "qrl-sign-typed-v1",
+  version: "2",
+  scheme: "qrl-sign-message-v2",
   issuedAt: 10,
   expiresAt: 20,
   nonce: `0x${"11".repeat(32)}`,
@@ -31,7 +32,7 @@ const row = (overrides: Partial<OrderView> = {}): OrderView => ({
   fromAmount: "1",
   toAmount: "2",
   makerEthAccount: `0x${"22".repeat(20)}`,
-  makerQrlAccount: `Q${"33".repeat(20)}`,
+  makerQrlAccount: `Q${"33".repeat(64)}`,
   status: "open",
   takerEthAccount: null,
   takerQrlAccount: null,
@@ -800,7 +801,7 @@ describe("federated snapshot and SSE transport", () => {
 
   it("bounds and expires persisted sticky quarantines", () => {
     const now = 1_800_000_000_000;
-    const storageKey = "quantaswap.orderbook.quarantines.v1";
+    const storageKey = `${DEPLOYMENT_STORAGE_PREFIX}.orderbook-quarantines`;
     const expiredId = "ff".repeat(32);
     const entries = Array.from({ length: 1_030 }, (_, index) => ({
       id: index.toString(16).padStart(64, "0"),

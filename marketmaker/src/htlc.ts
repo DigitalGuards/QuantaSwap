@@ -3,6 +3,15 @@
 // order book coordinates, the chain decides.
 
 import { Interface } from "ethers";
+import { decodeQrvmSwap, encodeQrvmHtlc } from "./qrvmHtlc.js";
+import { protocolV2Config } from "./protocol-v2-config.js";
+import {
+  QIP55_QRVM_ABI_ERROR,
+  QRVM_ZERO_ADDRESS,
+  assertQip55ReadReady,
+  isQip55QrlAddress,
+  qrlOrEthHex,
+} from "./qip55.js";
 
 export const HTLC_ABI = [
   "function lockNative(bytes32 hashlock, address recipient, uint256 timeout) payable",
@@ -28,8 +37,9 @@ const erc20 = new Interface(ERC20_ABI);
 export const SwapStatus = { None: 0, Open: 1, Claimed: 2, Refunded: 3 } as const;
 export type SwapStatusValue = (typeof SwapStatus)[keyof typeof SwapStatus];
 
-/** The native-coin sentinel in the HTLC's `token` field (address(0)). */
+/** Ethereum address(0). QRL QRVM64 uses QRL_NATIVE_TOKEN. */
 export const NATIVE_TOKEN = `0x${"0".repeat(40)}`;
+export const QRL_NATIVE_TOKEN = QRVM_ZERO_ADDRESS;
 
 export interface LegState {
   status: SwapStatusValue;
@@ -49,8 +59,7 @@ export interface LegState {
 
 export type LegKey = "eth" | "qrl";
 
-export const qToHex = (addr: string): string =>
-  addr.startsWith("Q") || addr.startsWith("Z") ? `0x${addr.slice(1)}` : addr;
+export const qToHex = (addr: string): string => qrlOrEthHex(addr);
 
 export const sameAddr = (a: string, b: string): boolean =>
   qToHex(a).toLowerCase() === qToHex(b).toLowerCase();
@@ -94,6 +103,20 @@ export async function getChainId(leg: LegRpc): Promise<string> {
   return result;
 }
 
+export async function assertQrlRuntime(leg: LegRpc): Promise<void> {
+  if (leg.ns !== "qrl") return;
+  assertQip55ReadReady(leg.htlc);
+  const [chain, block] = await Promise.all([
+    getChainId(leg),
+    rpc(leg.url, "qrl_getBlockByNumber", ["0x0", false], leg.timeoutMs),
+  ]);
+  if (
+    BigInt(chain) !== BigInt(protocolV2Config.qrlChainId) ||
+    typeof block !== "object" || block === null ||
+    !("hash" in block) || block.hash !== protocolV2Config.qrlGenesisHash
+  ) throw new Error("QRL RPC chain or genesis mismatch; refusing v3 operations");
+}
+
 /** Simulate exact HTLC calldata from the real transaction sender against
  * latest state. Claim callers must treat any RPC or EVM error as fatal and
  * must not broadcast the secret-bearing calldata. The deliberately generic
@@ -105,6 +128,7 @@ export async function simulateHtlcCall(
   data: string,
   valueWei = 0n,
 ): Promise<void> {
+  await assertQrlRuntime(leg);
   try {
     const result = await rpc(
       leg.url,
@@ -156,13 +180,17 @@ export async function getSwapState(
   hashlock: string,
   blockTag = "latest",
 ): Promise<LegState> {
-  const data = iface.encodeFunctionData("getSwap", [hashlock]);
+  await assertQrlRuntime(leg);
+  const data = leg.ns === "qrl"
+    ? encodeQrvmHtlc("getSwap", [hashlock])
+    : iface.encodeFunctionData("getSwap", [hashlock]);
   const raw = (await rpc(
     leg.url,
     `${leg.ns}_call`,
     [{ to: leg.htlc, data }, blockTag],
     leg.timeoutMs,
   )) as string;
+  if (leg.ns === "qrl") return decodeQrvmSwap(raw);
   const [swap] = iface.decodeFunctionResult("getSwap", raw) as unknown as [
     {
       initiator: string;
@@ -192,13 +220,22 @@ export async function getConfirmedSwapState(
   hashlock: string,
   confirmations: number,
 ): Promise<LegState> {
+  if (leg.ns === "qrl") assertQip55ReadReady(leg.htlc);
   const head = await getBlockNumber(leg);
   const depth = Math.max(0, head - confirmations);
   return getSwapState(leg, hashlock, `0x${depth.toString(16)}`);
 }
 
-export const encodeLock = (hashlock: string, recipient: string, timeout: number): string =>
-  iface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+export const encodeLock = (
+  leg: LegKey,
+  hashlock: string,
+  recipient: string,
+  timeout: number,
+): string => {
+  if (leg === "qrl") return encodeQrvmHtlc("lockNative", [hashlock, recipient, timeout]);
+  if (isQip55QrlAddress(recipient)) throw new Error(QIP55_QRVM_ABI_ERROR);
+  return iface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+};
 
 /** lockToken calldata: value rides in the calldata (msg.value 0) after an
  *  exact-amount approval. */
@@ -208,8 +245,16 @@ export const encodeLockToken = (
   token: string,
   amount: bigint,
   timeout: number,
-): string =>
-  iface.encodeFunctionData("lockToken", [hashlock, qToHex(recipient), token, amount, timeout]);
+): string => {
+  if (isQip55QrlAddress(recipient)) throw new Error(QIP55_QRVM_ABI_ERROR);
+  return iface.encodeFunctionData("lockToken", [
+    hashlock,
+    qToHex(recipient),
+    token,
+    amount,
+    timeout,
+  ]);
+};
 
 export const encodeApprove = (spender: string, amount: bigint): string =>
   erc20.encodeFunctionData("approve", [spender, amount]);
@@ -223,6 +268,7 @@ export async function erc20Allowance(
   owner: string,
   spender: string,
 ): Promise<bigint> {
+  if (leg.ns !== "eth") throw new Error("ERC-20 allowances require the Ethereum leg");
   const data = erc20.encodeFunctionData("allowance", [owner, spender]);
   const raw = (await rpc(
     leg.url,
@@ -235,6 +281,7 @@ export async function erc20Allowance(
 }
 
 export async function erc20BalanceOf(leg: LegRpc, token: string, holder: string): Promise<bigint> {
+  if (leg.ns !== "eth") throw new Error("ERC-20 balances require the Ethereum leg");
   const data = erc20.encodeFunctionData("balanceOf", [holder]);
   const raw = (await rpc(
     leg.url,
@@ -246,8 +293,12 @@ export async function erc20BalanceOf(leg: LegRpc, token: string, holder: string)
   return value;
 }
 
-export const encodeClaim = (hashlock: string, preimage: string): string =>
-  iface.encodeFunctionData("claim", [hashlock, preimage]);
+export const encodeClaim = (leg: LegKey, hashlock: string, preimage: string): string => {
+  if (leg === "qrl") return encodeQrvmHtlc("claim", [hashlock, preimage]);
+  return iface.encodeFunctionData("claim", [hashlock, preimage]);
+};
 
-export const encodeRefund = (hashlock: string): string =>
-  iface.encodeFunctionData("refund", [hashlock]);
+export const encodeRefund = (leg: LegKey, hashlock: string): string => {
+  if (leg === "qrl") return encodeQrvmHtlc("refund", [hashlock]);
+  return iface.encodeFunctionData("refund", [hashlock]);
+};

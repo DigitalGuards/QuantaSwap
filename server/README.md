@@ -6,8 +6,8 @@ or decides whether an on-chain lock is valid. Every client must continue to
 verify all economic and settlement facts against the HTLCs.
 
 **Testnet only.** This image packages one independent mirror. It verifies and
-stores the full single-use OrderV1, FillIntentV1, FillV1, CancelV1, and
-ReleaseV1 proof chain. Mirrors relay signed public events through an optional
+stores the full single-use OrderV2, FillIntentV2, FillV2, CancelV2, and
+ReleaseV2 proof chain. Mirrors relay signed public events through an optional
 pull federation; private and unsigned rows stay origin-local.
 
 ## What the package provides
@@ -21,8 +21,8 @@ pull federation; private and unsigned rows stay origin-local.
 - global, per-maker, per-source, rate, take, and stream-connection limits;
 - storage-aware `/api/health` readiness plus sanitized `/api/status` peer and
   feed diagnostics;
-- dual-scheme ML-DSA-87 protocol verification for MyQRLWallet and the official
-  QRL Web3 Wallet, with independent browser and headless LP verification;
+- SDK 5 ML-DSA-87 message verification for MyQRLWallet portable V2 proofs,
+  with independent browser and headless LP verification;
 - a durable content-addressed event feed with reset snapshots and cursors;
 - explicit peer lists, loop-safe replay deduplication, narrow CORS, and
   origin-local private capabilities;
@@ -30,6 +30,15 @@ pull federation; private and unsigned rows stay origin-local.
   conflict evidence, and causal dependency retries.
 
 ## First boot
+
+The private v3 deployment pins chain ID `3151909`, its exact genesis, and both
+fresh HTLCs in `config/protocol-v2.json`. Portable V2 uses full 64-byte QRL
+identities and canonical message bytes. Old V1 proofs and persisted wire state
+are rejected. Preserve legacy recovery files and begin with a separate state
+volume after settling existing swaps on their original contracts.
+
+The Compose build uses the repository root context. Direct Node deployments
+must preserve `config/protocol-v2.json` as a sibling of `server/`.
 
 From `server/` at a reviewed release tag or commit:
 
@@ -98,7 +107,7 @@ within the current sync cycle. Every record supplied by a later reset is
 revalidated against current store state, allowing valid evidence swept since an
 earlier cycle to be reconstructed.
 
-A terminal or release event may arrive before its OrderV1 or FillV1 when peers
+A terminal or release event may arrive before its OrderV2 or FillV2 when peers
 sync concurrently. The receiver retains up to 4096 dependency-missing events
 in memory, with at most 512 attributed to any one peer, and retries them after
 all peers in up to eight causal passes. Ordinary authoritative resets retain
@@ -248,8 +257,8 @@ docker compose -f compose.federation-lab.yaml down --volumes
 ```
 
 External-base mode posts fresh test proofs and therefore refuses non-loopback
-bases. It covers reciprocal HTTP transport, OrderV1, FillIntentV1, FillV1 and
-CancelV1 propagation, origin-local exclusions, capability exclusion, and
+bases. It covers reciprocal HTTP transport, OrderV2, FillIntentV2, FillV2 and
+CancelV2 propagation, origin-local exclusions, capability exclusion, and
 sanitized status. The managed `npm test` mode additionally owns both child
 processes, scans their persisted state for raw capabilities, simulates a
 partition, restarts one mirror with its existing state, proves reset-snapshot
@@ -262,15 +271,15 @@ and administrative boundary. The independent-host procedure is in
 ## Signed create capabilities
 
 For `POST /api/orders/signed`, the maker generates each raw 32-byte capability
-before signing. OrderV1 includes:
+before signing. OrderV2 includes:
 
 ```text
 makerTokenCommitment = sha256(
-  UTF8("QuantaSwap Maker capability V1\0") || raw maker token bytes
+  UTF8("QuantaSwap Maker capability V2\0") || raw maker token bytes
 )
 
 shareTokenCommitment = sha256(
-  UTF8("QuantaSwap Share capability V1\0") || raw share token bytes
+  UTF8("QuantaSwap Share capability V2\0") || raw share token bytes
 )
 ```
 
@@ -279,7 +288,7 @@ The raw tokens are 64 lowercase hex characters without `0x`; commitments are
 A public order signs a zero share commitment and submits exactly `auth`,
 `makerToken`, and `order`. A private order signs a nonzero share commitment and
 also submits `shareToken`. The raw values are outer request preimages, outside
-the signed economic order object, while their commitments are signed OrderV1
+the signed economic order object, while their commitments are signed OrderV2
 fields immediately after `nonce` and before the deployment fields.
 
 Clients persist the complete signed request before its first POST. An exact

@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { shake256 } from "@noble/hashes/sha3.js";
 import {
-  SCHEME_TAG_TYPED,
-  computeTypedDataDigest,
-  type QrlTypedDataPayload,
+  SCHEME_TAG_MSG,
+  computeMessageDigest,
 } from "@qrlwallet/connect";
 import {
   CryptoBytes,
@@ -12,13 +11,8 @@ import {
   cryptoSignKeypair,
   cryptoSignSignature,
 } from "@theqrl/mldsa87";
-import {
-  TypedDataEncoder,
-  concat,
-  getBytes,
-  keccak256,
-  toUtf8Bytes,
-} from "ethers";
+import { getBytes } from "ethers";
+import { sha256 } from "@noble/hashes/sha2.js";
 import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "./orderbook";
 import {
   CANCEL_V1_FIELDS,
@@ -52,6 +46,9 @@ import {
   verifyOrderV1Auth,
   verifyOrderCapabilities,
 } from "./orderSigning";
+import { protocolMessageBytes } from "./protocol-v2-wire";
+import { canonicalQip55QrlAddress, isQip55QrlAddress } from "./qip55";
+import vectors from "../../../config/protocol-v2-vectors.json";
 
 const BODY: CreateOrderBody = {
   direction: "eth->qrl",
@@ -59,7 +56,7 @@ const BODY: CreateOrderBody = {
   fromAmount: "1000000000000000",
   toAmount: "2000000000000000",
   makerEthAccount: "0x1111111111111111111111111111111111111111",
-  makerQrlAccount: "Q2222222222222222222222222222222222222222",
+  makerQrlAccount: `Q${"2".repeat(128)}`,
   visibility: "public",
 };
 
@@ -79,7 +76,7 @@ function testSigner(seed: number): TestSigner {
   const secretKey = new Uint8Array(CryptoSecretKeyBytes);
   cryptoSignKeypair(new Uint8Array(32).fill(seed), publicKey, secretKey);
   const descriptor = new Uint8Array([1, 0, 0]);
-  const address = shake256(new Uint8Array([...descriptor, ...publicKey]), { dkLen: 20 });
+  const address = shake256(new Uint8Array([...descriptor, ...publicKey]), { dkLen: 64 });
   return {
     signer: `Q${Buffer.from(address).toString("hex")}`,
     publicKey,
@@ -89,13 +86,13 @@ function testSigner(seed: number): TestSigner {
 }
 
 function signedProtocolAuth(
-  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4",
+  scheme: "qrl-sign-message-v2",
   signer: TestSigner,
   fields: { issuedAt: number; expiresAt: number; nonce: string },
   payloadFor: (auth: ProtocolAuthV1) => ReturnType<typeof buildOrderV1Payload>,
 ): ProtocolAuthV1 {
   const auth: ProtocolAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     ...fields,
     signature: "",
@@ -103,83 +100,48 @@ function signedProtocolAuth(
     descriptor: hex(signer.descriptor),
   };
   const payload = payloadFor(auth);
-  const digest =
-    scheme === "qrl-sign-typed-v1"
-      ? computeTypedDataDigest(payload)
-      : getBytes(
-          keccak256(
-            concat([
-              toUtf8Bytes("\x19QRL Signed Message:\n32"),
-              getBytes(
-                TypedDataEncoder.hash(
-                  payload.domain,
-                  { [payload.primaryType]: [...(payload.types[payload.primaryType] ?? [])] },
-                  payload.message,
-                ),
-              ),
-            ]),
-          ),
-        );
+  const digest = computeMessageDigest(protocolMessageBytes(payload));
   const signature = new Uint8Array(CryptoBytes);
   cryptoSignSignature(
     signature,
     digest,
     signer.secretKey,
     false,
-    scheme === "qrl-sign-typed-v1" ? SCHEME_TAG_TYPED : toUtf8Bytes("ZOND"),
+    SCHEME_TAG_MSG,
   );
   auth.signature = hex(signature);
   return auth;
 }
 
 function walletRequest(
-  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4",
+  scheme: "qrl-sign-message-v2",
   signer: TestSigner,
 ) {
   return vi.fn(async (args: { method: string; params?: unknown[] }) => {
-    const payload = args.params?.[1] as QrlTypedDataPayload;
-    const digest =
-      scheme === "qrl-sign-typed-v1"
-        ? computeTypedDataDigest(payload)
-        : getBytes(
-            keccak256(
-              concat([
-                toUtf8Bytes("\x19QRL Signed Message:\n32"),
-                getBytes(
-                  TypedDataEncoder.hash(
-                    payload.domain,
-                    { [payload.primaryType]: [...(payload.types[payload.primaryType] ?? [])] },
-                    payload.message,
-                  ),
-                ),
-              ]),
-            ),
-          );
+    expect(scheme).toBe("qrl-sign-message-v2");
+    expect(args.method).toBe("qrl_signMessage");
+    const digest = computeMessageDigest(getBytes(args.params?.[1] as string));
     const signature = new Uint8Array(CryptoBytes);
     cryptoSignSignature(
       signature,
       digest,
       signer.secretKey,
       false,
-      scheme === "qrl-sign-typed-v1" ? SCHEME_TAG_TYPED : toUtf8Bytes("ZOND"),
+      SCHEME_TAG_MSG,
     );
-    if (scheme === "qrl-eip712-v4") {
-      return { signature: hex(signature), publicKey: hex(signer.publicKey) };
-    }
     return {
       signature: hex(signature),
       publicKey: hex(signer.publicKey),
       descriptor: hex(signer.descriptor),
       signer: signer.signer,
       digest: hex(digest),
-      schemeVersion: "QRL-SIGN-TYPED-v1",
-      domain: payload.domain,
+      schemeVersion: "QRL-SIGN-MSG-v1",
     };
   });
 }
 
 function verifiedFixture(
-  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4",
+  scheme: "qrl-sign-message-v2",
   options: {
     expiresAt?: number;
     body?: Partial<CreateOrderBody>;
@@ -193,7 +155,7 @@ function verifiedFixture(
     makerQrlAccount,
   };
   const auth: MakerOrderAuthV1 = {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt: 1_800_000_000,
     expiresAt: options.expiresAt ?? 1_800_003_600,
@@ -208,30 +170,14 @@ function verifiedFixture(
     descriptor: hex(maker.descriptor),
   };
   const payload = buildOrderV1Payload(body, auth);
-  const digest =
-    scheme === "qrl-sign-typed-v1"
-      ? computeTypedDataDigest(payload)
-      : getBytes(
-          keccak256(
-            concat([
-              toUtf8Bytes("\x19QRL Signed Message:\n32"),
-              getBytes(
-                TypedDataEncoder.hash(
-                  payload.domain,
-                  { OrderV1: [...ORDER_V1_FIELDS] },
-                  payload.message,
-                ),
-              ),
-            ]),
-          ),
-        );
+  const digest = computeMessageDigest(protocolMessageBytes(payload));
   const signature = new Uint8Array(CryptoBytes);
   cryptoSignSignature(
     signature,
     digest,
     maker.secretKey,
     false,
-    scheme === "qrl-sign-typed-v1" ? SCHEME_TAG_TYPED : toUtf8Bytes("ZOND"),
+    SCHEME_TAG_MSG,
   );
   auth.signature = hex(signature);
   return {
@@ -260,43 +206,38 @@ function verifiedFixture(
 
 describe("OrderV1 wallet signing", () => {
   it("selects a scheme from the selected provider identity", () => {
-    expect(orderSigningSchemeForWallet("com.qrlwallet.connect")).toBe("qrl-sign-typed-v1");
-    expect(orderSigningSchemeForWallet("com.qrlwallet.extension")).toBe("qrl-sign-typed-v1");
-    expect(orderSigningSchemeForWallet("theqrl.org")).toBe("qrl-eip712-v4");
+    expect(orderSigningSchemeForWallet("com.qrlwallet.connect")).toBe("qrl-sign-message-v2");
+    expect(orderSigningSchemeForWallet("com.qrlwallet.extension")).toBe("qrl-sign-message-v2");
+    expect(orderSigningSchemeForWallet("theqrl.org")).toBeNull();
     expect(orderSigningSchemeForWallet(null)).toBeNull();
-    expect(orderSigningLabel("theqrl.org")).toContain("Official QRL wallet");
+    expect(orderSigningLabel("com.qrlwallet.extension")).toContain("MyQRLWallet");
   });
 
-  it("matches the official QRL web3 ABI 0.5.0 EIP-712 vector", () => {
+  it("pins the V2 domain and ordered message schema", () => {
     const payload = buildOrderV1Payload(BODY, {
-      scheme: "qrl-eip712-v4",
+      scheme: "qrl-sign-message-v2",
       issuedAt: 1_800_000_000,
       expiresAt: 1_800_003_600,
       nonce: `0x${"42".repeat(32)}`,
       makerTokenCommitment: capabilityCommitment("maker", "ab".repeat(32)),
       shareTokenCommitment: `0x${"00".repeat(32)}`,
     });
-    const semantic = TypedDataEncoder.hash(
-      payload.domain,
-      { OrderV1: [...ORDER_V1_FIELDS] },
-      payload.message,
-    );
-    expect(semantic).toBe(
-      "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48",
-    );
-    expect(
-      keccak256(
-        concat([toUtf8Bytes("\x19QRL Signed Message:\n32"), getBytes(semantic)]),
-      ),
-    ).toBe("0xc305e6936db7a0b374f936cb7058fde90963e39896f5d127f25bd87c147211d3");
+    expect(payload.primaryType).toBe("OrderV2");
+    expect(payload.types.OrderV2).toEqual(ORDER_V1_FIELDS);
+    expect(payload.domain).toEqual(vectors.domain);
+    expect(hex(sha256(protocolMessageBytes(payload)))).toBe(vectors.expected.orderDigest);
+    expect(hex(computeMessageDigest(protocolMessageBytes(payload)))).toBe(vectors.expected.messageDigest);
+    expect(payload.domain).toMatchObject({ version: "2", qrlChainId: "3151909", qrlGenesisHash: "0xd15407991193e6c23b733dc6bf9c628deaff8f9b6e252aa0d60030952b3e3ea4" });
+    expect(new TextDecoder().decode(protocolMessageBytes(payload))).toMatch(/^QuantaSwap Protocol V2\u0000\["2","OrderV2"/);
+    expect(() => protocolMessageBytes({ ...payload, domain: { ...payload.domain, version: "1" } })).toThrow(/domain/);
   });
 
   it("matches the cross-package capability commitment vectors", () => {
     expect(capabilityCommitment("maker", "00".repeat(32))).toBe(
-      "0x9ca8274349471eadc293ebb7690d81e64ce538ad0d9d65646f9ff1af227709e6",
+      vectors.expected.makerCapabilityZero,
     );
     expect(capabilityCommitment("share", "11".repeat(32))).toBe(
-      "0xe0e4441fa2456254d19815bb0b962e160e06027efe181f8f8887292f527590e2",
+      vectors.expected.shareCapabilityOne,
     );
     expect(() => capabilityCommitment("maker", "AA".repeat(32))).toThrow(
       /lowercase hex/,
@@ -304,8 +245,7 @@ describe("OrderV1 wallet signing", () => {
   });
 
   it("matches the cross-package capability-aware child digest vectors", () => {
-    const orderDigestHex =
-      "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48";
+    const orderDigestHex = vectors.expected.orderDigest;
     const orderAuth = {
       issuedAt: NOW,
       expiresAt: NOW + 3600,
@@ -320,12 +260,12 @@ describe("OrderV1 wallet signing", () => {
       `0x${"55".repeat(32)}`,
     );
     expect(releaseCommitment).toBe(
-      "0xa786c492a3707147bfa3277ddf44d49af0c794252e42dd05379f04b8c4621e0e",
+      vectors.expected.releaseCommitment,
     );
     const intent: FillIntentV1Body = {
       orderDigest: orderDigestHex,
       takerEthAccount: "0x2222222222222222222222222222222222222222",
-      takerQrlAccount: "Q3333333333333333333333333333333333333333",
+      takerQrlAccount: `Q${"3".repeat(128)}`,
       releaseCommitment,
     };
     const intentAuth = {
@@ -335,7 +275,7 @@ describe("OrderV1 wallet signing", () => {
     };
     const intentDigestHex = intentDigest(intent, intentAuth);
     expect(intentDigestHex).toBe(
-      "0x48f387eff4522d99a48f52ec0e9e8b146fa0deb119383c53ffbb7d134ca00a2b",
+      vectors.expected.intentDigest,
     );
     expect(
       fillDigest(
@@ -353,39 +293,38 @@ describe("OrderV1 wallet signing", () => {
           nonce: `0x${"44".repeat(32)}`,
         },
       ),
-    ).toBe("0x6d4d7d0a3fb70062fc6897c9f402353536e3ffeefe7a6e698b5db78cedcb3c13");
+    ).toBe(vectors.expected.fillDigest);
     expect(
       cancelDigest(
         { orderDigest: orderDigestHex, reasonCode: 1 },
         orderAuth,
         { issuedAt: NOW + 30, nonce: `0x${"45".repeat(32)}` },
       ),
-    ).toBe("0xde9d19dc6dd94501ea1fb23ac89295ce139cc2f8566aee99f5b5ca5f83769214");
+    ).toBe(vectors.expected.cancelDigest);
   });
 
-  it("uses the official method while preserving the authorized signer parameter", async () => {
+  it("uses qrl_signMessage while preserving the authorized signer parameter", async () => {
     const maker = testSigner(6);
     const requestedSigner = `Q${maker.signer.slice(1).toUpperCase()}`;
-    const request = walletRequest("qrl-eip712-v4", maker);
+    const request = walletRequest("qrl-sign-message-v2", maker);
     const signed = await signOrderV1({
       body: {
         ...BODY,
         makerEthAccount: BODY.makerEthAccount.toUpperCase().replace("0X", "0x"),
         makerQrlAccount: requestedSigner,
       },
-      walletRdns: "theqrl.org",
+      walletRdns: "com.qrlwallet.connect",
       request,
       now: 1_800_000_000,
     });
 
     expect(request).toHaveBeenCalledOnce();
     const call = request.mock.calls[0]?.[0];
-    expect(call?.method).toBe("qrl_signTypedData_v4");
+    expect(call?.method).toBe("qrl_signMessage");
     expect(call?.params?.[0]).toBe(requestedSigner);
-    expect((call?.params?.[1] as { message: Record<string, unknown> }).message).toMatchObject({
-      makerEthAccount: "eip155:11155111:0x1111111111111111111111111111111111111111",
-      makerQrlAccount: maker.signer,
-    });
+    const message = new TextDecoder().decode(getBytes(call?.params?.[1] as string));
+    expect(message).toContain("eip155:11155111:0x1111111111111111111111111111111111111111");
+    expect(message).toContain(maker.signer);
     expect(signed.order.makerQrlAccount).toBe(maker.signer);
     expect(signed.auth.signature).toMatch(/^0x[0-9a-f]+$/);
     expect(signed.auth.descriptor).toBe("0x010000");
@@ -404,7 +343,7 @@ describe("OrderV1 wallet signing", () => {
     const signed = await signOrderV1({
       body: { ...BODY, makerQrlAccount: maker.signer, visibility: "private" },
       walletRdns: "com.qrlwallet.extension",
-      request: walletRequest("qrl-sign-typed-v1", maker),
+      request: walletRequest("qrl-sign-message-v2", maker),
       now: NOW,
     });
     expect(signed.shareToken).toMatch(/^[0-9a-f]{64}$/);
@@ -441,9 +380,35 @@ describe("OrderV1 wallet signing", () => {
     }, NOW + 1)).toBe(true);
   });
 
+  it("rejects an invalid allowed-taker checksum before requesting a signature", async () => {
+    const maker = testSigner(5);
+    const recipient = canonicalQip55QrlAddress(testSigner(7).signer);
+    const malformedRecipient = recipient.replace(/[a-fA-F]/, (character) =>
+      character === character.toLowerCase()
+        ? character.toUpperCase()
+        : character.toLowerCase(),
+    );
+    expect(isQip55QrlAddress(malformedRecipient)).toBe(false);
+    const request = walletRequest("qrl-sign-message-v2", maker);
+    await expect(
+      signOrderV1({
+        body: {
+          ...BODY,
+          makerQrlAccount: maker.signer,
+          visibility: "private",
+          allowedTakerQrl: malformedRecipient,
+        },
+        walletRdns: "com.qrlwallet.extension",
+        request,
+        now: NOW,
+      }),
+    ).rejects.toThrow("order.allowedTakerQrl must be a QRL address");
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("caps a pre-funded order signature at its escrow timeout", async () => {
     const maker = testSigner(8);
-    const request = walletRequest("qrl-eip712-v4", maker);
+    const request = walletRequest("qrl-sign-message-v2", maker);
     const signed = await signOrderV1({
       body: {
         ...BODY,
@@ -453,7 +418,7 @@ describe("OrderV1 wallet signing", () => {
           initiatorTimeout: 1_800_010_800,
         },
       },
-      walletRdns: "theqrl.org",
+      walletRdns: "com.qrlwallet.connect",
       request,
       now: 1_800_000_000,
     });
@@ -466,11 +431,11 @@ describe("OrderV1 wallet signing", () => {
     await expect(
       signOrderV1({
         body: { ...BODY, makerQrlAccount: maker.signer },
-        walletRdns: "theqrl.org",
-        request: walletRequest("qrl-eip712-v4", other),
+        walletRdns: "com.qrlwallet.connect",
+        request: walletRequest("qrl-sign-message-v2", other),
         now: NOW,
       }),
-    ).rejects.toThrow(/does not match this order/);
+    ).rejects.toThrow(/does not match this V2 message/);
   });
 
   it("fails closed for an unknown provider", async () => {
@@ -481,6 +446,19 @@ describe("OrderV1 wallet signing", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("refuses a legacy account before requesting an OrderV2 signature", async () => {
+    const request = vi.fn();
+    await expect(
+      signOrderV1({
+        body: { ...BODY, makerQrlAccount: `Q${"12".repeat(20)}` },
+        walletRdns: "com.qrlwallet.extension",
+        request,
+        now: NOW,
+      }),
+    ).rejects.toThrow(/64-byte|QIP-55/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("rejects noncanonical OrderV1 input before asking the wallet to sign", async () => {
     const request = vi.fn();
     const invalidBodies: Array<[CreateOrderBody, RegExp]> = [
@@ -488,7 +466,7 @@ describe("OrderV1 wallet signing", () => {
       [{ ...BODY, asset: "DOGE" } as unknown as CreateOrderBody, /asset/],
       [{ ...BODY, fromAmount: "01" }, /fromAmount/],
       [{ ...BODY, makerEthAccount: "0x1234" }, /makerEthAccount/],
-      [{ ...BODY, makerQrlAccount: "Q1234" }, /makerQrlAccount/],
+      [{ ...BODY, makerQrlAccount: "Q1234" }, /64-byte|QIP-55/],
       [
         { ...BODY, allowedTakerEth: "0x3333333333333333333333333333333333333333" },
         /public orders cannot restrict/,
@@ -544,14 +522,14 @@ describe("OrderV1 wallet signing", () => {
   it("derives signer-bound OrderV1 ids from raw address and nonce bytes", () => {
     const nonce = `0x${"42".repeat(32)}`;
     expect(
-      deriveOrderV1Id("Q2222222222222222222222222222222222222222", nonce),
-    ).toBe("cd84c99465b251d67a23548932b13fe84caa67d28c8331686e91774343552e0e");
+      deriveOrderV1Id(`Q${"2".repeat(128)}`, nonce),
+    ).toBe(vectors.expected.orderId);
     expect(
-      deriveOrderV1Id("Q3333333333333333333333333333333333333333", nonce),
-    ).not.toBe(deriveOrderV1Id("Q2222222222222222222222222222222222222222", nonce));
+      deriveOrderV1Id(`Q${"3".repeat(128)}`, nonce),
+    ).not.toBe(deriveOrderV1Id(`Q${"2".repeat(128)}`, nonce));
   });
 
-  for (const scheme of ["qrl-sign-typed-v1", "qrl-eip712-v4"] as const) {
+  for (const scheme of ["qrl-sign-message-v2"] as const) {
     it(`independently verifies received ${scheme} orders`, () => {
       const order = verifiedFixture(scheme);
       expect(verifyOrderV1Auth(order, 1_800_000_001)).toBe(true);
@@ -583,7 +561,7 @@ describe("OrderV1 wallet signing", () => {
   }
 
   it("rejects a signed prelock whose order proof outlives the escrow", () => {
-    const order = verifiedFixture("qrl-sign-typed-v1", {
+    const order = verifiedFixture("qrl-sign-message-v2", {
       expiresAt: NOW + 12_000,
       body: {
         prelock: {
@@ -597,7 +575,7 @@ describe("OrderV1 wallet signing", () => {
 
   it("rejects signed prelocks outside the 3 to 72 hour issuance window", () => {
     for (const initiatorTimeout of [NOW + 10_799, NOW + 72 * 3600 + 1]) {
-      const order = verifiedFixture("qrl-sign-typed-v1", {
+      const order = verifiedFixture("qrl-sign-message-v2", {
         expiresAt: NOW + 3_600,
         body: {
           prelock: {
@@ -625,7 +603,7 @@ function orderBody(order: OrderView): CreateOrderBody {
 
 function signedIntentFixture(
   order: OrderView,
-  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4",
+  scheme: "qrl-sign-message-v2",
   expiresAt = NOW + 121,
 ): { intent: FillIntentV1Body; auth: ProtocolAuthV1 } {
   const orderAuth = order.makerAuth!;
@@ -709,11 +687,11 @@ function signedCancelFixture(
 
 describe("federated order authorization", () => {
   for (const [scheme, rdns] of [
-    ["qrl-sign-typed-v1", "com.qrlwallet.extension"],
-    ["qrl-eip712-v4", "theqrl.org"],
+    ["qrl-sign-message-v2", "com.qrlwallet.extension"],
+    ["qrl-sign-message-v2", "com.qrlwallet.connect"],
   ] as const) {
     it(`signs FillIntentV1 through ${scheme}`, async () => {
-      const order = verifiedFixture("qrl-sign-typed-v1");
+      const order = verifiedFixture("qrl-sign-message-v2");
       const taker = testSigner(7);
       const request = walletRequest(scheme, taker);
       const signed = await signFillIntentV1({
@@ -732,17 +710,17 @@ describe("federated order authorization", () => {
 
       expect(request).toHaveBeenCalledOnce();
       expect(request.mock.calls[0]?.[0].method).toBe(
-        scheme === "qrl-sign-typed-v1" ? "qrl_signTypedData" : "qrl_signTypedData_v4",
+        "qrl_signMessage",
       );
       expect(verifyFillIntentV1(signed.intent, signed.auth, order, NOW + 20)).toBe(true);
     });
   }
 
   it("signs maker FillV1 and CancelV1 with the OrderV1 proof identity", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
-    const signedIntent = signedIntentFixture(order, "qrl-eip712-v4");
+    const order = verifiedFixture("qrl-sign-message-v2");
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
     const maker = testSigner(9);
-    const request = walletRequest("qrl-sign-typed-v1", maker);
+    const request = walletRequest("qrl-sign-message-v2", maker);
     const unsignedFill = signedFillFixture(order, signedIntent).fill;
     const signedFill = await signFillV1({
       body: unsignedFill,
@@ -772,9 +750,9 @@ describe("federated order authorization", () => {
   });
 
   it("clamps FillIntentV1 expiry to the signed OrderV1 validity window", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1", { expiresAt: NOW + 60 });
+    const order = verifiedFixture("qrl-sign-message-v2", { expiresAt: NOW + 60 });
     const taker = testSigner(7);
-    const request = walletRequest("qrl-sign-typed-v1", taker);
+    const request = walletRequest("qrl-sign-message-v2", taker);
     const signed = await signFillIntentV1({
       body: {
         orderDigest: orderDigest(orderBody(order), order.makerAuth!),
@@ -794,8 +772,8 @@ describe("federated order authorization", () => {
   });
 
   it("refuses to issue FillIntentV1 before the signed order issuance time", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
-    const request = walletRequest("qrl-sign-typed-v1", testSigner(7));
+    const order = verifiedFixture("qrl-sign-message-v2");
+    const request = walletRequest("qrl-sign-message-v2", testSigner(7));
     await expect(
       signFillIntentV1({
         body: {
@@ -814,7 +792,7 @@ describe("federated order authorization", () => {
   });
 
   it("emits exact canonical child message bodies from mixed-case runtime input", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
+    const order = verifiedFixture("qrl-sign-message-v2");
     const orderDigestHex = orderDigest(orderBody(order), order.makerAuth!);
     const upperBytes32 = (value: string) => `0x${value.slice(2).toUpperCase()}`;
     const taker = testSigner(7);
@@ -828,7 +806,7 @@ describe("federated order authorization", () => {
       order,
       releaseSecret: upperBytes32(`0x${"47".repeat(32)}`),
       walletRdns: "com.qrlwallet.extension",
-      request: walletRequest("qrl-sign-typed-v1", taker),
+      request: walletRequest("qrl-sign-message-v2", taker),
       now: NOW + 1,
       expiresAt: NOW + 121,
     });
@@ -858,7 +836,7 @@ describe("federated order authorization", () => {
       } as FillV1Body,
       order,
       walletRdns: "com.qrlwallet.extension",
-      request: walletRequest("qrl-sign-typed-v1", testSigner(9)),
+      request: walletRequest("qrl-sign-message-v2", testSigner(9)),
       respondBy: NOW + 70,
       now: NOW + 10,
     });
@@ -885,7 +863,7 @@ describe("federated order authorization", () => {
       } as CancelV1Body,
       order,
       walletRdns: "com.qrlwallet.extension",
-      request: walletRequest("qrl-sign-typed-v1", testSigner(9)),
+      request: walletRequest("qrl-sign-message-v2", testSigner(9)),
       now: NOW + 20,
     });
     expect(Object.keys(signedCancel.cancel).sort()).toEqual(["orderDigest", "reasonCode"]);
@@ -893,8 +871,8 @@ describe("federated order authorization", () => {
   });
 
   it("rejects cancellation exactly at OrderV1 expiry before signing", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1", { expiresAt: NOW + 60 });
-    const request = walletRequest("qrl-sign-typed-v1", testSigner(9));
+    const order = verifiedFixture("qrl-sign-message-v2", { expiresAt: NOW + 60 });
+    const request = walletRequest("qrl-sign-message-v2", testSigner(9));
     await expect(
       signCancelV1({
         body: {
@@ -911,12 +889,12 @@ describe("federated order authorization", () => {
   });
 
   it("builds exact CAIP-bound typed payloads", () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
+    const order = verifiedFixture("qrl-sign-message-v2");
     const orderAuth = order.makerAuth!;
-    const signedIntent = signedIntentFixture(order, "qrl-sign-typed-v1");
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
     const intentPayload = buildFillIntentV1Payload(signedIntent.intent, signedIntent.auth);
 
-    expect(intentPayload.types.FillIntentV1).toEqual(FILL_INTENT_V1_FIELDS);
+    expect(intentPayload.types.FillIntentV2).toEqual(FILL_INTENT_V1_FIELDS);
     expect(intentPayload.message).toMatchObject({
       orderDigest: signedIntent.intent.orderDigest,
       requestNonce: signedIntent.auth.nonce,
@@ -926,12 +904,12 @@ describe("federated order authorization", () => {
       issuedAt: String(NOW + 1),
       expiresAt: String(NOW + 121),
       ethChainId: "11155111",
-      qrlChainId: "1337",
+      qrlChainId: "3151909",
     });
 
     const signedFill = signedFillFixture(order, signedIntent);
     const fillPayload = buildFillV1Payload(signedFill.fill, orderAuth, signedFill.auth);
-    expect(fillPayload.types.FillV1).toEqual(FILL_V1_FIELDS);
+    expect(fillPayload.types.FillV2).toEqual(FILL_V1_FIELDS);
     expect(fillPayload.message).toMatchObject({
       orderNonce: orderAuth.nonce,
       fillNonce: signedFill.auth.nonce,
@@ -949,7 +927,7 @@ describe("federated order authorization", () => {
       orderAuth,
       signedCancel.auth,
     );
-    expect(cancelPayload.types.CancelV1).toEqual(CANCEL_V1_FIELDS);
+    expect(cancelPayload.types.CancelV2).toEqual(CANCEL_V1_FIELDS);
     expect(cancelPayload.message).toMatchObject({
       orderNonce: orderAuth.nonce,
       cancelNonce: signedCancel.auth.nonce,
@@ -959,25 +937,19 @@ describe("federated order authorization", () => {
   });
 
   it("derives scheme-independent semantic digests", () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
-    const signedIntent = signedIntentFixture(order, "qrl-eip712-v4");
+    const order = verifiedFixture("qrl-sign-message-v2");
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
     const custom = buildFillIntentV1Payload(signedIntent.intent, {
       ...signedIntent.auth,
-      scheme: "qrl-sign-typed-v1",
+      scheme: "qrl-sign-message-v2",
     });
     const official = buildFillIntentV1Payload(signedIntent.intent, {
       ...signedIntent.auth,
-      scheme: "qrl-eip712-v4",
+      scheme: "qrl-sign-message-v2",
     });
     const digest = intentDigest(signedIntent.intent, signedIntent.auth);
     expect(custom.message).toEqual(official.message);
-    expect(digest).toBe(
-      TypedDataEncoder.hash(
-        official.domain,
-        { FillIntentV1: [...FILL_INTENT_V1_FIELDS] },
-        official.message,
-      ),
-    );
+    expect(digest).toBe(hex(sha256(protocolMessageBytes(official))));
     expect(
       intentDigest(
         { ...signedIntent.intent, releaseCommitment: `0x${"ab".repeat(32)}` },
@@ -1002,7 +974,7 @@ describe("federated order authorization", () => {
         `0x${"22".repeat(32)}`,
         `0x${"33".repeat(32)}`,
       ),
-    ).toBe("0x5fc8c5fdfc3b3df859a6d0883c794662e325ff10147adb67f6ac7a677e442702");
+    ).toBe("0x4f3673dd21bcb296e18dbaf410ea73a2a7dd0b367a72646b69646f3e31ccdd20");
     expect(() =>
       computeReleaseCommitment(
         `0x${"11".repeat(32)}`,
@@ -1012,11 +984,11 @@ describe("federated order authorization", () => {
     ).toThrow(/lowercase bytes32/);
   });
 
-  for (const makerScheme of ["qrl-sign-typed-v1", "qrl-eip712-v4"] as const) {
+  for (const makerScheme of ["qrl-sign-message-v2"] as const) {
     it(`verifies intent, fill, and cancel proofs for ${makerScheme} orders`, () => {
       const order = verifiedFixture(makerScheme);
       const takerScheme =
-        makerScheme === "qrl-sign-typed-v1" ? "qrl-eip712-v4" : "qrl-sign-typed-v1";
+        makerScheme === "qrl-sign-message-v2" ? "qrl-sign-message-v2" : "qrl-sign-message-v2";
       const signedIntent = signedIntentFixture(order, takerScheme);
       const signedFill = signedFillFixture(order, signedIntent);
       const signedCancel = signedCancelFixture(order);
@@ -1043,12 +1015,12 @@ describe("federated order authorization", () => {
   }
 
   for (const [orderScheme, terminalScheme] of [
-    ["qrl-sign-typed-v1", "qrl-eip712-v4"],
-    ["qrl-eip712-v4", "qrl-sign-typed-v1"],
+    ["qrl-sign-message-v2", "qrl-sign-message-v2"],
+    ["qrl-sign-message-v2", "qrl-sign-message-v2"],
   ] as const) {
     it(`accepts ${terminalScheme} terminal proofs for a ${orderScheme} order`, () => {
       const order = verifiedFixture(orderScheme);
-      const signedIntent = signedIntentFixture(order, "qrl-sign-typed-v1");
+      const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
       const signedFill = signedFillFixture(order, signedIntent, 60, {}, terminalScheme);
       const signedCancel = signedCancelFixture(order, terminalScheme);
 
@@ -1062,11 +1034,11 @@ describe("federated order authorization", () => {
   }
 
   it("rejects expired request windows, short fill deadlines, and unbound cancel expiry", () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
-    const longIntent = signedIntentFixture(order, "qrl-sign-typed-v1", NOW + 122);
+    const order = verifiedFixture("qrl-sign-message-v2");
+    const longIntent = signedIntentFixture(order, "qrl-sign-message-v2", NOW + 122);
     expect(verifyFillIntentV1(longIntent.intent, longIntent.auth, order, NOW + 20)).toBe(false);
 
-    const signedIntent = signedIntentFixture(order, "qrl-sign-typed-v1");
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
     const shortFill = signedFillFixture(order, signedIntent, 59);
     expect(verifyFillV1(shortFill.fill, shortFill.auth, order, signedIntent, NOW + 20)).toBe(
       false,
@@ -1084,8 +1056,8 @@ describe("federated order authorization", () => {
   });
 
   it("rejects FillV1 respondBy after OrderV1 expiry during recovery verification", () => {
-    const order = verifiedFixture("qrl-sign-typed-v1", { expiresAt: NOW + 65 });
-    const signedIntent = signedIntentFixture(order, "qrl-sign-typed-v1", NOW + 50);
+    const order = verifiedFixture("qrl-sign-message-v2", { expiresAt: NOW + 65 });
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2", NOW + 50);
     const signedFill = signedFillFixture(order, signedIntent, 60);
 
     expect(
@@ -1097,8 +1069,8 @@ describe("federated order authorization", () => {
   });
 
   it("rejects oversized FillV1 escrow windows before signing and on verification", async () => {
-    const order = verifiedFixture("qrl-sign-typed-v1");
-    const signedIntent = signedIntentFixture(order, "qrl-sign-typed-v1");
+    const order = verifiedFixture("qrl-sign-message-v2");
+    const signedIntent = signedIntentFixture(order, "qrl-sign-message-v2");
     const multiYear = signedFillFixture(order, signedIntent, 60, {
       initiatorTimeout: NOW + 10 * 365 * 24 * 3600,
     });
@@ -1106,7 +1078,7 @@ describe("federated order authorization", () => {
       false,
     );
 
-    const makerRequest = walletRequest("qrl-sign-typed-v1", testSigner(9));
+    const makerRequest = walletRequest("qrl-sign-message-v2", testSigner(9));
     await expect(
       signFillV1({
         body: multiYear.fill,

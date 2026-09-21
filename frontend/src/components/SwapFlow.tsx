@@ -40,6 +40,7 @@ import {
 } from "@/lib/swapMachine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
@@ -353,7 +354,11 @@ export function SwapFlow({
           onStage: setLockStage,
         });
       } else {
-        await sendOnLeg(leg, buildLockNativeData(hashlock, plan.recipient, timeout), plan.amount);
+        await sendOnLeg(
+          leg,
+          buildLockNativeData(leg, hashlock, plan.recipient, timeout),
+          plan.amount,
+        );
       }
     });
 
@@ -369,12 +374,12 @@ export function SwapFlow({
         revealedPreimage !== null &&
         preimage === revealedPreimage;
       if (!legacyPublicSecretRecovery) requireBoundTerms();
-      await sendClaimOnLeg(leg, buildClaimData(hashlock, preimage), 0n);
+      await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n);
     });
 
   const refundLeg = (leg: LegKey) =>
     runAction(`refund-${leg}`, async () => {
-      await sendOnLeg(leg, buildRefundData(hashlock), 0n);
+      await sendOnLeg(leg, buildRefundData(leg, hashlock), 0n);
     });
 
   // Prelocked swaps only: one-time recipient assignment on the maker's
@@ -386,12 +391,12 @@ export function SwapFlow({
       if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
         throw new Error(signedFillIssue);
       }
-      await sendOnLeg(leg, buildAssignData(hashlock, legPlan[leg].recipient), 0n);
+      await sendOnLeg(leg, buildAssignData(leg, hashlock, legPlan[leg].recipient), 0n);
     });
 
   const releaseLeg = (leg: LegKey) =>
     runAction(`release-${leg}`, async () => {
-      await sendOnLeg(leg, buildReleaseData(hashlock), 0n);
+      await sendOnLeg(leg, buildReleaseData(leg, hashlock), 0n);
     });
 
   /** Busy-state key for a step's own action button. */
@@ -507,11 +512,27 @@ export function SwapFlow({
         ) : null}
 
         {accountMismatch ? (
-          <p className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
-            A connected wallet differs from the address this swap was agreed with. Payouts still go
-            to the agreed addresses (<span className="font-data">{ownEth.slice(0, 8)}…</span> /{" "}
-            <span className="font-data">{ownQrl.slice(0, 8)}…</span>).
-          </p>
+          <div className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">
+            <p>
+              A connected wallet differs from the address this swap was agreed with. Payouts still
+              go to the agreed addresses (
+              <AddressFingerprint address={ownEth} /> /{" "}
+              <AddressFingerprint address={ownQrl} />).
+            </p>
+            <details className="mt-2">
+              <summary className="cursor-pointer font-medium">Show full agreed addresses</summary>
+              <dl className="mt-1 space-y-1 font-data text-[11px]">
+                <div>
+                  <dt className="inline font-sans">Ethereum: </dt>
+                  <dd className="inline break-all select-text">{ownEth}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-sans">QRL: </dt>
+                  <dd className="inline break-all select-text">{ownQrl}</dd>
+                </div>
+              </dl>
+            </details>
+          </div>
         ) : null}
 
         {steps.map((step, i) => {

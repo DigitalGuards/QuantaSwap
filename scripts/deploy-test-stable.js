@@ -18,7 +18,10 @@ if (!rpc || !key) {
 }
 
 async function main() {
-  const artifacts = compileDirs([path.join(__dirname, "..", "contracts", "testnet")]);
+  const artifacts = compileDirs(
+    [path.join(__dirname, "..", "contracts", "testnet")],
+    "evm"
+  );
   const { abi, bytecode } = artifacts.TestStable;
 
   const provider = new ethers.JsonRpcProvider(rpc);

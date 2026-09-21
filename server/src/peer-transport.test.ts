@@ -102,7 +102,7 @@ describe("federation onion transport", () => {
     const transport = new FederationPeerTransport(`socks5h://127.0.0.1:${proxyPort}`);
     try {
       const response = await transport.fetch(
-        `http://${ONION_HOST}:${targetPort}/api/federation/v1/events`,
+        `http://${ONION_HOST}:${targetPort}/api/federation/v2/events`,
         { headers: { Accept: "application/json" }, redirect: "error" },
       );
       assert.equal(response.status, 200);
@@ -141,7 +141,7 @@ describe("federation onion transport", () => {
   it("fails closed without a SOCKS route and after transport shutdown", async () => {
     const transport = new FederationPeerTransport(null);
     await assert.rejects(
-      transport.fetch(`http://${ONION_HOST}/api/federation/v1/events`),
+      transport.fetch(`http://${ONION_HOST}/api/federation/v2/events`),
       /no SOCKS route/,
     );
     await transport.close();
@@ -177,7 +177,7 @@ describe("federation onion transport", () => {
     });
     try {
       await assert.rejects(
-        transport.fetch(`http://${ONION_HOST}/api/federation/v1/events`, {
+        transport.fetch(`http://${ONION_HOST}/api/federation/v2/events`, {
           redirect: "error",
           signal: AbortSignal.timeout(25),
         }),

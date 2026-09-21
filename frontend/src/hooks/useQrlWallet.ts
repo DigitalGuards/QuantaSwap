@@ -15,7 +15,11 @@ import {
   getAppStoreUrl,
   type ConnectionStatus,
 } from "@qrlwallet/connect";
-import { getAuthorizedQrlAccount, requireQrlAccount } from "@/lib/qrlAddress";
+import {
+  bindAuthorizedMessageSigner,
+  getAuthorizedQrlAccount,
+  requireQrlAccount,
+} from "@/lib/qrlAddress";
 import {
   activateExtensionAfterRelayRetirement,
   ChannelTaskGuard,
@@ -549,14 +553,15 @@ export function useQrlWallet() {
 
   const request = useCallback(
     (args: { method: string; params?: unknown[] }) => {
+      const authorizedRequest = bindAuthorizedMessageSigner(args, account);
       if (kindRef.current === "extension") {
         const provider = extensionRef.current;
         if (!provider) throw new Error("QRL extension not connected");
-        return provider.request(args);
+        return provider.request(authorizedRequest);
       }
-      return sdk().request(args as never);
+      return sdk().request(authorizedRequest as never);
     },
-    [sdk],
+    [sdk, account],
   );
 
   return {

@@ -15,7 +15,6 @@ import {
   submitFillIntent,
   type OrderView,
 } from "@/lib/orderbook";
-import { shortAddr } from "@/lib/htlc";
 import { prelockEscrowIssue } from "@/lib/prelock";
 import {
   intentDigest,
@@ -29,6 +28,7 @@ import {
   sameSignedIntent,
 } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { NetworkPanel } from "@/components/NetworkPanel";
 import { errorMessage } from "@/utils/errorMessage";
@@ -180,7 +180,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
       void (async () => {
         if (signingScheme === null || order.orderDigest === undefined) {
           throw new Error(
-            "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
+            "Portable V2 orders require message signing. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
           );
         }
         const releaseSecret = (await generateSecret()).preimage;
@@ -352,11 +352,13 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           .
         </p>
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-          <div className="flex justify-between">
+          <div className="grid grid-cols-1 items-start gap-1 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
             <span className="text-muted-foreground">Maker</span>
-            <span className="font-data text-xs">
-              {shortAddr(order.makerEthAccount)} / {shortAddr(order.makerQrlAccount)}
-            </span>
+            <ChainAddressPair
+              ethAddress={order.makerEthAccount}
+              qrlAddress={order.makerQrlAccount}
+              className="justify-items-start sm:justify-items-end"
+            />
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Maker online</span>
@@ -365,14 +367,13 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
             </span>
           </div>
           {reserved ? (
-            <div className="flex justify-between">
+            <div className="grid grid-cols-1 items-start gap-1 sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
               <span className="text-muted-foreground">Reserved for</span>
-              <span className="font-data text-xs">
-                {[order.allowedTakerEth, order.allowedTakerQrl]
-                  .filter((a): a is string => Boolean(a))
-                  .map((a) => shortAddr(a))
-                  .join(" / ")}
-              </span>
+              <ChainAddressPair
+                ethAddress={order.allowedTakerEth}
+                qrlAddress={order.allowedTakerQrl}
+                className="justify-items-start sm:justify-items-end"
+              />
             </div>
           ) : null}
           {order.prelocked === true ? (
@@ -460,13 +461,12 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
         </Button>
         {order.makerAuth !== undefined && signingScheme === null ? (
           <p className="text-xs text-amber-400">
-            Install and connect MyQRLWallet Extension for the recommended portable-order flow.
-            The official QRL Web3 Wallet is also compatible through qrl_signTypedData_v4.
+            Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2 orders.
           </p>
         ) : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {order.makerAuth !== undefined
-            ? "Your signed request holds no funds. The maker must publish a valid FillV1 before its response deadline; your browser verifies it before enabling any lock."
+            ? "Your signed request holds no funds. The maker must publish a valid FillV2 before its response deadline; your browser verifies it before enabling any lock."
             : order.prelocked === true
               ? "Taking holds no funds yet: the maker's escrow is already on-chain, they assign you as its recipient, you verify that on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."
               : "Taking holds no funds yet: the maker locks first, you verify their lock on-chain, then lock yours. The HTLCs settle the swap atomically or refund after the timelocks."}

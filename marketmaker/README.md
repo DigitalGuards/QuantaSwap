@@ -6,7 +6,7 @@ HTLC protocol as the browser maker. It does not grant an operator any protocol
 privilege, custody user funds, or share keys with another LP.
 
 **Testnet only.** QuantaSwap has not completed a real-value deployment review.
-Use only Sepolia ETH/tokens and QRL v2 testnet funds until that milestone is
+Use only Sepolia ETH/tokens and private QRL v3 testnet funds until that milestone is
 explicitly closed in the project release notes.
 
 ## What the kit provides
@@ -16,12 +16,12 @@ explicitly closed in the project release notes.
 - independent ETH and QRL wallet generation without printing either secret;
 - read-only secret mounts instead of secrets baked into the image;
 - a persistent, deployment-bound state volume for swap recovery;
-- portable OrderV1 listings plus deterministic verification and selection of
-  short-lived taker FillIntentV1 proofs;
-- crash-safe persistence of the exact FillV1 or CancelV1 terminal proof before
+- portable OrderV2 listings plus deterministic verification and selection of
+  short-lived taker FillIntentV2 proofs;
+- crash-safe persistence of the exact FillV2 or CancelV2 terminal proof before
   publication, with no order reopening after either decision;
 - exact authentication of create, fill, cancel, and recovery responses before
-  funding or deleting state, plus a durable FillV1 acknowledgment and sticky
+  funding or deleting state, plus a durable FillV2 acknowledgment and sticky
   release observation;
 - an exclusive process lease bound to the state path, deployment fingerprint,
   and operator accounts;
@@ -33,7 +33,7 @@ on-chain swap decision behavior. It replaces mirror-local accept tokens for new
 listings with independently verifiable ML-DSA-87 protocol messages.
 The headless kit publishes public signed orders only. It creates each raw maker
 capability before signing, commits its domain-separated SHA-256 digest inside
-OrderV1, and persists the raw capability with the proof before the first POST.
+OrderV2, and persists the raw capability with the proof before the first POST.
 An uncertain create can retry the exact request without minting a new order or
 losing administrative access. Private signed orders remain a browser flow until
 the kit has an allowed-taker policy and operator interface.
@@ -43,28 +43,30 @@ For raw maker token `m`, serialized as 64 lowercase hex characters without
 
 ```text
 makerTokenCommitment = sha256(
-  UTF8("QuantaSwap Maker capability V1\0") || m as 32 raw bytes
+  UTF8("QuantaSwap Maker capability V2\0") || m as 32 raw bytes
 )
 ```
 
 The kit signs the public-order zero value for `shareTokenCommitment`. It writes
 the complete `{order, auth, makerToken}` create envelope to mode-0600 state
-before transport. An exact retry receives the existing authenticated OrderV1
+before transport. An exact retry receives the existing authenticated OrderV2
 and the same raw maker token it supplied again. The mirror keeps only the signed
 commitment. The raw token never enters federation or kit logs.
 
 ## QRL network compatibility gate
 
-The current QRL v2 testnet deployment uses 20-byte Q addresses and therefore
-pins `@theqrl/web3` to `0.4.4`. Web3 1.x intentionally derives 64-byte Q
-addresses: it produces a different account from the same extended seed, rejects
-the current short HTLC address, and the current node rejects its long account
-address. Do not override this pin merely to clear a dependency scanner finding.
+The private v3 deployment uses chain ID `3151909`, 64-byte Q-prefixed addresses,
+and `@theqrl/web3` 1.0.3. Its exact genesis and fresh HTLC addresses are pinned in
+`config/protocol-v2.json`. RPC reads and signing verify the network identity.
+The same extended seed derives a different full-length account, so fund its v3
+address explicitly with testnet inventory.
 
-The upgrade belongs to the network cutover. Drain every existing maker, preserve
-its old recovery environment, deploy fresh HTLCs for the new address model,
-regenerate or explicitly migrate operator wallets, and repeat signed transaction
-and refund recovery tests before accepting any inventory on web3 1.x.
+Portable V2 uses canonical, deployment-bound message bytes through SDK 5 message
+signing. Legacy V1 proofs and deployment-bound recovery state are rejected.
+Drain an old maker and preserve its original recovery environment before starting
+with fresh v3 state. Existing locks must settle on their original contracts.
+Build the container from the repository root context through the provided Compose
+file; both Node packages require the sibling `config/protocol-v2.json` at runtime.
 
 ## Prerequisites
 
@@ -156,7 +158,7 @@ distinct LP instances.
 
 The named volume `quantaswap-lp-state` contains `state.json`. That file can hold
 live origin capability preimages, unrevealed swap preimages, selected taker
-proofs, and the exact maker-signed OrderV1, FillV1, or CancelV1 artifacts needed
+proofs, and the exact maker-signed OrderV2, FillV2, or CancelV2 artifacts needed
 for safe retry. Treat it as a secret. Every record is bound to both chain ids
 and both HTLC addresses. Protocol proofs are cryptographically reverified during
 hydration, and a mismatch is refused without modifying the file.
@@ -166,14 +168,14 @@ the running process from rolling memory back after the new file may have become
 durable.
 
 Order-book responses are also authenticated against this state. The maker
-requires the exact OrderV1, selected FillIntentV1, FillV1 or CancelV1, semantic
+requires the exact OrderV2, selected FillIntentV2, FillV2 or CancelV2, semantic
 digests, expected terminal status, and no equivocation evidence. A malformed or
 contradictory success response blocks funding and leaves recovery state intact.
 
 For portable fills, the kit persists `fillAcknowledged` only after authenticating
 the exact locking response. The state write completes before the live decision
 object changes, and its first on-chain lock requires that acknowledgment. An
-unacknowledged local FillV1 proof does not grant funding authority. An
+unacknowledged local FillV2 proof does not grant funding authority. An
 authenticated release observation is persisted as a sticky fact and
 permanently blocks a new or repeated lock for that fill.
 

@@ -53,7 +53,7 @@ export default function App() {
           role="status"
           className="border-b border-accent/40 bg-accent/10 px-4 py-2 text-center text-sm text-foreground"
         >
-          Development deployment · signed OrderV1 experiment · no first-party liquidity
+          Development deployment · portable OrderV2 · private v3 testnet
         </div>
       ) : null}
 

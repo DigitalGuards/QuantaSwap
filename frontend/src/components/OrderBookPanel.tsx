@@ -55,6 +55,7 @@ import {
   sameSignedIntent,
 } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
+import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
@@ -276,7 +277,7 @@ export function OrderBookPanel({
         const routedOrder = routeSignedOrder(order);
         if (signingScheme === null || routedOrder.orderDigest === undefined) {
           throw new Error(
-            "Portable orders require typed-data signing. Use MyQRLWallet Extension or the official QRL Web3 Wallet.",
+            "Portable V2 orders require message signing. Use MyQRLWallet Extension or the MyQRLWallet web wallet.",
           );
         }
         const releaseSecret = (await generateSecret()).preimage;
@@ -618,6 +619,14 @@ export function OrderBookPanel({
                 </p>
               );
             })()}
+            <div className="grid grid-cols-1 items-start gap-1 rounded-md border border-border/60 bg-background/30 p-2 text-xs sm:grid-cols-[auto_minmax(0,1fr)] sm:gap-4">
+              <span className="text-muted-foreground">Maker identity</span>
+              <ChainAddressPair
+                ethAddress={pending.makerEthAccount}
+                qrlAddress={pending.makerQrlAccount}
+                className="justify-items-start sm:justify-items-end"
+              />
+            </div>
             {pending.prelocked === true && escrow?.id === pending.id ? (
               escrow.status === "checking" ? (
                 <p className="text-xs text-muted-foreground">
@@ -660,16 +669,15 @@ export function OrderBookPanel({
             ) : null}
             <p className="text-xs text-muted-foreground">
               {pending.makerAuth !== undefined
-                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV1. The maker selects one request and publishes a signed FillV1 before you can fund. No funds move during either signature."
+                ? "Confirming asks your QRL wallet to sign a short-lived FillIntentV2. The maker selects one request and publishes a signed FillV2 before you can fund. No funds move during either signature."
                 : pending.prelocked === true
                   ? "Confirming reserves this order; the maker only assigns you as recipient. It counts toward your daily take allowance whether or not you complete it."
                   : "Confirming reserves this order and the maker starts locking their leg. It counts toward your daily take allowance whether or not you complete it."}
             </p>
             {pending.makerAuth !== undefined && signingScheme === null ? (
               <p className="text-xs text-amber-400">
-                Install and connect MyQRLWallet Extension for the recommended portable-order
-                flow. The official QRL Web3 Wallet is also compatible through
-                qrl_signTypedData_v4.
+                Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2
+                orders.
               </p>
             ) : null}
             <div className="flex flex-wrap gap-2">

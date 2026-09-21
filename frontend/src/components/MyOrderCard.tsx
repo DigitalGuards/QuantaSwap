@@ -716,7 +716,7 @@ export function MyOrderCard({
       }
       const state = await getLegState(pre.leg, pre.hashlock);
       if (state.status === SwapStatus.Open) {
-        await sendOnLeg(pre.leg, buildReleaseData(pre.hashlock), 0n);
+        await sendOnLeg(pre.leg, buildReleaseData(pre.leg, pre.hashlock), 0n);
         for (let i = 0; ; i += 1) {
           const cur = await getLegState(pre.leg, pre.hashlock).catch(() => null);
           if (cur && cur.status !== SwapStatus.Open) break;

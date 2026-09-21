@@ -21,7 +21,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { QRL_BOUNDS, isKnownAsset, requireAsset, type AmountBounds, type AssetSymbol } from "./assets.js";
+import {
+  QRL_BOUNDS,
+  isKnownAsset,
+  requireAsset,
+  type AmountBounds,
+  type AssetSymbol,
+} from "./assets.js";
 import { ApiError } from "./errors.js";
 import {
   computeReleaseCommitment,
@@ -39,6 +45,7 @@ import {
   type VerifiedFillIntentV1,
   type VerifiedOrderV1,
 } from "./order-signing.js";
+import { assertLegacyOrderProtocolInput } from "./qip55.js";
 import type { FederationEvent } from "./federation.js";
 
 export { ApiError } from "./errors.js";
@@ -64,7 +71,7 @@ export type PublicFillIntentV1 = Omit<
 
 export type TerminalConflictEvidence =
   | {
-      kind: "fill-v1";
+      kind: "fill-v2";
       digest: string;
       body: FillV1Body;
       auth: ProtocolAuthV1;
@@ -72,7 +79,7 @@ export type TerminalConflictEvidence =
       intentAuth: ProtocolAuthV1;
     }
   | {
-      kind: "cancel-v1";
+      kind: "cancel-v2";
       digest: string;
       body: CancelV1Body;
       auth: ProtocolAuthV1;
@@ -249,7 +256,8 @@ const PRELOCK_MAX_T1_S = 72 * 3600;
 const MIN_TAKEABLE_RUNWAY_S = 2 * 3600 + 1800;
 
 const ETH_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const QRL_ADDR_RE = /^Q[0-9a-fA-F]{40}$/;
+// Legacy and immutable V1 persistence width. QIP-55 submissions are gated first.
+const QRL_ADDR_RE = /^Q[0-9a-fA-F]{128}$/;
 const HASHLOCK_RE = /^0x[0-9a-f]{64}$/;
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const TOKEN_HASH_RE = /^[0-9a-f]{64}$/;
@@ -259,7 +267,8 @@ const AMOUNT_RE = /^[0-9]{1,30}$/;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
 
-const sha256Hex = (s: string): string => createHash("sha256").update(s).digest("hex");
+const sha256Hex = (s: string): string =>
+  createHash("sha256").update(s).digest("hex");
 
 function exactRawToken(raw: unknown, field: string): string {
   if (typeof raw !== "string" || !RAW_TOKEN_RE.test(raw)) {
@@ -287,13 +296,14 @@ function capabilityMatches(
 }
 
 function legacyTokenMatches(storedHex: string, raw: unknown): boolean {
-  return (
-    typeof raw === "string" &&
-    fixedHexMatches(storedHex, sha256Hex(raw))
-  );
+  return typeof raw === "string" && fixedHexMatches(storedHex, sha256Hex(raw));
 }
 
-function requireAmount(raw: unknown, field: string, bounds: AmountBounds): string {
+function requireAmount(
+  raw: unknown,
+  field: string,
+  bounds: AmountBounds,
+): string {
   if (typeof raw !== "string" || !AMOUNT_RE.test(raw)) {
     throw new ApiError(400, `${field} must be a decimal base-unit string`);
   }
@@ -301,7 +311,8 @@ function requireAmount(raw: unknown, field: string, bounds: AmountBounds): strin
   if (units < bounds.minBaseUnits) {
     throw new ApiError(400, `${field} is below the ${bounds.minLabel} minimum`);
   }
-  if (units > bounds.maxBaseUnits) throw new ApiError(400, `${field} exceeds the maximum`);
+  if (units > bounds.maxBaseUnits)
+    throw new ApiError(400, `${field} exceeds the maximum`);
   return units.toString();
 }
 
@@ -334,7 +345,9 @@ function signedOrderBody(order: Order): Record<string, unknown> {
     ...(order.allowedTakerQrl !== undefined
       ? { allowedTakerQrl: order.allowedTakerQrl }
       : {}),
-    ...(order.prelocked === true && order.hashlock !== null && order.initiatorTimeout !== null
+    ...(order.prelocked === true &&
+    order.hashlock !== null &&
+    order.initiatorTimeout !== null
       ? {
           prelock: {
             hashlock: order.hashlock,
@@ -346,15 +359,22 @@ function signedOrderBody(order: Order): Record<string, unknown> {
 }
 
 function verifiedSignedOrder(order: Order): VerifiedOrderV1 {
-  if (order.makerAuth === undefined) throw new ApiError(409, "order is not portable");
-  return verifyOrderV1(signedOrderBody(order), order.makerAuth, { allowExpired: true });
+  if (order.makerAuth === undefined)
+    throw new ApiError(409, "order is not portable");
+  return verifyOrderV1(signedOrderBody(order), order.makerAuth, {
+    allowExpired: true,
+  });
 }
 
 function referencedSignedOrderVariant(
   order: Order,
   rawTerminal: unknown,
 ): VerifiedOrderV1 {
-  if (typeof rawTerminal !== "object" || rawTerminal === null || Array.isArray(rawTerminal)) {
+  if (
+    typeof rawTerminal !== "object" ||
+    rawTerminal === null ||
+    Array.isArray(rawTerminal)
+  ) {
     throw new ApiError(400, "terminal proof must be an object");
   }
   const digest = (rawTerminal as Record<string, unknown>)["orderDigest"];
@@ -368,7 +388,8 @@ function referencedSignedOrderVariant(
     const candidate = verifyOrderV1(conflict.order, conflict.auth, {
       allowExpired: true,
     });
-    if (candidate.orderId !== order.id || candidate.orderDigest !== digest) break;
+    if (candidate.orderId !== order.id || candidate.orderDigest !== digest)
+      break;
     return candidate;
   }
   throw new ApiError(
@@ -390,7 +411,13 @@ function signedCreateCapabilities(
   const makerCommitment = verified.auth.makerTokenCommitment;
   const shareCommitment = verified.auth.shareTokenCommitment;
   const makerToken = exactRawToken(raw.makerToken, "makerToken");
-  if (!capabilityMatches(makerCommitment.slice(2), makerToken, computeMakerTokenCommitment)) {
+  if (
+    !capabilityMatches(
+      makerCommitment.slice(2),
+      makerToken,
+      computeMakerTokenCommitment,
+    )
+  ) {
     throw new ApiError(401, "makerToken does not match the signed commitment");
   }
   if (verified.terms.visibility === "public") {
@@ -400,7 +427,13 @@ function signedCreateCapabilities(
     return { makerToken };
   }
   const shareToken = exactRawToken(raw.shareToken, "shareToken");
-  if (!capabilityMatches(shareCommitment.slice(2), shareToken, computeShareTokenCommitment)) {
+  if (
+    !capabilityMatches(
+      shareCommitment.slice(2),
+      shareToken,
+      computeShareTokenCommitment,
+    )
+  ) {
     throw new ApiError(401, "shareToken does not match the signed commitment");
   }
   return { makerToken, shareToken };
@@ -421,7 +454,8 @@ function matchingString(
   pattern: RegExp,
 ): string {
   const value = row[field];
-  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  if (typeof value !== "string" || !pattern.test(value))
+    invalidPersisted(index, field);
   return value;
 }
 
@@ -433,7 +467,8 @@ function optionalMatchingString(
 ): string | undefined {
   const value = row[field];
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  if (typeof value !== "string" || !pattern.test(value))
+    invalidPersisted(index, field);
   return value;
 }
 
@@ -445,11 +480,16 @@ function nullableMatchingString(
 ): string | null {
   const value = row[field];
   if (value === null) return null;
-  if (typeof value !== "string" || !pattern.test(value)) invalidPersisted(index, field);
+  if (typeof value !== "string" || !pattern.test(value))
+    invalidPersisted(index, field);
   return value;
 }
 
-function safeInteger(row: Record<string, unknown>, index: number, field: string): number {
+function safeInteger(
+  row: Record<string, unknown>,
+  index: number,
+  field: string,
+): number {
   const value = row[field];
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     invalidPersisted(index, field);
@@ -475,7 +515,11 @@ function nullableSafeInteger(
   return safeInteger(row, index, field);
 }
 
-function persistedObject(raw: unknown, index: number, field: string): Record<string, unknown> {
+function persistedObject(
+  raw: unknown,
+  index: number,
+  field: string,
+): Record<string, unknown> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     invalidPersisted(index, field);
   }
@@ -489,7 +533,10 @@ function exactPayload(
 ): Record<string, unknown> {
   const keys = Object.keys(raw).sort();
   const expected = [...fields].sort();
-  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+  if (
+    keys.length !== expected.length ||
+    keys.some((key, index) => key !== expected[index])
+  ) {
     throw new ApiError(400, `${label} has unexpected fields`);
   }
   return raw;
@@ -509,9 +556,14 @@ function hydrateIntentProof(
   const verified = verifyFillIntentV1(row["intent"], row["auth"], order, {
     allowExpired: true,
   });
-  if (row["intentDigest"] !== verified.intentDigest) invalidPersisted(index, `${field} digest`);
+  if (row["intentDigest"] !== verified.intentDigest)
+    invalidPersisted(index, `${field} digest`);
   const receivedAt = row["receivedAt"];
-  if (typeof receivedAt !== "number" || !Number.isSafeInteger(receivedAt) || receivedAt < 0) {
+  if (
+    typeof receivedAt !== "number" ||
+    !Number.isSafeInteger(receivedAt) ||
+    receivedAt < 0
+  ) {
     invalidPersisted(index, `${field} receive time`);
   }
   const rawIpHash = row["acceptorIpHash"];
@@ -519,11 +571,14 @@ function hydrateIntentProof(
     includeIp && typeof rawIpHash === "string" && TOKEN_HASH_RE.test(rawIpHash)
       ? rawIpHash
       : sha256Hex("federated-intent");
-  if (includeIp && acceptorIpHash !== rawIpHash) invalidPersisted(index, `${field} source hash`);
+  if (includeIp && acceptorIpHash !== rawIpHash)
+    invalidPersisted(index, `${field} source hash`);
   const releasedAt = row["releasedAt"];
   if (
     releasedAt !== undefined &&
-    (typeof releasedAt !== "number" || !Number.isSafeInteger(releasedAt) || releasedAt < 0)
+    (typeof releasedAt !== "number" ||
+      !Number.isSafeInteger(releasedAt) ||
+      releasedAt < 0)
   ) {
     invalidPersisted(index, `${field} release time`);
   }
@@ -571,7 +626,12 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     invalidPersisted(index, "direction");
   }
   const status = row["status"];
-  if (status !== "open" && status !== "accepted" && status !== "locking" && status !== "cancelled") {
+  if (
+    status !== "open" &&
+    status !== "accepted" &&
+    status !== "locking" &&
+    status !== "cancelled"
+  ) {
     invalidPersisted(index, "status");
   }
 
@@ -579,23 +639,60 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
   if (typeof rawAsset !== "string" || !isKnownAsset(rawAsset)) {
     invalidPersisted(index, "asset");
   }
-  const shareTokenHash = optionalMatchingString(row, index, "shareTokenHash", TOKEN_HASH_RE);
+  const shareTokenHash = optionalMatchingString(
+    row,
+    index,
+    "shareTokenHash",
+    TOKEN_HASH_RE,
+  );
   const rawVisibility = row["visibility"];
-  if (rawVisibility !== undefined && rawVisibility !== "public" && rawVisibility !== "private") {
+  if (
+    rawVisibility !== undefined &&
+    rawVisibility !== "public" &&
+    rawVisibility !== "private"
+  ) {
     invalidPersisted(index, "visibility");
   }
   const visibility: Visibility =
-    rawVisibility === "private" || shareTokenHash !== undefined ? "private" : "public";
+    rawVisibility === "private" || shareTokenHash !== undefined
+      ? "private"
+      : "public";
 
   const hashlock = nullableMatchingString(row, index, "hashlock", HASHLOCK_RE);
   const initiatorTimeout = nullableSafeInteger(row, index, "initiatorTimeout");
   const responderTimeout = nullableSafeInteger(row, index, "responderTimeout");
-  const prelocked = row["prelocked"] === true && hashlock !== null && initiatorTimeout !== null;
-  const allowedTakerEth = optionalMatchingString(row, index, "allowedTakerEth", ETH_ADDR_RE);
-  const allowedTakerQrl = optionalMatchingString(row, index, "allowedTakerQrl", QRL_ADDR_RE);
-  const takerTokenHash = optionalMatchingString(row, index, "takerTokenHash", TOKEN_HASH_RE);
-  const acceptorIpHash = optionalMatchingString(row, index, "acceptorIpHash", TOKEN_HASH_RE);
-  const creatorIpHash = optionalMatchingString(row, index, "creatorIpHash", TOKEN_HASH_RE);
+  const prelocked =
+    row["prelocked"] === true && hashlock !== null && initiatorTimeout !== null;
+  const allowedTakerEth = optionalMatchingString(
+    row,
+    index,
+    "allowedTakerEth",
+    ETH_ADDR_RE,
+  );
+  const allowedTakerQrl = optionalMatchingString(
+    row,
+    index,
+    "allowedTakerQrl",
+    QRL_ADDR_RE,
+  );
+  const takerTokenHash = optionalMatchingString(
+    row,
+    index,
+    "takerTokenHash",
+    TOKEN_HASH_RE,
+  );
+  const acceptorIpHash = optionalMatchingString(
+    row,
+    index,
+    "acceptorIpHash",
+    TOKEN_HASH_RE,
+  );
+  const creatorIpHash = optionalMatchingString(
+    row,
+    index,
+    "creatorIpHash",
+    TOKEN_HASH_RE,
+  );
   const rawFederationSourceHash = optionalMatchingString(
     row,
     index,
@@ -604,7 +701,12 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
   );
   const acceptedAt = optionalSafeInteger(row, index, "acceptedAt");
   const releasedAt = optionalSafeInteger(row, index, "releasedAt");
-  const releaseSecret = optionalMatchingString(row, index, "releaseSecret", BYTES32_RE);
+  const releaseSecret = optionalMatchingString(
+    row,
+    index,
+    "releaseSecret",
+    BYTES32_RE,
+  );
 
   const order: Order = {
     id: matchingString(row, index, "id", ORDER_ID_RE),
@@ -615,8 +717,18 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     makerEthAccount: matchingString(row, index, "makerEthAccount", ETH_ADDR_RE),
     makerQrlAccount: matchingString(row, index, "makerQrlAccount", QRL_ADDR_RE),
     status,
-    takerEthAccount: nullableMatchingString(row, index, "takerEthAccount", ETH_ADDR_RE),
-    takerQrlAccount: nullableMatchingString(row, index, "takerQrlAccount", QRL_ADDR_RE),
+    takerEthAccount: nullableMatchingString(
+      row,
+      index,
+      "takerEthAccount",
+      ETH_ADDR_RE,
+    ),
+    takerQrlAccount: nullableMatchingString(
+      row,
+      index,
+      "takerQrlAccount",
+      QRL_ADDR_RE,
+    ),
     hashlock,
     initiatorTimeout,
     responderTimeout,
@@ -648,7 +760,10 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     }
     order.makerAuth = verified.auth;
     const persistedDigest = row["orderDigest"];
-    if (persistedDigest !== undefined && persistedDigest !== verified.orderDigest) {
+    if (
+      persistedDigest !== undefined &&
+      persistedDigest !== verified.orderDigest
+    ) {
       invalidPersisted(index, "signed order digest");
     }
     order.orderDigest = verified.orderDigest;
@@ -684,7 +799,10 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
   if (portableOrder !== undefined) {
     const rawIntents = row["fillIntents"];
     if (rawIntents !== undefined) {
-      if (!Array.isArray(rawIntents) || rawIntents.length > MAX_FILL_INTENTS_PER_ORDER) {
+      if (
+        !Array.isArray(rawIntents) ||
+        rawIntents.length > MAX_FILL_INTENTS_PER_ORDER
+      ) {
         invalidPersisted(index, "fill intents");
       }
       order.fillIntents = rawIntents.map(
@@ -697,7 +815,10 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
             true,
           ).stored,
       );
-      if (new Set(order.fillIntents.map((intent) => intent.intentDigest)).size !== order.fillIntents.length) {
+      if (
+        new Set(order.fillIntents.map((intent) => intent.intentDigest)).size !==
+        order.fillIntents.length
+      ) {
         invalidPersisted(index, "duplicate fill intents");
       }
     }
@@ -722,7 +843,9 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     }
 
     const hasAnyFillField =
-      row["fill"] !== undefined || row["fillAuth"] !== undefined || row["fillDigest"] !== undefined;
+      row["fill"] !== undefined ||
+      row["fillAuth"] !== undefined ||
+      row["fillDigest"] !== undefined;
     if (hasAnyFillField) {
       if (
         row["fill"] === undefined ||
@@ -739,7 +862,8 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
         selectedVerified,
         { allowExpired: true },
       );
-      if (row["fillDigest"] !== fill.fillDigest) invalidPersisted(index, "fill digest");
+      if (row["fillDigest"] !== fill.fillDigest)
+        invalidPersisted(index, "fill digest");
       if (
         order.hashlock !== fill.fill.hashlock ||
         order.initiatorTimeout !== fill.fill.initiatorTimeout ||
@@ -772,7 +896,8 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
         portableOrder,
         { allowExpired: true },
       );
-      if (row["cancelDigest"] !== cancel.cancelDigest) invalidPersisted(index, "cancel digest");
+      if (row["cancelDigest"] !== cancel.cancelDigest)
+        invalidPersisted(index, "cancel digest");
       order.cancelProof = cancel.cancel;
       order.cancelAuth = cancel.auth;
       order.cancelDigest = cancel.cancelDigest;
@@ -780,61 +905,77 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
 
     const rawTerminalConflicts = row["conflicts"];
     if (rawTerminalConflicts !== undefined) {
-      if (!Array.isArray(rawTerminalConflicts) || rawTerminalConflicts.length > MAX_CONFLICT_PROOFS) {
+      if (
+        !Array.isArray(rawTerminalConflicts) ||
+        rawTerminalConflicts.length > MAX_CONFLICT_PROOFS
+      ) {
         invalidPersisted(index, "terminal conflicts");
       }
-      order.conflicts = rawTerminalConflicts.map((rawConflict, conflictIndex) => {
-        const conflict = persistedObject(
-          rawConflict,
-          index,
-          `terminal conflict ${conflictIndex}`,
-        );
-        if (conflict["kind"] === "fill-v1") {
-          const intent = verifyFillIntentV1(
-            conflict["intent"],
-            conflict["intentAuth"],
-            portableOrder,
-            { allowExpired: true },
+      order.conflicts = rawTerminalConflicts.map(
+        (rawConflict, conflictIndex) => {
+          const conflict = persistedObject(
+            rawConflict,
+            index,
+            `terminal conflict ${conflictIndex}`,
           );
-          const fill = verifyFillV1(
-            conflict["body"],
-            conflict["auth"],
-            portableOrder,
-            intent,
-            { allowExpired: true },
-          );
-          if (conflict["digest"] !== fill.fillDigest) {
-            invalidPersisted(index, `terminal conflict ${conflictIndex} digest`);
+          if (conflict["kind"] === "fill-v2") {
+            const intent = verifyFillIntentV1(
+              conflict["intent"],
+              conflict["intentAuth"],
+              portableOrder,
+              { allowExpired: true },
+            );
+            const fill = verifyFillV1(
+              conflict["body"],
+              conflict["auth"],
+              portableOrder,
+              intent,
+              { allowExpired: true },
+            );
+            if (conflict["digest"] !== fill.fillDigest) {
+              invalidPersisted(
+                index,
+                `terminal conflict ${conflictIndex} digest`,
+              );
+            }
+            return {
+              kind: "fill-v2" as const,
+              digest: fill.fillDigest,
+              body: fill.fill,
+              auth: fill.auth,
+              intent: intent.intent,
+              intentAuth: intent.auth,
+            };
           }
-          return {
-            kind: "fill-v1" as const,
-            digest: fill.fillDigest,
-            body: fill.fill,
-            auth: fill.auth,
-            intent: intent.intent,
-            intentAuth: intent.auth,
-          };
-        }
-        if (conflict["kind"] === "cancel-v1") {
-          const cancel = verifyCancelV1(
-            conflict["body"],
-            conflict["auth"],
-            portableOrder,
-            { allowExpired: true },
-          );
-          if (conflict["digest"] !== cancel.cancelDigest) {
-            invalidPersisted(index, `terminal conflict ${conflictIndex} digest`);
+          if (conflict["kind"] === "cancel-v2") {
+            const cancel = verifyCancelV1(
+              conflict["body"],
+              conflict["auth"],
+              portableOrder,
+              { allowExpired: true },
+            );
+            if (conflict["digest"] !== cancel.cancelDigest) {
+              invalidPersisted(
+                index,
+                `terminal conflict ${conflictIndex} digest`,
+              );
+            }
+            return {
+              kind: "cancel-v2" as const,
+              digest: cancel.cancelDigest,
+              body: cancel.cancel,
+              auth: cancel.auth,
+            };
           }
-          return {
-            kind: "cancel-v1" as const,
-            digest: cancel.cancelDigest,
-            body: cancel.cancel,
-            auth: cancel.auth,
-          };
-        }
-        return invalidPersisted(index, `terminal conflict ${conflictIndex} kind`);
-      });
-      const conflictDigests = order.conflicts.map((conflict) => conflict.digest);
+          return invalidPersisted(
+            index,
+            `terminal conflict ${conflictIndex} kind`,
+          );
+        },
+      );
+      const conflictDigests = order.conflicts.map(
+        (conflict) => conflict.digest,
+      );
       if (
         new Set(conflictDigests).size !== conflictDigests.length ||
         conflictDigests.includes(order.fillDigest ?? "") ||
@@ -846,24 +987,41 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
 
     const rawOrderConflicts = row["orderConflicts"];
     if (rawOrderConflicts !== undefined) {
-      if (!Array.isArray(rawOrderConflicts) || rawOrderConflicts.length > MAX_CONFLICT_PROOFS) {
+      if (
+        !Array.isArray(rawOrderConflicts) ||
+        rawOrderConflicts.length > MAX_CONFLICT_PROOFS
+      ) {
         invalidPersisted(index, "order conflicts");
       }
-      order.orderConflicts = rawOrderConflicts.map((rawConflict, conflictIndex) => {
-        const conflict = persistedObject(rawConflict, index, `order conflict ${conflictIndex}`);
-        const verified = verifyOrderV1(conflict["order"], conflict["auth"], {
-          allowExpired: true,
-        });
-        if (verified.orderId !== order.id || conflict["orderDigest"] !== verified.orderDigest) {
-          invalidPersisted(index, `order conflict ${conflictIndex} reference`);
-        }
-        return {
-          orderDigest: verified.orderDigest,
-          order: verified.order,
-          auth: verified.auth,
-        };
-      });
-      const conflictDigests = order.orderConflicts.map((conflict) => conflict.orderDigest);
+      order.orderConflicts = rawOrderConflicts.map(
+        (rawConflict, conflictIndex) => {
+          const conflict = persistedObject(
+            rawConflict,
+            index,
+            `order conflict ${conflictIndex}`,
+          );
+          const verified = verifyOrderV1(conflict["order"], conflict["auth"], {
+            allowExpired: true,
+          });
+          if (
+            verified.orderId !== order.id ||
+            conflict["orderDigest"] !== verified.orderDigest
+          ) {
+            invalidPersisted(
+              index,
+              `order conflict ${conflictIndex} reference`,
+            );
+          }
+          return {
+            orderDigest: verified.orderDigest,
+            order: verified.order,
+            auth: verified.auth,
+          };
+        },
+      );
+      const conflictDigests = order.orderConflicts.map(
+        (conflict) => conflict.orderDigest,
+      );
       if (
         new Set(conflictDigests).size !== conflictDigests.length ||
         conflictDigests.includes(order.orderDigest ?? "")
@@ -878,7 +1036,11 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     if (order.fill !== undefined && order.status !== "locking") {
       invalidPersisted(index, "fill status");
     }
-    if (order.cancelProof !== undefined && order.fill === undefined && order.status !== "cancelled") {
+    if (
+      order.cancelProof !== undefined &&
+      order.fill === undefined &&
+      order.status !== "cancelled"
+    ) {
       invalidPersisted(index, "cancel status");
     }
     if (order.releaseSecret !== undefined) {
@@ -956,7 +1118,9 @@ export class OrderStore {
         chmodSync(this.dataFile, 0o600);
       }
     } catch {
-      throw new Error(`order data path is not readable and writable: ${this.dataFile}`);
+      throw new Error(
+        `order data path is not readable and writable: ${this.dataFile}`,
+      );
     }
   }
 
@@ -988,7 +1152,9 @@ export class OrderStore {
       throw new Error(`order data file is not valid JSON: ${this.dataFile}`);
     }
     if (!Array.isArray(parsed)) {
-      throw new Error(`order data file must contain an array: ${this.dataFile}`);
+      throw new Error(
+        `order data file must contain an array: ${this.dataFile}`,
+      );
     }
 
     const now = nowS();
@@ -1004,12 +1170,19 @@ export class OrderStore {
         order.hashlock !== null &&
         order.status !== "cancelled" &&
         [...this.orders.values()].some(
-          (existing) => existing.status !== "cancelled" && existing.hashlock === order.hashlock,
+          (existing) =>
+            existing.status !== "cancelled" &&
+            existing.hashlock === order.hashlock,
         )
       ) {
-        throw new Error(`order data file contains duplicate live hashlock ${order.hashlock}`);
+        throw new Error(
+          `order data file contains duplicate live hashlock ${order.hashlock}`,
+        );
       }
-      if (order.visibility === "public" && usesPortableTerminalProtocol(order)) {
+      if (
+        order.visibility === "public" &&
+        usesPortableTerminalProtocol(order)
+      ) {
         publicPortableOrders += 1;
         if (publicPortableOrders > MAX_PUBLIC_PORTABLE_ORDERS) {
           throw new Error(
@@ -1018,12 +1191,15 @@ export class OrderStore {
         }
         if (order.federationSourceHash !== undefined) {
           federatedPublicPortableOrders += 1;
-          if (federatedPublicPortableOrders > MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS) {
+          if (
+            federatedPublicPortableOrders > MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS
+          ) {
             throw new Error(
               `order data file contains more than ${MAX_FEDERATED_PUBLIC_PORTABLE_ORDERS} federated portable public orders`,
             );
           }
-          const sourceCount = (federatedOrdersBySource.get(order.federationSourceHash) ?? 0) + 1;
+          const sourceCount =
+            (federatedOrdersBySource.get(order.federationSourceHash) ?? 0) + 1;
           if (sourceCount > MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER) {
             throw new Error(
               `order data file contains more than ${MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER} portable public orders from one federation source`,
@@ -1047,7 +1223,11 @@ export class OrderStore {
     try {
       fileDescriptor = openSync(tmp, "wx", 0o600);
       fchmodSync(fileDescriptor, 0o600);
-      writeFileSync(fileDescriptor, JSON.stringify([...this.orders.values()]), "utf8");
+      writeFileSync(
+        fileDescriptor,
+        JSON.stringify([...this.orders.values()]),
+        "utf8",
+      );
       fsyncSync(fileDescriptor);
       closeSync(fileDescriptor);
       fileDescriptor = undefined;
@@ -1072,7 +1252,9 @@ export class OrderStore {
       } catch {
         // The rename may already have consumed the temporary file.
       }
-      throw new OrderStorePersistenceError("order data could not be persisted safely");
+      throw new OrderStorePersistenceError(
+        "order data could not be persisted safely",
+      );
     }
     this.notify();
   }
@@ -1136,7 +1318,8 @@ export class OrderStore {
       if (
         (order.status === "open" &&
           (age > OPEN_TTL_S ||
-            (order.makerAuth !== undefined && now >= order.makerAuth.expiresAt))) ||
+            (order.makerAuth !== undefined &&
+              now >= order.makerAuth.expiresAt))) ||
         (order.status === "accepted" && age > ACCEPTED_TTL_S)
       ) {
         order.status = "cancelled";
@@ -1176,7 +1359,12 @@ export class OrderStore {
     this.sweep();
     const now = nowS();
     return [...this.orders.values()]
-      .filter((o) => o.status === "open" && o.visibility === "public" && this.hasRunway(o, now))
+      .filter(
+        (o) =>
+          o.status === "open" &&
+          o.visibility === "public" &&
+          this.hasRunway(o, now),
+      )
       .filter((o) => o.equivocated !== true)
       .sort((a, b) => b.createdAt - a.createdAt)
       .map((o) => this.pub(o));
@@ -1189,7 +1377,10 @@ export class OrderStore {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
-    if (order.visibility === "private" && !this.shareAuthorized(order, shareToken)) {
+    if (
+      order.visibility === "private" &&
+      !this.shareAuthorized(order, shareToken)
+    ) {
       throw new ApiError(404, "order not found");
     }
     return this.pub(order);
@@ -1200,15 +1391,23 @@ export class OrderStore {
       order.shareTokenHash !== undefined &&
       (order.makerAuth === undefined
         ? legacyTokenMatches(order.shareTokenHash, shareToken)
-        : capabilityMatches(order.shareTokenHash, shareToken, computeShareTokenCommitment))
+        : capabilityMatches(
+            order.shareTokenHash,
+            shareToken,
+            computeShareTokenCommitment,
+          ))
     );
   }
 
-  create(body: Record<string, unknown>, makerIp = "unknown"): {
+  create(
+    body: Record<string, unknown>,
+    makerIp = "unknown",
+  ): {
     order: PublicOrder;
     makerToken: string;
     shareToken?: string;
   } {
+    assertLegacyOrderProtocolInput(body["makerQrlAccount"]);
     return this.createInternal(body, makerIp);
   }
 
@@ -1241,9 +1440,14 @@ export class OrderStore {
     }
     const existing = this.orders.get(verified.orderId);
     if (existing !== undefined) {
-      if (existing.orderDigest === verified.orderDigest) return this.pub(existing);
+      if (existing.orderDigest === verified.orderDigest)
+        return this.pub(existing);
       const conflicts = existing.orderConflicts ?? [];
-      if (!conflicts.some((conflict) => conflict.orderDigest === verified.orderDigest)) {
+      if (
+        !conflicts.some(
+          (conflict) => conflict.orderDigest === verified.orderDigest,
+        )
+      ) {
         conflicts.push({
           orderDigest: verified.orderDigest,
           order: verified.order,
@@ -1259,7 +1463,7 @@ export class OrderStore {
         this.persist();
         if (existing.visibility === "public") {
           this.publish({
-            kind: "order-v1",
+            kind: "order-v2",
             payload: { order: verified.order, auth: verified.auth },
           });
         }
@@ -1300,7 +1504,10 @@ export class OrderStore {
       const existing = this.orders.get(verified.orderId);
       if (existing !== undefined) {
         if (existing.orderDigest !== verified.orderDigest) {
-          throw new ApiError(409, "order id conflicts with another signed order");
+          throw new ApiError(
+            409,
+            "order id conflicts with another signed order",
+          );
         }
         if (federated || capabilities === undefined) {
           return { order: this.pub(existing), makerToken: "" };
@@ -1311,9 +1518,15 @@ export class OrderStore {
           !fixedHexMatches(existing.makerTokenHash, makerCommitment.slice(2)) ||
           (existing.visibility === "private" &&
             (existing.shareTokenHash === undefined ||
-              !fixedHexMatches(existing.shareTokenHash, shareCommitment.slice(2))))
+              !fixedHexMatches(
+                existing.shareTokenHash,
+                shareCommitment.slice(2),
+              )))
         ) {
-          throw new ApiError(409, "stored order capabilities do not match the signed proof");
+          throw new ApiError(
+            409,
+            "stored order capabilities do not match the signed proof",
+          );
         }
         this.seenAt.set(existing.id, nowS());
         return {
@@ -1333,7 +1546,9 @@ export class OrderStore {
         "transient_capacity",
       );
     }
-    const openOrders = [...this.orders.values()].filter((o) => o.status === "open");
+    const openOrders = [...this.orders.values()].filter(
+      (o) => o.status === "open",
+    );
     if (openOrders.length >= MAX_OPEN_ORDERS) {
       throw new ApiError(503, "order book is full", "transient_capacity");
     }
@@ -1345,7 +1560,11 @@ export class OrderStore {
     const asset = requireAsset(body["asset"]);
     const [fromBounds, toBounds]: [AmountBounds, AmountBounds] =
       direction === "eth->qrl" ? [asset, QRL_BOUNDS] : [QRL_BOUNDS, asset];
-    const fromAmount = requireAmount(body["fromAmount"], "fromAmount", fromBounds);
+    const fromAmount = requireAmount(
+      body["fromAmount"],
+      "fromAmount",
+      fromBounds,
+    );
     const toAmount = requireAmount(body["toAmount"], "toAmount", toBounds);
     const makerEthAccount = requireAddress(
       body["makerEthAccount"],
@@ -1408,10 +1627,15 @@ export class OrderStore {
     }
 
     const rawVisibility = body["visibility"];
-    if (rawVisibility !== undefined && rawVisibility !== "public" && rawVisibility !== "private") {
+    if (
+      rawVisibility !== undefined &&
+      rawVisibility !== "public" &&
+      rawVisibility !== "private"
+    ) {
       throw new ApiError(400, "visibility must be public or private");
     }
-    const visibility: Visibility = rawVisibility === "private" ? "private" : "public";
+    const visibility: Visibility =
+      rawVisibility === "private" ? "private" : "public";
     if (
       verified !== undefined &&
       visibility === "public" &&
@@ -1440,10 +1664,13 @@ export class OrderStore {
           "transient_capacity",
         );
       }
-      const sourceHash = sha256Hex(`federation:${federationSource ?? "unknown"}`);
+      const sourceHash = sha256Hex(
+        `federation:${federationSource ?? "unknown"}`,
+      );
       if (
-        federatedOrders.filter((order) => order.federationSourceHash === sourceHash).length >=
-        MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER
+        federatedOrders.filter(
+          (order) => order.federationSourceHash === sourceHash,
+        ).length >= MAX_PUBLIC_PORTABLE_ORDERS_PER_FEDERATION_PEER
       ) {
         throw new ApiError(
           429,
@@ -1460,19 +1687,31 @@ export class OrderStore {
     let allowedTakerEth: string | undefined;
     let allowedTakerQrl: string | undefined;
     if (visibility === "private") {
-      shareToken = verified === undefined
-        ? randomBytes(32).toString("hex")
-        : capabilities?.shareToken;
+      shareToken =
+        verified === undefined
+          ? randomBytes(32).toString("hex")
+          : capabilities?.shareToken;
       if (shareToken === undefined && !federated) {
         throw new ApiError(400, "private signed order shareToken is missing");
       }
       if (body["allowedTakerEth"] !== undefined) {
-        allowedTakerEth = requireAddress(body["allowedTakerEth"], "allowedTakerEth", ETH_ADDR_RE);
+        allowedTakerEth = requireAddress(
+          body["allowedTakerEth"],
+          "allowedTakerEth",
+          ETH_ADDR_RE,
+        );
       }
       if (body["allowedTakerQrl"] !== undefined) {
-        allowedTakerQrl = requireAddress(body["allowedTakerQrl"], "allowedTakerQrl", QRL_ADDR_RE);
+        allowedTakerQrl = requireAddress(
+          body["allowedTakerQrl"],
+          "allowedTakerQrl",
+          QRL_ADDR_RE,
+        );
       }
-    } else if (body["allowedTakerEth"] !== undefined || body["allowedTakerQrl"] !== undefined) {
+    } else if (
+      body["allowedTakerEth"] !== undefined ||
+      body["allowedTakerQrl"] !== undefined
+    ) {
       throw new ApiError(400, "taker restrictions require a private order");
     }
 
@@ -1490,14 +1729,26 @@ export class OrderStore {
       const p = rawPrelock as Record<string, unknown>;
       const hashlock = p["hashlock"];
       if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
-        throw new ApiError(400, "prelock.hashlock must be 32 bytes of lowercase hex");
+        throw new ApiError(
+          400,
+          "prelock.hashlock must be 32 bytes of lowercase hex",
+        );
       }
       const initiatorTimeout = p["initiatorTimeout"];
-      if (typeof initiatorTimeout !== "number" || !Number.isInteger(initiatorTimeout)) {
-        throw new ApiError(400, "prelock.initiatorTimeout must be a unix-second integer");
+      if (
+        typeof initiatorTimeout !== "number" ||
+        !Number.isInteger(initiatorTimeout)
+      ) {
+        throw new ApiError(
+          400,
+          "prelock.initiatorTimeout must be a unix-second integer",
+        );
       }
       if (!federated && initiatorTimeout < now + PRELOCK_MIN_T1_S) {
-        throw new ApiError(400, "prelock.initiatorTimeout is too soon for a takeable listing");
+        throw new ApiError(
+          400,
+          "prelock.initiatorTimeout is too soon for a takeable listing",
+        );
       }
       if (!federated && initiatorTimeout > now + PRELOCK_MAX_T1_S) {
         throw new ApiError(400, "prelock.initiatorTimeout is too far out");
@@ -1514,9 +1765,10 @@ export class OrderStore {
       prelock = { hashlock: normalized, initiatorTimeout };
     }
 
-    const makerToken = verified === undefined
-      ? randomBytes(32).toString("hex")
-      : capabilities?.makerToken ?? "";
+    const makerToken =
+      verified === undefined
+        ? randomBytes(32).toString("hex")
+        : (capabilities?.makerToken ?? "");
     const id = verified?.orderId ?? randomBytes(8).toString("hex");
     if (this.orders.has(id)) throw new ApiError(409, "order already exists");
     const signedMakerCommitment = verified?.auth.makerTokenCommitment;
@@ -1532,7 +1784,10 @@ export class OrderStore {
               candidate.shareTokenHash === shareHash),
         )
       ) {
-        throw new ApiError(409, "signed order capability commitment is already in use");
+        throw new ApiError(
+          409,
+          "signed order capability commitment is already in use",
+        );
       }
     }
     const order: Order = {
@@ -1569,10 +1824,18 @@ export class OrderStore {
           : signedMakerCommitment!.slice(2),
       creatorIpHash,
       ...(federated
-        ? { federationSourceHash: sha256Hex(`federation:${federationSource ?? "unknown"}`) }
+        ? {
+            federationSourceHash: sha256Hex(
+              `federation:${federationSource ?? "unknown"}`,
+            ),
+          }
         : {}),
       ...(verified !== undefined
-        ? { makerAuth: verified.auth, orderDigest: verified.orderDigest, fillIntents: [] }
+        ? {
+            makerAuth: verified.auth,
+            orderDigest: verified.orderDigest,
+            fillIntents: [],
+          }
         : {}),
     };
     this.orders.set(order.id, order);
@@ -1580,7 +1843,7 @@ export class OrderStore {
     this.persist();
     if (verified !== undefined && visibility === "public") {
       this.publish({
-        kind: "order-v1",
+        kind: "order-v2",
         payload: { order: verified.order, auth: verified.auth },
       });
     }
@@ -1601,7 +1864,10 @@ export class OrderStore {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
-    if (order.visibility === "private" && !this.shareAuthorized(order, shareToken)) {
+    if (
+      order.visibility === "private" &&
+      !this.shareAuthorized(order, shareToken)
+    ) {
       throw new ApiError(404, "order not found");
     }
     if (order.makerAuth === undefined) {
@@ -1628,7 +1894,10 @@ export class OrderStore {
       throw new ApiError(409, "order is no longer open");
     }
     if (!this.hasRunway(order, nowS())) {
-      throw new ApiError(409, "this pre-funded order has too little time left to swap safely");
+      throw new ApiError(
+        409,
+        "this pre-funded order has too little time left to swap safely",
+      );
     }
     return this.storeFillIntent(order, verified, takerIp, false);
   }
@@ -1640,16 +1909,25 @@ export class OrderStore {
   ): PublicFillIntentV1 {
     this.sweep();
     const order = this.orders.get(id);
-    if (!order || order.visibility !== "public" || !usesPortableTerminalProtocol(order)) {
+    if (
+      !order ||
+      order.visibility !== "public" ||
+      !usesPortableTerminalProtocol(order)
+    ) {
       throw new ApiError(
         409,
         "referenced public order is unavailable",
         "federation_dependency",
       );
     }
-    const verified = verifyFillIntentV1(rawIntent, rawAuth, verifiedSignedOrder(order), {
-      allowExpired: true,
-    });
+    const verified = verifyFillIntentV1(
+      rawIntent,
+      rawAuth,
+      verifiedSignedOrder(order),
+      {
+        allowExpired: true,
+      },
+    );
     const replay = (order.fillIntents ?? []).find(
       (intent) => intent.intentDigest === verified.intentDigest,
     );
@@ -1679,7 +1957,9 @@ export class OrderStore {
     federated: boolean,
   ): PublicFillIntentV1 {
     const intents = order.fillIntents ?? [];
-    const replay = intents.find((intent) => intent.intentDigest === verified.intentDigest);
+    const replay = intents.find(
+      (intent) => intent.intentDigest === verified.intentDigest,
+    );
     if (replay !== undefined) {
       const {
         acceptorIpHash: _omit,
@@ -1690,7 +1970,10 @@ export class OrderStore {
       return publicIntent;
     }
     if (intents.some((intent) => intent.auth.nonce === verified.auth.nonce)) {
-      throw new ApiError(409, "fill intent nonce conflicts with another signed intent");
+      throw new ApiError(
+        409,
+        "fill intent nonce conflicts with another signed intent",
+      );
     }
     if (intents.length >= MAX_FILL_INTENTS_PER_ORDER) {
       throw new ApiError(
@@ -1715,19 +1998,26 @@ export class OrderStore {
         0,
       );
       if (activeIntentCount >= MAX_CONCURRENT_TAKES_PER_IP) {
-        throw new ApiError(429, "you already have fill requests in progress; finish or let them expire");
+        throw new ApiError(
+          429,
+          "you already have fill requests in progress; finish or let them expire",
+        );
       }
       const recentIntentCount = [...this.orders.values()].reduce(
         (count, candidate) =>
           count +
           (candidate.fillIntents ?? []).filter(
             (intent) =>
-              intent.acceptorIpHash === ipHash && intent.receivedAt > now - TAKE_WINDOW_S,
+              intent.acceptorIpHash === ipHash &&
+              intent.receivedAt > now - TAKE_WINDOW_S,
           ).length,
         0,
       );
       if (recentIntentCount >= MAX_TAKES_PER_IP_PER_DAY) {
-        throw new ApiError(429, "daily fill intent limit reached; leave some liquidity for others");
+        throw new ApiError(
+          429,
+          "daily fill intent limit reached; leave some liquidity for others",
+        );
       }
     }
 
@@ -1744,7 +2034,7 @@ export class OrderStore {
     this.persist();
     if (order.visibility === "public") {
       this.publish({
-        kind: "fill-intent-v1",
+        kind: "fill-intent-v2",
         payload: {
           orderId: order.id,
           intent: verified.intent,
@@ -1765,7 +2055,8 @@ export class OrderStore {
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
-    if (!usesPortableTerminalProtocol(order)) throw new ApiError(409, "order is not portable");
+    if (!usesPortableTerminalProtocol(order))
+      throw new ApiError(409, "order is not portable");
     if (order.visibility === "private") {
       this.authorized(order, { token: makerToken });
     }
@@ -1800,7 +2091,9 @@ export class OrderStore {
     if (
       evidence.digest === order.fillDigest ||
       evidence.digest === order.cancelDigest ||
-      (order.conflicts ?? []).some((conflict) => conflict.digest === evidence.digest)
+      (order.conflicts ?? []).some(
+        (conflict) => conflict.digest === evidence.digest,
+      )
     ) {
       return false;
     }
@@ -1877,7 +2170,7 @@ export class OrderStore {
       allowExpired: options.federated,
     });
     const event: FederationEvent = {
-      kind: "fill-v1",
+      kind: "fill-v2",
       payload: {
         orderId: order.id,
         fill: fill.fill,
@@ -1891,7 +2184,7 @@ export class OrderStore {
     if (order.fillDigest !== undefined || order.cancelDigest !== undefined) {
       if (
         this.rememberTerminalConflict(order, {
-          kind: "fill-v1",
+          kind: "fill-v2",
           digest: fill.fillDigest,
           body: fill.fill,
           auth: fill.auth,
@@ -1906,7 +2199,11 @@ export class OrderStore {
     }
     if (
       order.status !== "open" &&
-      !(options.federated && order.status === "cancelled" && order.cancelProof === undefined)
+      !(
+        options.federated &&
+        order.status === "cancelled" &&
+        order.cancelProof === undefined
+      )
     ) {
       throw new ApiError(409, "order is no longer open");
     }
@@ -1914,14 +2211,13 @@ export class OrderStore {
     const storedIntent = (order.fillIntents ?? []).find(
       (candidate) => candidate.intentDigest === intent.intentDigest,
     );
-    const selectedSource: StoredFillIntentV1 =
-      storedIntent ?? {
-        intentDigest: intent.intentDigest,
-        intent: intent.intent,
-        auth: intent.auth,
-        receivedAt: nowS(),
-        acceptorIpHash: sha256Hex("federated-intent"),
-      };
+    const selectedSource: StoredFillIntentV1 = storedIntent ?? {
+      intentDigest: intent.intentDigest,
+      intent: intent.intent,
+      auth: intent.auth,
+      receivedAt: nowS(),
+      acceptorIpHash: sha256Hex("federated-intent"),
+    };
     const {
       acceptorIpHash,
       releasedAt: selectedReleasedAt,
@@ -1943,7 +2239,10 @@ export class OrderStore {
     order.acceptedAt = fill.auth.issuedAt;
     order.updatedAt = now;
     delete order.takerTokenHash;
-    if (selectedReleasedAt !== undefined && selectedReleaseSecret !== undefined) {
+    if (
+      selectedReleasedAt !== undefined &&
+      selectedReleaseSecret !== undefined
+    ) {
       order.releasedAt = selectedReleasedAt;
       order.releaseSecret = selectedReleaseSecret;
     } else {
@@ -1967,7 +2266,11 @@ export class OrderStore {
     });
   }
 
-  importSignedCancel(id: string, rawCancel: unknown, rawAuth: unknown): PublicOrder {
+  importSignedCancel(
+    id: string,
+    rawCancel: unknown,
+    rawAuth: unknown,
+  ): PublicOrder {
     return this.applySignedCancel(id, rawCancel, rawAuth, { federated: true });
   }
 
@@ -1992,7 +2295,8 @@ export class OrderStore {
     if (!options.federated && order.visibility === "private") {
       this.authorized(order, { token: options.makerToken });
     }
-    if (!usesPortableTerminalProtocol(order)) throw new ApiError(409, "order is not portable");
+    if (!usesPortableTerminalProtocol(order))
+      throw new ApiError(409, "order is not portable");
     const cancel = verifyCancelV1(
       rawCancel,
       rawAuth,
@@ -2002,14 +2306,14 @@ export class OrderStore {
       },
     );
     const event: FederationEvent = {
-      kind: "cancel-v1",
+      kind: "cancel-v2",
       payload: { orderId: order.id, cancel: cancel.cancel, auth: cancel.auth },
     };
     if (order.cancelDigest === cancel.cancelDigest) return this.pub(order);
     if (order.fillDigest !== undefined || order.cancelDigest !== undefined) {
       if (
         this.rememberTerminalConflict(order, {
-          kind: "cancel-v1",
+          kind: "cancel-v2",
           digest: cancel.cancelDigest,
           body: cancel.cancel,
           auth: cancel.auth,
@@ -2036,31 +2340,36 @@ export class OrderStore {
     const events: FederationEvent[] = [];
     const orders = [...this.orders.values()]
       .filter(
-        (order) => order.visibility === "public" && usesPortableTerminalProtocol(order),
+        (order) =>
+          order.visibility === "public" && usesPortableTerminalProtocol(order),
       )
       .sort((left, right) => left.id.localeCompare(right.id));
     for (const order of orders) {
       const makerAuth = order.makerAuth;
       if (makerAuth === undefined) continue;
       events.push({
-        kind: "order-v1",
+        kind: "order-v2",
         payload: { order: signedOrderBody(order), auth: makerAuth },
       });
       for (const conflict of order.orderConflicts ?? []) {
         events.push({
-          kind: "order-v1",
+          kind: "order-v2",
           payload: { order: conflict.order, auth: conflict.auth },
         });
       }
       for (const intent of order.fillIntents ?? []) {
         if (intent.auth.expiresAt + SIGNED_INTENT_RETENTION_S <= now) continue;
         events.push({
-          kind: "fill-intent-v1",
-          payload: { orderId: order.id, intent: intent.intent, auth: intent.auth },
+          kind: "fill-intent-v2",
+          payload: {
+            orderId: order.id,
+            intent: intent.intent,
+            auth: intent.auth,
+          },
         });
         if (intent.releaseSecret !== undefined) {
           events.push({
-            kind: "release-v1",
+            kind: "release-v2",
             payload: {
               orderId: order.id,
               intentDigest: intent.intentDigest,
@@ -2075,7 +2384,7 @@ export class OrderStore {
         order.selectedIntent !== undefined
       ) {
         events.push({
-          kind: "fill-v1",
+          kind: "fill-v2",
           payload: {
             orderId: order.id,
             fill: order.fill,
@@ -2084,17 +2393,24 @@ export class OrderStore {
             intentAuth: order.selectedIntent.auth,
           },
         });
-      } else if (order.cancelProof !== undefined && order.cancelAuth !== undefined) {
+      } else if (
+        order.cancelProof !== undefined &&
+        order.cancelAuth !== undefined
+      ) {
         events.push({
-          kind: "cancel-v1",
-          payload: { orderId: order.id, cancel: order.cancelProof, auth: order.cancelAuth },
+          kind: "cancel-v2",
+          payload: {
+            orderId: order.id,
+            cancel: order.cancelProof,
+            auth: order.cancelAuth,
+          },
         });
       }
       for (const conflict of order.conflicts ?? []) {
         events.push(
-          conflict.kind === "fill-v1"
+          conflict.kind === "fill-v2"
             ? {
-                kind: "fill-v1",
+                kind: "fill-v2",
                 payload: {
                   orderId: order.id,
                   fill: conflict.body,
@@ -2104,7 +2420,7 @@ export class OrderStore {
                 },
               }
             : {
-                kind: "cancel-v1",
+                kind: "cancel-v2",
                 payload: {
                   orderId: order.id,
                   cancel: conflict.body,
@@ -2119,7 +2435,7 @@ export class OrderStore {
         order.releasedAt !== undefined
       ) {
         events.push({
-          kind: "release-v1",
+          kind: "release-v2",
           payload: {
             orderId: order.id,
             fillDigest: order.fillDigest,
@@ -2131,9 +2447,12 @@ export class OrderStore {
     return events;
   }
 
-  applyFederationEvent(event: FederationEvent, federationSource = "unknown"): void {
+  applyFederationEvent(
+    event: FederationEvent,
+    federationSource = "unknown",
+  ): void {
     const payload = event.payload;
-    if (event.kind === "order-v1") {
+    if (event.kind === "order-v2") {
       exactPayload(payload, ["order", "auth"], "federated order event");
       const verified = verifyOrderV1(payload["order"], payload["auth"], {
         allowExpired: true,
@@ -2146,7 +2465,7 @@ export class OrderStore {
     if (typeof orderId !== "string" || !ORDER_ID_RE.test(orderId)) {
       throw new ApiError(400, "federation event has an invalid order id");
     }
-    if (event.kind === "fill-intent-v1") {
+    if (event.kind === "fill-intent-v2") {
       exactPayload(
         payload,
         ["orderId", "intent", "auth"],
@@ -2155,7 +2474,7 @@ export class OrderStore {
       this.importFillIntent(orderId, payload["intent"], payload["auth"]);
       return;
     }
-    if (event.kind === "fill-v1") {
+    if (event.kind === "fill-v2") {
       exactPayload(
         payload,
         ["orderId", "fill", "auth", "intent", "intentAuth"],
@@ -2170,7 +2489,7 @@ export class OrderStore {
       );
       return;
     }
-    if (event.kind === "cancel-v1") {
+    if (event.kind === "cancel-v2") {
       exactPayload(
         payload,
         ["orderId", "cancel", "auth"],
@@ -2182,7 +2501,11 @@ export class OrderStore {
     const hasFillDigest = payload["fillDigest"] !== undefined;
     exactPayload(
       payload,
-      ["orderId", hasFillDigest ? "fillDigest" : "intentDigest", "releaseSecret"],
+      [
+        "orderId",
+        hasFillDigest ? "fillDigest" : "intentDigest",
+        "releaseSecret",
+      ],
       "federated release event",
     );
     this.importRelease(orderId, {
@@ -2203,7 +2526,9 @@ export class OrderStore {
   ): { order: PublicOrder; takerToken: string } {
     const now = nowS();
     const ipHash = sha256Hex(takerIp);
-    const mine = [...this.orders.values()].filter((o) => o.acceptorIpHash === ipHash);
+    const mine = [...this.orders.values()].filter(
+      (o) => o.acceptorIpHash === ipHash,
+    );
     // A take counts as "in progress" while the taker can still act: the whole
     // accepted phase, and the locking phase only within the swap horizon.
     // For a classic order T1 = announce + 2h already bounds that; a prelocked
@@ -2217,28 +2542,50 @@ export class OrderStore {
     const lockingSlotActive = (o: Order): boolean => {
       if (o.status !== "locking") return false;
       const t1 = o.initiatorTimeout ?? Number.POSITIVE_INFINITY;
-      const horizon = Math.min(t1, (o.acceptedAt ?? now) + LOCKING_SLOT_HORIZON_S);
+      const horizon = Math.min(
+        t1,
+        (o.acceptedAt ?? now) + LOCKING_SLOT_HORIZON_S,
+      );
       return now <= horizon;
     };
     const concurrent = mine.filter(
-      (o) => o.releasedAt === undefined && (o.status === "accepted" || lockingSlotActive(o)),
+      (o) =>
+        o.releasedAt === undefined &&
+        (o.status === "accepted" || lockingSlotActive(o)),
     ).length;
     if (concurrent >= MAX_CONCURRENT_TAKES_PER_IP) {
-      throw new ApiError(429, "you already have swaps in progress; finish or let them expire");
+      throw new ApiError(
+        429,
+        "you already have swaps in progress; finish or let them expire",
+      );
     }
-    const recent = mine.filter((o) => (o.acceptedAt ?? 0) > now - TAKE_WINDOW_S).length;
+    const recent = mine.filter(
+      (o) => (o.acceptedAt ?? 0) > now - TAKE_WINDOW_S,
+    ).length;
     if (recent >= MAX_TAKES_PER_IP_PER_DAY) {
-      throw new ApiError(429, "daily take limit reached; leave some liquidity for others");
+      throw new ApiError(
+        429,
+        "daily take limit reached; leave some liquidity for others",
+      );
     }
 
-    const takerEthAccount = requireAddress(body["takerEthAccount"], "takerEthAccount", ETH_ADDR_RE);
-    const takerQrlAccount = requireAddress(body["takerQrlAccount"], "takerQrlAccount", QRL_ADDR_RE);
+    const takerEthAccount = requireAddress(
+      body["takerEthAccount"],
+      "takerEthAccount",
+      ETH_ADDR_RE,
+    );
+    const takerQrlAccount = requireAddress(
+      body["takerQrlAccount"],
+      "takerQrlAccount",
+      QRL_ADDR_RE,
+    );
     // Maker-declared taker restriction (private OTC orders): a courtesy
     // filter here; the maker's client re-verifies the taker before
     // locking, and the HTLC fixes the recipient at lock time.
     if (
       (order.allowedTakerEth !== undefined &&
-        order.allowedTakerEth.toLowerCase() !== takerEthAccount.toLowerCase()) ||
+        order.allowedTakerEth.toLowerCase() !==
+          takerEthAccount.toLowerCase()) ||
       (order.allowedTakerQrl !== undefined &&
         order.allowedTakerQrl.toLowerCase() !== takerQrlAccount.toLowerCase())
     ) {
@@ -2263,20 +2610,28 @@ export class OrderStore {
     body: Record<string, unknown>,
     takerIp: string,
   ): { order: PublicOrder; takerToken: string } {
+    assertLegacyOrderProtocolInput(body["takerQrlAccount"]);
     this.sweep();
     const order = this.orders.get(id);
     if (!order) throw new ApiError(404, "order not found");
     // Same 404 as a missing order: an id alone must not confirm a
     // private listing exists.
-    if (order.visibility === "private" && !this.shareAuthorized(order, body["shareToken"])) {
+    if (
+      order.visibility === "private" &&
+      !this.shareAuthorized(order, body["shareToken"])
+    ) {
       throw new ApiError(404, "order not found");
     }
     if (usesPortableTerminalProtocol(order)) {
       throw new ApiError(409, "signed orders require a FillIntentV1 request");
     }
-    if (order.status !== "open") throw new ApiError(409, "order is no longer open");
+    if (order.status !== "open")
+      throw new ApiError(409, "order is no longer open");
     if (!this.hasRunway(order, nowS())) {
-      throw new ApiError(409, "this pre-funded order has too little time left to swap safely");
+      throw new ApiError(
+        409,
+        "this pre-funded order has too little time left to swap safely",
+      );
     }
     return this.commitTake(order, body, takerIp);
   }
@@ -2293,6 +2648,7 @@ export class OrderStore {
     body: Record<string, unknown>,
     takerIp: string,
   ): { order: PublicOrder; takerToken: string } {
+    assertLegacyOrderProtocolInput(body["takerQrlAccount"]);
     this.sweep();
     const direction = requireDirection(body["direction"]);
     // The taker pays the order's toAmount side and receives its
@@ -2302,7 +2658,9 @@ export class OrderStore {
     const [payBounds, receiveBounds]: [AmountBounds, AmountBounds] =
       direction === "eth->qrl" ? [QRL_BOUNDS, asset] : [asset, QRL_BOUNDS];
     const maxPay = BigInt(requireAmount(body["maxPay"], "maxPay", payBounds));
-    const minReceive = BigInt(requireAmount(body["minReceive"], "minReceive", receiveBounds));
+    const minReceive = BigInt(
+      requireAmount(body["minReceive"], "minReceive", receiveBounds),
+    );
 
     const now = nowS();
     const candidates = [...this.orders.values()].filter(
@@ -2322,7 +2680,9 @@ export class OrderStore {
     // asset-scoped filter above guarantees), then the larger fill, then
     // FIFO.
     candidates.sort((a, b) => {
-      const cross = BigInt(a.fromAmount) * BigInt(b.toAmount) - BigInt(b.fromAmount) * BigInt(a.toAmount);
+      const cross =
+        BigInt(a.fromAmount) * BigInt(b.toAmount) -
+        BigInt(b.fromAmount) * BigInt(a.toAmount);
       if (cross !== 0n) return cross > 0n ? -1 : 1;
       const size = BigInt(a.fromAmount) - BigInt(b.fromAmount);
       if (size !== 0n) return size > 0n ? -1 : 1;
@@ -2330,7 +2690,10 @@ export class OrderStore {
     });
     const best = candidates[0];
     if (!best) {
-      throw new ApiError(409, "no open order matches those terms; the book may have moved");
+      throw new ApiError(
+        409,
+        "no open order matches those terms; the book may have moved",
+      );
     }
     return this.commitTake(best, body, takerIp);
   }
@@ -2371,7 +2734,8 @@ export class OrderStore {
     if (usesPortableTerminalProtocol(order)) {
       throw new ApiError(409, "signed orders require a FillV1 proof");
     }
-    if (order.status !== "accepted") throw new ApiError(409, "order is not awaiting a hashlock");
+    if (order.status !== "accepted")
+      throw new ApiError(409, "order is not awaiting a hashlock");
 
     const hashlock = body["hashlock"];
     if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
@@ -2395,17 +2759,27 @@ export class OrderStore {
       // that lost local state and regenerated a secret: refuse before the
       // taker wastes a verification round on an escrow that cannot match.
       if (hashlock.toLowerCase() !== order.hashlock) {
-        throw new ApiError(400, "hashlock does not match the pre-funded escrow");
+        throw new ApiError(
+          400,
+          "hashlock does not match the pre-funded escrow",
+        );
       }
       if (initiatorTimeout !== order.initiatorTimeout) {
-        throw new ApiError(400, "initiatorTimeout does not match the pre-funded escrow");
+        throw new ApiError(
+          400,
+          "initiatorTimeout does not match the pre-funded escrow",
+        );
       }
     }
     // Invariant from the architecture spec: the initiator's window must
     // cover the responder's window twice over. Clients re-verify on-chain.
-    if (responderTimeout <= now + 600) throw new ApiError(400, "responder timeout is too soon");
+    if (responderTimeout <= now + 600)
+      throw new ApiError(400, "responder timeout is too soon");
     if (initiatorTimeout - now < 2 * (responderTimeout - now)) {
-      throw new ApiError(400, "initiator timeout must be at least 2x the responder timeout");
+      throw new ApiError(
+        400,
+        "initiator timeout must be at least 2x the responder timeout",
+      );
     }
     order.hashlock = hashlock.toLowerCase();
     order.initiatorTimeout = initiatorTimeout;
@@ -2461,7 +2835,11 @@ export class OrderStore {
   importRelease(id: string, body: Record<string, unknown>): PublicOrder {
     this.sweep();
     const order = this.orders.get(id);
-    if (!order || order.visibility !== "public" || !usesPortableTerminalProtocol(order)) {
+    if (
+      !order ||
+      order.visibility !== "public" ||
+      !usesPortableTerminalProtocol(order)
+    ) {
       throw new ApiError(
         409,
         "referenced public order is unavailable",
@@ -2487,7 +2865,10 @@ export class OrderStore {
     const hasFillDigest = body["fillDigest"] !== undefined;
     const hasIntentDigest = body["intentDigest"] !== undefined;
     if (hasFillDigest === hasIntentDigest) {
-      throw new ApiError(400, "release must identify exactly one fill or fill intent");
+      throw new ApiError(
+        400,
+        "release must identify exactly one fill or fill intent",
+      );
     }
     exactPayload(
       body,
@@ -2500,10 +2881,14 @@ export class OrderStore {
     );
     const releaseSecret = body["releaseSecret"];
     if (typeof releaseSecret !== "string" || !BYTES32_RE.test(releaseSecret)) {
-      throw new ApiError(400, "releaseSecret must be 32 bytes of lowercase hex");
+      throw new ApiError(
+        400,
+        "releaseSecret must be 32 bytes of lowercase hex",
+      );
     }
     const orderDigestValue = order.orderDigest;
-    if (orderDigestValue === undefined) throw new ApiError(409, "order is not portable");
+    if (orderDigestValue === undefined)
+      throw new ApiError(409, "order is not portable");
     const now = nowS();
 
     let event: FederationEvent;
@@ -2528,28 +2913,39 @@ export class OrderStore {
         releaseSecret,
       );
       if (expected !== order.fill.releaseCommitment) {
-        throw new ApiError(403, "release secret does not match the signed fill");
+        throw new ApiError(
+          403,
+          "release secret does not match the signed fill",
+        );
       }
-      if (order.releaseSecret === releaseSecret && order.releasedAt !== undefined) {
+      if (
+        order.releaseSecret === releaseSecret &&
+        order.releasedAt !== undefined
+      ) {
         return this.pub(order);
       }
       order.releaseSecret = releaseSecret;
       order.releasedAt = now;
       order.updatedAt = now;
       event = {
-        kind: "release-v1",
+        kind: "release-v2",
         payload: { orderId: order.id, fillDigest: digest, releaseSecret },
       };
     } else {
       const digest = body["intentDigest"];
       if (typeof digest !== "string" || !BYTES32_RE.test(digest)) {
-        throw new ApiError(400, "intentDigest must be 32 bytes of lowercase hex");
+        throw new ApiError(
+          400,
+          "intentDigest must be 32 bytes of lowercase hex",
+        );
       }
       const storedIntent = (order.fillIntents ?? []).find(
         (candidate) => candidate.intentDigest === digest,
       );
       const selectedIntent =
-        order.selectedIntent?.intentDigest === digest ? order.selectedIntent : undefined;
+        order.selectedIntent?.intentDigest === digest
+          ? order.selectedIntent
+          : undefined;
       const intent = storedIntent ?? selectedIntent;
       if (intent === undefined) {
         throw new ApiError(
@@ -2564,10 +2960,14 @@ export class OrderStore {
         releaseSecret,
       );
       if (expected !== intent.intent.releaseCommitment) {
-        throw new ApiError(403, "release secret does not match the fill intent");
+        throw new ApiError(
+          403,
+          "release secret does not match the fill intent",
+        );
       }
       if (
-        (storedIntent?.releaseSecret === releaseSecret && storedIntent.releasedAt !== undefined) ||
+        (storedIntent?.releaseSecret === releaseSecret &&
+          storedIntent.releasedAt !== undefined) ||
         (selectedIntent !== undefined &&
           order.releaseSecret === releaseSecret &&
           order.releasedAt !== undefined)
@@ -2584,7 +2984,7 @@ export class OrderStore {
       }
       order.updatedAt = now;
       event = {
-        kind: "release-v1",
+        kind: "release-v2",
         payload: { orderId: order.id, intentDigest: digest, releaseSecret },
       };
     }

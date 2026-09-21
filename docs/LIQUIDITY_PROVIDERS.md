@@ -59,20 +59,20 @@ yours.
 
 1. **Create, commit, sign, and stage**: generate a fresh raw 32-byte maker
    capability. A private browser order also generates a fresh 32-byte share
-   capability. Sign OrderV1 over direction, asset, amounts, both maker accounts,
+   capability. Sign OrderV2 over direction, asset, amounts, both maker accounts,
    deployment, expiry, a fresh nonce, and the two domain-separated SHA-256
    capability commitments. Public orders sign a zero share commitment; private
    orders sign a nonzero one. Persist the exact `{order, auth, makerToken}`
    request, plus `shareToken` when private, before the first
    `POST /orders/signed`. The stable cross-mirror id is SHA-256 over the fixed
-   OrderV1 id domain, your raw 20-byte QRL account, and the raw 32-byte nonce.
+   OrderV2 id domain, your raw 64-byte QRL account, and the raw 32-byte nonce.
    Keep the staged envelope until the origin returns the same authenticated
-   OrderV1. Retry it without changing any field after an uncertain response.
+   OrderV2. Retry it without changing any field after an uncertain response.
 2. **Heartbeat**: `POST /orders/:id/heartbeat` at least every 90 s per open
    listing (the reference maker beats every tick). It communicates origin
    liveness and keeps legacy rows eligible for take-by-terms matching.
 3. **Verify proposals**: poll `GET /orders/:id/intents`. Independently verify
-   every FillIntentV1 signature, deployment, order digest, taker accounts,
+   every FillIntentV2 signature, deployment, order digest, taker accounts,
    release commitment, and expiry. Discard future-issued proposals, then select
    by signed `auth.issuedAt` and semantic `intentDigest`. Never use mirror-local
    `receivedAt` as a tie-breaker. Persist that exact proposal before making a
@@ -80,19 +80,19 @@ yours.
 4. **Generate and persist**: generate a fresh 32-byte CSPRNG secret, compute
    `hashlock = sha256(secret)`, choose safe T1/T2, and persist the secret and
    terms. Never reuse a secret across swaps or chains.
-5. **Sign the terminal fill**: sign FillV1 over the selected intent digest,
+5. **Sign the terminal fill**: sign FillV2 over the selected intent digest,
    taker accounts, release commitment, hashlock, timeouts, deployment, and a
    short `respondBy`. Persist the exact proof before
    `POST /orders/:id/fill`. If the response says `released: true`, stop before
-   funding. Authenticate the returned OrderV1, FillV1, selected intent,
+   funding. Authenticate the returned OrderV2, FillV2, selected intent,
    semantic digests, status, and absence of cancellation or conflict evidence.
    Persist a separate `fillAcknowledged` flag only after authenticating that
    exact locking response, and make the acknowledgment durable before changing
    the live decision state. The reference maker requires this flag before its
-   first lock; the locally persisted FillV1 proof alone is insufficient. A fill
-   never reopens; use a fresh OrderV1 to quote again.
+   first lock; the locally persisted FillV2 proof alone is insufficient. A fill
+   never reopens; use a fresh OrderV2 to quote again.
 6. **Lock first**: lock your leg on-chain with the selected taker as recipient
-   and the FillV1 initiator timeout. The contract enforces hashlock freshness.
+   and the FillV2 initiator timeout. The contract enforces hashlock freshness.
 7. **Verify the taker's lock, then claim**: wait for the taker's HTLC lock,
    re-read it on-chain **at your confirmation depth** (the reference maker
    re-reads at `head - N`), and verify recipient, amount, token address and
@@ -102,14 +102,14 @@ yours.
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
 9. **Cancel or repost**: before selecting an intent, a maker may sign and
-   persist CancelV1, then `POST /orders/:id/cancel/signed`. A filled or
-   cancelled listing is terminal. Authenticate the exact CancelV1 and digest
-   in the response before deleting local state. Sign a fresh OrderV1 to stay in
+   persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
+   cancelled listing is terminal. Authenticate the exact CancelV2 and digest
+   in the response before deleting local state. Sign a fresh OrderV2 to stay in
    the book.
 
-A taker can reveal the release preimage committed in FillIntentV1. It marks the
+A taker can reveal the release preimage committed in FillIntentV2. It marks the
 proposal or selected fill released and means commit no further funds. It never
-relists the consumed OrderV1. If you already locked, follow the refund path.
+relists the consumed OrderV2. If you already locked, follow the refund path.
 
 ## Pre-funded listings (prelock)
 
@@ -128,7 +128,7 @@ flow is the *Pre-fund* checkbox on the post card. What changes:
 - the escrow's T1 is fixed at post (the frontend uses 48 h, matching the
   listing TTL), and the book stops offering the order once less than 2 h 30 m
   of runway remains: release and relist at that point;
-- order of operations at match is publish FillV1 first, assign second, and **never
+- order of operations at match is publish FillV2 first, assign second, and **never
   assign while the shared hashlock already exists on the responder chain**
   (a dust-cost squat there would strand your escrow until T1: release and
   relist with a fresh secret instead). Never reveal the secret while your own
@@ -138,12 +138,12 @@ The reference market maker intentionally does **not** prelock: it is always
 online, so lock-at-match costs its takers nothing, and unfunded listings keep
 its inventory fungible across the whole ladder instead of parked per rung.
 
-Portable timing bounds are enforced by the signer and verifier. FillIntentV1
-lasts at most 120 s. FillV1 `respondBy` is 60 to 900 s after issuance and leaves
-more than 600 s before T2. T2 is at most 2 h after FillV1 issuance. A classic
+Portable timing bounds are enforced by the signer and verifier. FillIntentV2
+lasts at most 120 s. FillV2 `respondBy` is 60 to 900 s after issuance and leaves
+more than 600 s before T2. T2 is at most 2 h after FillV2 issuance. A classic
 T1 is at most 4 h after issuance and provides at least twice the T2 window. A
-signed prelock anchors T1 from 3 h through 72 h after OrderV1 issuance, cannot
-expire before OrderV1, and must retain at least 2 h 30 m when matched.
+signed prelock anchors T1 from 3 h through 72 h after OrderV2 issuance, cannot
+expire before OrderV2, and must retain at least 2 h 30 m when matched.
 
 ## Safety rules (non-negotiable)
 
@@ -196,7 +196,7 @@ risk:
   An authenticated `released: true` observation is persisted and sticky, so a
   later stale or unavailable response cannot authorize a new lock.
 - **Book-outage continuity**: a portable first lock requires a durably
-  authenticated FillV1 acknowledgment. During a book outage, the reference
+  authenticated FillV2 acknowledgment. During a book outage, the reference
   maker continues chain settlement only when it already has that acknowledgment,
   a persisted lock attempt, or observed exposure on either HTLC leg. A prior
   lock attempt is never abandoned merely because an RPC currently reports

@@ -15,8 +15,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { Descriptor, MLDSA87, getAddressFromPKAndDescriptor } from "@theqrl/wallet.js";
-import { getBytes } from "ethers";
 import { isAssetSymbol } from "./assets.js";
 import {
   parseDeploymentIdentity,
@@ -39,10 +37,10 @@ import {
   computeFillIntentDigest,
   computeOrderDigest,
   deriveOrderV1Id,
-  officialQrlDigest,
   EMPTY_CAPABILITY_COMMITMENT,
   MAKER_CAPABILITY_DOMAIN,
   verifyFillIntentV1,
+  verifyOfficialV1Proof,
   type CanonicalOrderV1Body,
   type FillIntentV1Body,
   type MakerOrderAuthV1,
@@ -59,7 +57,12 @@ interface StateEnvelope {
 
 type PersistedOrder = Omit<
   ManagedOrder,
-  "level" | "quotedMidMilli" | "announcedAt" | "asset" | "deployment" | "protocol"
+  | "level"
+  | "quotedMidMilli"
+  | "announcedAt"
+  | "asset"
+  | "deployment"
+  | "protocol"
 > & {
   level?: number;
   quotedMidMilli?: string | null;
@@ -71,7 +74,8 @@ type PersistedOrder = Omit<
 
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const ETH_ADDRESS_RE = /^0x[0-9a-f]{40}$/;
-const QRL_ADDRESS_RE = /^Q[0-9a-f]{40}$/;
+// V2 persistence binds the full QIP-55 identity; legacy proof state fails closed.
+const QRL_ADDRESS_RE = /^Q[0-9a-f]{128}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
 const HEX_RE = /^0x[0-9a-f]+$/;
 const DESCRIPTOR_RE = /^0x[0-9a-f]{6}$/;
@@ -101,7 +105,10 @@ export class StateFilePoisonedError extends Error {}
 function processStart(pid: number): string | null {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const suffix = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/);
+    const suffix = stat
+      .slice(stat.lastIndexOf(") ") + 2)
+      .trim()
+      .split(/\s+/);
     return suffix[19] ?? null;
   } catch {
     return null;
@@ -258,7 +265,8 @@ export class StateProcessLease {
       .update(JSON.stringify(identity))
       .digest("hex");
     const currentStart = processStart(process.pid);
-    if (currentStart === null) throw new Error("cannot determine market maker process identity");
+    if (currentStart === null)
+      throw new Error("cannot determine market maker process identity");
     const currentBoot = bootId();
     const makeRecord = (leaseId: string): LeaseRecord => ({
       version: 1,
@@ -322,7 +330,9 @@ export class StateProcessLease {
         releaseOwnedLeaseFile(recoveryPath, recoveryLeaseId, directory);
       }
     }
-    throw new Error(`state lease ${path} remained contended during stale-lock recovery`);
+    throw new Error(
+      `state lease ${path} remained contended during stale-lock recovery`,
+    );
   }
 
   close(): void {
@@ -396,9 +406,9 @@ function parseIntentAuth(
     ],
     field,
   );
-  if (auth["version"] !== "1") throw new Error(`${field}.version is malformed`);
+  if (auth["version"] !== "2") throw new Error(`${field}.version is malformed`);
   const scheme = auth["scheme"];
-  if (scheme !== "qrl-sign-typed-v1" && scheme !== "qrl-eip712-v4") {
+  if (scheme !== "qrl-sign-message-v2") {
     throw new Error(`${field}.scheme is malformed`);
   }
   const issuedAt = proofInteger(auth["issuedAt"], `${field}.issuedAt`);
@@ -407,14 +417,18 @@ function parseIntentAuth(
     throw new Error(`${field} lifetime is malformed`);
   }
   return {
-    version: "1",
+    version: "2",
     scheme,
     issuedAt,
     expiresAt,
     nonce: proofString(auth["nonce"], BYTES32_RE, `${field}.nonce`),
     signature: proofString(auth["signature"], HEX_RE, `${field}.signature`),
     publicKey: proofString(auth["publicKey"], HEX_RE, `${field}.publicKey`),
-    descriptor: proofString(auth["descriptor"], DESCRIPTOR_RE, `${field}.descriptor`),
+    descriptor: proofString(
+      auth["descriptor"],
+      DESCRIPTOR_RE,
+      `${field}.descriptor`,
+    ),
   };
 }
 
@@ -450,12 +464,12 @@ function parseMakerAuth(raw: unknown, field: string): MakerOrderAuthV1 {
     field,
     48 * 3600,
   );
-  if (auth.scheme !== "qrl-eip712-v4" || auth.descriptor !== "0x010000") {
+  if (auth.scheme !== "qrl-sign-message-v2" || auth.descriptor !== "0x010000") {
     throw new Error(`${field} is not a headless maker proof`);
   }
   return {
     ...auth,
-    scheme: "qrl-eip712-v4",
+    scheme: "qrl-sign-message-v2",
     descriptor: "0x010000",
     makerTokenCommitment: proofString(
       value["makerTokenCommitment"],
@@ -476,30 +490,23 @@ function verifyMakerProof(
   payload: ReturnType<typeof buildOrderV1Payload>,
   field: string,
 ): void {
-  const descriptor = Descriptor.from(getBytes(auth.descriptor));
-  const address = getAddressFromPKAndDescriptor(getBytes(auth.publicKey), descriptor);
-  const derived = `Q${Buffer.from(address).toString("hex")}`;
-  if (
-    derived !== signer ||
-    !MLDSA87.verify(
-      getBytes(auth.signature),
-      officialQrlDigest(payload),
-      getBytes(auth.publicKey),
-    )
-  ) {
+  if (!verifyOfficialV1Proof(signer, auth, payload)) {
     throw new Error(`${field} signature is malformed`);
   }
 }
 
 function parseTerminalMakerAuth(raw: unknown, field: string): ProtocolAuthV1 {
   const auth = parseIntentAuth(raw, field, 48 * 3600);
-  if (auth.scheme !== "qrl-eip712-v4" || auth.descriptor !== "0x010000") {
+  if (auth.scheme !== "qrl-sign-message-v2" || auth.descriptor !== "0x010000") {
     throw new Error(`${field} is not a headless maker proof`);
   }
   return auth;
 }
 
-function parseCanonicalOrder(raw: unknown, field: string): CanonicalOrderV1Body {
+function parseCanonicalOrder(
+  raw: unknown,
+  field: string,
+): CanonicalOrderV1Body {
   const order = proofObject(raw, field);
   const allowed = new Set([
     "direction",
@@ -539,9 +546,17 @@ function parseCanonicalOrder(raw: unknown, field: string): CanonicalOrderV1Body 
   let prelock: CanonicalOrderV1Body["prelock"];
   if (order["prelock"] !== undefined) {
     const rawPrelock = proofObject(order["prelock"], `${field}.prelock`);
-    exactProofKeys(rawPrelock, ["hashlock", "initiatorTimeout"], `${field}.prelock`);
+    exactProofKeys(
+      rawPrelock,
+      ["hashlock", "initiatorTimeout"],
+      `${field}.prelock`,
+    );
     prelock = {
-      hashlock: proofString(rawPrelock["hashlock"], BYTES32_RE, `${field}.prelock.hashlock`),
+      hashlock: proofString(
+        rawPrelock["hashlock"],
+        BYTES32_RE,
+        `${field}.prelock.hashlock`,
+      ),
       initiatorTimeout: proofInteger(
         rawPrelock["initiatorTimeout"],
         `${field}.prelock.initiatorTimeout`,
@@ -551,7 +566,11 @@ function parseCanonicalOrder(raw: unknown, field: string): CanonicalOrderV1Body 
   return {
     direction,
     asset,
-    fromAmount: proofString(order["fromAmount"], AMOUNT_RE, `${field}.fromAmount`),
+    fromAmount: proofString(
+      order["fromAmount"],
+      AMOUNT_RE,
+      `${field}.fromAmount`,
+    ),
     toAmount: proofString(order["toAmount"], AMOUNT_RE, `${field}.toAmount`),
     makerEthAccount: proofString(
       order["makerEthAccount"],
@@ -594,7 +613,11 @@ function parseIntentBody(raw: unknown, field: string): FillIntentV1Body {
     field,
   );
   return {
-    orderDigest: proofString(intent["orderDigest"], BYTES32_RE, `${field}.orderDigest`),
+    orderDigest: proofString(
+      intent["orderDigest"],
+      BYTES32_RE,
+      `${field}.orderDigest`,
+    ),
     takerEthAccount: proofString(
       intent["takerEthAccount"],
       ETH_ADDRESS_RE,
@@ -620,7 +643,11 @@ function parseSelectedIntent(
   orderAuth: MakerOrderAuthV1,
 ): SelectedFillIntentV1 {
   const selected = proofObject(raw, field);
-  exactProofKeys(selected, ["intentDigest", "intent", "auth", "receivedAt"], field);
+  exactProofKeys(
+    selected,
+    ["intentDigest", "intent", "auth", "receivedAt"],
+    field,
+  );
   const intent = parseIntentBody(selected["intent"], `${field}.intent`);
   const auth = parseIntentAuth(selected["auth"], `${field}.auth`);
   const intentDigest = proofString(
@@ -628,7 +655,8 @@ function parseSelectedIntent(
     BYTES32_RE,
     `${field}.intentDigest`,
   );
-  if (intent.orderDigest !== orderDigest) throw new Error(`${field} references another order`);
+  if (intent.orderDigest !== orderDigest)
+    throw new Error(`${field} references another order`);
   if (computeFillIntentDigest(intent, auth) !== intentDigest) {
     throw new Error(`${field} digest is malformed`);
   }
@@ -675,8 +703,16 @@ function parseFillProof(
     `${field}.fill`,
   );
   const fill = {
-    orderDigest: proofString(fillRow["orderDigest"], BYTES32_RE, `${field}.fill.orderDigest`),
-    intentDigest: proofString(fillRow["intentDigest"], BYTES32_RE, `${field}.fill.intentDigest`),
+    orderDigest: proofString(
+      fillRow["orderDigest"],
+      BYTES32_RE,
+      `${field}.fill.orderDigest`,
+    ),
+    intentDigest: proofString(
+      fillRow["intentDigest"],
+      BYTES32_RE,
+      `${field}.fill.intentDigest`,
+    ),
     takerEthAccount: proofString(
       fillRow["takerEthAccount"],
       ETH_ADDRESS_RE,
@@ -692,7 +728,11 @@ function parseFillProof(
       BYTES32_RE,
       `${field}.fill.releaseCommitment`,
     ),
-    hashlock: proofString(fillRow["hashlock"], BYTES32_RE, `${field}.fill.hashlock`),
+    hashlock: proofString(
+      fillRow["hashlock"],
+      BYTES32_RE,
+      `${field}.fill.hashlock`,
+    ),
     initiatorTimeout: proofInteger(
       fillRow["initiatorTimeout"],
       `${field}.fill.initiatorTimeout`,
@@ -767,8 +807,12 @@ function parseCancelProof(
   exactProofKeys(wrapper, ["cancel", "auth"], field);
   const cancelRow = proofObject(wrapper["cancel"], `${field}.cancel`);
   exactProofKeys(cancelRow, ["orderDigest", "reasonCode"], `${field}.cancel`);
-  const reasonCode = proofInteger(cancelRow["reasonCode"], `${field}.cancel.reasonCode`);
-  if (reasonCode > 255) throw new Error(`${field}.cancel.reasonCode is malformed`);
+  const reasonCode = proofInteger(
+    cancelRow["reasonCode"],
+    `${field}.cancel.reasonCode`,
+  );
+  if (reasonCode > 255)
+    throw new Error(`${field}.cancel.reasonCode is malformed`);
   const cancel = {
     orderDigest: proofString(
       cancelRow["orderDigest"],
@@ -818,7 +862,8 @@ function parseProtocol(
   if (Object.keys(protocol).some((key) => !allowed.has(key))) {
     throw new Error(`${field} has unsupported fields`);
   }
-  if (protocol["version"] !== 1) throw new Error(`${field}.version is malformed`);
+  if (protocol["version"] !== 2)
+    throw new Error(`${field}.version is malformed`);
   if (
     protocol["fillAcknowledged"] !== undefined &&
     typeof protocol["fillAcknowledged"] !== "boolean"
@@ -835,13 +880,15 @@ function parseProtocol(
   const releaseObserved = protocol["releaseObserved"] === true;
   const orderBody = parseCanonicalOrder(protocol["order"], `${field}.order`);
   if (orderBody.visibility !== "public") {
-    throw new Error(`${field} is private and unsupported by the headless market maker`);
+    throw new Error(
+      `${field} is private and unsupported by the headless market maker`,
+    );
   }
   const orderAuth = parseMakerAuth(protocol["orderAuth"], `${field}.orderAuth`);
   if (
     orderAuth.makerTokenCommitment === EMPTY_CAPABILITY_COMMITMENT ||
-    orderBody.visibility === "public" &&
-      orderAuth.shareTokenCommitment !== EMPTY_CAPABILITY_COMMITMENT
+    (orderBody.visibility === "public" &&
+      orderAuth.shareTokenCommitment !== EMPTY_CAPABILITY_COMMITMENT)
   ) {
     throw new Error(`${field} capability commitments are malformed`);
   }
@@ -851,10 +898,13 @@ function parseProtocol(
     capabilityCommitment(MAKER_CAPABILITY_DOMAIN, order.token) !==
       orderAuth.makerTokenCommitment
   ) {
-    throw new Error(`${field} maker capability does not match its signed commitment`);
+    throw new Error(
+      `${field} maker capability does not match its signed commitment`,
+    );
   }
   if (orderBody.prelock !== undefined) {
-    const prelockWindow = orderBody.prelock.initiatorTimeout - orderAuth.issuedAt;
+    const prelockWindow =
+      orderBody.prelock.initiatorTimeout - orderAuth.issuedAt;
     if (
       prelockWindow < 3 * 60 * 60 ||
       prelockWindow > 72 * 60 * 60 ||
@@ -877,7 +927,9 @@ function parseProtocol(
     buildOrderV1Payload(orderBody, orderAuth),
     `${field}.orderAuth`,
   );
-  if (order.id !== deriveOrderV1Id(orderBody.makerQrlAccount, orderAuth.nonce)) {
+  if (
+    order.id !== deriveOrderV1Id(orderBody.makerQrlAccount, orderAuth.nonce)
+  ) {
     throw new Error(`${field} order id is malformed`);
   }
   if (
@@ -890,7 +942,8 @@ function parseProtocol(
   }
 
   const selectedIntent =
-    protocol["selectedIntent"] === undefined || protocol["selectedIntent"] === null
+    protocol["selectedIntent"] === undefined ||
+    protocol["selectedIntent"] === null
       ? undefined
       : parseSelectedIntent(
           protocol["selectedIntent"],
@@ -943,9 +996,16 @@ function parseProtocol(
     ) {
       throw new Error(`${field} selected intent projection is malformed`);
     }
-    const preimage = proofString(order.preimage, BYTES32_RE, `${field} preimage`);
-    const derivedHashlock = `0x${createHash("sha256").update(Buffer.from(preimage.slice(2), "hex")).digest("hex")}`;
-    if (derivedHashlock !== order.hashlock) throw new Error(`${field} hashlock is malformed`);
+    const preimage = proofString(
+      order.preimage,
+      BYTES32_RE,
+      `${field} preimage`,
+    );
+    const derivedHashlock = `0x${createHash("sha256")
+      .update(Buffer.from(preimage.slice(2), "hex"))
+      .digest("hex")}`;
+    if (derivedHashlock !== order.hashlock)
+      throw new Error(`${field} hashlock is malformed`);
   }
   if (
     fillProof !== undefined &&
@@ -959,7 +1019,7 @@ function parseProtocol(
     throw new Error(`${field} cancellation follows an intent selection`);
   }
   return {
-    version: 1,
+    version: 2,
     orderDigest,
     order: orderBody,
     orderAuth,
@@ -984,7 +1044,9 @@ export class StateFile {
   constructor(
     private readonly file: string,
     private readonly deployment: DeploymentIdentity,
-    private readonly syncDirectory: (directory: string) => void = fsyncDirectory,
+    private readonly syncDirectory: (
+      directory: string,
+    ) => void = fsyncDirectory,
   ) {
     let raw: string | null = null;
     try {
@@ -1003,7 +1065,10 @@ export class StateFile {
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
       if (parsed.length > 0) {
-        throw recoveryError(this.file, "non-empty legacy state has no deployment identity");
+        throw recoveryError(
+          this.file,
+          "non-empty legacy state has no deployment identity",
+        );
       }
       this.persist();
       return;
@@ -1013,7 +1078,10 @@ export class StateFile {
     }
     const envelope = parsed as Record<string, unknown>;
     if (envelope.version !== 1 || !Array.isArray(envelope.orders)) {
-      throw recoveryError(this.file, "state envelope version or order list is malformed");
+      throw recoveryError(
+        this.file,
+        "state envelope version or order list is malformed",
+      );
     }
     let fileDeployment: DeploymentIdentity;
     try {
@@ -1061,17 +1129,25 @@ export class StateFile {
       } catch (err) {
         throw recoveryError(
           this.file,
-          err instanceof Error ? err.message : `order ${order.id} deployment identity is malformed`,
+          err instanceof Error
+            ? err.message
+            : `order ${order.id} deployment identity is malformed`,
         );
       }
       if (
         !sameDeployment(orderDeployment, fileDeployment) ||
         !sameDeployment(orderDeployment, this.deployment)
       ) {
-        throw recoveryError(this.file, `order ${order.id} belongs to another deployment`);
+        throw recoveryError(
+          this.file,
+          `order ${order.id} belongs to another deployment`,
+        );
       }
       if (order.token !== null && typeof order.token !== "string") {
-        throw recoveryError(this.file, `order ${order.id} has a malformed maker token`);
+        throw recoveryError(
+          this.file,
+          `order ${order.id} has a malformed maker token`,
+        );
       }
       let protocol: ManagedProtocolV1 | undefined;
       try {
@@ -1079,11 +1155,16 @@ export class StateFile {
       } catch (err) {
         throw recoveryError(
           this.file,
-          err instanceof Error ? err.message : `order ${order.id} protocol state is malformed`,
+          err instanceof Error
+            ? err.message
+            : `order ${order.id} protocol state is malformed`,
         );
       }
       if (protocol === undefined && order.token === null) {
-        throw recoveryError(this.file, `legacy order ${order.id} has no maker token`);
+        throw recoveryError(
+          this.file,
+          `legacy order ${order.id} has no maker token`,
+        );
       }
       // These fields arrived before deployment binding. They remain
       // defaultable inside a correctly bound envelope so in-flight swaps
@@ -1110,7 +1191,10 @@ export class StateFile {
   upsert(order: ManagedOrder): void {
     this.assertHealthy();
     if (!sameDeployment(order.deployment, this.deployment)) {
-      throw recoveryError(this.file, `order ${order.id} belongs to another deployment`);
+      throw recoveryError(
+        this.file,
+        `order ${order.id} belongs to another deployment`,
+      );
     }
     const previous = this.orders.get(order.id);
     this.orders.set(order.id, structuredClone(order));
@@ -1132,7 +1216,8 @@ export class StateFile {
     try {
       this.persist();
     } catch (err) {
-      if (this.poisoned === null && previous !== undefined) this.orders.set(id, previous);
+      if (this.poisoned === null && previous !== undefined)
+        this.orders.set(id, previous);
       throw err;
     }
   }

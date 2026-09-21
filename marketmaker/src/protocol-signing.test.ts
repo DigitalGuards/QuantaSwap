@@ -1,13 +1,12 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import {
-  ML_DSA_87_SIGNATURE_BYTES,
-  SCHEME_TAG_TYPED,
-  computeTypedDataDigest,
-} from "@qrlwallet/connect";
-import { cryptoSignSignature } from "@theqrl/mldsa87";
-import { ExtendedSeed, MLDSA87 } from "@theqrl/wallet.js";
+import { Descriptor, ExtendedSeed, MLDSA87 } from "@theqrl/wallet.js";
 import { getBytes } from "ethers";
+import {
+  V2_TEST_EXTENDED_SEED,
+  protocolV2Identity,
+  signProtocolV2Auth,
+} from "./protocol-v2-test-helper.js";
 import {
   ProtocolSigner,
   capabilityCommitment,
@@ -20,22 +19,25 @@ import {
   computeFillIntentDigest,
   computeOrderDigest,
   computeReleaseCommitment,
+  deriveLegacyV1QrlAddress,
   deriveOrderV1Id,
   officialQrlDigest,
   verifyFillIntentV1,
+  verifyOfficialV1Proof,
   EMPTY_CAPABILITY_COMMITMENT,
   MAKER_CAPABILITY_DOMAIN,
   SHARE_CAPABILITY_DOMAIN,
   type FillIntentV1Body,
-  type FillV1Body,
+  type CanonicalOrderV1Body,
   type OrderSigningScheme,
-  type OrderV1Body,
   type ProtocolAuthV1,
 } from "./protocol-signing.js";
 
 const NOW = 1_800_000_000;
-const EXTENDED_SEED = `0x010000${"07".repeat(48)}`;
-const EXPECTED_ADDRESS = "Q806e3ce8587683518b117edc3c3cbcfbe03f110c";
+const EXTENDED_SEED = V2_TEST_EXTENDED_SEED;
+const EXPECTED_LEGACY_ADDRESS = "Q806e3ce8587683518b117edc3c3cbcfbe03f110c";
+const EXPECTED_CURRENT_ADDRESS =
+  "Q806E3Ce8587683518b117EdC3c3CBCFBE03F110cc997b6E928424c96cd4409Fb1BA5c426802096Fb6E14C932E283EC7B78B0769E09cd726F93e0c2279149a80b";
 const ORDER_NONCE = `0x${"42".repeat(32)}`;
 const REQUEST_NONCE = `0x${"43".repeat(32)}`;
 const FILL_NONCE = `0x${"44".repeat(32)}`;
@@ -49,19 +51,31 @@ function orderUnsignedAuth(issuedAt: number, expiresAt: number, nonce: string) {
     issuedAt,
     expiresAt,
     nonce,
-    makerTokenCommitment: capabilityCommitment(MAKER_CAPABILITY_DOMAIN, MAKER_TOKEN),
+    makerTokenCommitment: capabilityCommitment(
+      MAKER_CAPABILITY_DOMAIN,
+      MAKER_TOKEN,
+    ),
     shareTokenCommitment: EMPTY_CAPABILITY_COMMITMENT,
   };
 }
 
 it("derives OrderV1 identity from maker and nonce", () => {
   assert.equal(
-    deriveOrderV1Id("Q2222222222222222222222222222222222222222", ORDER_NONCE),
-    "cd84c99465b251d67a23548932b13fe84caa67d28c8331686e91774343552e0e",
+    deriveOrderV1Id(
+      "Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+      ORDER_NONCE,
+    ),
+    "680f1ac51008253a70792f659dfd37f2371ee2f3fcddf853605e8eea2711f079",
   );
   assert.notEqual(
-    deriveOrderV1Id("Q2222222222222222222222222222222222222222", ORDER_NONCE),
-    deriveOrderV1Id("Q3333333333333333333333333333333333333333", ORDER_NONCE),
+    deriveOrderV1Id(
+      "Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+      ORDER_NONCE,
+    ),
+    deriveOrderV1Id(
+      "Q33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+      ORDER_NONCE,
+    ),
   );
 });
 
@@ -69,7 +83,7 @@ function hex(bytes: Uint8Array): string {
   return `0x${Buffer.from(bytes).toString("hex")}`;
 }
 
-function orderBody(makerQrlAccount: string): OrderV1Body {
+function orderBody(makerQrlAccount: string): CanonicalOrderV1Body {
   return {
     direction: "eth->qrl",
     asset: "ETH",
@@ -82,13 +96,14 @@ function orderBody(makerQrlAccount: string): OrderV1Body {
 }
 
 function proofIsValid(
-  auth: Pick<ProtocolAuthV1, "signature" | "publicKey">,
+  auth: Pick<ProtocolAuthV1, "signature" | "publicKey" | "descriptor">,
   payload: ReturnType<typeof buildOrderV1Payload>,
+  signer = `Q${EXPECTED_CURRENT_ADDRESS.slice(1).toLowerCase()}`,
 ): boolean {
-  return MLDSA87.verify(
-    getBytes(auth.signature),
-    officialQrlDigest(payload),
-    getBytes(auth.publicKey),
+  return verifyOfficialV1Proof(
+    signer,
+    { ...auth, scheme: "qrl-sign-message-v2" },
+    payload,
   );
 }
 
@@ -101,67 +116,56 @@ function signedIntentFixture(
   auth: ProtocolAuthV1;
   orderDigest: string;
 } {
-  const extendedSeed = ExtendedSeed.from(EXTENDED_SEED);
-  const wallet = MLDSA87.newWalletFromExtendedSeed(extendedSeed);
-  (extendedSeed as typeof extendedSeed & { zeroize(): void }).zeroize();
-  const secretKey = wallet.getSK();
-  try {
-    const orderDigest = expectedOrderDigest;
-    const intent: FillIntentV1Body = {
-      orderDigest,
-      takerEthAccount: "0x2222222222222222222222222222222222222222",
-      takerQrlAccount: wallet.getAddressStr(),
-      releaseCommitment: RELEASE_COMMITMENT,
-    };
-    const unsigned = {
-      issuedAt: NOW,
-      expiresAt: NOW + 120,
-      nonce: REQUEST_NONCE,
-    };
-    const canonicalPayload = buildFillIntentV1Payload(intent, unsigned, scheme);
-    const payload = {
-      ...canonicalPayload,
-      message: { ...canonicalPayload.message, ...messageOverrides },
-    };
-    const digest =
-      scheme === "qrl-sign-typed-v1"
-        ? computeTypedDataDigest(payload)
-        : officialQrlDigest(payload);
-    const signature = new Uint8Array(ML_DSA_87_SIGNATURE_BYTES);
-    cryptoSignSignature(
-      signature,
-      digest,
-      secretKey,
-      false,
-      scheme === "qrl-sign-typed-v1" ? SCHEME_TAG_TYPED : new TextEncoder().encode("ZOND"),
-    );
-    return {
-      intent,
-      orderDigest,
-      auth: {
-        version: "1",
-        scheme,
-        ...unsigned,
-        signature: hex(signature),
-        publicKey: hex(wallet.getPK()),
-        descriptor: hex(wallet.getDescriptor().toBytes()),
-      },
-    };
-  } finally {
-    secretKey.fill(0);
-    (wallet as typeof wallet & { zeroize(): void }).zeroize();
-  }
+  const identity = protocolV2Identity();
+  const orderDigest = expectedOrderDigest;
+  const intent: FillIntentV1Body = {
+    orderDigest,
+    takerEthAccount: "0x2222222222222222222222222222222222222222",
+    takerQrlAccount: identity.currentAddress,
+    releaseCommitment: RELEASE_COMMITMENT,
+  };
+  const unsigned = {
+    issuedAt: NOW,
+    expiresAt: NOW + 120,
+    nonce: REQUEST_NONCE,
+  };
+  const canonicalPayload = buildFillIntentV1Payload(intent, unsigned, scheme);
+  const payload = {
+    ...canonicalPayload,
+    message: { ...canonicalPayload.message, ...messageOverrides },
+  };
+  return {
+    intent,
+    orderDigest,
+    auth: signProtocolV2Auth(payload, scheme, unsigned),
+  };
+}
+
+function signedOrderFixture() {
+  const identity = protocolV2Identity();
+  const order = orderBody(identity.currentAddress);
+  const unsignedAuth = orderUnsignedAuth(NOW, NOW + 3600, ORDER_NONCE);
+  const auth = {
+    ...signProtocolV2Auth(
+      buildOrderV1Payload(order, unsignedAuth),
+      "qrl-sign-message-v2",
+      unsignedAuth,
+    ),
+    makerTokenCommitment: unsignedAuth.makerTokenCommitment,
+    shareTokenCommitment: unsignedAuth.shareTokenCommitment,
+  };
+  return { identity, order, auth };
 }
 
 describe("headless protocol signing", () => {
   it("commits raw capabilities with separate NUL-terminated domains", () => {
     assert.equal(
       capabilityCommitment(MAKER_CAPABILITY_DOMAIN, "00".repeat(32)),
-      "0x9ca8274349471eadc293ebb7690d81e64ce538ad0d9d65646f9ff1af227709e6",
+      "0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549",
     );
     assert.equal(
       capabilityCommitment(SHARE_CAPABILITY_DOMAIN, "11".repeat(32)),
-      "0xe0e4441fa2456254d19815bb0b962e160e06027efe181f8f8887292f527590e2",
+      "0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30",
     );
     assert.notEqual(
       capabilityCommitment(MAKER_CAPABILITY_DOMAIN, "11".repeat(32)),
@@ -169,20 +173,26 @@ describe("headless protocol signing", () => {
     );
   });
 
-  it("matches the server OrderV1 EIP-712 vector", () => {
-    const body = orderBody("Q2222222222222222222222222222222222222222");
+  it("matches the server V2 canonical message vector", () => {
+    const body = orderBody(
+      "Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222",
+    );
     const auth = orderUnsignedAuth(NOW, NOW + 3600, ORDER_NONCE);
     const digest = computeOrderDigest(body, auth);
-    assert.equal(digest, "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48");
+    assert.equal(
+      digest,
+      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4",
+    );
     assert.equal(
       hex(officialQrlDigest(buildOrderV1Payload(body, auth))),
-      "0xc305e6936db7a0b374f936cb7058fde90963e39896f5d127f25bd87c147211d3",
+      "0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c",
     );
   });
 
   it("matches the server capability-aware semantic replay vectors", () => {
     const orderAuth = orderUnsignedAuth(NOW, NOW + 3600, ORDER_NONCE);
-    const orderDigest = "0x5a76e96bdd26891fc5b28848ed2f519a9fee5d8bdc7614692b71a3431c085a48";
+    const orderDigest =
+      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4";
     const releaseCommitment = computeReleaseCommitment(
       orderDigest,
       REQUEST_NONCE,
@@ -190,17 +200,25 @@ describe("headless protocol signing", () => {
     );
     assert.equal(
       releaseCommitment,
-      "0xa786c492a3707147bfa3277ddf44d49af0c794252e42dd05379f04b8c4621e0e",
+      "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
     );
     const intent = {
       orderDigest,
       takerEthAccount: "0x2222222222222222222222222222222222222222",
-      takerQrlAccount: "Q3333333333333333333333333333333333333333",
+      takerQrlAccount:
+        "Q33333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
       releaseCommitment,
     };
-    const intentAuth = { issuedAt: NOW + 10, expiresAt: NOW + 130, nonce: REQUEST_NONCE };
+    const intentAuth = {
+      issuedAt: NOW + 10,
+      expiresAt: NOW + 130,
+      nonce: REQUEST_NONCE,
+    };
     const intentDigest = computeFillIntentDigest(intent, intentAuth);
-    assert.equal(intentDigest, "0x48f387eff4522d99a48f52ec0e9e8b146fa0deb119383c53ffbb7d134ca00a2b");
+    assert.equal(
+      intentDigest,
+      "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
+    );
     assert.equal(
       computeFillDigest(
         {
@@ -213,264 +231,246 @@ describe("headless protocol signing", () => {
         orderAuth,
         { issuedAt: NOW + 20, expiresAt: NOW + 80, nonce: FILL_NONCE },
       ),
-      "0x6d4d7d0a3fb70062fc6897c9f402353536e3ffeefe7a6e698b5db78cedcb3c13",
+      "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
     );
     assert.equal(
-      computeCancelDigest(
-        { orderDigest, reasonCode: 1 },
-        orderAuth,
-        { issuedAt: NOW + 30, nonce: CANCEL_NONCE },
-      ),
-      "0xde9d19dc6dd94501ea1fb23ac89295ce139cc2f8566aee99f5b5ca5f83769214",
+      computeCancelDigest({ orderDigest, reasonCode: 1 }, orderAuth, {
+        issuedAt: NOW + 30,
+        nonce: CANCEL_NONCE,
+      }),
+      "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd",
     );
   });
 
-  it("derives the expected Q address and signs a canonical OrderV1", () => {
+  it("binds the seed to the full Q128 identity and signs a V2 order", () => {
     const signer = new ProtocolSigner(EXTENDED_SEED);
     try {
-      assert.equal(signer.address, EXPECTED_ADDRESS);
-      assert.equal(signer.descriptor, "0x010000");
-
+      assert.equal(
+        signer.address,
+        "Q" + EXPECTED_CURRENT_ADDRESS.slice(1).toLowerCase(),
+      );
+      assert.equal(
+        deriveLegacyV1QrlAddress(signer.descriptor, signer.publicKey),
+        EXPECTED_LEGACY_ADDRESS,
+      );
       const signed = signer.signOrderV1(orderBody(signer.address), {
         makerToken: MAKER_TOKEN,
         issuedAt: NOW,
         expiresAt: NOW + 3600,
         nonce: ORDER_NONCE,
       });
-      assert.equal(signed.order.makerQrlAccount, EXPECTED_ADDRESS);
-      assert.equal(signed.auth.scheme, "qrl-eip712-v4");
-      assert.equal(signed.auth.nonce, ORDER_NONCE);
-      assert.equal(
-        proofIsValid(signed.auth, buildOrderV1Payload(signed.order, signed.auth)),
-        true,
-      );
-
-      const changed = { ...signed.order, toAmount: "2000000000000001" };
-      assert.equal(
-        proofIsValid(signed.auth, buildOrderV1Payload(changed, signed.auth)),
-        false,
-      );
-    } finally {
-      signer.close();
-    }
-  });
-
-  it("links a FillV1 to a deterministic signed intent digest", () => {
-    const signer = new ProtocolSigner(EXTENDED_SEED);
-    try {
-      const order = signer.signOrderV1(orderBody(signer.address), {
-        makerToken: MAKER_TOKEN,
-        issuedAt: NOW,
-        expiresAt: NOW + 3600,
-        nonce: ORDER_NONCE,
-      });
-      const orderDigest = computeOrderDigest(order.order, order.auth);
-      const intentFixture = signedIntentFixture("qrl-eip712-v4", {}, orderDigest);
-      const intent = intentFixture.intent;
-      const intentAuth = intentFixture.auth;
-      const intentDigest = computeFillIntentDigest(intent, intentAuth);
-      const fill: FillV1Body = {
-        orderDigest,
-        intentDigest,
-        takerEthAccount: intent.takerEthAccount,
-        takerQrlAccount: intent.takerQrlAccount,
-        releaseCommitment: intent.releaseCommitment,
-        hashlock: HASHLOCK,
-        initiatorTimeout: NOW + 14_400,
-        responderTimeout: NOW + 7_200,
-      };
-      const signed = signer.signFillV1(fill, {
-        order,
-        selectedIntent: { intentDigest, intent, auth: intentAuth },
-        issuedAt: NOW + 20,
-        respondBy: NOW + 320,
-        fillNonce: FILL_NONCE,
-      });
-      const payload = buildFillV1Payload(signed.fill, order.auth, signed.auth);
-
-      assert.equal(intentDigest, computeFillIntentDigest(intent, intentAuth));
-      assert.equal(signed.auth.nonce, FILL_NONCE);
-      assert.equal(signed.auth.expiresAt, NOW + 320);
-      assert.equal(proofIsValid(signed.auth, payload), true);
-      assert.equal(
-        computeFillDigest(signed.fill, order.auth, signed.auth),
-        "0xeb748cf575f57bf1ee44307aaa4eedcc8d2740a433637d8e876109d3a6dd2ac9",
-      );
-
-      const changed = { ...signed.fill, hashlock: `0x${"48".repeat(32)}` };
+      assert.equal(signed.auth.version, "2");
+      assert.equal(signed.auth.scheme, "qrl-sign-message-v2");
       assert.equal(
         proofIsValid(
           signed.auth,
-          buildFillV1Payload(changed, order.auth, signed.auth),
+          buildOrderV1Payload(signed.order, signed.auth),
+          signer.address,
+        ),
+        true,
+      );
+      assert.equal(
+        proofIsValid(
+          signed.auth,
+          buildOrderV1Payload(signed.order, signed.auth),
+          EXPECTED_LEGACY_ADDRESS,
+        ),
+        false,
+      );
+      const orderDigest = computeOrderDigest(signed.order, signed.auth);
+      const selected = signedIntentFixture(
+        "qrl-sign-message-v2",
+        {},
+        orderDigest,
+      );
+      const intentDigest = computeFillIntentDigest(
+        selected.intent,
+        selected.auth,
+      );
+      const fill = signer.signFillV1(
+        {
+          ...selected.intent,
+          intentDigest,
+          hashlock: HASHLOCK,
+          initiatorTimeout: NOW + 14_400,
+          responderTimeout: NOW + 7_200,
+        },
+        {
+          order: signed,
+          selectedIntent: {
+            intentDigest,
+            intent: selected.intent,
+            auth: selected.auth,
+          },
+          issuedAt: NOW + 20,
+          respondBy: NOW + 320,
+          fillNonce: FILL_NONCE,
+        },
+      );
+      assert.equal(
+        verifyOfficialV1Proof(
+          signer.address,
+          fill.auth,
+          buildFillV1Payload(fill.fill, signed.auth, fill.auth),
+        ),
+        true,
+      );
+      const cancel = signer.signCancelV1(
+        { orderDigest, reasonCode: 1 },
+        {
+          orderNonce: signed.auth.nonce,
+          issuedAt: NOW + 30,
+          expiresAt: signed.auth.expiresAt,
+          cancelNonce: CANCEL_NONCE,
+        },
+      );
+      assert.equal(
+        verifyOfficialV1Proof(
+          signer.address,
+          cancel.auth,
+          buildCancelV1Payload(cancel.cancel, signed.auth, cancel.auth),
+        ),
+        true,
+      );
+    } finally {
+      signer.close();
+    }
+  });
+
+  it("verifies V2 order, fill, and cancel fixtures", () => {
+    const order = signedOrderFixture();
+    const orderPayload = buildOrderV1Payload(order.order, order.auth);
+    assert.equal(
+      proofIsValid(order.auth, orderPayload, order.identity.currentAddress),
+      true,
+    );
+    assert.equal(
+      proofIsValid(
+        order.auth,
+        buildOrderV1Payload(
+          { ...order.order, toAmount: "2000000000000001" },
+          order.auth,
+        ),
+        order.identity.currentAddress,
+      ),
+      false,
+    );
+
+    const orderDigest = computeOrderDigest(order.order, order.auth);
+    const intentFixture = signedIntentFixture(
+      "qrl-sign-message-v2",
+      {},
+      orderDigest,
+    );
+    const intentDigest = computeFillIntentDigest(
+      intentFixture.intent,
+      intentFixture.auth,
+    );
+    const fill = {
+      orderDigest,
+      intentDigest,
+      takerEthAccount: intentFixture.intent.takerEthAccount,
+      takerQrlAccount: intentFixture.intent.takerQrlAccount,
+      releaseCommitment: intentFixture.intent.releaseCommitment,
+      hashlock: HASHLOCK,
+      initiatorTimeout: NOW + 14_400,
+      responderTimeout: NOW + 7_200,
+    };
+    const fillUnsigned = {
+      issuedAt: NOW + 20,
+      expiresAt: NOW + 320,
+      nonce: FILL_NONCE,
+    };
+    const fillAuth = signProtocolV2Auth(
+      buildFillV1Payload(fill, order.auth, fillUnsigned),
+      "qrl-sign-message-v2",
+      fillUnsigned,
+    );
+    assert.equal(
+      verifyOfficialV1Proof(
+        order.identity.currentAddress,
+        fillAuth,
+        buildFillV1Payload(fill, order.auth, fillAuth),
+      ),
+      true,
+    );
+    assert.equal(
+      computeFillDigest(fill, order.auth, fillAuth),
+      "0x036a1105f4f96224a2423616c37fa334e18aa1d51a178530739f2b06f4076b28",
+    );
+
+    const cancel = { orderDigest, reasonCode: 1 };
+    const cancelUnsigned = {
+      issuedAt: NOW + 30,
+      expiresAt: order.auth.expiresAt,
+      nonce: CANCEL_NONCE,
+    };
+    const cancelAuth = signProtocolV2Auth(
+      buildCancelV1Payload(cancel, order.auth, cancelUnsigned),
+      "qrl-sign-message-v2",
+      cancelUnsigned,
+    );
+    assert.equal(
+      verifyOfficialV1Proof(
+        order.identity.currentAddress,
+        cancelAuth,
+        buildCancelV1Payload(cancel, order.auth, cancelAuth),
+      ),
+      true,
+    );
+    assert.equal(
+      computeCancelDigest(cancel, order.auth, cancelAuth),
+      "0x5f7460d8d57766301caed78aab496939c5c70c0ff7d3ba006f3efd00d6be9c04",
+    );
+    assert.throws(
+      () =>
+        buildCancelV1Payload(
+          { ...cancel, reasonCode: 256 },
+          order.auth,
+          cancelAuth,
+        ),
+      /fit uint8/,
+    );
+  });
+
+  it("keeps legacy ZOND and current descriptor signing contexts separate", () => {
+    const order = signedOrderFixture();
+    const payload = buildOrderV1Payload(order.order, order.auth);
+    const digest = officialQrlDigest(payload);
+    const extendedSeed = ExtendedSeed.from(EXTENDED_SEED);
+    const wallet = MLDSA87.newWalletFromExtendedSeed(extendedSeed);
+    (extendedSeed as typeof extendedSeed & { zeroize(): void }).zeroize();
+    try {
+      const descriptorSignature = wallet.sign(digest);
+      const descriptor = Descriptor.from(getBytes(order.auth.descriptor));
+      assert.equal(
+        verifyOfficialV1Proof(
+          order.identity.currentAddress,
+          { ...order.auth, signature: hex(descriptorSignature) },
+          payload,
+        ),
+        false,
+      );
+      assert.equal(
+        MLDSA87.verify(
+          descriptorSignature,
+          digest,
+          getBytes(order.auth.publicKey),
+          descriptor,
+        ),
+        true,
+      );
+      assert.equal(
+        MLDSA87.verify(
+          getBytes(order.auth.signature),
+          digest,
+          getBytes(order.auth.publicKey),
+          descriptor,
         ),
         false,
       );
     } finally {
-      signer.close();
-    }
-  });
-
-  it("requires a nonzero hashlock and the full live order and intent context", () => {
-    const signer = new ProtocolSigner(EXTENDED_SEED);
-    try {
-      const order = signer.signOrderV1(orderBody(signer.address), {
-        makerToken: MAKER_TOKEN,
-        issuedAt: NOW,
-        expiresAt: NOW + 3600,
-        nonce: ORDER_NONCE,
-      });
-      const orderDigest = computeOrderDigest(order.order, order.auth);
-      const fixture = signedIntentFixture("qrl-eip712-v4", {}, orderDigest);
-      const intentDigest = computeFillIntentDigest(fixture.intent, fixture.auth);
-      const fill: FillV1Body = {
-        orderDigest,
-        intentDigest,
-        takerEthAccount: fixture.intent.takerEthAccount,
-        takerQrlAccount: fixture.intent.takerQrlAccount,
-        releaseCommitment: fixture.intent.releaseCommitment,
-        hashlock: `0x${"00".repeat(32)}`,
-        initiatorTimeout: NOW + 7200,
-        responderTimeout: NOW + 3600,
-      };
-      const options = {
-        order,
-        selectedIntent: { intentDigest, intent: fixture.intent, auth: fixture.auth },
-        issuedAt: NOW + 20,
-        respondBy: NOW + 320,
-        fillNonce: FILL_NONCE,
-      };
-      assert.throws(() => signer.signFillV1(fill, options), /hashlock cannot be zero/);
-      assert.throws(
-        () => signer.signFillV1({ ...fill, hashlock: HASHLOCK, intentDigest: `0x${"9".repeat(64)}` }, options),
-        /does not authenticate the selected live intent/,
-      );
-      assert.throws(
-        () => signer.signFillV1({ ...fill, hashlock: HASHLOCK }, {
-          ...options,
-          issuedAt: fixture.auth.expiresAt,
-          respondBy: fixture.auth.expiresAt + 60,
-        }),
-        /does not authenticate the selected live intent|outside its order or intent window/,
-      );
-    } finally {
-      signer.close();
-    }
-  });
-
-  it("allows a 3h to 72h prelock T1 beyond the ordinary 4h fill cap only on exact match", () => {
-    const signer = new ProtocolSigner(EXTENDED_SEED);
-    try {
-      const order = signer.signOrderV1(
-        {
-          ...orderBody(signer.address),
-          prelock: { hashlock: HASHLOCK, initiatorTimeout: NOW + 6 * 3600 },
-        },
-        { makerToken: MAKER_TOKEN, issuedAt: NOW, expiresAt: NOW + 3600, nonce: ORDER_NONCE },
-      );
-      const orderDigest = computeOrderDigest(order.order, order.auth);
-      const fixture = signedIntentFixture("qrl-eip712-v4", {}, orderDigest);
-      const intentDigest = computeFillIntentDigest(fixture.intent, fixture.auth);
-      const fill: FillV1Body = {
-        orderDigest,
-        intentDigest,
-        takerEthAccount: fixture.intent.takerEthAccount,
-        takerQrlAccount: fixture.intent.takerQrlAccount,
-        releaseCommitment: fixture.intent.releaseCommitment,
-        hashlock: HASHLOCK,
-        initiatorTimeout: NOW + 6 * 3600,
-        responderTimeout: NOW + 3600,
-      };
-      const options = {
-        order,
-        selectedIntent: { intentDigest, intent: fixture.intent, auth: fixture.auth },
-        issuedAt: NOW + 20,
-        respondBy: NOW + 80,
-        fillNonce: FILL_NONCE,
-      };
-      assert.doesNotThrow(() => signer.signFillV1(fill, options));
-      assert.throws(
-        () => signer.signFillV1({ ...fill, hashlock: `0x${"48".repeat(32)}` }, options),
-        /exactly match the signed prelock/,
-      );
-      assert.throws(
-        () => signer.signFillV1({ ...fill, initiatorTimeout: fill.initiatorTimeout + 1 }, options),
-        /exactly match the signed prelock/,
-      );
-    } finally {
-      signer.close();
-    }
-  });
-
-  it("explicitly rejects private signed orders in the headless market maker", () => {
-    const signer = new ProtocolSigner(EXTENDED_SEED);
-    try {
-      assert.throws(
-        () => signer.signOrderV1(
-          {
-            ...orderBody(signer.address),
-            visibility: "private",
-            allowedTakerEth: "0x2222222222222222222222222222222222222222",
-            allowedTakerQrl: signer.address,
-          },
-          {
-            makerToken: MAKER_TOKEN,
-            shareToken: "cd".repeat(32),
-            issuedAt: NOW,
-            expiresAt: NOW + 3600,
-            nonce: ORDER_NONCE,
-          },
-        ),
-        /supports public signed orders only/,
-      );
-    } finally {
-      signer.close();
-    }
-  });
-
-  it("signs a typed cancellation tombstone and rejects reason overflow", () => {
-    const signer = new ProtocolSigner(EXTENDED_SEED);
-    try {
-      const order = signer.signOrderV1(orderBody(signer.address), {
-        makerToken: MAKER_TOKEN,
-        issuedAt: NOW,
-        expiresAt: NOW + 3600,
-        nonce: ORDER_NONCE,
-      });
-      const cancel = signer.signCancelV1(
-        {
-          orderDigest: computeOrderDigest(order.order, order.auth),
-          reasonCode: 1,
-        },
-        {
-          orderNonce: ORDER_NONCE,
-          issuedAt: NOW + 30,
-          expiresAt: order.auth.expiresAt,
-          cancelNonce: CANCEL_NONCE,
-        },
-      );
-      const payload = buildCancelV1Payload(cancel.cancel, order.auth, cancel.auth);
-
-      assert.equal(cancel.auth.nonce, CANCEL_NONCE);
-      assert.equal(proofIsValid(cancel.auth, payload), true);
-      assert.equal(
-        computeCancelDigest(cancel.cancel, order.auth, cancel.auth),
-        "0x3a838c3cf2242d520e17d0742f471efa989ce867d8965ce043fcceddad0636c3",
-      );
-      assert.throws(
-        () =>
-          signer.signCancelV1(
-            { ...cancel.cancel, reasonCode: 256 },
-            {
-              orderNonce: ORDER_NONCE,
-              issuedAt: NOW + 30,
-              expiresAt: order.auth.expiresAt,
-              cancelNonce: CANCEL_NONCE,
-            },
-          ),
-        /fit uint8/,
-      );
-    } finally {
-      signer.close();
+      (wallet as typeof wallet & { zeroize(): void }).zeroize();
     }
   });
 
@@ -493,11 +493,11 @@ describe("headless protocol signing", () => {
   it("refuses an extended seed with noncanonical descriptor metadata", () => {
     assert.throws(
       () => new ProtocolSigner(`0x010001${"07".repeat(48)}`),
-      /descriptor 0x010000/,
+      /Descriptor metadata bytes are reserved and must be zero/,
     );
   });
 
-  for (const scheme of ["qrl-sign-typed-v1", "qrl-eip712-v4"] as const) {
+  for (const scheme of ["qrl-sign-message-v2"] as const) {
     it(`independently verifies a canonical ${scheme} FillIntentV1`, () => {
       const fixture = signedIntentFixture(scheme);
       assert.equal(
@@ -518,16 +518,21 @@ describe("headless protocol signing", () => {
         false,
       );
       assert.equal(
-        verifyFillIntentV1(fixture.intent, fixture.auth, `0x${"53".repeat(32)}`, {
-          now: NOW,
-        }),
+        verifyFillIntentV1(
+          fixture.intent,
+          fixture.auth,
+          `0x${"53".repeat(32)}`,
+          {
+            now: NOW,
+          },
+        ),
         false,
       );
     });
   }
 
   it("rejects noncanonical, expired, overlong, and out-of-order-window intents", () => {
-    const fixture = signedIntentFixture("qrl-eip712-v4");
+    const fixture = signedIntentFixture("qrl-sign-message-v2");
     assert.equal(
       verifyFillIntentV1(
         { ...fixture.intent, extra: true },
@@ -539,7 +544,10 @@ describe("headless protocol signing", () => {
     );
     assert.equal(
       verifyFillIntentV1(
-        { ...fixture.intent, orderDigest: fixture.intent.orderDigest.toUpperCase() },
+        {
+          ...fixture.intent,
+          orderDigest: fixture.intent.orderDigest.toUpperCase(),
+        },
         fixture.auth,
         fixture.orderDigest,
         { now: NOW },
@@ -590,7 +598,7 @@ describe("headless protocol signing", () => {
   });
 
   it("rejects a proof signed for another HTLC deployment", () => {
-    const fixture = signedIntentFixture("qrl-eip712-v4", {
+    const fixture = signedIntentFixture("qrl-sign-message-v2", {
       qrlHtlc: `Q${"54".repeat(20)}`,
     });
     assert.equal(

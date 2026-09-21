@@ -15,31 +15,47 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExtendedSeed, MLDSA87 } from "@theqrl/wallet.js";
-import { makeDeploymentIdentity, type DeploymentIdentity } from "./deployment.js";
 import {
-  ProtocolSigner,
+  makeDeploymentIdentity,
+  type DeploymentIdentity,
+} from "./deployment.js";
+import {
+  V2_TEST_EXTENDED_SEED,
+  protocolV2Identity,
+  signProtocolV2Auth,
+} from "./protocol-v2-test-helper.js";
+import {
+  EMPTY_CAPABILITY_COMMITMENT,
+  MAKER_CAPABILITY_DOMAIN,
+  buildCancelV1Payload,
   buildFillIntentV1Payload,
+  buildFillV1Payload,
+  buildOrderV1Payload,
+  capabilityCommitment,
   computeFillIntentDigest,
   computeOrderDigest,
   deriveOrderV1Id,
-  officialQrlDigest,
+  type CanonicalOrderV1Body,
   type MakerOrderAuthV1,
   type ProtocolAuthV1,
 } from "./protocol-signing.js";
-import { StateFile, StateFilePoisonedError, StateProcessLease } from "./state.js";
+import {
+  StateFile,
+  StateFilePoisonedError,
+  StateProcessLease,
+} from "./state.js";
 
 const DEPLOYMENT = makeDeploymentIdentity({
   ethChainId: "11155111",
   qrlChainId: "1337",
   ethHtlc: `0x${"1".repeat(40)}`,
-  qrlHtlc: `Q${"2".repeat(40)}`,
+  qrlHtlc: `Q${"2".repeat(128)}`,
 });
 const OTHER_DEPLOYMENT = makeDeploymentIdentity({
   ethChainId: "11155111",
   qrlChainId: "1337",
   ethHtlc: `0x${"3".repeat(40)}`,
-  qrlHtlc: `Q${"4".repeat(40)}`,
+  qrlHtlc: `Q${"4".repeat(128)}`,
 });
 
 const preFieldRecord = {
@@ -60,158 +76,154 @@ const preFieldRecord = {
   createdAt: 1_800_000_000,
 };
 
-const EXTENDED_SEED = `0x010000${"07".repeat(48)}`;
+const EXTENDED_SEED = V2_TEST_EXTENDED_SEED;
 const ORDER_NONCE = `0x${"42".repeat(32)}`;
 const MAKER_TOKEN = "ab".repeat(32);
+const LEGACY_IDENTITY = protocolV2Identity(EXTENDED_SEED);
 
 function portableOpenRecord(
   orderExpiresAt = preFieldRecord.createdAt + 3600,
 ): Record<string, unknown> {
-  const signer = new ProtocolSigner(EXTENDED_SEED);
-  try {
-    const signed = signer.signOrderV1(
-      {
-        direction: "eth->qrl",
-        asset: "ETH",
-        fromAmount: preFieldRecord.fromAmount,
-        toAmount: preFieldRecord.toAmount,
-        makerEthAccount: `0x${"1".repeat(40)}`,
-        makerQrlAccount: signer.address,
-        visibility: "public",
-      },
-      {
-        makerToken: MAKER_TOKEN,
-        issuedAt: preFieldRecord.createdAt,
-        expiresAt: orderExpiresAt,
-        nonce: ORDER_NONCE,
-      },
-    );
-    return {
-      ...preFieldRecord,
-      id: deriveOrderV1Id(signed.order.makerQrlAccount, signed.auth.nonce),
-      token: MAKER_TOKEN,
-      asset: "ETH",
-      level: 0,
-      quotedMidMilli: "100000",
-      announcedAt: null,
-      deployment: DEPLOYMENT,
-      protocol: {
-        version: 1,
-        orderDigest: computeOrderDigest(signed.order, signed.auth),
-        order: signed.order,
-        orderAuth: signed.auth,
-      },
-    };
-  } finally {
-    signer.close();
-  }
+  const order: CanonicalOrderV1Body = {
+    direction: "eth->qrl",
+    asset: "ETH",
+    fromAmount: preFieldRecord.fromAmount,
+    toAmount: preFieldRecord.toAmount,
+    makerEthAccount: `0x${"1".repeat(40)}`,
+    makerQrlAccount: LEGACY_IDENTITY.currentAddress,
+    visibility: "public",
+  };
+  const unsignedAuth = {
+    issuedAt: preFieldRecord.createdAt,
+    expiresAt: orderExpiresAt,
+    nonce: ORDER_NONCE,
+    makerTokenCommitment: capabilityCommitment(
+      MAKER_CAPABILITY_DOMAIN,
+      MAKER_TOKEN,
+    ),
+    shareTokenCommitment: EMPTY_CAPABILITY_COMMITMENT,
+  };
+  const orderAuth: MakerOrderAuthV1 = {
+    ...signProtocolV2Auth(
+      buildOrderV1Payload(order, unsignedAuth),
+      "qrl-sign-message-v2",
+      unsignedAuth,
+      EXTENDED_SEED,
+    ),
+    makerTokenCommitment: unsignedAuth.makerTokenCommitment,
+    shareTokenCommitment: unsignedAuth.shareTokenCommitment,
+  };
+  return {
+    ...preFieldRecord,
+    id: deriveOrderV1Id(order.makerQrlAccount, orderAuth.nonce),
+    token: MAKER_TOKEN,
+    asset: "ETH",
+    level: 0,
+    quotedMidMilli: "100000",
+    announcedAt: null,
+    deployment: DEPLOYMENT,
+    protocol: {
+      version: 2,
+      orderDigest: computeOrderDigest(order, orderAuth),
+      order,
+      orderAuth,
+    },
+  };
 }
 
 function portableFillRecord(
   options: { orderExpiresAt?: number; fillRespondBy?: number } = {},
 ): Record<string, unknown> {
-  const signer = new ProtocolSigner(EXTENDED_SEED);
-  const extendedSeed = ExtendedSeed.from(EXTENDED_SEED);
-  const takerWallet = MLDSA87.newWalletFromExtendedSeed(extendedSeed) as ReturnType<
-    typeof MLDSA87.newWalletFromExtendedSeed
-  > & { zeroize(): void };
-  (extendedSeed as typeof extendedSeed & { zeroize(): void }).zeroize();
-  try {
-    const open = portableOpenRecord(options.orderExpiresAt);
-    const protocol = open.protocol as Record<string, unknown>;
-    const orderDigest = protocol.orderDigest as string;
-    const intent = {
-      orderDigest,
-      takerEthAccount: `0x${"2".repeat(40)}`,
-      takerQrlAccount: signer.address,
-      releaseCommitment: `0x${"3".repeat(64)}`,
-    };
-    const unsignedIntentAuth = {
-      issuedAt: preFieldRecord.createdAt + 10,
-      expiresAt: preFieldRecord.createdAt + 110,
-      nonce: `0x${"43".repeat(32)}`,
-    };
-    const intentAuth: ProtocolAuthV1 = {
-      version: "1",
-      scheme: "qrl-eip712-v4",
-      ...unsignedIntentAuth,
-      signature: `0x${Buffer.from(
-        takerWallet.sign(officialQrlDigest(buildFillIntentV1Payload(intent, unsignedIntentAuth))),
-      ).toString("hex")}`,
-      publicKey: `0x${Buffer.from(takerWallet.getPK()).toString("hex")}`,
-      descriptor: "0x010000",
-    };
-    const selectedIntent = {
-      intentDigest: computeFillIntentDigest(intent, intentAuth),
-      intent,
-      auth: intentAuth,
-      receivedAt: preFieldRecord.createdAt + 11,
-    };
-    const preimage = `0x${"4".repeat(64)}`;
-    const hashlock = `0x${createHash("sha256")
-      .update(Buffer.from(preimage.slice(2), "hex"))
-      .digest("hex")}`;
-    const initiatorTimeout = preFieldRecord.createdAt + 7200;
-    const responderTimeout = preFieldRecord.createdAt + 3600;
-    const orderAuth = protocol.orderAuth as MakerOrderAuthV1;
-    const fillProof = signer.signFillV1(
-      {
-        orderDigest,
-        intentDigest: selectedIntent.intentDigest,
-        takerEthAccount: intent.takerEthAccount,
-        takerQrlAccount: intent.takerQrlAccount,
-        releaseCommitment: intent.releaseCommitment,
-        hashlock,
-        initiatorTimeout,
-        responderTimeout,
-      },
-      {
-        order: {
-          order: protocol.order as ReturnType<ProtocolSigner["signOrderV1"]>["order"],
-          auth: orderAuth,
-        },
-        selectedIntent,
-        issuedAt: preFieldRecord.createdAt + 20,
-        respondBy: options.fillRespondBy ?? preFieldRecord.createdAt + 320,
-        fillNonce: `0x${"44".repeat(32)}`,
-      },
-    );
-    return {
-      ...open,
-      preimage,
-      hashlock,
-      initiatorTimeout,
-      responderTimeout,
-      announcedAt: preFieldRecord.createdAt + 20,
-      takerEthAccount: intent.takerEthAccount,
-      takerQrlAccount: intent.takerQrlAccount,
-      protocol: { ...protocol, selectedIntent, fillProof },
-    };
-  } finally {
-    takerWallet.zeroize();
-    signer.close();
-  }
+  const open = portableOpenRecord(options.orderExpiresAt);
+  const protocol = open.protocol as Record<string, unknown>;
+  const orderDigest = protocol.orderDigest as string;
+  const intent = {
+    orderDigest,
+    takerEthAccount: `0x${"2".repeat(40)}`,
+    takerQrlAccount: LEGACY_IDENTITY.currentAddress,
+    releaseCommitment: `0x${"3".repeat(64)}`,
+  };
+  const unsignedIntentAuth = {
+    issuedAt: preFieldRecord.createdAt + 10,
+    expiresAt: preFieldRecord.createdAt + 110,
+    nonce: `0x${"43".repeat(32)}`,
+  };
+  const intentAuth: ProtocolAuthV1 = signProtocolV2Auth(
+    buildFillIntentV1Payload(intent, unsignedIntentAuth),
+    "qrl-sign-message-v2",
+    unsignedIntentAuth,
+    EXTENDED_SEED,
+  );
+  const selectedIntent = {
+    intentDigest: computeFillIntentDigest(intent, intentAuth),
+    intent,
+    auth: intentAuth,
+    receivedAt: preFieldRecord.createdAt + 11,
+  };
+  const preimage = `0x${"4".repeat(64)}`;
+  const hashlock = `0x${createHash("sha256")
+    .update(Buffer.from(preimage.slice(2), "hex"))
+    .digest("hex")}`;
+  const initiatorTimeout = preFieldRecord.createdAt + 7200;
+  const responderTimeout = preFieldRecord.createdAt + 3600;
+  const orderAuth = protocol.orderAuth as MakerOrderAuthV1;
+  const fill = {
+    orderDigest,
+    intentDigest: selectedIntent.intentDigest,
+    takerEthAccount: intent.takerEthAccount,
+    takerQrlAccount: intent.takerQrlAccount,
+    releaseCommitment: intent.releaseCommitment,
+    hashlock,
+    initiatorTimeout,
+    responderTimeout,
+  };
+  const unsignedFillAuth = {
+    issuedAt: preFieldRecord.createdAt + 20,
+    expiresAt: options.fillRespondBy ?? preFieldRecord.createdAt + 320,
+    nonce: `0x${"44".repeat(32)}`,
+  };
+  const fillProof = {
+    fill,
+    auth: signProtocolV2Auth(
+      buildFillV1Payload(fill, orderAuth, unsignedFillAuth),
+      "qrl-sign-message-v2",
+      unsignedFillAuth,
+      EXTENDED_SEED,
+    ),
+  };
+  return {
+    ...open,
+    preimage,
+    hashlock,
+    initiatorTimeout,
+    responderTimeout,
+    announcedAt: preFieldRecord.createdAt + 20,
+    takerEthAccount: intent.takerEthAccount,
+    takerQrlAccount: intent.takerQrlAccount,
+    protocol: { ...protocol, selectedIntent, fillProof },
+  };
 }
 
 function portableCancelRecord(): Record<string, unknown> {
-  const signer = new ProtocolSigner(EXTENDED_SEED);
-  try {
-    const open = portableOpenRecord();
-    const protocol = open.protocol as Record<string, unknown>;
-    const orderAuth = protocol.orderAuth as MakerOrderAuthV1;
-    const cancelProof = signer.signCancelV1(
-      { orderDigest: protocol.orderDigest as string, reasonCode: 1 },
-      {
-        orderNonce: orderAuth.nonce,
-        issuedAt: preFieldRecord.createdAt + 20,
-        expiresAt: orderAuth.expiresAt,
-        cancelNonce: `0x${"45".repeat(32)}`,
-      },
-    );
-    return { ...open, protocol: { ...protocol, cancelProof } };
-  } finally {
-    signer.close();
-  }
+  const open = portableOpenRecord();
+  const protocol = open.protocol as Record<string, unknown>;
+  const orderAuth = protocol.orderAuth as MakerOrderAuthV1;
+  const cancel = { orderDigest: protocol.orderDigest as string, reasonCode: 1 };
+  const unsignedCancelAuth = {
+    issuedAt: preFieldRecord.createdAt + 20,
+    expiresAt: orderAuth.expiresAt,
+    nonce: `0x${"45".repeat(32)}`,
+  };
+  const cancelProof = {
+    cancel,
+    auth: signProtocolV2Auth(
+      buildCancelV1Payload(cancel, orderAuth, unsignedCancelAuth),
+      "qrl-sign-message-v2",
+      unsignedCancelAuth,
+      EXTENDED_SEED,
+    ),
+  };
+  return { ...open, protocol: { ...protocol, cancelProof } };
 }
 
 const envelope = (
@@ -245,7 +257,11 @@ function assertRefusedWithoutMutation(
     const before = JSON.stringify(contents);
     writeFileSync(file, before, "utf8");
     assert.throws(() => new StateFile(file, deployment), pattern);
-    assert.equal(readFileSync(file, "utf8"), before, "recovery state must remain byte-for-byte intact");
+    assert.equal(
+      readFileSync(file, "utf8"),
+      before,
+      "recovery state must remain byte-for-byte intact",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -253,30 +269,49 @@ function assertRefusedWithoutMutation(
 
 describe("deployment-bound state hydration", () => {
   it("keeps field-level upgrade defaults inside a correctly bound deployment", () => {
-    withStateFile(envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]), (state) => {
-      const orders = state.all();
-      assert.equal(orders.length, 1);
-      assert.equal(orders[0]?.asset, "ETH");
-      assert.equal(orders[0]?.level, 0);
-      assert.equal(orders[0]?.quotedMidMilli, null);
-      assert.equal(orders[0]?.announcedAt, null);
-      assert.deepEqual(orders[0]?.deployment, DEPLOYMENT);
-    });
+    withStateFile(
+      envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+      (state) => {
+        const orders = state.all();
+        assert.equal(orders.length, 1);
+        assert.equal(orders[0]?.asset, "ETH");
+        assert.equal(orders[0]?.level, 0);
+        assert.equal(orders[0]?.quotedMidMilli, null);
+        assert.equal(orders[0]?.announcedAt, null);
+        assert.deepEqual(orders[0]?.deployment, DEPLOYMENT);
+      },
+    );
   });
 
   it("keeps an explicit asset on a bound record", () => {
     withStateFile(
-      envelope([{ ...preFieldRecord, id: "order-2", asset: "USDC", deployment: DEPLOYMENT }]),
+      envelope([
+        {
+          ...preFieldRecord,
+          id: "order-2",
+          asset: "USDC",
+          deployment: DEPLOYMENT,
+        },
+      ]),
       (state) => assert.equal(state.all()[0]?.asset, "USDC"),
     );
   });
 
-  it("hydrates a pending signed order with its exact committed maker capability", () => {
+  it("hydrates a V2 proof inside its bound Q128 deployment envelope", () => {
     const record = portableOpenRecord();
     withStateFile(envelope([record]), (state) => {
       const order = state.all()[0];
       assert.ok(order?.protocol);
-      assert.equal(order.id, deriveOrderV1Id(order.protocol.order.makerQrlAccount, ORDER_NONCE));
+      assert.match(order.deployment.qrlHtlc, /^Q[0-9a-fA-F]{128}$/);
+      assert.match(order.protocol.order.makerQrlAccount, /^Q[0-9a-f]{128}$/);
+      assert.equal(
+        order.protocol.order.makerQrlAccount,
+        LEGACY_IDENTITY.currentAddress,
+      );
+      assert.equal(
+        order.id,
+        deriveOrderV1Id(order.protocol.order.makerQrlAccount, ORDER_NONCE),
+      );
       assert.equal(order.token, MAKER_TOKEN);
       assert.equal(order.protocol.orderAuth.nonce, ORDER_NONCE);
       assert.equal(order.protocol.fillAcknowledged, false);
@@ -286,6 +321,25 @@ describe("deployment-bound state hydration", () => {
         computeOrderDigest(order.protocol.order, order.protocol.orderAuth),
       );
     });
+  });
+
+  it("preserves a V1 protocol record and refuses to reinterpret it on v3", () => {
+    const record = portableOpenRecord();
+    const protocol = record.protocol as Record<string, unknown>;
+    const auth = protocol.orderAuth as Record<string, unknown>;
+    assertRefusedWithoutMutation(
+      envelope([{ ...record, protocol: { ...protocol, version: 1 } }]),
+      /version.*left untouched/s,
+    );
+    assertRefusedWithoutMutation(
+      envelope([
+        {
+          ...record,
+          protocol: { ...protocol, orderAuth: { ...auth, version: "1" } },
+        },
+      ]),
+      /version.*left untouched/s,
+    );
   });
 
   it("cryptographically hydrates a selected intent and exact signed fill", () => {
@@ -319,13 +373,15 @@ describe("deployment-bound state hydration", () => {
     });
   });
 
-  it("refuses to sign a FillV1 response deadline past its OrderV1 expiry", () => {
-    assert.throws(
-      () => portableFillRecord({
-        orderExpiresAt: preFieldRecord.createdAt + 200,
-        fillRespondBy: preFieldRecord.createdAt + 320,
-      }),
-      /fill authorization is outside its order or intent window/,
+  it("refuses a recovered FillV1 response deadline past its OrderV1 expiry", () => {
+    assertRefusedWithoutMutation(
+      envelope([
+        portableFillRecord({
+          orderExpiresAt: preFieldRecord.createdAt + 200,
+          fillRespondBy: preFieldRecord.createdAt + 320,
+        }),
+      ]),
+      /maker authorization is malformed.*left untouched/s,
     );
   });
 
@@ -352,7 +408,12 @@ describe("deployment-bound state hydration", () => {
       /maker capability does not match its signed commitment.*left untouched/s,
     );
     assertRefusedWithoutMutation(
-      envelope([{ ...record, protocol: { ...protocol, orderDigest: `0x${"f".repeat(64)}` } }]),
+      envelope([
+        {
+          ...record,
+          protocol: { ...protocol, orderDigest: `0x${"f".repeat(64)}` },
+        },
+      ]),
       /protocol state.*orderDigest is malformed.*left untouched/s,
     );
     assertRefusedWithoutMutation(
@@ -360,7 +421,9 @@ describe("deployment-bound state hydration", () => {
       /fillProof has no selected intent.*left untouched/s,
     );
     assertRefusedWithoutMutation(
-      envelope([{ ...record, protocol: { ...protocol, fillAcknowledged: true } }]),
+      envelope([
+        { ...record, protocol: { ...protocol, fillAcknowledged: true } },
+      ]),
       /fillAcknowledged has no fill proof.*left untouched/s,
     );
     assertRefusedWithoutMutation(
@@ -382,7 +445,10 @@ describe("deployment-bound state hydration", () => {
           ...record,
           protocol: {
             ...protocol,
-            orderAuth: { ...orderAuth, signature: `${signature.slice(0, -2)}${replacement}` },
+            orderAuth: {
+              ...orderAuth,
+              signature: `${signature.slice(0, -2)}${replacement}`,
+            },
           },
         },
       ]),
@@ -393,7 +459,10 @@ describe("deployment-bound state hydration", () => {
   it("migrates only an empty legacy array to the bound envelope", () => {
     withStateFile([], (state, file) => {
       assert.deepEqual(state.all(), []);
-      const persisted = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      const persisted = JSON.parse(readFileSync(file, "utf8")) as Record<
+        string,
+        unknown
+      >;
       assert.equal(persisted.version, 1);
       assert.deepEqual(persisted.deployment, DEPLOYMENT);
       assert.deepEqual(persisted.orders, []);
@@ -409,7 +478,10 @@ describe("deployment-bound state hydration", () => {
 
   it("refuses a state envelope from another HTLC pair without mutating it", () => {
     assertRefusedWithoutMutation(
-      envelope([{ ...preFieldRecord, deployment: OTHER_DEPLOYMENT }], OTHER_DEPLOYMENT),
+      envelope(
+        [{ ...preFieldRecord, deployment: OTHER_DEPLOYMENT }],
+        OTHER_DEPLOYMENT,
+      ),
       /deployment fingerprint.*does not match configured.*left untouched/s,
     );
   });
@@ -429,16 +501,19 @@ describe("deployment-bound state hydration", () => {
   });
 
   it("refuses cross-deployment upserts", () => {
-    withStateFile(envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]), (state, file) => {
-      const order = state.all()[0];
-      assert.ok(order);
-      const before = readFileSync(file, "utf8");
-      assert.throws(
-        () => state.upsert({ ...order, deployment: OTHER_DEPLOYMENT }),
-        /belongs to another deployment.*left untouched/s,
-      );
-      assert.equal(readFileSync(file, "utf8"), before);
-    });
+    withStateFile(
+      envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+      (state, file) => {
+        const order = state.all()[0];
+        assert.ok(order);
+        const before = readFileSync(file, "utf8");
+        assert.throws(
+          () => state.upsert({ ...order, deployment: OTHER_DEPLOYMENT }),
+          /belongs to another deployment.*left untouched/s,
+        );
+        assert.equal(readFileSync(file, "utf8"), before);
+      },
+    );
   });
 
   it("rolls the in-memory map back when an atomic persistence step fails", () => {
@@ -449,7 +524,9 @@ describe("deployment-bound state hydration", () => {
       const file = join(stateDir, "state.json");
       writeFileSync(
         file,
-        JSON.stringify(envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }])),
+        JSON.stringify(
+          envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+        ),
         "utf8",
       );
       const state = new StateFile(file, DEPLOYMENT);
@@ -470,17 +547,27 @@ describe("deployment-bound state hydration", () => {
       const file = join(dir, "state.json");
       writeFileSync(
         file,
-        JSON.stringify(envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }])),
+        JSON.stringify(
+          envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+        ),
         "utf8",
       );
       const state = new StateFile(file, DEPLOYMENT, () => {
         throw new Error("injected directory sync failure");
       });
-      assert.throws(() => state.delete(preFieldRecord.id), StateFilePoisonedError);
-      const persisted = JSON.parse(readFileSync(file, "utf8")) as { orders: unknown[] };
+      assert.throws(
+        () => state.delete(preFieldRecord.id),
+        StateFilePoisonedError,
+      );
+      const persisted = JSON.parse(readFileSync(file, "utf8")) as {
+        orders: unknown[];
+      };
       assert.deepEqual(persisted.orders, []);
       assert.throws(() => state.all(), StateFilePoisonedError);
-      assert.throws(() => state.delete(preFieldRecord.id), StateFilePoisonedError);
+      assert.throws(
+        () => state.delete(preFieldRecord.id),
+        StateFilePoisonedError,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -502,7 +589,7 @@ describe("exclusive state process lease", () => {
   const identity = {
     deploymentFingerprint: DEPLOYMENT.configFingerprint,
     ethAccount: `0x${"1".repeat(40)}`,
-    qrlAccount: `Q${"2".repeat(40)}`,
+    qrlAccount: `Q${"2".repeat(128)}`,
   };
 
   it("deterministically refuses a live second instance and releases cleanly", () => {
@@ -528,7 +615,10 @@ describe("exclusive state process lease", () => {
     try {
       writeFileSync(`${file}.lock`, "incomplete crash record", { mode: 0o600 });
       const lease = StateProcessLease.acquire(file, identity);
-      assert.throws(() => StateProcessLease.acquire(file, identity), /held by live process/);
+      assert.throws(
+        () => StateProcessLease.acquire(file, identity),
+        /held by live process/,
+      );
       lease.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -584,7 +674,10 @@ describe("exclusive state process lease", () => {
       assert.ok(winner);
       assert.equal(readFileSync(`${file}.lock`, "utf8"), winnerContents);
       assert.equal(existsSync(`${file}.lock.recovery`), false);
-      assert.throws(() => StateProcessLease.acquire(file, identity), /held by live process/);
+      assert.throws(
+        () => StateProcessLease.acquire(file, identity),
+        /held by live process/,
+      );
 
       winner.close();
       winners.pop();

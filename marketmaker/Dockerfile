@@ -1,10 +1,12 @@
 FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS build
 
-WORKDIR /app
-COPY package.json package-lock.json ./
+WORKDIR /app/marketmaker
+COPY marketmaker/package.json marketmaker/package-lock.json ./
 RUN npm ci
-COPY tsconfig.json ./
-COPY src ./src
+COPY marketmaker/tsconfig.json ./
+COPY marketmaker/src ./src
+COPY config/protocol-v2.json /app/config/protocol-v2.json
+COPY config/protocol-v2-vectors.json /app/config/protocol-v2-vectors.json
 RUN npm run build
 RUN npm prune --omit=dev
 
@@ -15,10 +17,11 @@ ENV NODE_ENV=production \
     MM_HEALTH_HOST=0.0.0.0 \
     MM_HEALTH_PORT=8092
 
-WORKDIR /app
-COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
-COPY --from=build --chown=node:node /app/node_modules ./node_modules
-COPY --from=build --chown=node:node /app/dist ./dist
+WORKDIR /app/marketmaker
+COPY --from=build --chown=node:node /app/marketmaker/package.json /app/marketmaker/package-lock.json ./
+COPY --from=build --chown=node:node /app/marketmaker/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/marketmaker/dist ./dist
+COPY --from=build --chown=node:node /app/config /app/config
 RUN mkdir -p /var/lib/quantaswap-marketmaker && chown node:node /var/lib/quantaswap-marketmaker
 
 USER node

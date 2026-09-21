@@ -3,6 +3,7 @@ name: Order book CI
 on:
   pull_request:
     paths:
+      - 'config/protocol-v2*.json'
       - 'server/**'
       - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
@@ -11,6 +12,7 @@ on:
     branches:
       - dev
     paths:
+      - 'config/protocol-v2*.json'
       - 'server/**'
       - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
@@ -114,7 +116,7 @@ jobs:
 
       - name: Build runtime image
         working-directory: server
-        run: docker build --tag quantaswap-orderbook:ci .
+        run: docker build --file Dockerfile --tag quantaswap-orderbook:ci ..
 
       - name: Build Tor sidecars
         working-directory: server

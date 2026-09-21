@@ -151,7 +151,7 @@ Design notes:
 
 - `feeBps` and `treasury` immutable preserves the no-admin-keys invariant over user funds. `MAX_FEE_BPS` in the constructor caps what any future deployment can claim to be "the official HTLC".
 - Pull-based `accruedFees` + `withdrawFees` means a broken or compromised FeeVault can never block claims or refunds; worst case the fees sit unclaimed.
-- Same artifact still deploys to both chains (constructor args differ per chain: each chain's vault address).
+- The same reviewed source and ABI still serve both chains through target-specific EVM-256 and QRVM-512 artifacts (constructor args differ per chain: each chain's vault address).
 - `getSwap` keeps returning gross `amount`; clients verify gross and display net (`amount * (10000 - feeBps) / 10000`).
 - Hashlock single-use stays per contract instance, so v1 and v2 hashlock namespaces are independent; a secret used on v1 must still never be reused on v2 (client rule already exists).
 

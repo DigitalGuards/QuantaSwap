@@ -25,8 +25,8 @@ function stubStorage(): void {
 const makerToken = "aa".repeat(32);
 const shareToken = "bb".repeat(32);
 const auth: MakerOrderAuthV1 = {
-  version: "1",
-  scheme: "qrl-sign-typed-v1",
+  version: "2",
+  scheme: "qrl-sign-message-v2",
   issuedAt: 1_800_000_000,
   expiresAt: 1_800_003_600,
   nonce: `0x${"11".repeat(32)}`,

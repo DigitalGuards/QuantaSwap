@@ -16,12 +16,11 @@ import type {
 
 export type Direction = "eth->qrl" | "qrl->eth";
 
-/** A taker proof can come from MyQRLWallet's native typed-data method or
- *  the official wallet's EIP-712 method. The protocol verifier checks the
- *  exact proof before the maker selects it. */
+/** A V2 taker proof signs canonical deployment-bound message bytes.
+ * The verifier authenticates the full QIP-55 identity before selection. */
 export interface FillIntentAuthV1 {
-  version: "1";
-  scheme: "qrl-sign-typed-v1" | "qrl-eip712-v4";
+  version: "2";
+  scheme: "qrl-sign-message-v2";
   issuedAt: number;
   expiresAt: number;
   nonce: string;
@@ -43,7 +42,7 @@ export interface SelectedFillIntentV1 {
  *  records from earlier releases remain recoverable through their legacy
  *  endpoints. Every present proof is persisted exactly for safe retries. */
 export interface ManagedProtocolV1 {
-  version: 1;
+  version: 2;
   orderDigest: string;
   order: CanonicalOrderV1Body;
   orderAuth: MakerOrderAuthV1;
@@ -155,11 +154,15 @@ export interface DecideInput {
   lockGraceS: number;
 }
 
-const retryOk = (sentAt: number | null, nowS: number, resendAfterS: number): boolean =>
-  sentAt === null || nowS - sentAt > resendAfterS;
+const retryOk = (
+  sentAt: number | null,
+  nowS: number,
+  resendAfterS: number,
+): boolean => sentAt === null || nowS - sentAt > resendAfterS;
 
 const terminal = (s: LegState | null): boolean =>
-  s !== null && (s.status === SwapStatus.Claimed || s.status === SwapStatus.Refunded);
+  s !== null &&
+  (s.status === SwapStatus.Claimed || s.status === SwapStatus.Refunded);
 
 const chainExposed = (s: LegState | null): boolean =>
   s !== null && s.status !== SwapStatus.None;
@@ -207,7 +210,12 @@ export function decide(x: DecideInput): Decision {
 
   // From here: status locking, or the book forgot an order that has funds
   // on chain. The chain governs; the book is no longer needed.
-  if (managed.preimage === null || managed.hashlock === null || t1 === null || t2 === null) {
+  if (
+    managed.preimage === null ||
+    managed.hashlock === null ||
+    t1 === null ||
+    t2 === null
+  ) {
     return "wait"; // inconsistent snapshot; next tick reconciles
   }
   if (x.iState === null) return "wait"; // RPC gap: fail closed
@@ -277,7 +285,11 @@ export function decide(x: DecideInput): Decision {
   if (terminal(x.iState) && rSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
-  if (x.iState.status === SwapStatus.None && nowS >= t2 && managed.lockSentAt === null) {
+  if (
+    x.iState.status === SwapStatus.None &&
+    nowS >= t2 &&
+    managed.lockSentAt === null
+  ) {
     return "abort";
   }
 
@@ -316,7 +328,8 @@ export function levelQuote(args: {
     args.direction === "eth->qrl"
       ? (args.midPriceMilli * (10_000n + offsetBps)) / 10_000n // ask: above mid
       : (args.midPriceMilli * (10_000n - offsetBps)) / 10_000n; // bid: below mid
-  const qrlWei = (units * priceMilli * 10n ** BigInt(18 - args.assetDecimals)) / 1000n;
+  const qrlWei =
+    (units * priceMilli * 10n ** BigInt(18 - args.assetDecimals)) / 1000n;
   return args.direction === "eth->qrl"
     ? { fromAmount: units.toString(), toAmount: qrlWei.toString() }
     : { fromAmount: qrlWei.toString(), toAmount: units.toString() };

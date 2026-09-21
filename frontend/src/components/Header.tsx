@@ -1,11 +1,12 @@
 import { NavLink, Link } from "react-router";
 import { Wallet, LogOut } from "lucide-react";
 import { Logo } from "@/components/Logo";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
-import { shortAddr } from "@/lib/htlc";
 import { cn } from "@/utils/cn";
 import { QRL_LEG, ETH_LEG } from "@/config";
 import type { QrlStatus } from "@/hooks/useQrlWallet";
+import { hasLegacySwapState } from "@/lib/activeSwap";
 
 const navItems = [
   { to: "/", label: "Swap" },
@@ -34,16 +35,21 @@ function WalletSlot({
   onDisconnect,
 }: WalletSlotProps) {
   if (account) {
+    const chainLabel = label.startsWith("QRL") ? "QRL" : "ETH";
     return (
       <div className="flex items-center gap-2">
         <a
           href={`${explorerBase}${account}`}
           target="_blank"
           rel="noreferrer"
-          title={`View address on ${explorerName}`}
-          className="font-data rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs text-blue-accent transition-colors hover:border-blue-accent/50"
+          title={account}
+          aria-label={`View ${label} ${account} on ${explorerName}`}
+          className="font-data inline-flex items-center rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs text-blue-accent transition-colors hover:border-blue-accent/50"
         >
-          {shortAddr(account)}
+          <span className="font-sans text-[10px] font-semibold tracking-wide xl:hidden">
+            {chainLabel}
+          </span>
+          <AddressFingerprint address={account} className="hidden xl:inline" />
         </a>
         {onDisconnect ? (
           <Button variant="ghost" size="sm" onClick={onDisconnect} aria-label={`Disconnect ${label}`}>
@@ -77,7 +83,7 @@ export function Header(props: Props) {
       <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-4 px-4">
         <div className="flex items-center gap-6">
           <Link to="/" aria-label="QuantaSwap home">
-            <Logo />
+            <Logo className="[&>span]:hidden sm:[&>span]:inline" />
           </Link>
           <nav className="hidden items-center gap-1 md:flex">
             {navItems.map((item) => (
@@ -101,7 +107,7 @@ export function Header(props: Props) {
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden rounded-full border border-secondary/40 bg-secondary/10 px-2.5 py-0.5 text-xs font-medium text-secondary sm:inline">
-            Testnet
+            Private v3
           </span>
           <WalletSlot
             label="ETH wallet"
@@ -140,6 +146,12 @@ export function Header(props: Props) {
           </NavLink>
         ))}
       </nav>
+      {hasLegacySwapState() && (
+        <p role="status" className="mx-auto max-w-5xl px-4 py-2 text-xs text-muted-foreground">
+          Previous testnet swap records are preserved on this device. V3 uses a separate deployment.
+          Keep your old recovery records until every earlier swap has settled.
+        </p>
+      )}
     </header>
   );
 }

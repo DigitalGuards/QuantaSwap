@@ -3,7 +3,11 @@
 // Served same-origin behind nginx (/api -> 127.0.0.1:PORT) in production
 // and behind the Vite dev proxy locally.
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { resolveClientIp } from "./client-ip.js";
 import { readConfig } from "./config.js";
 import { corsHeaders, preflightHeaders, type CorsMode } from "./cors.js";
@@ -45,7 +49,10 @@ let shuttingDown = false;
 const WINDOW_MS = 60_000;
 const MAX_MUTATIONS_PER_WINDOW = 120;
 const MAX_READS_PER_WINDOW = 1440;
-const hits = new Map<string, { windowStart: number; reads: number; mutations: number }>();
+const hits = new Map<
+  string,
+  { windowStart: number; reads: number; mutations: number }
+>();
 const publicFederationResetLimiter = new FederationResetLimiter();
 const publicFederationRequestLimiter = new FederationResetLimiter({
   perSourceLimit: 240,
@@ -63,10 +70,11 @@ const authenticatedFederationRequestLimiter = new FederationResetLimiter({
   perSourceLimit: 240,
   globalLimit: 3840,
 });
-const authenticatedFederationConcurrencyLimiter = new FederationConcurrencyLimiter({
-  perSourceLimit: 1,
-  globalLimit: 16,
-});
+const authenticatedFederationConcurrencyLimiter =
+  new FederationConcurrencyLimiter({
+    perSourceLimit: 1,
+    globalLimit: 16,
+  });
 const federationResponseCache = new FederationResponseCache({
   maxEntries: 128,
   maxBytes: MAX_FEDERATION_RESPONSE_BYTES * 2,
@@ -97,7 +105,11 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   sendSerializedJson(res, status, body);
 }
 
-function sendSerializedJson(res: ServerResponse, status: number, body: string): void {
+function sendSerializedJson(
+  res: ServerResponse,
+  status: number,
+  body: string,
+): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "X-Content-Type-Options": "nosniff",
@@ -136,7 +148,10 @@ function waitForResponse(
   });
 }
 
-async function sendFederationJson(res: ServerResponse, body: Buffer): Promise<void> {
+async function sendFederationJson(
+  res: ServerResponse,
+  body: Buffer,
+): Promise<void> {
   const deadline = Date.now() + config.streamBackpressureMs;
   res.writeHead(200, {
     "Content-Type": "application/json",
@@ -147,7 +162,10 @@ async function sendFederationJson(res: ServerResponse, body: Buffer): Promise<vo
   for (let offset = 0; offset < body.byteLength; offset += 64 * 1024) {
     if (res.destroyed) return;
     const accepted = res.write(body.subarray(offset, offset + 64 * 1024));
-    if (!accepted && !(await waitForResponse(res, "drain", deadline - Date.now()))) {
+    if (
+      !accepted &&
+      !(await waitForResponse(res, "drain", deadline - Date.now()))
+    ) {
       return;
     }
   }
@@ -194,7 +212,11 @@ async function readJsonBody(
   if (size === 0) return {};
   try {
     const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
       throw new Error("not an object");
     }
     return parsed as Record<string, unknown>;
@@ -203,7 +225,9 @@ async function readJsonBody(
   }
 }
 
-const store = new OrderStore(config.dataFile, { presenceTtlS: config.presenceTtlS });
+const store = new OrderStore(config.dataFile, {
+  presenceTtlS: config.presenceTtlS,
+});
 const federationFeed = new FederationFeed(config.federationDataFile);
 const peerTransport = new FederationPeerTransport(config.federationOnionProxy, {
   connectTimeoutMs: config.federationRequestTimeoutMs,
@@ -243,12 +267,17 @@ const peerSync = new FederationPeerSync({
   apply: (event, peer) => {
     try {
       const peerIndex = config.federationPeers.indexOf(peer);
-      const peerId = peerIndex === -1 ? "peer-unknown" : config.federationPeerIds[peerIndex]!;
+      const peerId =
+        peerIndex === -1
+          ? "peer-unknown"
+          : config.federationPeerIds[peerIndex]!;
       store.applyFederationEvent(event, peerId);
       return "applied";
     } catch (error) {
       if (error instanceof OrderStorePersistenceError) {
-        console.error("[orderbook] fatal persistence failure during federation sync");
+        console.error(
+          "[orderbook] fatal persistence failure during federation sync",
+        );
         initiateShutdown("storage failure", 1);
         throw error;
       }
@@ -264,7 +293,8 @@ const peerSync = new FederationPeerSync({
   },
   onError: (peer, error) => {
     const peerIndex = config.federationPeers.indexOf(peer);
-    const peerId = peerIndex === -1 ? "peer-unknown" : config.federationPeerIds[peerIndex];
+    const peerId =
+      peerIndex === -1 ? "peer-unknown" : config.federationPeerIds[peerIndex];
     console.warn(
       `[orderbook] federation ${peerId} sync failed:`,
       error instanceof Error ? error.message : "unknown transport error",
@@ -276,7 +306,8 @@ const peerSyncTimer =
     ? undefined
     : setInterval(() => void peerSync.syncAll(), config.federationSyncMs);
 peerSyncTimer?.unref();
-if (config.federationPeers.length > 0) setImmediate(() => void peerSync.syncAll());
+if (config.federationPeers.length > 0)
+  setImmediate(() => void peerSync.syncAll());
 const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 
 function clientIp(req: IncomingMessage): string {
@@ -347,10 +378,19 @@ function removeStream(res: ServerResponse, ip: string): void {
   else streamIpCounts.set(ip, count);
 }
 
-function openStream(req: IncomingMessage, res: ServerResponse, ip: string): void {
+function openStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ip: string,
+): void {
   const perIp = streamIpCounts.get(ip) ?? 0;
-  if (streamClients.size >= MAX_STREAM_CLIENTS || perIp >= MAX_STREAM_CLIENTS_PER_IP) {
-    sendJson(res, 503, { error: "too many stream connections; fall back to polling" });
+  if (
+    streamClients.size >= MAX_STREAM_CLIENTS ||
+    perIp >= MAX_STREAM_CLIENTS_PER_IP
+  ) {
+    sendJson(res, 503, {
+      error: "too many stream connections; fall back to polling",
+    });
     return;
   }
   res.writeHead(200, {
@@ -381,13 +421,17 @@ function corsMode(method: string, path: string): CorsMode {
       path === "/api/status" ||
       path === "/api/orders" ||
       path === "/api/orders/stream" ||
-      path === "/api/federation/v1/events")
+      path === "/api/federation/v2/events")
     ? "public-read"
     : "configured-origin";
 }
 
-function applyHeaders(res: ServerResponse, headers: Record<string, string>): void {
-  for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+function applyHeaders(
+  res: ServerResponse,
+  headers: Record<string, string>,
+): void {
+  for (const [name, value] of Object.entries(headers))
+    res.setHeader(name, value);
 }
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -416,7 +460,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     return;
   }
-  applyHeaders(res, corsHeaders(requestOrigin(req), corsMode(method, path), config.corsOrigins));
+  applyHeaders(
+    res,
+    corsHeaders(requestOrigin(req), corsMode(method, path), config.corsOrigins),
+  );
 
   if (shuttingDown && path !== "/api/health" && path !== "/api/status") {
     sendJson(res, 503, { error: "order book is shutting down" });
@@ -426,7 +473,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Heartbeats are read-class: they mutate nothing durable and a maker
   // with several listings pings often by design.
   const mutation = method !== "GET" && !path.endsWith("/heartbeat");
-  if (path !== "/api/federation/v1/events" && rateLimited(ip, mutation)) {
+  if (path !== "/api/federation/v2/events" && rateLimited(ip, mutation)) {
     sendJson(res, 429, { error: "rate limited, slow down" });
     return;
   }
@@ -455,11 +502,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     });
     return;
   }
-  if (method === "GET" && path === "/api/federation/v1/events") {
+  if (method === "GET" && path === "/api/federation/v2/events") {
     const unexpected = [...url.searchParams.keys()].some(
       (key) => key !== "cursor" && key !== "limit",
     );
-    if (unexpected) throw new ApiError(400, "unsupported federation query parameter");
+    if (unexpected)
+      throw new ApiError(400, "unsupported federation query parameter");
     const rawLimit = url.searchParams.get("limit") ?? "256";
     if (!/^[0-9]+$/.test(rawLimit)) {
       throw new ApiError(400, "federation limit must be an integer");
@@ -504,7 +552,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         status.latestSequence,
       );
       const body = federationResponseCache.getOrCreate(cacheKey, () => {
-        const page = federationFeed.page(cursor, limit, () => store.federationSnapshot());
+        const page = federationFeed.page(cursor, limit, () =>
+          store.federationSnapshot(),
+        );
         return federationPageBody(page);
       });
       await sendFederationJson(res, body);
@@ -528,9 +578,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (method === "POST" && path === "/api/orders/signed") {
     const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
     const verified = verifyOrderV1(body["order"], body["auth"]);
-    const expectedKeys = verified.terms.visibility === "private"
-      ? ["auth", "makerToken", "order", "shareToken"]
-      : ["auth", "makerToken", "order"];
+    const expectedKeys =
+      verified.terms.visibility === "private"
+        ? ["auth", "makerToken", "order", "shareToken"]
+        : ["auth", "makerToken", "order"];
     const actualKeys = Object.keys(body).sort();
     if (
       actualKeys.length !== expectedKeys.length ||
@@ -561,7 +612,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
-  const signedCancelMatch = /^\/api\/orders\/([^/]+)\/cancel\/signed$/.exec(path);
+  const signedCancelMatch = /^\/api\/orders\/([^/]+)\/cancel\/signed$/.exec(
+    path,
+  );
   if (signedCancelMatch && method === "POST") {
     const id = signedCancelMatch[1] ?? "";
     if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
@@ -621,9 +674,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
   }
 
-  const match = /^\/api\/orders\/([^/]+)(?:\/(accept|hashlock|cancel|release|heartbeat))?$/.exec(
-    path,
-  );
+  const match =
+    /^\/api\/orders\/([^/]+)(?:\/(accept|hashlock|cancel|release|heartbeat))?$/.exec(
+      path,
+    );
   if (match) {
     const id = match[1] ?? "";
     const action = match[2];
@@ -633,7 +687,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       // query string would land in nginx/CF access logs, and the browser
       // client keeps it in the URL fragment, which never leaves the page).
       const share = req.headers["x-share-token"];
-      sendJson(res, 200, { order: store.get(id, typeof share === "string" ? share : undefined) });
+      sendJson(res, 200, {
+        order: store.get(id, typeof share === "string" ? share : undefined),
+      });
       return;
     }
     if (method === "POST" && action !== undefined) {
@@ -684,7 +740,8 @@ let shutdownTimer: NodeJS.Timeout | undefined;
 
 function initiateShutdown(reason: string, exitCode = 0): void {
   if (shuttingDown) {
-    const currentExitCode = typeof process.exitCode === "number" ? process.exitCode : 0;
+    const currentExitCode =
+      typeof process.exitCode === "number" ? process.exitCode : 0;
     if (exitCode > currentExitCode) process.exitCode = exitCode;
     return;
   }
@@ -720,7 +777,8 @@ process.once("SIGTERM", () => initiateShutdown("SIGTERM"));
 process.once("SIGINT", () => initiateShutdown("SIGINT"));
 
 server.on("clientError", (_error, socket) => {
-  if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+  if (socket.writable)
+    socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
 });
 
 server.on("error", (error) => {
