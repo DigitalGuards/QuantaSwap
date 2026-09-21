@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { isAssetSymbol } from "./assets.js";
+import { orderRetentionUntil, parseAdmissionRecords, type AdmissionRecord } from "./admission.js";
 import {
   parseDeploymentIdentity,
   sameDeployment,
@@ -50,9 +51,10 @@ import {
 } from "./protocol-signing.js";
 
 interface StateEnvelope {
-  version: 1;
+  version: 2;
   deployment: DeploymentIdentity;
   orders: ManagedOrder[];
+  admissions: AdmissionRecord[];
 }
 
 type PersistedOrder = Omit<
@@ -1039,6 +1041,7 @@ const recoveryError = (file: string, reason: string): Error =>
 
 export class StateFile {
   private orders = new Map<string, ManagedOrder>();
+  private admissions = new Map<string, number>();
   private poisoned: Error | null = null;
 
   constructor(
@@ -1077,7 +1080,7 @@ export class StateFile {
       throw recoveryError(this.file, "state envelope is malformed");
     }
     const envelope = parsed as Record<string, unknown>;
-    if (envelope.version !== 1 || !Array.isArray(envelope.orders)) {
+    if ((envelope.version !== 1 && envelope.version !== 2) || !Array.isArray(envelope.orders)) {
       throw recoveryError(
         this.file,
         "state envelope version or order list is malformed",
@@ -1100,6 +1103,11 @@ export class StateFile {
         this.file,
         `deployment fingerprint ${fileDeployment.configFingerprint} does not match configured ${this.deployment.configFingerprint}`,
       );
+    }
+    if (envelope.version === 2 || envelope.admissions !== undefined) {
+      for (const entry of parseAdmissionRecords(envelope.admissions)) {
+        this.admissions.set(entry.id, entry.retainUntil);
+      }
     }
 
     // Records carry live preimages, so a state file this build cannot
@@ -1180,12 +1188,29 @@ export class StateFile {
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),
       });
+      this.rememberAdmission(this.orders.get(order.id)!);
     }
   }
 
   all(): ManagedOrder[] {
     this.assertHealthy();
     return [...this.orders.values()].map((order) => structuredClone(order));
+  }
+
+  retainedAdmissionCount(now: number): number {
+    this.assertHealthy();
+    return [...this.admissions.values()].filter(until => until > now).length;
+  }
+
+  private rememberAdmission(order: ManagedOrder): void {
+    const now = Math.floor(Date.now() / 1000);
+    for (const [id, until] of this.admissions) {
+      if (until <= now) this.admissions.delete(id);
+    }
+    const until = orderRetentionUntil(order, now);
+    if (until !== null) {
+      this.admissions.set(order.id, Math.max(this.admissions.get(order.id) ?? 0, until));
+    }
   }
 
   upsert(order: ManagedOrder): void {
@@ -1197,13 +1222,17 @@ export class StateFile {
       );
     }
     const previous = this.orders.get(order.id);
+    const previousAdmission = this.admissions.get(order.id);
     this.orders.set(order.id, structuredClone(order));
+    this.rememberAdmission(order);
     try {
       this.persist();
     } catch (err) {
       if (this.poisoned === null) {
         if (previous === undefined) this.orders.delete(order.id);
         else this.orders.set(order.id, previous);
+        if (previousAdmission === undefined) this.admissions.delete(order.id);
+        else this.admissions.set(order.id, previousAdmission);
       }
       throw err;
     }
@@ -1234,9 +1263,12 @@ export class StateFile {
       `.state.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
     );
     const envelope: StateEnvelope = {
-      version: 1,
+      version: 2,
       deployment: this.deployment,
       orders: this.all(),
+      admissions: [...this.admissions.entries()]
+        .filter(([, until]) => until > Math.floor(Date.now() / 1000))
+        .map(([id, retainUntil]) => ({ id, retainUntil })),
     };
     let fileDescriptor: number | undefined;
     let renamed = false;

@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import {
   OrderBookClient,
+  OrderBookCapacityError,
   OrderBookUnavailableError,
   type OrderView,
 } from "./orderbook.js";
@@ -104,6 +105,20 @@ async function withFetch(
 }
 
 describe("portable order book client", () => {
+  it("classifies quota rejection as admission backpressure without reflecting the response", async () => {
+    await withFetch(
+      () => new Response(JSON.stringify({ error: "sensitive upstream detail" }), {
+        status: 429, headers: { "Content-Type": "application/json" },
+      }),
+      async () => {
+        await assert.rejects(
+          new OrderBookClient("https://book.test/api").createSigned(signedOrder, MAKER_TOKEN),
+          (error: unknown) => error instanceof OrderBookCapacityError &&
+            error instanceof OrderBookUnavailableError && !error.message.includes("sensitive"),
+        );
+      },
+    );
+  });
   it("parses exact FillIntentV1 rows", async () => {
     await withFetch(
       () =>

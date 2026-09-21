@@ -15,6 +15,24 @@ afterEach(async () => {
 });
 
 describe("market maker health", () => {
+  it("reports retention waits and upstream backoff without hiding settlement progress", () => {
+    let now = 1_800_000_000_000;
+    const health = new MakerHealth({ deploymentFingerprint: "sha256:test", assets: ["ETH"],
+      draining: false, staleAfterMs: 60_000, now: () => now });
+    health.markRuntimeVerified();
+    health.markTickStarted(2);
+    health.markTickCompleted(2, 0);
+    health.markQuoteAdmission(60, 0);
+    assert.equal(health.snapshot().status, "ok");
+    assert.equal(health.snapshot().quoteAdmission.state, "waiting-retention");
+    health.markQuoteAdmission(20, now / 1000 + 30);
+    assert.equal(health.snapshot().status, "degraded");
+    assert.equal(health.snapshot().quoteAdmission.state, "backoff");
+    assert.equal(health.snapshot().lastTickErrorCount, 0);
+    now += 30_000;
+    assert.equal(health.snapshot().status, "ok");
+    assert.equal(health.snapshot().quoteAdmission.state, "active");
+  });
   it("moves from starting to healthy after verification and a clean tick", () => {
     let now = 1_800_000_000_000;
     const health = new MakerHealth({
