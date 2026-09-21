@@ -170,7 +170,7 @@ jobs:
 
           order_id="$(curl --fail-with-body --silent \
             -H 'Content-Type: application/json' \
-            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q2222222222222222222222222222222222222222"}' \
+            -d '{"direction":"eth->qrl","fromAmount":"1000000000000000000","toAmount":"1000000000000000000","makerEthAccount":"0x1111111111111111111111111111111111111111","makerQrlAccount":"Q22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"}' \
             http://127.0.0.1:8091/api/orders | jq -er '.order.id')"
           test "$(docker compose exec -T orderbook stat -c '%a' /var/lib/quantaswap-orderbook/orders.json)" = 600
 
