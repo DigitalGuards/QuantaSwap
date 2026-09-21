@@ -9,15 +9,23 @@ export function NetworkPanel() {
 
   useEffect(() => {
     const poll = () => {
-      void getBlockNumber("qrl").then((n) => setHeights((h) => ({ ...h, qrl: n }))).catch(() => undefined);
-      void getBlockNumber("eth").then((n) => setHeights((h) => ({ ...h, eth: n }))).catch(() => undefined);
+      void getBlockNumber("qrl")
+        .then((n) => setHeights((h) => ({ ...h, qrl: n })))
+        .catch(() => undefined);
+      void getBlockNumber("eth")
+        .then((n) => setHeights((h) => ({ ...h, eth: n })))
+        .catch(() => undefined);
     };
     poll();
     const t = setInterval(poll, 15000);
     return () => clearInterval(t);
   }, []);
 
-  const cell = (leg: typeof QRL_LEG | typeof ETH_LEG, height: number | undefined, addressUrl: string) => (
+  const cell = (
+    leg: typeof QRL_LEG | typeof ETH_LEG,
+    height: number | undefined,
+    addressUrl: string,
+  ) => (
     <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-1.5 text-muted-foreground">

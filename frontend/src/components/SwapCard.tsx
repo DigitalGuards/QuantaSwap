@@ -69,7 +69,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
     kind: "From" | "To",
     leg: typeof ETH_LEG | typeof QRL_LEG,
     value: string,
-    setValue: (v: string) => void
+    setValue: (v: string) => void,
   ) => (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between text-xs text-muted-foreground">

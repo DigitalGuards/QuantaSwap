@@ -33,7 +33,7 @@ const POLL_MS = 5000;
 
 const pillStyles: Record<string, string> = {
   none: "bg-muted/40 text-muted-foreground",
-  open: "bg-blue-accent/10 text-blue-accent",
+  open: "bg-identity-accent/10 text-identity-accent",
   claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
@@ -43,7 +43,7 @@ const statusKey = ["none", "open", "claimed", "refunded"] as const;
 
 const toneStyles = {
   success: "border-success/40 bg-success/10 text-success",
-  pending: "border-blue-accent/40 bg-blue-accent/10 text-blue-accent",
+  pending: "border-identity-accent/40 bg-identity-accent/10 text-identity-accent",
   warn: "border-amber-400/40 bg-amber-400/10 text-amber-400",
   neutral: "border-border/60 bg-muted/20 text-muted-foreground",
 } as const;
@@ -223,8 +223,8 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
             <CardTitle>Not a swap hash</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            A swap link looks like <span className="font-data">/swap/0x…</span> with a 32-byte
-            hex hashlock. Check the link you were given.
+            A swap link looks like <span className="font-data">/swap/0x…</span> with a 32-byte hex
+            hashlock. Check the link you were given.
           </CardContent>
         </Card>
       </div>
@@ -295,8 +295,8 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
 
       <p className="text-xs text-muted-foreground">
         Live from both chains, refreshed every {POLL_MS / 1000}s. Anyone with this link sees the
-        same view; no wallet or account is involved. Escrows pay out only to the recipient fixed
-        at lock time, so sharing this page is safe.
+        same view; no wallet or account is involved. Escrows pay out only to the recipient fixed at
+        lock time, so sharing this page is safe.
       </p>
     </div>
   );
