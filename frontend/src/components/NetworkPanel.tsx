@@ -26,32 +26,34 @@ export function NetworkPanel() {
     height: number | undefined,
     addressUrl: string,
   ) => (
-    <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-      <div className="flex items-center justify-between">
-        <span className="flex items-center gap-1.5 text-muted-foreground">
+    <div className="min-w-0 space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
+      <div className="flex min-w-0 items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5 truncate text-muted-foreground">
           <span
             aria-hidden
             className={
               height !== undefined
-                ? "glow-dot h-1.5 w-1.5 rounded-full bg-current text-success"
-                : "h-1.5 w-1.5 rounded-full bg-current text-muted-foreground/60"
+                ? "glow-dot h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
+                : "h-1.5 w-1.5 shrink-0 rounded-full bg-current text-muted-foreground/60"
             }
           />
-          {leg.name}
+          <span className="truncate">{leg.name}</span>
         </span>
-        <span className="font-numeric text-xs text-muted-foreground">block {height ?? "…"}</span>
+        <span className="font-numeric shrink-0 text-xs text-muted-foreground">
+          block {height ?? "…"}
+        </span>
       </div>
-      <div className="font-data text-xs">
-        HTLC{" "}
+      <div className="flex min-w-0 flex-wrap items-baseline gap-1 font-data text-xs">
+        <span className="shrink-0">HTLC</span>
         <a
           href={addressUrl}
           target="_blank"
           rel="noreferrer"
           title={leg.htlc}
           aria-label={`View ${leg.name} HTLC ${leg.htlc} on explorer`}
-          className="text-blue-accent hover:underline"
+          className="min-w-0 break-all text-blue-accent hover:underline"
         >
-          <AddressFingerprint address={leg.htlc} />
+          <AddressFingerprint address={leg.htlc} className="break-all" />
         </a>
       </div>
     </div>
