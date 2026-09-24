@@ -528,14 +528,6 @@ export function OrderBookPanel({
               funded
             </span>
           ) : null}
-          {row.order.makerAuth !== undefined ? (
-            <span
-              className="ml-1.5 rounded-sm bg-secondary/15 px-1 py-px text-[10px] font-medium text-secondary"
-              title="Portable ML-DSA-87 maker proof attached; verified before take"
-            >
-              PQ proof
-            </span>
-          ) : null}
         </span>
         <span className="relative text-foreground/90">{fmtAmount(row.totalQrl, 18)}</span>
         <span className="relative text-muted-foreground">
