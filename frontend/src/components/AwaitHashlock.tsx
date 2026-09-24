@@ -176,11 +176,11 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
       <CardContent className="space-y-3">
         <p className="text-sm">
           You send{" "}
-          <span className="font-data font-medium">
+          <span className="font-numeric font-medium">
             {send.amount} {send.symbol}
           </span>{" "}
           and receive{" "}
-          <span className="font-data font-medium">
+          <span className="font-numeric font-medium">
             {recv.amount} {recv.symbol}
           </span>
           .

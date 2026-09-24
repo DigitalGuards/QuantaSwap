@@ -1,9 +1,10 @@
 import { cn } from "@/utils/cn";
 
-// Omega bridge mark: the arch spans the old world (ETH, blue) on the left
-// and the new (QRL, ember) on the right; the feet are the two-way crossing.
-// The arcs keep their brand hues (battery blue / QRL orange); the disc behind them
-// reads from the surface tokens. Arrowheads are deliberately oversized
+// Omega bridge mark: the arch spans the old world (ETH, battery blue) on
+// the left and the new (QRL, sky blue) on the right; the feet are the
+// two-way crossing. The left arc keeps its fixed ETH hue; the right arc
+// follows the --secondary token so it tracks the theme. The disc behind
+// them reads from the surface tokens. Arrowheads are deliberately oversized
 // (roughly 2x the stroke width) after community feedback that the originals
 // vanished at favicon sizes; keep them dominant in any future tweak.
 const Mark = () => (

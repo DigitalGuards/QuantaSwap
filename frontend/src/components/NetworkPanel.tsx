@@ -39,7 +39,7 @@ export function NetworkPanel() {
           />
           {leg.name}
         </span>
-        <span className="font-data text-xs text-muted-foreground">block {height ?? "…"}</span>
+        <span className="font-numeric text-xs text-muted-foreground">block {height ?? "…"}</span>
       </div>
       <div className="font-data text-xs">
         HTLC{" "}

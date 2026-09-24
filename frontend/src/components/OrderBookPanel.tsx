@@ -9,12 +9,13 @@
 //
 // Color is polarity only (bid green / ask red, the exchange convention);
 // the sides are also labeled and spatially split, so identity never
-// rides on color alone. Bids wear the theme's success token (~8:1 on the
-// obsidian card); ask text wears red-400 (~6.9:1) because the destructive
-// token (0 68% 46%) only reaches ~3.3:1 here and fails WCAG AA at this
-// size, so it stays reserved for error copy. This mirrors the wallet's
-// financial-polarity pairing (text-success with red-400/500). Depth
-// fills stay translucent /10 token steps.
+// rides on color alone. Bids wear the theme's success token (~7.8:1 on the
+// navy card); ask text wears red-400 (~6.7:1). The theme's destructive
+// token (0 72% 64%) itself now reaches ~5.5:1 on this card and clears
+// WCAG AA at this size, but ask text keeps red-400 for its extra margin
+// and to avoid coupling order-book polarity to a token shared with error
+// copy. This mirrors the wallet's financial-polarity pairing (text-success
+// with red-400/500). Depth fills stay translucent /10 token steps.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatUnits } from "ethers";
@@ -498,7 +499,7 @@ export function OrderBookPanel({
             : `Take: you send ${side === "ask" ? fmtAmount(row.amountUnits, asset.decimals) : fmtAmount(row.totalQrl, 18)} ${give}, receive ${side === "ask" ? fmtAmount(row.totalQrl, 18) : fmtAmount(row.amountUnits, asset.decimals)} ${get} · maker ${shortAddr(row.order.makerEthAccount)}${offline ? " · maker offline right now, the swap may not start" : ""}`
         }
         className={cn(
-          "font-data relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
+          "font-numeric relative grid w-full grid-cols-3 items-center gap-2 px-2 py-[5px] text-right text-xs",
           selectable ? "cursor-pointer hover:bg-muted/40" : "cursor-default",
           pending?.id === row.order.id && "bg-muted/40 ring-1 ring-identity-accent/40",
           offline && !own && "opacity-40",
@@ -775,7 +776,7 @@ export function OrderBookPanel({
             ) : null}
 
             <div className="my-1 flex items-baseline justify-between border-y border-border/60 px-2 py-1.5">
-              <span className="font-data text-sm font-semibold">
+              <span className="font-numeric text-sm font-semibold">
                 {mid !== undefined ? fmtPrice(mid, asset.decimals) : "-"}
                 <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">
                   QRL/{pair} mid

@@ -342,11 +342,11 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
       <div className="space-y-4">
         <p className="text-sm">
           You send{" "}
-          <span className="font-data font-medium">
+          <span className="font-numeric font-medium">
             {pay.amount} {pay.symbol}
           </span>{" "}
           and receive{" "}
-          <span className="font-data font-medium">
+          <span className="font-numeric font-medium">
             {recv.amount} {recv.symbol}
           </span>
           .
