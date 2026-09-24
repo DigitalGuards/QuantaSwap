@@ -4,6 +4,14 @@ import { getBlockNumber } from "@/lib/htlc";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 
+/** Compact single-ellipsis form for the QRL HTLC address in this card. The
+ *  shared three-segment fingerprint (lib/qrlAddress.ts) is deliberately
+ *  longer for maker/order identity elsewhere, but here it needs to sit on
+ *  one line next to "HTLC", same shape as the Sepolia row's shortAddr.
+ *  The full address stays in the link's href/title. */
+const compactQrlAddr = (addr: string): string =>
+  addr.length > 20 ? `${addr.slice(0, 9)}…${addr.slice(-8)}` : addr;
+
 export function NetworkPanel() {
   const [heights, setHeights] = useState<{ eth?: number; qrl?: number }>({});
 
@@ -27,8 +35,8 @@ export function NetworkPanel() {
     addressUrl: string,
   ) => (
     <div className="min-w-0 space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-      <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-1.5 truncate text-muted-foreground">
+      <div className="space-y-0.5">
+        <span className="flex items-center gap-1.5 whitespace-nowrap text-muted-foreground">
           <span
             aria-hidden
             className={
@@ -37,23 +45,23 @@ export function NetworkPanel() {
                 : "h-1.5 w-1.5 shrink-0 rounded-full bg-current text-muted-foreground/60"
             }
           />
-          <span className="truncate">{leg.name}</span>
+          {leg.name}
         </span>
-        <span className="font-numeric shrink-0 text-xs text-muted-foreground">
+        <span className="font-numeric block pl-3 text-xs text-muted-foreground">
           block {height ?? "…"}
         </span>
       </div>
-      <div className="flex min-w-0 flex-wrap items-baseline gap-1 font-data text-xs">
-        <span className="shrink-0">HTLC</span>
+      <div className="font-data text-xs">
+        HTLC{" "}
         <a
           href={addressUrl}
           target="_blank"
           rel="noreferrer"
           title={leg.htlc}
           aria-label={`View ${leg.name} HTLC ${leg.htlc} on explorer`}
-          className="min-w-0 break-all text-blue-accent hover:underline"
+          className="whitespace-nowrap text-blue-accent hover:underline"
         >
-          <AddressFingerprint address={leg.htlc} className="break-all" />
+          {leg.key === "qrl" ? compactQrlAddr(leg.htlc) : <AddressFingerprint address={leg.htlc} />}
         </a>
       </div>
     </div>
