@@ -4,6 +4,14 @@ import { getBlockNumber } from "@/lib/htlc";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 
+/** Compact single-ellipsis form for the QRL HTLC address in this card. The
+ *  shared three-segment fingerprint (lib/qrlAddress.ts) is deliberately
+ *  longer for maker/order identity elsewhere, but here it needs to sit on
+ *  one line next to "HTLC", same shape as the Sepolia row's shortAddr.
+ *  The full address stays in the link's href/title. */
+const compactQrlAddr = (addr: string): string =>
+  addr.length > 20 ? `${addr.slice(0, 9)}…${addr.slice(-8)}` : addr;
+
 export function NetworkPanel() {
   const [heights, setHeights] = useState<{ eth?: number; qrl?: number }>({});
 
@@ -26,20 +34,22 @@ export function NetworkPanel() {
     height: number | undefined,
     addressUrl: string,
   ) => (
-    <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-      <div className="flex items-center justify-between">
-        <span className="flex items-center gap-1.5 text-muted-foreground">
+    <div className="min-w-0 space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
+      <div className="space-y-0.5">
+        <span className="flex items-center gap-1.5 whitespace-nowrap text-muted-foreground">
           <span
             aria-hidden
             className={
               height !== undefined
-                ? "glow-dot h-1.5 w-1.5 rounded-full bg-current text-success"
-                : "h-1.5 w-1.5 rounded-full bg-current text-muted-foreground/60"
+                ? "glow-dot h-1.5 w-1.5 shrink-0 rounded-full bg-current text-success"
+                : "h-1.5 w-1.5 shrink-0 rounded-full bg-current text-muted-foreground/60"
             }
           />
           {leg.name}
         </span>
-        <span className="font-data text-xs text-muted-foreground">block {height ?? "…"}</span>
+        <span className="font-numeric block pl-3 text-xs text-muted-foreground">
+          block {height ?? "…"}
+        </span>
       </div>
       <div className="font-data text-xs">
         HTLC{" "}
@@ -49,9 +59,9 @@ export function NetworkPanel() {
           rel="noreferrer"
           title={leg.htlc}
           aria-label={`View ${leg.name} HTLC ${leg.htlc} on explorer`}
-          className="text-blue-accent hover:underline"
+          className="whitespace-nowrap text-blue-accent hover:underline"
         >
-          <AddressFingerprint address={leg.htlc} />
+          {leg.key === "qrl" ? compactQrlAddr(leg.htlc) : <AddressFingerprint address={leg.htlc} />}
         </a>
       </div>
     </div>
