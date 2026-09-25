@@ -173,12 +173,32 @@ unhealthy. Inspect the logs and recovery state before intervening.
 Run one active process for each state volume and wallet pair. The maker creates
 a mode-0600 `state.json.lock` lease before it reads recovery state. It records
 the deployment and account identity digest, Linux boot id, PID, process start
-time, and a random lease id. A live holder makes a second process fail closed;
-a stale main lease from a crash or reboot is atomically replaced while a
-separate recovery guard is held. A stale recovery guard causes fail-safe
+time, PID namespace, and a random lease id. A live holder makes a second process
+fail closed; a stale main lease from a crash or reboot is atomically replaced
+while a separate recovery guard is held. A stale recovery guard causes fail-safe
 refusal for manual inspection. Shutdown removes only the lease id it acquired,
 so it cannot delete a newer holder's file. Use distinct volumes and keys for
 distinct LP instances.
+
+A holder in another PID namespace or from another host boot, which is what a
+second container on the same state volume looks like, is judged by the lease
+heartbeat alone. Its PID and process start time carry no meaning outside its own
+namespace. The running maker refreshes the lease file's timestamp every 10 s, and
+every observer treats the lease as live for 90 s after the last refresh. That
+gives three properties:
+
+- a second container on one state volume fails closed while the first one runs,
+  with a refusal that names the situation;
+- after a container crashes, is killed, or the host reboots, its replacement
+  waits at most 90 s for the heartbeat to expire and then takes the lease over
+  automatically. Startup refuses during that window, so keep a restart policy on
+  the container or supervisor;
+- a maker that loses the lease refuses every further state write, logs the
+  displacement, and exits non-zero so its supervisor restarts it.
+
+A lease record written before this change carries no PID namespace and keeps the
+original PID-based semantics, which is correct for a single-host deployment.
+Restart such a maker once so it writes the current record format.
 
 ## State and recovery
 

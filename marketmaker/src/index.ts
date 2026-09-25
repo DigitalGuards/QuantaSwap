@@ -71,9 +71,12 @@ const stateLease = StateProcessLease.acquire(cfg.stateFile, {
   ethAccount: eth.address.toLowerCase(),
   qrlAccount: protocolSigner.address.toLowerCase(),
 });
+stateLease.startHeartbeat(() => void exitOnLostLease());
 let state: StateFile;
 try {
-  state = new StateFile(cfg.stateFile, deployment);
+  state = new StateFile(cfg.stateFile, deployment, undefined, () =>
+    stateLease.assertOwned(),
+  );
 } catch (error) {
   stateLease.close();
   protocolSigner.close();
@@ -1024,6 +1027,24 @@ async function main(): Promise<void> {
   log(`managing ${state.all().length} persisted order(s)`);
   await tick();
   if (!stopping) tickTimer = setInterval(() => void tick(), cfg.tickMs);
+}
+
+/**
+ * Another process now owns the state lease, so this maker was displaced and
+ * every further state write is already refused. Shut down and let the
+ * supervisor restart us: the restart either re-acquires the lease or fails
+ * closed against the live holder.
+ */
+async function exitOnLostLease(): Promise<void> {
+  log(
+    `FATAL: the state lease ${cfg.stateFile}.lock is held by another process now. ` +
+      "This maker was displaced, stopped writing state, and exits so its supervisor can restart it",
+  );
+  try {
+    await stop("state lease lost", 1);
+  } finally {
+    process.exit(1);
+  }
 }
 
 async function stop(reason: string, exitCode: number): Promise<void> {
