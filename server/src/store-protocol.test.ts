@@ -199,8 +199,12 @@ function makeFill(
     fillIssuedAt?: number;
     fillExpiresAt?: number;
     requestNonceByte?: number;
+    takerKeys?: typeof taker;
+    takerEth?: string;
   } = {},
 ): FillArtifacts {
+  const signer = timing.takerKeys ?? taker;
+  const takerEth = timing.takerEth ?? "0x2222222222222222222222222222222222222222";
   const requestNonce = nonce(timing.requestNonceByte ?? 43);
   const releaseSecret = nonce(55);
   const releaseCommitment = computeReleaseCommitment(
@@ -210,8 +214,8 @@ function makeFill(
   );
   const intentBody: FillIntentV1Body = {
     orderDigest: order.orderDigest,
-    takerEthAccount: "0x2222222222222222222222222222222222222222",
-    takerQrlAccount: taker.address,
+    takerEthAccount: takerEth,
+    takerQrlAccount: signer.address,
     releaseCommitment,
   };
   const intentBase = {
@@ -225,7 +229,7 @@ function makeFill(
     orderDigest: order.orderDigest,
     requestNonce,
     takerEthAccount: `eip155:11155111:${intentBody.takerEthAccount}`,
-    takerQrlAccount: taker.address,
+    takerQrlAccount: signer.address,
     releaseCommitment,
     issuedAt: String(intentBase.issuedAt),
     expiresAt: String(intentBase.expiresAt),
@@ -234,7 +238,7 @@ function makeFill(
   const intentAuth = signedAuth(
     intentBase,
     buildFillIntentV1Payload(intentTerms, intentBase.scheme),
-    taker,
+    signer,
   );
   const intentVerificationTime = Math.max(
     intentBase.issuedAt,
@@ -267,7 +271,7 @@ function makeFill(
     intentDigest: intent.intentDigest,
     fillNonce: fillBase.nonce,
     takerEthAccount: `eip155:11155111:${intentBody.takerEthAccount}`,
-    takerQrlAccount: taker.address,
+    takerQrlAccount: signer.address,
     releaseCommitment,
     hashlock: fillBody.hashlock,
     initiatorTimeout: String(fillBody.initiatorTimeout),
@@ -891,5 +895,417 @@ describe("single-use signed order store", () => {
       () => new OrderStore(file),
       /auth\.makerTokenCommitment is required/,
     );
+  });
+});
+
+describe("fill intent admission fairness", () => {
+  const extraTakers = Array.from({ length: 8 }, (_value, index) =>
+    keypair(90 + index),
+  );
+  const takerAt = (index: number): typeof taker => {
+    const keys = extraTakers[index];
+    if (keys === undefined) throw new Error(`no test taker ${index}`);
+    return keys;
+  };
+  const takerEthFor = (index: number): string =>
+    `0x${(index + 0x30).toString(16).padStart(2, "0").repeat(20)}`;
+
+  function withClock<T>(start: number, run: (advance: (s: number) => void) => T): T {
+    const originalNow = Date.now;
+    let clock = start * 1000;
+    Date.now = () => clock;
+    try {
+      return run((seconds) => {
+        clock += seconds * 1000;
+      });
+    } finally {
+      Date.now = originalNow;
+    }
+  }
+
+  function freshOrder(now: number, nonceByte: number): {
+    store: OrderStore;
+    order: VerifiedOrderV1;
+  } {
+    const store = new OrderStore(storeFile());
+    const order = makeOrder(now, {
+      nonceByte,
+      issuedAt: now - 300,
+      expiresAt: now + 3600,
+    });
+    store.createVerified(order, createCapabilities(order), "203.0.113.90");
+    return { store, order };
+  }
+
+  it("lets expired proposals give up their pending slot", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, (advance) => {
+      const { store, order } = freshOrder(now, 91);
+      for (let index = 0; index < 8; index += 1) {
+        const artifacts = makeFill(now, order, 44, 66, {
+          requestNonceByte: 0x10 + index,
+          intentIssuedAt: now - 1,
+          intentExpiresAt: now + 1,
+          takerKeys: takerAt(index),
+          takerEth: takerEthFor(index),
+        });
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          `198.51.100.${index}`,
+        );
+      }
+      const blocked = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x20,
+        takerEth: takerEthFor(20),
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            blocked.intentBody,
+            blocked.intentAuth,
+            "198.51.100.50",
+          ),
+        (error) => error instanceof ApiError && error.status === 429,
+      );
+
+      advance(5);
+      const later = now + 5;
+      const honest = makeFill(later, order, 44, 66, {
+        requestNonceByte: 0x21,
+        takerEth: takerEthFor(21),
+      });
+      store.submitFillIntent(
+        order.orderId,
+        honest.intentBody,
+        honest.intentAuth,
+        "198.51.100.51",
+      );
+      const pending = store.listFillIntents(order.orderId);
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0]?.intent.takerQrlAccount, taker.address);
+      const retained = store
+        .federationSnapshot()
+        .filter((event) => event.kind === "fill-intent-v2");
+      assert.equal(retained.length, 8);
+    });
+  });
+
+  it("allows one pending proposal per signed QRL account on an order", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, () => {
+      const { store, order } = freshOrder(now, 92);
+      const first = makeFill(now, order, 44, 66, { requestNonceByte: 0x30 });
+      const second = makeFill(now, order, 44, 66, { requestNonceByte: 0x31 });
+      store.submitFillIntent(
+        order.orderId,
+        first.intentBody,
+        first.intentAuth,
+        "198.51.100.60",
+      );
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            second.intentBody,
+            second.intentAuth,
+            "198.51.100.61",
+          ),
+        (error) =>
+          error instanceof ApiError &&
+          error.status === 409 &&
+          /pending fill request/.test(error.message),
+      );
+      // The ETH address is not signed, so naming another taker's ETH
+      // address from a different QRL key must not lock that taker out.
+      const spoof = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x32,
+        takerKeys: takerAt(1),
+      });
+      store.submitFillIntent(
+        order.orderId,
+        spoof.intentBody,
+        spoof.intentAuth,
+        "198.51.100.62",
+      );
+      const firstDigest = verifyFillIntentV1(
+        first.intentBody,
+        first.intentAuth,
+        order,
+      ).intentDigest;
+      store.release(order.orderId, {
+        intentDigest: firstDigest,
+        releaseSecret: first.releaseSecret,
+      });
+      store.submitFillIntent(
+        order.orderId,
+        second.intentBody,
+        second.intentAuth,
+        "198.51.100.61",
+      );
+      assert.equal(store.listFillIntents(order.orderId).length, 2);
+    });
+  });
+
+  it("keeps release evidence while evicting expired proposals", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, (advance) => {
+      const { store, order } = freshOrder(now, 96);
+      const released = makeFill(now, order, 45, 67, {
+        requestNonceByte: 0x80,
+        fillIssuedAt: now,
+        fillExpiresAt: now + 600,
+      });
+      store.submitFillIntent(
+        order.orderId,
+        released.intentBody,
+        released.intentAuth,
+        "198.51.100.100",
+      );
+      store.release(order.orderId, {
+        intentDigest: verifyFillIntentV1(
+          released.intentBody,
+          released.intentAuth,
+          order,
+        ).intentDigest,
+        releaseSecret: released.releaseSecret,
+      });
+      for (let index = 0; index < 7; index += 1) {
+        const artifacts = makeFill(now, order, 44, 66, {
+          requestNonceByte: 0x81 + index,
+          intentIssuedAt: now - 1,
+          intentExpiresAt: now + 2,
+          takerKeys: takerAt(index),
+          takerEth: takerEthFor(index),
+        });
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          `198.51.100.${110 + index}`,
+        );
+      }
+      // Released but unexpired still occupies a slot: eight live.
+      const early = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x8f,
+        takerKeys: takerAt(7),
+        takerEth: takerEthFor(7),
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            early.intentBody,
+            early.intentAuth,
+            "198.51.100.120",
+          ),
+        (error) => error instanceof ApiError && error.status === 429,
+      );
+
+      advance(5);
+      const late = makeFill(now + 5, order, 44, 66, {
+        requestNonceByte: 0x90,
+        takerKeys: takerAt(7),
+        takerEth: takerEthFor(7),
+      });
+      store.submitFillIntent(
+        order.orderId,
+        late.intentBody,
+        late.intentAuth,
+        "198.51.100.120",
+      );
+      // A late fill for the released proposal must still surface the
+      // walk-away, so the maker never locks into it.
+      const filled = store.fillOrder(
+        order.orderId,
+        released.fillBody,
+        released.fillAuth,
+        released.intentBody,
+        released.intentAuth,
+      );
+      assert.equal(filled.status, "locking");
+      assert.equal(filled.released, true);
+    });
+  });
+
+  it("refuses direct proposals dated beyond the future skew", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, () => {
+      const { store, order } = freshOrder(now, 93);
+      const ahead = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x40,
+        intentIssuedAt: now + 60,
+        intentExpiresAt: now + 170,
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            ahead.intentBody,
+            ahead.intentAuth,
+            "198.51.100.70",
+          ),
+        (error) =>
+          error instanceof ApiError &&
+          error.status === 400 &&
+          /dated in the future/.test(error.message),
+      );
+      const skewed = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x41,
+        intentIssuedAt: now + 20,
+        intentExpiresAt: now + 130,
+      });
+      store.submitFillIntent(
+        order.orderId,
+        skewed.intentBody,
+        skewed.intentAuth,
+        "198.51.100.70",
+      );
+    });
+  });
+
+  it("enforces the daily cap after proposals leave retention", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, (advance) => {
+      const { store, order } = freshOrder(now, 94);
+      let clock = now;
+      for (let index = 0; index < 24; index += 1) {
+        const artifacts = makeFill(clock, order, 44, 66, {
+          requestNonceByte: 0x50 + index,
+          intentIssuedAt: clock - 1,
+          intentExpiresAt: clock + 2,
+        });
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          "198.51.100.80",
+        );
+        advance(5);
+        clock += 5;
+      }
+      // Past the 20 minute retention every proposal is swept.
+      advance(25 * 60);
+      clock += 25 * 60;
+      const laterCapability = "e7".repeat(32);
+      const later = makeOrder(clock, {
+        nonceByte: 97,
+        makerCapability: laterCapability,
+      });
+      store.createVerified(later, { makerToken: laterCapability }, "203.0.113.97");
+      assert.equal(
+        store
+          .federationSnapshot()
+          .filter((event) => event.kind === "fill-intent-v2").length,
+        0,
+      );
+      const overLimit = makeFill(clock, later, 44, 66, {
+        requestNonceByte: 0x70,
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            later.orderId,
+            overLimit.intentBody,
+            overLimit.intentAuth,
+            "198.51.100.80",
+          ),
+        (error) =>
+          error instanceof ApiError &&
+          error.status === 429 &&
+          /daily/.test(error.message),
+      );
+    });
+  });
+
+  it("reseeds the daily cap from retained proposals after a restart", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, (advance) => {
+      const file = storeFile();
+      const store = new OrderStore(file);
+      const orders = [98, 99, 100].map((nonceByte) => {
+        const capability = nonceByte.toString(16).padStart(2, "0").repeat(32);
+        const order = makeOrder(now, {
+          nonceByte,
+          issuedAt: now - 300,
+          expiresAt: now + 3600,
+          makerCapability: capability,
+        });
+        store.createVerified(order, { makerToken: capability }, "203.0.113.98");
+        return order;
+      });
+      let clock = now;
+      for (let index = 0; index < 24; index += 1) {
+        const order = orders[Math.floor(index / 8)];
+        if (order === undefined) throw new Error("missing order");
+        const artifacts = makeFill(clock, order, 44, 66, {
+          requestNonceByte: 0xa0 + index,
+          intentIssuedAt: clock - 1,
+          intentExpiresAt: clock + 2,
+        });
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          "198.51.100.130",
+        );
+        advance(5);
+        clock += 5;
+      }
+      const restarted = new OrderStore(file);
+      const target = orders[0];
+      if (target === undefined) throw new Error("missing order");
+      const next = makeFill(clock, target, 44, 66, { requestNonceByte: 0xc0 });
+      assert.throws(
+        () =>
+          restarted.submitFillIntent(
+            target.orderId,
+            next.intentBody,
+            next.intentAuth,
+            "198.51.100.130",
+          ),
+        (error) =>
+          error instanceof ApiError &&
+          error.status === 429 &&
+          /daily/.test(error.message),
+      );
+    });
+  });
+
+  it("ranks proposals by arrival when issuance is backdated", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, (advance) => {
+      const { store, order } = freshOrder(now, 95);
+      const honest = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x60,
+        intentIssuedAt: now - 5,
+        intentExpiresAt: now + 115,
+      });
+      store.submitFillIntent(
+        order.orderId,
+        honest.intentBody,
+        honest.intentAuth,
+        "198.51.100.90",
+      );
+      advance(10);
+      const backdated = makeFill(now + 10, order, 44, 66, {
+        requestNonceByte: 0x61,
+        intentIssuedAt: now - 100,
+        intentExpiresAt: now + 19,
+        takerKeys: takerAt(0),
+        takerEth: takerEthFor(0),
+      });
+      store.submitFillIntent(
+        order.orderId,
+        backdated.intentBody,
+        backdated.intentAuth,
+        "198.51.100.91",
+      );
+      const ordered = store.listFillIntents(order.orderId);
+      assert.equal(ordered.length, 2);
+      assert.equal(ordered[0]?.intent.takerQrlAccount, taker.address);
+    });
   });
 });

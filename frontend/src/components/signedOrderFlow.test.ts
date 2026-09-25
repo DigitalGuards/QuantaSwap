@@ -25,17 +25,36 @@ const candidate = (
   }) as FillIntentView;
 
 describe("signed order UI flow", () => {
-  it("selects by signed time after issuance across mirror-local receive times", () => {
-    const late = candidate(1, "0x03", 20);
-    const tieB = candidate(30, "0x02", 10);
-    const tieA = candidate(40, "0x01", 10);
-    const future = candidate(0, "0x00", 31);
-    const selected = selectEarliestFillIntent(order, [late, tieB, tieA, future], {
-      now: 30,
+  const select = (candidates: FillIntentView[], now: number) =>
+    selectEarliestFillIntent(order, candidates, {
+      now,
       verify: (() => true) as never,
       digest: ((intent: { orderDigest: string }) => intent.orderDigest) as never,
     });
-    expect(selected).toBe(tieA);
+
+  it("selects the proposal that reached the book first", () => {
+    const first = candidate(12, "0x03", 11);
+    const second = candidate(20, "0x01", 19);
+    const future = candidate(0, "0x00", 31);
+    expect(select([second, future, first], 30)).toBe(first);
+  });
+
+  it("gives a backdated issuance no priority over an earlier arrival", () => {
+    const honest = candidate(10, "0x02", 8);
+    const backdated = candidate(25, "0x01", -90);
+    expect(select([backdated, honest], 30)).toBe(honest);
+  });
+
+  it("falls back to issuance when a book under-reports arrival", () => {
+    const early = candidate(0, "0x02", 10);
+    const late = candidate(0, "0x01", 20);
+    expect(select([late, early], 30)).toBe(early);
+  });
+
+  it("breaks full ties by the semantic digest", () => {
+    const high = candidate(10, "0x02", 10);
+    const low = candidate(10, "0x01", 10);
+    expect(select([high, low], 30)).toBe(low);
   });
 
   it("blocks funding after respondBy", () => {

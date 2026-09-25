@@ -139,31 +139,71 @@ function fillIntent(
 describe("portable fill intent selection", () => {
   const orderDigest = `0x${"a".repeat(64)}`;
 
-  it("selects by signed issue time regardless of mirror-local receive order", () => {
-    const later = fillIntent("2", NOW + 1, {
-      auth: { ...fillIntent("2", NOW + 1).auth, issuedAt: NOW - 5 },
+  it("selects the proposal that reached the book first", () => {
+    const first = fillIntent("2", NOW - 8, {
+      auth: { ...fillIntent("2", NOW - 8).auth, issuedAt: NOW - 9 },
     });
-    const earliest = fillIntent("1", NOW + 2, {
-      auth: { ...fillIntent("1", NOW + 2).auth, issuedAt: NOW - 10 },
+    const second = fillIntent("1", NOW - 3, {
+      auth: { ...fillIntent("1", NOW - 3).auth, issuedAt: NOW - 4 },
     });
     assert.equal(
-      earliestValidFillIntent([later, earliest], orderDigest, NOW, () => true)
+      earliestValidFillIntent([second, first], orderDigest, NOW, () => true)
         ?.intentDigest,
-      earliest.intentDigest,
+      first.intentDigest,
     );
   });
 
-  it("uses the semantic digest as the cross-mirror tie breaker", () => {
-    const highDigestReceivedFirst = fillIntent("2", NOW);
-    const lowDigestReceivedLater = fillIntent("1", NOW + 20);
+  it("gives a backdated issuance no priority over an earlier arrival", () => {
+    const honest = fillIntent("2", NOW - 20, {
+      auth: { ...fillIntent("2", NOW - 20).auth, issuedAt: NOW - 25 },
+    });
+    const backdated = fillIntent("1", NOW - 5, {
+      auth: { ...fillIntent("1", NOW - 5).auth, issuedAt: NOW - 110 },
+    });
     assert.equal(
-      earliestValidFillIntent(
-        [highDigestReceivedFirst, lowDigestReceivedLater],
-        orderDigest,
-        NOW,
-        () => true,
-      )?.intentDigest,
-      lowDigestReceivedLater.intentDigest,
+      earliestValidFillIntent([backdated, honest], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      honest.intentDigest,
+    );
+  });
+
+  it("ranks a slow wallet approval by its arrival", () => {
+    // Issued before a 60 s approval prompt, received after it: queued
+    // behind a proposal that arrived during the prompt.
+    const slow = fillIntent("1", NOW - 5, {
+      auth: { ...fillIntent("1", NOW - 5).auth, issuedAt: NOW - 65 },
+    });
+    const fast = fillIntent("2", NOW - 30, {
+      auth: { ...fillIntent("2", NOW - 30).auth, issuedAt: NOW - 32 },
+    });
+    assert.equal(
+      earliestValidFillIntent([slow, fast], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      fast.intentDigest,
+    );
+  });
+
+  it("falls back to issuance when a book under-reports arrival", () => {
+    const early = fillIntent("2", 0, {
+      auth: { ...fillIntent("2", 0).auth, issuedAt: NOW - 10 },
+    });
+    const late = fillIntent("1", 0, {
+      auth: { ...fillIntent("1", 0).auth, issuedAt: NOW - 5 },
+    });
+    assert.equal(
+      earliestValidFillIntent([late, early], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      early.intentDigest,
+    );
+  });
+
+  it("uses the semantic digest when arrival and issuance tie", () => {
+    const high = fillIntent("2", NOW);
+    const low = fillIntent("1", NOW);
+    assert.equal(
+      earliestValidFillIntent([high, low], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      low.intentDigest,
     );
   });
 

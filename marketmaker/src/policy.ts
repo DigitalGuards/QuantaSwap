@@ -55,9 +55,17 @@ export interface ManagedProtocolV1 {
   cancelProof?: SignedCancelV1;
 }
 
-/** Select deterministically across mirrors while refusing expired,
- *  cross-order, or cryptographically invalid proposals. Mirror-local
- *  receive timestamps are deliberately excluded from ordering. */
+/** First-come priority for a proposal: its signed issuance, clamped to
+ *  when the maker's book received it. The taker chooses issuedAt, so
+ *  backdating must not jump proposals that arrived earlier; a book that
+ *  under-reports receivedAt can only fall back to issuance order. */
+export function intentPriority(intent: SelectedFillIntentV1): number {
+  return Math.max(intent.auth.issuedAt, intent.receivedAt);
+}
+
+/** Select the first-come valid proposal while refusing expired,
+ *  cross-order, or cryptographically invalid ones. Ties fall back to
+ *  signed issuance, then the semantic digest. */
 export function earliestValidFillIntent(
   intents: readonly SelectedFillIntentV1[],
   orderDigest: string,
@@ -73,6 +81,7 @@ export function earliestValidFillIntent(
   );
   valid.sort(
     (a, b) =>
+      intentPriority(a) - intentPriority(b) ||
       a.auth.issuedAt - b.auth.issuedAt ||
       a.intentDigest.localeCompare(b.intentDigest),
   );
