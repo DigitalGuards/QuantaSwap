@@ -213,9 +213,10 @@ bound** across local and federated sources, with at most **48 federated public
 portable orders** and **16 first supplied by one direct peer**. These bounds are
 also checked while loading persisted state. Each order retains at most **8
 FillIntentV2 proposals** and **2 conflicting proof artifacts** per conflict
-class. Only pending proposals (unreleased and unexpired) count against the
-intent bound: when the retained set is full, a new proposal evicts the
-non-pending one with the earliest expiry. A full retained store rejects new creates while preserving active
+class. Only unexpired proposals count against the intent bound. When the
+retained set is full, a new proposal evicts an expired one: unreleased
+before released, earliest expiry first. An unexpired released proposal keeps
+its slot so its release evidence can still stop a late FillV2. A full retained store rejects new creates while preserving active
 recovery evidence.
 
 These are resource ceilings, not Sybil resistance. A public client with enough
@@ -434,14 +435,17 @@ starve the other (`429 rate limited, slow down`):
 Take and FillIntent caps, per IP (fairness for shared demo liquidity, not
 sybil resistance):
 
-- **4 concurrent actions**: an unreleased portable intent occupies a slot until
-  its signed expiry. A legacy take occupies a slot through `accepted` and, once
+- **4 concurrent actions**: a portable intent occupies a slot until its signed
+  expiry, including after release, so one source cannot cycle
+  post-and-release to fill an order alone. A legacy take occupies a slot through `accepted` and, once
   `locking`, through the earlier of T1 or two hours after acceptance. Release
   frees the slot.
 - **24 actions per rolling 24 h**: portable intents count by mirror receipt
   time and legacy takes by acceptance time. Intent admissions are tracked for
   the full window independently of intent retention; a restart keeps only
-  admissions still backed by retained intents.
+  admissions still backed by retained intents. The log tracks at most 10,000
+  sources and drops the oldest-tracked one past that bound (fails open, like
+  the HTTP rate limiter).
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
@@ -789,10 +793,10 @@ Raw preimages that do not match their signed commitments return `401`.
 For a private order, send the origin's share capability in `X-Share-Token`
 or `shareToken`. → `201 {"intent": {"intentDigest", "intent", "auth",
 "receivedAt"}}`. Exact retries are idempotent. The order remains open until
-the maker publishes FillV2. At most 8 pending intents are held per order;
-expired and released ones never block new proposals. Each taker ETH or QRL
-account may hold one pending intent per order (`409` otherwise; release it or
-let it expire). Direct submissions issued more than **30 s** in the future are
+the maker publishes FillV2. At most 8 unexpired intents are held per order;
+expired ones never block new proposals. Each taker QRL account, the signed
+identity, may hold one unreleased pending intent per order (`409` otherwise;
+release it or let it expire). Direct submissions issued more than **30 s** in the future are
 refused with `400`: sync the device clock.
 
 ### `GET /orders/:id/intents`: read pending proposals (maker)
@@ -802,8 +806,11 @@ refused with `400`: sync the device clock.
 `intentDigest`. The taker chooses `issuedAt`, so the clamp to this book's
 receipt time stops backdated proposals from jumping earlier arrivals; a book
 that under-reports `receivedAt` can only fall back to issuance order.
-Proposals issued in the future, expired proposals, and released proposals are
-omitted.
+A proposal relayed from another mirror counts as received when this book
+pulled it, so it trails local submissions by up to one federation pull
+interval (5 s by default); reset snapshots re-import with one shared receipt
+time, where ranking falls back to issuance. Proposals issued in the future,
+expired proposals, and released proposals are omitted.
 Public portable proposals are public data. A private order additionally
 requires `X-Maker-Token` and remains origin-local.
 

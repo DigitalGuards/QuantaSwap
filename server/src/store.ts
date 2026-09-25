@@ -233,10 +233,11 @@ const DEFAULT_PRESENCE_TTL_S = 90;
 const MAX_CONCURRENT_TAKES_PER_IP = 4;
 const MAX_TAKES_PER_IP_PER_DAY = 24;
 const TAKE_WINDOW_S = 24 * 3600;
-// Pending (unreleased, unexpired) proposals per order. Expired and
-// released proposals stay retained as evidence but never hold a slot: when
-// the retained set is full, the oldest non-pending proposal is evicted so a
-// burst of short-lived or self-released intents cannot jam an order.
+// Unexpired proposals per order. Expired ones stay retained as evidence
+// but never hold a slot: when the retained set is full, an expired proposal
+// is evicted (unreleased first, since a fill carries its own intent copy)
+// so a burst of short-lived intents cannot jam an order. Unexpired released
+// proposals are kept: their release evidence can still stop a late fill.
 const MAX_FILL_INTENTS_PER_ORDER = 8;
 // Direct submissions dated further ahead than this are refused. Honest
 // clients stamp issuance before the wallet prompt, so their proposals
@@ -244,8 +245,12 @@ const MAX_FILL_INTENTS_PER_ORDER = 8;
 // matures while occupying a pending slot. Federated imports keep the
 // general protocol skew so older peers do not degrade.
 const MAX_INTENT_FUTURE_SKEW_S = 30;
-// How often the per-IP fill-intent admission log is pruned.
+// How often the per-IP fill-intent admission log is pruned, and how many
+// sources it tracks. Past the bound the oldest-tracked source is dropped:
+// the daily cap is fairness for demo traffic, so it fails open under an
+// address flood, like the HTTP rate limiter.
 const ADMISSION_PRUNE_INTERVAL_S = 60;
+const MAX_ADMISSION_SOURCES = 10_000;
 const MAX_CONFLICT_PROOFS = 2;
 const SIGNED_TERMINAL_GRACE_S = 5 * 60;
 const MAX_FILL_RESPONSE_S = 15 * 60;
@@ -279,9 +284,18 @@ const AMOUNT_RE = /^[0-9]{1,30}$/;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
 
-/** A proposal the maker may still select: not withdrawn, not expired. */
-const isPendingIntent = (intent: StoredFillIntentV1, now: number): boolean =>
-  intent.releasedAt === undefined && intent.auth.expiresAt > now;
+const isLiveIntent = (intent: StoredFillIntentV1, now: number): boolean =>
+  intent.auth.expiresAt > now;
+
+/** Eviction order for a full retained set: expired only, unreleased before
+ *  released, earliest expiry first. */
+const evictionOrder = (
+  left: StoredFillIntentV1,
+  right: StoredFillIntentV1,
+): number =>
+  Number(left.releasedAt !== undefined) -
+    Number(right.releasedAt !== undefined) ||
+  left.auth.expiresAt - right.auth.expiresAt;
 
 /** Maker-facing priority: signed issuance, clamped to arrival at this book.
  *  The taker chooses issuedAt, so backdating it must not buy priority over
@@ -1128,9 +1142,7 @@ export class OrderStore {
       for (const intent of order.fillIntents ?? []) {
         if (intent.acceptorIpHash === federatedHash) continue;
         if (intent.receivedAt <= since) continue;
-        const admissions = this.intentAdmissions.get(intent.acceptorIpHash) ?? [];
-        admissions.push(intent.receivedAt);
-        this.intentAdmissions.set(intent.acceptorIpHash, admissions);
+        this.recordIntentAdmission(intent.acceptorIpHash, intent.receivedAt);
       }
     }
   }
@@ -1143,6 +1155,23 @@ export class OrderStore {
     if (recent.length === 0) this.intentAdmissions.delete(ipHash);
     else this.intentAdmissions.set(ipHash, recent);
     return recent;
+  }
+
+  private recordIntentAdmission(ipHash: string, receivedAt: number): void {
+    const admissions = this.intentAdmissions.get(ipHash);
+    if (admissions !== undefined) {
+      admissions.push(receivedAt);
+      return;
+    }
+    if (this.intentAdmissions.size >= MAX_ADMISSION_SOURCES) {
+      this.admissionsPrunedAt = 0;
+      this.pruneIntentAdmissions(receivedAt);
+    }
+    if (this.intentAdmissions.size >= MAX_ADMISSION_SOURCES) {
+      const oldest = this.intentAdmissions.keys().next();
+      if (oldest.done !== true) this.intentAdmissions.delete(oldest.value);
+    }
+    this.intentAdmissions.set(ipHash, [receivedAt]);
   }
 
   private pruneIntentAdmissions(now: number): void {
@@ -2047,8 +2076,12 @@ export class OrderStore {
       );
     }
     const now = nowS();
-    const pending = intents.filter((intent) => isPendingIntent(intent, now));
-    if (pending.length >= MAX_FILL_INTENTS_PER_ORDER) {
+    const incomingLive = verified.auth.expiresAt > now;
+    if (
+      incomingLive &&
+      intents.filter((intent) => isLiveIntent(intent, now)).length >=
+        MAX_FILL_INTENTS_PER_ORDER
+    ) {
       throw new ApiError(
         429,
         "this order already has too many pending fill intents",
@@ -2058,10 +2091,13 @@ export class OrderStore {
 
     const ipHash = sha256Hex(takerIp);
     if (!federated) {
+      // Only the QRL account is authenticated by the intent signature; an
+      // unsigned ETH address would let anyone lock a named taker out.
       if (
-        pending.some(
+        intents.some(
           (intent) =>
-            intent.intent.takerEthAccount === verified.intent.takerEthAccount ||
+            intent.releasedAt === undefined &&
+            isLiveIntent(intent, now) &&
             intent.intent.takerQrlAccount === verified.intent.takerQrlAccount,
         )
       ) {
@@ -2070,12 +2106,14 @@ export class OrderStore {
           "you already have a pending fill request for this order; wait for it to expire or release it",
         );
       }
+      // Released proposals keep their slot until signed expiry, so one
+      // source cannot cycle post-and-release to fill an order alone.
       const activeIntentCount = [...this.orders.values()].reduce(
         (count, candidate) =>
           count +
           (candidate.fillIntents ?? []).filter(
             (intent) =>
-              intent.acceptorIpHash === ipHash && isPendingIntent(intent, now),
+              intent.acceptorIpHash === ipHash && isLiveIntent(intent, now),
           ).length,
         0,
       );
@@ -2096,13 +2134,26 @@ export class OrderStore {
       }
     }
 
-    // Make room by dropping the oldest non-pending proposal. Pending ones
-    // are below the cap here, so a full retained set always has one.
+    // Make room by evicting an expired proposal. A live incoming proposal
+    // always finds one here (live ones are below the cap). An expired
+    // federated import only displaces a proposal that expired before it;
+    // otherwise it waits like any other capacity-bound import.
     if (intents.length >= MAX_FILL_INTENTS_PER_ORDER) {
-      const oldest = intents
-        .filter((intent) => !isPendingIntent(intent, now))
-        .sort((left, right) => left.auth.expiresAt - right.auth.expiresAt)[0];
-      if (oldest !== undefined) intents.splice(intents.indexOf(oldest), 1);
+      const candidate = intents
+        .filter(
+          (intent) =>
+            !isLiveIntent(intent, now) &&
+            (incomingLive || intent.auth.expiresAt < verified.auth.expiresAt),
+        )
+        .sort(evictionOrder)[0];
+      if (candidate === undefined) {
+        throw new ApiError(
+          429,
+          "this order already has too many retained fill intents",
+          "transient_capacity",
+        );
+      }
+      intents.splice(intents.indexOf(candidate), 1);
     }
 
     const stored: StoredFillIntentV1 = {
@@ -2115,12 +2166,7 @@ export class OrderStore {
     intents.push(stored);
     order.fillIntents = intents;
     order.updatedAt = now;
-    if (!federated) {
-      this.intentAdmissions.set(ipHash, [
-        ...this.recentIntentAdmissions(ipHash, now),
-        now,
-      ]);
-    }
+    if (!federated) this.recordIntentAdmission(ipHash, now);
     this.persist();
     if (order.visibility === "public") {
       this.publish({

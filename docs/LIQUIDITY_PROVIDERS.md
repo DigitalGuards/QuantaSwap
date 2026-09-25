@@ -78,7 +78,8 @@ yours.
    then semantic `intentDigest`. The taker picks `issuedAt`, so ranking on it
    alone rewards backdating; clamping to your book's receipt time removes that,
    and a book that under-reports `receivedAt` only falls back to issuance
-   order. Persist that exact proposal before making a terminal decision.
+   order. Proposals relayed from other mirrors rank by when your book pulled
+   them. Persist that exact proposal before making a terminal decision.
 4. **Generate and persist**: generate a fresh 32-byte CSPRNG secret, compute
    `hashlock = sha256(secret)`, choose safe T1/T2, and persist the secret and
    terms. Never reuse a secret across swaps or chains.
