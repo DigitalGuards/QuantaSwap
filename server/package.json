@@ -1,6 +1,6 @@
 {
   "name": "quantaswap-orderbook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "QuantaSwap order book: coordination-only matching service for protocol-mode HTLC swaps",
   "license": "GPL-3.0",
