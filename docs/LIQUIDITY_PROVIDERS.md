@@ -229,5 +229,8 @@ risk:
 - **Operator independence**: each LP needs distinct keys, capital, host, RPC
   trust choices, policy, monitoring and encrypted backups. Do not clone the
   original operator's secret files, state volume or server access.
-- **Testnet only for now**: real-value production waits on QRL v2 mainnet.
-  Current contract addresses and faucet notes: [DEPLOYMENTS.md](DEPLOYMENTS.md).
+- **Testnet only for now**: real-value production waits on QRL 2.0 mainnet.
+  Current contract addresses: [DEPLOYMENTS.md](DEPLOYMENTS.md). Testnet QRL:
+  the [zondscan faucet](https://zondscan.com/faucet) (100 QRL per address per
+  24 hours). Funding figures for the reference kit:
+  [marketmaker/README.md](../marketmaker/README.md#funding).

@@ -1,0 +1,13 @@
+# Run a published, signed release image instead of a local build. Layer it
+# over the base file after verifying the digest (see README "Verified image
+# releases"):
+#
+#   LP_IMAGE=ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest> \
+#     docker compose -f compose.yaml -f compose.release.yaml up -d
+#
+# `!reset` needs Docker Compose 2.24 or newer.
+services:
+  marketmaker:
+    image: ${LP_IMAGE:?set LP_IMAGE to the verified ghcr.io/digitalguards/quantaswap-marketmaker@sha256 digest}
+    build: !reset null
+    pull_policy: missing

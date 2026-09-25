@@ -45,6 +45,7 @@ import {
   decide,
   earliestValidFillIntent,
   levelQuote,
+  inventoryShort,
   shouldPost,
   type BookStatus,
   type Direction,
@@ -102,6 +103,9 @@ const log = (...args: unknown[]) => console.log(`[mm ${new Date().toISOString()}
 const CANCEL_REASON_OPERATOR = 1;
 const FILL_RESPONSE_TARGET_S = 5 * 60;
 const admissionBackoff = new AdmissionBackoff();
+// Pair directions currently too thin to quote, so the operator gets one
+// log line per change instead of a silent empty ladder.
+const underfunded = new Set<string>();
 
 const feed = new PriceFeed({
   url: COINGECKO_URL,
@@ -855,7 +859,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
           : cfg.qrlReserveWei;
       const [gasBalanceWei, gasReserveWei] =
         info.tokenAddress !== null ? [balances.eth, cfg.ethReserveWei] : [balanceWei, reserveWei];
-      const post = shouldPost({
+      const refillInput = {
         direction,
         myOpenCount,
         ordersPerDirection: policy.ordersPerDirection,
@@ -867,8 +871,20 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         orderWei: BigInt(quote.fromAmount),
         gasBalanceWei,
         gasReserveWei,
-      });
-      if (!post) continue;
+      };
+      const shortKey = `${asset} ${direction}`;
+      if (inventoryShort(refillInput)) {
+        if (!underfunded.has(shortKey)) {
+          underfunded.add(shortKey);
+          log(
+            `${shortKey} not quoting: level ${level} needs ${quote.fromAmount} plus reserve ${reserveWei} ` +
+              `(have ${balanceWei}), gas ${gasBalanceWei} vs reserve ${gasReserveWei}; fund the wallet or lower the order size`,
+          );
+        }
+      } else if (underfunded.delete(shortKey)) {
+        log(`${shortKey} funded again; quoting resumes`);
+      }
+      if (!shouldPost(refillInput)) continue;
       if (state.retainedAdmissionCount(nowS()) >= LOCAL_RETAINED_ORDER_BUDGET) return;
 
       const makerToken = randomBytes(32).toString("hex");

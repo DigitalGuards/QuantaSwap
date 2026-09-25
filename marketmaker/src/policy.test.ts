@@ -15,6 +15,7 @@ import {
   canContinueWithoutBook,
   decide,
   earliestValidFillIntent,
+  inventoryShort,
   levelQuote,
   shouldPost,
   type DecideInput,
@@ -762,6 +763,21 @@ describe("refill policy", () => {
 
   it("stops when inventory would dip into the reserve", () => {
     assert.equal(shouldPost({ ...base, balanceWei: 6n * 10n ** 16n }), false);
+  });
+
+  it("reports inventory short only when funds are the blocker", () => {
+    assert.equal(inventoryShort(base), false);
+    assert.equal(inventoryShort({ ...base, balanceWei: 6n * 10n ** 16n }), true);
+    assert.equal(inventoryShort({ ...base, gasBalanceWei: 10n ** 16n }), true);
+    // Full ladder or maxed in-flight: nothing is wanted, so nothing is short.
+    assert.equal(
+      inventoryShort({ ...base, balanceWei: 0n, myOpenCount: 2 }),
+      false,
+    );
+    assert.equal(
+      inventoryShort({ ...base, balanceWei: 0n, inflightCount: 2 }),
+      false,
+    );
   });
 });
 
