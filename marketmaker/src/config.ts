@@ -90,6 +90,9 @@ export interface Config {
   healthStaleS: number;
   /** Cancel open listings, settle active swaps, and post no replacements. */
   drain: boolean;
+  /** Claim our own initiator lock for the taker once the preimage is
+   *  public, so takers need no gas on the chain they receive on. */
+  sponsorClaims: boolean;
 }
 
 function env(name: string, fallback: string): string {
@@ -258,5 +261,6 @@ export function loadConfig(): Config {
     healthPort,
     healthStaleS: envInt("MM_HEALTH_STALE_S", 600),
     drain: envBool("MM_DRAIN", false),
+    sponsorClaims: envBool("MM_SPONSOR_CLAIMS", true),
   };
 }

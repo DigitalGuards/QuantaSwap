@@ -572,6 +572,10 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
     lockGraceS: cfg.lockGraceS,
+    sponsorClaims: cfg.sponsorClaims,
+    ourInitiator: myAddress(iLeg),
+    takerOnInitiatorLeg: iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount,
+    sponsorMarginS: Math.ceil(cfg.txTimeoutMs / 1000) + 60,
   });
 
   switch (decision) {
@@ -701,6 +705,33 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         },
       );
       log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
+      break;
+    }
+
+    case "sponsor": {
+      if (managed.hashlock === null || managed.preimage === null) break;
+      // The preimage is already public; this pays the taker their leg at
+      // our gas cost. Same simulate-then-send path as our own claim. It is
+      // an optional courtesy on a swap we were already paid for, so the
+      // attempt is recorded up front (spacing retries by resendAfterS) and
+      // a failure, such as the taker having claimed first, is only logged.
+      managed.sponsorSentAt = nowS();
+      state.upsert(managed);
+      const claimData = encodeClaim(iLeg, managed.hashlock, managed.preimage);
+      try {
+        const hash = await submitPreflightedClaim(
+          legRpc[iLeg],
+          myAddress(iLeg),
+          claimData,
+          () => sender(iLeg).send(claimData, 0n),
+        );
+        log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
+      } catch (err) {
+        log(
+          `order ${short(managed.id)} sponsored claim skipped:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       break;
     }
 
@@ -881,6 +912,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         takerQrlAccount: null,
         lockSentAt: null,
         claimSentAt: null,
+        sponsorSentAt: null,
         refundSentAt: null,
         createdAt: nowS(),
       };

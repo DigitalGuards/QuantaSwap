@@ -362,6 +362,7 @@ describe("deployment-bound state hydration", () => {
         assert.equal(orders[0]?.level, 0);
         assert.equal(orders[0]?.quotedMidMilli, null);
         assert.equal(orders[0]?.announcedAt, null);
+        assert.equal(orders[0]?.sponsorSentAt, null);
         assert.deepEqual(orders[0]?.deployment, DEPLOYMENT);
       },
     );

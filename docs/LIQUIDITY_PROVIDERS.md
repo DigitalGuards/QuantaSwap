@@ -101,10 +101,20 @@ yours.
    re-reads at `head - N`), and verify recipient, amount, token address and
    timeout against your own registry, never against book data. Only then
    claim the taker's leg, which publishes the secret.
-8. **Or refund**: if the taker never locks (or locks wrong), do nothing until
+8. **Sponsor the taker's claim (recommended)**: once your claim is visible at
+   your confirmation depth, the secret is public and anyone may claim your
+   own lock for the taker. `claim()` pays only the recipient fixed at lock
+   time, so submitting it yourself moves nothing the taker is not already
+   owed, and it spares a taker who arrived from the other chain from holding
+   gas where they receive. The reference maker does this by default
+   (`MM_SPONSOR_CLAIMS=true`) with the same simulate-then-send path as its own
+   claim, only for the exact lock it funded for that taker, and stops one
+   transaction timeout plus 60 s before the lock's timeout. A failed attempt
+   is logged and retried after `MM_RESEND_AFTER_S`.
+9. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
-9. **Cancel or repost**: before selecting an intent, a maker may sign and
+10. **Cancel or repost**: before selecting an intent, a maker may sign and
    persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
    cancelled listing is terminal. Authenticate the exact CancelV2 and digest
    in the response before deleting local state. Sign a fresh OrderV2 to stay in

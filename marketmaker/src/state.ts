@@ -62,6 +62,7 @@ type PersistedOrder = Omit<
   | "level"
   | "quotedMidMilli"
   | "announcedAt"
+  | "sponsorSentAt"
   | "asset"
   | "deployment"
   | "protocol"
@@ -69,6 +70,7 @@ type PersistedOrder = Omit<
   level?: number;
   quotedMidMilli?: string | null;
   announcedAt?: number | null;
+  sponsorSentAt?: number | null;
   asset?: string;
   deployment?: unknown;
   protocol?: unknown;
@@ -1184,6 +1186,7 @@ export class StateFile {
         level: order.level ?? 0,
         quotedMidMilli: order.quotedMidMilli ?? null,
         announcedAt: order.announcedAt ?? null,
+        sponsorSentAt: order.sponsorSentAt ?? null,
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),
