@@ -199,9 +199,18 @@ risk:
 - **One active process per state and key set**: the reference maker acquires an
   exclusive mode-0600 `state.json.lock` lease before reading state. The lease
   binds the deployment fingerprint and both operator accounts, identifies the
-  Linux boot plus process start time, refuses a live second process, and safely
-  recovers a stale file after a crash or reboot. Distinct LP instances still
-  need distinct state volumes and keys.
+  Linux boot, process start time and PID namespace, refuses a live second
+  process, and safely recovers a stale file after a crash or reboot. A holder in
+  another PID namespace, which is how a second container on the same state volume
+  appears, is judged by the lease heartbeat: the holder refreshes it every 10 s
+  and it stays live for 90 s after the last refresh, so a crashed container's
+  replacement takes over automatically once that lifetime passes. Startup refuses
+  during that window, and with a container restart policy the backoff puts
+  unattended recovery at up to roughly two minutes. A maker that loses its lease
+  refuses every further state write and exits non-zero. This covers containers on
+  one host, which share a clock and a kernel boot id; a state volume shared
+  between machines is unsupported. Distinct LP instances still need distinct
+  state volumes and keys.
 - **Authenticated book responses**: the reference maker checks exact signed
   order, fill, cancel, selected intent, semantic digests, terminal state, and
   conflict absence before funding or deleting state. Preserve this gate in

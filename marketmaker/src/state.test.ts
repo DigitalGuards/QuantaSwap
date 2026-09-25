@@ -11,10 +11,13 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import type { ManagedOrder } from "./policy.js";
 import { canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 import {
@@ -42,8 +45,11 @@ import {
   type ProtocolAuthV1,
 } from "./protocol-signing.js";
 import {
+  LEASE_TTL_MS,
   StateFile,
   StateFilePoisonedError,
+  StateLeaseLostError,
+  StateLeaseUnverifiableError,
   StateProcessLease,
 } from "./state.js";
 
@@ -670,6 +676,57 @@ describe("deployment-bound state hydration", () => {
   });
 });
 
+// Two containers sharing one state volume see different PID namespaces, so
+// the lease tests drive that value through the acquisition seam.
+const LOCAL_NS = "pid:[4026531836]";
+const FOREIGN_NS = "pid:[4026539999]";
+
+interface LockRecord {
+  version: number;
+  pid: number;
+  processStart: string;
+  bootId: string;
+  pidNamespace?: string;
+  identityDigest: string;
+  leaseId: string;
+}
+
+const readLock = (file: string): LockRecord =>
+  JSON.parse(readFileSync(`${file}.lock`, "utf8")) as LockRecord;
+
+const writeLock = (file: string, overrides: Partial<LockRecord>): void => {
+  const record: LockRecord = {
+    version: 2,
+    pid: process.pid,
+    processStart: "0",
+    bootId: "other-boot",
+    identityDigest: "other-identity",
+    leaseId: "other-lease",
+    ...overrides,
+  };
+  writeFileSync(`${file}.lock`, JSON.stringify(record), { mode: 0o600 });
+};
+
+/** Backdates the lease heartbeat and returns the timestamp it was set to. */
+const ageLock = (file: string, byMs: number): number => {
+  const stamp = new Date(Date.now() - byMs);
+  utimesSync(`${file}.lock`, stamp, stamp);
+  return stamp.getTime();
+};
+
+async function waitFor(
+  ready: () => boolean,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready()) {
+    if (Date.now() > deadline) {
+      throw new Error("the awaited lease condition never held");
+    }
+    await setTimeoutPromise(2);
+  }
+}
+
 describe("exclusive state process lease", () => {
   const identity = {
     deploymentFingerprint: DEPLOYMENT.configFingerprint,
@@ -728,7 +785,7 @@ describe("exclusive state process lease", () => {
       );
       assert.throws(
         () => StateProcessLease.acquire(file, identity),
-        /recovery guard .* is stale; refusing unsafe automatic removal/,
+        /recovery guard .* is stale.*Refusing unsafe automatic removal; confirm no market maker process runs/,
       );
       assert.equal(existsSync(`${file}.lock`), false);
       assert.equal(existsSync(`${file}.lock.recovery`), true);
@@ -770,6 +827,523 @@ describe("exclusive state process lease", () => {
       replacement.close();
     } finally {
       winners[0]?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records the writing process's PID namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-ns-record-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const record = readLock(file);
+      assert.equal(record.version, 2);
+      assert.equal(record.pidNamespace, LOCAL_NS);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a live holder in another PID namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-foreign-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const holder = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const held = readLock(file);
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: FOREIGN_NS,
+          }),
+        /another PID namespace.*refusing a second market maker instance/,
+      );
+      // The refusal left the holder's record exactly as it was.
+      assert.deepEqual(readLock(file), held);
+      holder.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes over a foreign namespace lease whose heartbeat expired", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-expired-test-"));
+    const file = join(dir, "state.json");
+    try {
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "crashed" });
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      assert.notEqual(readLock(file).leaseId, "crashed");
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: FOREIGN_NS,
+          }),
+        /another PID namespace/,
+      );
+      lease.close();
+      assert.equal(existsSync(`${file}.lock`), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("judges a record from another host boot by its heartbeat too", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-boot-test-"));
+    const file = join(dir, "state.json");
+    try {
+      // Same namespace id, other boot id: another machine on this volume.
+      writeLock(file, { pidNamespace: LOCAL_NS, leaseId: "other-host" });
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /another host boot/,
+      );
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("honours an injected heartbeat lifetime for a foreign namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-ttl-test-"));
+    const file = join(dir, "state.json");
+    try {
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "crashed" });
+      ageLock(file, 20_000);
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+            ttlMs: 30_000,
+          }),
+        /another PID namespace/,
+      );
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+        ttlMs: 10_000,
+      });
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps PID semantics for a v1 record with no PID namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-v1-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const holder = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const { pidNamespace: _dropped, ...v1 } = readLock(file);
+      writeFileSync(
+        `${file}.lock`,
+        JSON.stringify({ ...v1, version: 1 }),
+        { mode: 0o600 },
+      );
+      // A v1 record is read as this namespace's own, so its live PID still
+      // refuses a starter that observes from anywhere.
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: FOREIGN_NS,
+          }),
+        /held by live process.*refusing a second market maker instance/,
+      );
+      holder.close();
+
+      // A dead PID in a v1 record is stale immediately, with no TTL wait.
+      writeFileSync(
+        `${file}.lock`,
+        JSON.stringify({ ...v1, version: 1, processStart: "0" }),
+        { mode: 0o600 },
+      );
+      const replacement = StateProcessLease.acquire(file, identity, {
+        pidNamespace: FOREIGN_NS,
+      });
+      assert.equal(readLock(file).version, 2);
+      replacement.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes the heartbeat while owned and reports a loss once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-beat-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const aged = ageLock(file, 60_000);
+      let lost = 0;
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 2);
+      await waitFor(() => statSync(`${file}.lock`).mtimeMs > aged);
+      assert.equal(lost, 0);
+      lease.assertOwned();
+
+      // Another container replaced the lease under us.
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      await waitFor(() => lost === 1);
+      await setTimeoutPromise(30);
+      assert.equal(lost, 1);
+      assert.throws(() => lease?.assertOwned(), StateLeaseLostError);
+      // A displaced holder never deletes the successor's lease file.
+      lease.close();
+      assert.equal(readLock(file).leaseId, "successor");
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a loss when the lease file is removed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-removed-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      let lost = 0;
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 2);
+      rmSync(`${file}.lock`);
+      await waitFor(() => lost === 1);
+      await setTimeoutPromise(30);
+      assert.equal(lost, 1);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a heartbeat from the future as stale", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-skew-test-"));
+    const file = join(dir, "state.json");
+    try {
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "fast-clock" });
+      // Inside the tolerated skew the holder still counts as live.
+      ageLock(file, -10_000);
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /-10\.0 s ago/,
+      );
+      ageLock(file, -120_000);
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never applies PID semantics to an unknown namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-unknown-test-"));
+    const file = join(dir, "state.json");
+    try {
+      // This process cannot read its own namespace, so it records the marker.
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: null,
+      });
+      assert.equal(readLock(file).pidNamespace, "unknown");
+      lease.close();
+
+      // A live PID under the marker is still judged by the heartbeat alone.
+      writeLock(file, {
+        pidNamespace: "unknown",
+        processStart: "0",
+        leaseId: "unknown-holder",
+      });
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: "unknown",
+          }),
+        /another PID namespace/,
+      );
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const replacement = StateProcessLease.acquire(file, identity, {
+        pidNamespace: "unknown",
+      });
+      replacement.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes staging files left behind past the heartbeat lifetime", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-staged-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const orphan = `${file}.lock.next.999.abandoned`;
+      const fresh = `${file}.lock.next.998.inflight`;
+      writeFileSync(orphan, "abandoned staging file", { mode: 0o600 });
+      writeFileSync(fresh, "another starter's staging file", { mode: 0o600 });
+      const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
+      utimesSync(orphan, old, old);
+
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      assert.equal(existsSync(orphan), false);
+      assert.equal(existsSync(fresh), true);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a loss when beats keep failing before a peer could take over", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-blind-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+        ttlMs: 200,
+      });
+      let lost = 0;
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 10);
+      // A lease file this process can no longer read, with its own lease id
+      // still plausibly on it. Reading a directory fails for any user.
+      rmSync(`${file}.lock`);
+      mkdirSync(`${file}.lock`);
+      const start = Date.now();
+      await waitFor(() => lost === 1);
+      // 200 ms lifetime and 10 ms beats budget 18 failures, and the loss must
+      // land before the lifetime a peer would count down.
+      assert.ok(Date.now() - start < 200, "loss must precede a peer takeover");
+      await setTimeoutPromise(60);
+      assert.equal(lost, 1);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-reads the lease file on every ownership check", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-recheck-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const held = readFileSync(`${file}.lock`, "utf8");
+      lease.assertOwned();
+      // No heartbeat runs here, so only a fresh read can catch this.
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      // A proven loss latches, so a record that comes back does not revive it.
+      writeFileSync(`${file}.lock`, held, { mode: 0o600 });
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      lease.close();
+      assert.equal(existsSync(`${file}.lock`), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a heartbeat interval with no detection margin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-margin-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+        ttlMs: 100,
+      });
+      assert.throws(
+        () => lease.startHeartbeat(() => undefined, 40),
+        /no detection margin/,
+      );
+      lease.startHeartbeat(() => undefined, 30);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores PID semantics for every record when this namespace is unknown", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-blindns-test-"));
+    const file = join(dir, "state.json");
+    let holder: StateProcessLease | undefined;
+    try {
+      holder = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const { pidNamespace: _dropped, ...v1 } = readLock(file);
+      writeFileSync(`${file}.lock`, JSON.stringify({ ...v1, version: 1 }), {
+        mode: 0o600,
+      });
+      // A starter that knows its namespace still reads the live PID.
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /held by live process/,
+      );
+      // A starter that cannot read its own namespace uses the heartbeat for
+      // this v1 record too, so a fresh one still refuses.
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, { pidNamespace: null }),
+        /another PID namespace/,
+      );
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const replacement = StateProcessLease.acquire(file, identity, {
+        pidNamespace: null,
+      });
+      replacement.close();
+    } finally {
+      holder?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dispatches the lost-lease callback after the failing write returns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-async-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const events: string[] = [];
+      lease.startHeartbeat((reason) => {
+        events.push(`lost: ${reason}`);
+      }, 30_000);
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      assert.throws(() => lease?.assertOwned(), StateLeaseLostError);
+      events.push("the refused write unwound");
+      await setTimeoutPromise(20);
+      assert.deepEqual(events, [
+        "the refused write unwound",
+        "lost: the lease file now carries another holder's lease id",
+      ]);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defers a write it cannot verify and resumes once the file reads again", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-transient-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      const contents = JSON.stringify(
+        envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+      );
+      writeFileSync(file, contents, "utf8");
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const owner = lease;
+      const held = readFileSync(`${file}.lock`, "utf8");
+      const state = new StateFile(file, DEPLOYMENT, undefined, () =>
+        owner.assertOwned(),
+      );
+      let lost = 0;
+      // A long interval, so only the write path observes the failure.
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 30_000);
+
+      // A lock path this process cannot read, for one write only.
+      rmSync(`${file}.lock`);
+      mkdirSync(`${file}.lock`);
+      assert.throws(
+        () => state.delete(preFieldRecord.id),
+        StateLeaseUnverifiableError,
+      );
+      assert.equal(readFileSync(file, "utf8"), contents);
+      assert.equal(state.all().length, 1);
+
+      rmSync(`${file}.lock`, { recursive: true });
+      writeFileSync(`${file}.lock`, held, { mode: 0o600 });
+      state.delete(preFieldRecord.id);
+      assert.equal(state.all().length, 0);
+      await setTimeoutPromise(20);
+      // A transient failure never latches a loss, so the maker keeps running.
+      assert.equal(lost, 0);
+      lease.assertOwned();
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an ownership check it cannot verify", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-unreadable-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      rmSync(`${file}.lock`);
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a state write after the lease is lost", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-write-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      const contents = JSON.stringify(
+        envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+      );
+      writeFileSync(file, contents, "utf8");
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const owner = lease;
+      const state = new StateFile(file, DEPLOYMENT, undefined, () =>
+        owner.assertOwned(),
+      );
+      let lost = 0;
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 2);
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      await waitFor(() => lost === 1);
+
+      assert.throws(
+        () => state.delete(preFieldRecord.id),
+        StateLeaseLostError,
+      );
+      assert.equal(readFileSync(file, "utf8"), contents);
+      // The refused write rolled back, so the order is still managed here.
+      assert.equal(state.all().length, 1);
+    } finally {
+      lease?.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
