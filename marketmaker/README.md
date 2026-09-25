@@ -102,6 +102,10 @@ file; both Node packages require the sibling `config/protocol-v2.json` at runtim
 - independent testnet capital for both legs and gas (see "Funding" below);
 - for release verification: cosign 3.0 or newer and GitHub CLI 2.49 or newer.
 
+Use RPC endpoints you trust. Claim simulation necessarily discloses a preimage
+to the configured RPC immediately before broadcast. The order book remains a
+coordination service and must never be trusted as proof of on-chain state.
+
 ### Funding
 
 With the defaults (ETH pair only, two rungs per direction, 0.02 ETH rung-0
@@ -114,12 +118,9 @@ smaller trial profile such as `MM_ORDERS_PER_DIRECTION=1` with
 keeps a rung unlisted, and another when quoting resumes.
 
 Testnet sources: QRL from the [zondscan faucet](https://zondscan.com/faucet)
-(100 QRL per address per 24 hours), Sepolia ETH from any public Sepolia faucet,
-and Sepolia USDC from [faucet.circle.com](https://faucet.circle.com).
-
-Use RPC endpoints you trust. Claim simulation necessarily discloses a preimage
-to the configured RPC immediately before broadcast. The order book remains a
-coordination service and must never be trusted as proof of on-chain state.
+(100 QRL per address per 24 hours, so the default ladder takes about three
+days of claims; start with the trial profile), Sepolia ETH from any public
+Sepolia faucet, and Sepolia USDC from [faucet.circle.com](https://faucet.circle.com).
 
 ## Verified image releases
 

@@ -45,6 +45,7 @@ import {
   decide,
   earliestValidFillIntent,
   levelQuote,
+  fundsShort,
   inventoryShort,
   shouldPost,
   type BookStatus,
@@ -106,6 +107,11 @@ const admissionBackoff = new AdmissionBackoff();
 // Pair directions currently too thin to quote, so the operator gets one
 // log line per change instead of a silent empty ladder.
 const underfunded = new Set<string>();
+const fmtUnits = (value: bigint, decimals: number): string => {
+  const scale = 10n ** BigInt(decimals);
+  const fraction = ((value % scale) * 10_000n) / scale;
+  return `${value / scale}.${fraction.toString().padStart(4, "0")}`;
+};
 
 const feed = new PriceFeed({
   url: COINGECKO_URL,
@@ -876,12 +882,24 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       if (inventoryShort(refillInput)) {
         if (!underfunded.has(shortKey)) {
           underfunded.add(shortKey);
-          log(
-            `${shortKey} not quoting: level ${level} needs ${quote.fromAmount} plus reserve ${reserveWei} ` +
-              `(have ${balanceWei}), gas ${gasBalanceWei} vs reserve ${gasReserveWei}; fund the wallet or lower the order size`,
-          );
+          const fromSymbol = direction === "eth->qrl" ? asset : "QRL";
+          const fromDecimals = direction === "eth->qrl" ? info.decimals : 18;
+          const needed = reserveWei + BigInt(quote.fromAmount);
+          const reasons: string[] = [];
+          if (balanceWei < needed) {
+            reasons.push(
+              `${fromSymbol} ${fmtUnits(balanceWei, fromDecimals)} below ${fmtUnits(needed, fromDecimals)} ` +
+                `(rung ${level} listing plus reserve)`,
+            );
+          }
+          if (info.tokenAddress !== null && gasBalanceWei < gasReserveWei) {
+            reasons.push(
+              `ETH gas ${fmtUnits(gasBalanceWei, 18)} below reserve ${fmtUnits(gasReserveWei, 18)}`,
+            );
+          }
+          log(`${shortKey} not quoting: ${reasons.join("; ")}; fund the wallet or lower the order size`);
         }
-      } else if (underfunded.delete(shortKey)) {
+      } else if (!fundsShort(refillInput) && underfunded.delete(shortKey)) {
         log(`${shortKey} funded again; quoting resumes`);
       }
       if (!shouldPost(refillInput)) continue;
