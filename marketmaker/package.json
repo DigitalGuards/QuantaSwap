@@ -1,6 +1,6 @@
 {
   "name": "quantaswap-marketmaker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "QuantaSwap market maker: always-online protocol-mode maker that keeps the order book stocked",
   "license": "GPL-3.0",
