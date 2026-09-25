@@ -247,6 +247,25 @@ describe("federation event feed", () => {
     });
   });
 
+  it("keeps an append that succeeded when the following compaction fails", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 2);
+      for (const id of ["one", "two", "three"]) feed.append(orderEvent(id), 100);
+      // The fourth event line exceeds 2 + 1 and triggers compaction.
+      const failing = feed as unknown as { compact: () => void };
+      failing.compact = () => {
+        throw new Error("simulated compaction failure");
+      };
+      const appended = feed.append(orderEvent("four"), 101);
+      assert.equal(appended.seq, 4);
+      assert.equal(feed.status().latestSequence, 4);
+      Reflect.deleteProperty(failing, "compact");
+      assert.equal(new FederationFeed(file, 2).status().latestSequence, 4);
+      feed.append(orderEvent("five"), 102);
+      assert.equal(new FederationFeed(file, 2).status().latestSequence, 5);
+    });
+  });
+
   it("drops a torn final line and rewrites a clean log", () => {
     withTempFile((file) => {
       const feed = new FederationFeed(file, 8);

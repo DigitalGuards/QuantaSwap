@@ -745,7 +745,12 @@ export class FederationFeed {
     }
     this.logLines += lines.length;
     if (this.logLines > this.maxEvents + Math.ceil(this.maxEvents / 4)) {
-      this.compact();
+      try {
+        this.compact();
+      } catch {
+        // The append above is durable. A failed compaction leaves the log
+        // intact, and the next write retries it before appending.
+      }
     }
   }
 
