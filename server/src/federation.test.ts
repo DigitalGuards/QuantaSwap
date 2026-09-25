@@ -212,14 +212,107 @@ describe("federation event feed", () => {
       const restored = new FederationFeed(file, 8);
       assert.equal(restored.page(cursor, 8, () => []).reset, false);
 
-      const parsed = JSON.parse(readFileSync(file, "utf8")) as {
-        events: Array<{ eventId: string }>;
-      };
-      const event = parsed.events[0];
-      assert.ok(event);
+      const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+      const event = JSON.parse(lines[1] ?? "") as { eventId: string };
       event.eventId = "0".repeat(64);
-      writeFileSync(file, JSON.stringify(parsed), "utf8");
+      lines[1] = JSON.stringify(event);
+      writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
       assert.throws(() => new FederationFeed(file, 8), /mismatched id/);
+    });
+  });
+
+  it("appends one line per event and compacts past a quarter of slack", () => {
+    withTempFile((file) => {
+      const lineCount = (): number =>
+        readFileSync(file, "utf8").trimEnd().split("\n").length;
+      const feed = new FederationFeed(file, 4);
+      feed.append(orderEvent("one"), 100);
+      // The first write creates the header and the retained ring.
+      assert.equal(lineCount(), 2);
+      feed.append(orderEvent("two"), 101);
+      feed.append(orderEvent("one"), 102);
+      assert.equal(lineCount(), 3);
+      for (const id of ["three", "four", "five"]) {
+        feed.append(orderEvent(id), 103);
+      }
+      assert.equal(lineCount(), 6);
+      // The sixth event line exceeds 4 + 1 and compacts to the ring of four.
+      feed.append(orderEvent("six"), 104);
+      assert.equal(lineCount(), 5);
+
+      const restored = new FederationFeed(file, 4);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.has(federationEventId(orderEvent("one"))), false);
+      assert.equal(restored.has(federationEventId(orderEvent("six"))), true);
+    });
+  });
+
+  it("drops a torn final line and rewrites a clean log", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      feed.append(orderEvent("two"), 101);
+      const cursor = feed.page(null, 8, () => []).cursor;
+      writeFileSync(
+        file,
+        `${readFileSync(file, "utf8")}{"type":"event","seq":3,"eve`,
+        "utf8",
+      );
+
+      const restored = new FederationFeed(file, 8);
+      assert.equal(restored.status().latestSequence, 2);
+      assert.equal(restored.page(cursor, 8, () => []).reset, false);
+      assert.equal(readFileSync(file, "utf8").endsWith("\n"), true);
+      restored.append(orderEvent("three"), 102);
+      assert.equal(new FederationFeed(file, 8).status().latestSequence, 3);
+    });
+  });
+
+  it("keeps the newest copy of an event appended again after trimming", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 2);
+      feed.append(orderEvent("one"), 100);
+      feed.append(orderEvent("two"), 101);
+      feed.append(orderEvent("three"), 102);
+      feed.append(orderEvent("one"), 103);
+      const restored = new FederationFeed(file, 2);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.has(federationEventId(orderEvent("one"))), true);
+    });
+  });
+
+  it("migrates a version 2 envelope without rotating the feed identity", () => {
+    withTempFile((file) => {
+      const records = ["one", "two"].map((id, index) => {
+        const event = orderEvent(id);
+        return {
+          seq: index + 1,
+          eventId: federationEventId(event),
+          event,
+          receivedAt: 100 + index,
+        };
+      });
+      const feedId = "ab".repeat(16);
+      writeFileSync(
+        file,
+        JSON.stringify({
+          version: 2,
+          feedId,
+          nextSeq: 3,
+          events: records,
+          snapshotDigest: null,
+        }),
+        "utf8",
+      );
+      const migrated = new FederationFeed(file, 8);
+      assert.equal(migrated.requiresReset(`${feedId}:1`), false);
+      assert.equal(migrated.status().latestSequence, 2);
+      const header = JSON.parse(
+        readFileSync(file, "utf8").split("\n")[0] ?? "",
+      ) as { type: string; version: number };
+      assert.equal(header.type, "header");
+      assert.equal(header.version, 3);
+      assert.equal(new FederationFeed(file, 8).requiresReset(`${feedId}:1`), false);
     });
   });
 

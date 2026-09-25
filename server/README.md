@@ -98,6 +98,14 @@ bound yields at most 1,472 reset records inside the 256-order total retention
 bound. Receivers also reject snapshots above their 6,144-record defensive
 ceiling. Peer responses must be `application/json`, and redirects are rejected.
 
+The feed file is an append-only log of JSON lines: one header, then one line
+per event. An append writes and fsyncs one line, and the log is compacted
+into the retained ring once it holds a quarter more lines than the ring. A
+torn final line left by a crash is dropped on the next start. The first start
+of this version migrates a version 2 feed file in place, and earlier images
+cannot read the result, so roll back by restoring the state snapshot taken
+before the update.
+
 Two workers pull up to 16 configured peers. The request timeout is one total
 deadline for every page, parse, and application step for a peer. Incremental
 pages checkpoint their cursor after successful application. Exact envelopes,

@@ -18,6 +18,7 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -43,11 +44,17 @@ interface PersistedFederationRecord extends FederationRecord {
   receivedAt: number;
 }
 
-interface FederationEnvelope {
-  version: 2;
+// The feed file is an append-only log of JSON lines. The first line is a
+// header, and each later line is one retained event or a snapshot digest
+// update. The log is compacted into a fresh header plus the retained ring
+// once it holds a quarter more lines than the ring, so an append costs one
+// line and one fsync rather than a rewrite of every retained proof. Version 2
+// files, a single JSON envelope, are migrated on load.
+interface FederationLogHeader {
+  type: "header";
+  version: 3;
   feedId: string;
   nextSeq: number;
-  events: PersistedFederationRecord[];
   snapshotDigest: string | null;
 }
 
@@ -278,6 +285,8 @@ export class FederationFeed {
   private eventIds = new Set<string>();
   private snapshotDigest: string | null = null;
   private cachedResetPage: CachedResetPage | undefined;
+  /** Event and digest lines in the log file, or null before compaction. */
+  private logLines: number | null = null;
 
   constructor(
     private readonly file: string,
@@ -357,16 +366,24 @@ export class FederationFeed {
     };
     const previousNextSeq = this.nextSeq;
     const previousSnapshotDigest = this.snapshotDigest;
+    const lines: unknown[] = [];
     if (existing === undefined) {
       this.nextSeq += 1;
       this.events.push(record);
       this.eventIds.add(eventId);
+      lines.push({ type: "event", ...record });
     }
     this.snapshotDigest = nextSnapshotDigest;
-    let removed: PersistedFederationRecord | undefined;
+    if (nextSnapshotDigest !== previousSnapshotDigest) {
+      lines.push({ type: "digest", snapshotDigest: nextSnapshotDigest });
+    }
+    const removed: PersistedFederationRecord[] = [];
     while (this.events.length > this.maxEvents) {
-      removed = this.events.shift();
-      if (removed !== undefined) this.eventIds.delete(removed.eventId);
+      const trimmed = this.events.shift();
+      if (trimmed !== undefined) {
+        this.eventIds.delete(trimmed.eventId);
+        removed.push(trimmed);
+      }
     }
     if (
       this.cachedResetPage !== undefined &&
@@ -376,7 +393,7 @@ export class FederationFeed {
       this.cachedResetPage = undefined;
     }
     try {
-      this.persist();
+      this.appendLines(lines);
     } catch (error) {
       this.nextSeq = previousNextSeq;
       this.snapshotDigest = previousSnapshotDigest;
@@ -384,9 +401,9 @@ export class FederationFeed {
         this.events.pop();
         this.eventIds.delete(eventId);
       }
-      if (removed !== undefined) {
-        this.events.unshift(removed);
-        this.eventIds.add(removed.eventId);
+      for (const entry of removed.reverse()) {
+        this.events.unshift(entry);
+        this.eventIds.add(entry.eventId);
       }
       throw error;
     }
@@ -403,7 +420,7 @@ export class FederationFeed {
     this.snapshotDigest = digest;
     this.cachedResetPage = undefined;
     try {
-      this.persist();
+      this.compact();
     } catch (error) {
       this.feedId = previousFeedId;
       this.snapshotDigest = previousSnapshotDigest;
@@ -507,11 +524,102 @@ export class FederationFeed {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw new Error(`federation data file could not be read: ${this.file}`);
     }
+    if (!raw.includes("\n")) {
+      // Version 2 stored one JSON envelope without a line terminator. A log
+      // always ends its atomically written header with one.
+      const envelope = this.parseLine(raw, "envelope");
+      if (envelope["version"] !== 2) {
+        throw new Error(
+          `federation data file has an unsupported version: ${this.file}`,
+        );
+      }
+      this.loadLegacyEnvelope(envelope);
+      this.compact();
+      return;
+    }
+    const lines = raw.split("\n");
+    // A crash can leave one unterminated final line. It was never
+    // acknowledged, so drop it and rewrite a clean log below.
+    const tornTail = lines.pop() !== "";
+    const header = this.parseLine(lines[0], "header");
+    if (header["type"] !== "header" || header["version"] !== 3) {
+      throw new Error(
+        `federation data file has an unsupported version: ${this.file}`,
+      );
+    }
+    const feedId = header["feedId"];
+    const nextSeq = header["nextSeq"];
+    if (typeof feedId !== "string" || !FEED_ID_RE.test(feedId)) {
+      throw new Error(
+        `federation data file has an invalid feed id: ${this.file}`,
+      );
+    }
+    if (
+      typeof nextSeq !== "number" ||
+      !Number.isSafeInteger(nextSeq) ||
+      nextSeq < 1
+    ) {
+      throw new Error(
+        `federation data file has an invalid sequence: ${this.file}`,
+      );
+    }
+    let snapshotDigest = this.parseDigest(header["snapshotDigest"]);
+    const events: PersistedFederationRecord[] = [];
+    const ids = new Set<string>();
+    let lastSeq = 0;
+    for (let index = 1; index < lines.length; index += 1) {
+      const line = this.parseLine(lines[index], `line ${index + 1}`);
+      if (line["type"] === "digest") {
+        snapshotDigest = this.parseDigest(line["snapshotDigest"]);
+        continue;
+      }
+      if (line["type"] !== "event") {
+        throw new Error(
+          `federation data file line ${index + 1} has an unknown type: ${this.file}`,
+        );
+      }
+      const { type: _type, ...rawRecord } = line;
+      const record = parseRecord(rawRecord, index);
+      if (record.seq <= lastSeq) {
+        throw new Error(
+          `federation data file sequences are not increasing: ${this.file}`,
+        );
+      }
+      lastSeq = record.seq;
+      // An event trimmed from the ring may be appended again later.
+      if (ids.has(record.eventId)) {
+        events.splice(
+          events.findIndex((entry) => entry.eventId === record.eventId),
+          1,
+        );
+      }
+      events.push(record);
+      ids.add(record.eventId);
+      while (events.length > this.maxEvents) {
+        const trimmed = events.shift();
+        if (trimmed !== undefined) ids.delete(trimmed.eventId);
+      }
+    }
+    this.feedId = feedId;
+    this.nextSeq = Math.max(nextSeq, lastSeq + 1);
+    this.events = events;
+    this.eventIds = ids;
+    this.snapshotDigest = snapshotDigest;
+    this.logLines = lines.length - 1;
+    if (tornTail) this.compact();
+  }
+
+  private parseLine(
+    line: string | undefined,
+    label: string,
+  ): Record<string, unknown> {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(line ?? "");
     } catch {
-      throw new Error(`federation data file is not valid JSON: ${this.file}`);
+      throw new Error(
+        `federation data file ${label} is not valid JSON: ${this.file}`,
+      );
     }
     if (
       typeof parsed !== "object" ||
@@ -519,19 +627,26 @@ export class FederationFeed {
       Array.isArray(parsed)
     ) {
       throw new Error(
-        `federation data file must contain an object: ${this.file}`,
+        `federation data file ${label} must contain an object: ${this.file}`,
       );
     }
-    const envelope = parsed as Record<string, unknown>;
-    if (envelope["version"] !== 2) {
+    return parsed as Record<string, unknown>;
+  }
+
+  private parseDigest(value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string" || !EVENT_ID_RE.test(value)) {
       throw new Error(
-        `federation data file has an unsupported version: ${this.file}`,
+        `federation data file has an invalid snapshot digest: ${this.file}`,
       );
     }
+    return value;
+  }
+
+  private loadLegacyEnvelope(envelope: Record<string, unknown>): void {
     const feedId = envelope["feedId"];
     const nextSeq = envelope["nextSeq"];
     const rawEvents = envelope["events"];
-    const snapshotDigest = envelope["snapshotDigest"];
     if (typeof feedId !== "string" || !FEED_ID_RE.test(feedId)) {
       throw new Error(
         `federation data file has an invalid feed id: ${this.file}`,
@@ -551,15 +666,7 @@ export class FederationFeed {
         `federation data file has an invalid event list: ${this.file}`,
       );
     }
-    if (
-      snapshotDigest !== undefined &&
-      snapshotDigest !== null &&
-      (typeof snapshotDigest !== "string" || !EVENT_ID_RE.test(snapshotDigest))
-    ) {
-      throw new Error(
-        `federation data file has an invalid snapshot digest: ${this.file}`,
-      );
-    }
+    const snapshotDigest = this.parseDigest(envelope["snapshotDigest"]);
     const events = rawEvents.map(parseRecord);
     for (let index = 1; index < events.length; index += 1) {
       if ((events[index - 1]?.seq ?? 0) >= (events[index]?.seq ?? 0)) {
@@ -583,28 +690,66 @@ export class FederationFeed {
     this.nextSeq = nextSeq;
     this.events = events;
     this.eventIds = ids;
-    this.snapshotDigest =
-      typeof snapshotDigest === "string" ? snapshotDigest : null;
+    this.snapshotDigest = snapshotDigest;
   }
 
-  private persist(): void {
+  private appendLines(lines: readonly unknown[]): void {
+    if (lines.length === 0) return;
+    if (this.logLines === null || !existsSync(this.file)) {
+      this.compact();
+      return;
+    }
+    let fileDescriptor: number | undefined;
+    try {
+      fileDescriptor = openSync(this.file, "a", 0o600);
+      writeSync(
+        fileDescriptor,
+        lines.map((line) => `${JSON.stringify(line)}\n`).join(""),
+      );
+      fsyncSync(fileDescriptor);
+    } catch {
+      // A failed append may leave a partial line; rewrite before reuse.
+      this.logLines = null;
+      throw new Error("federation data could not be persisted safely");
+    } finally {
+      if (fileDescriptor !== undefined) {
+        try {
+          closeSync(fileDescriptor);
+        } catch {
+          // Preserve the original persistence outcome.
+        }
+      }
+    }
+    this.logLines += lines.length;
+    if (this.logLines > this.maxEvents + Math.ceil(this.maxEvents / 4)) {
+      this.compact();
+    }
+  }
+
+  private compact(): void {
     const directory = dirname(this.file);
     const tmp = join(
       directory,
       `.federation.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
     );
-    const envelope: FederationEnvelope = {
-      version: 2,
+    const header: FederationLogHeader = {
+      type: "header",
+      version: 3,
       feedId: this.feedId,
       nextSeq: this.nextSeq,
-      events: this.events,
       snapshotDigest: this.snapshotDigest,
     };
+    const content = [
+      header,
+      ...this.events.map((record) => ({ type: "event", ...record })),
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
     let fileDescriptor: number | undefined;
     try {
       fileDescriptor = openSync(tmp, "wx", 0o600);
       fchmodSync(fileDescriptor, 0o600);
-      writeFileSync(fileDescriptor, JSON.stringify(envelope), "utf8");
+      writeFileSync(fileDescriptor, content, "utf8");
       fsyncSync(fileDescriptor);
       closeSync(fileDescriptor);
       fileDescriptor = undefined;
@@ -628,7 +773,9 @@ export class FederationFeed {
       } catch {
         // The rename may already have consumed the temporary file.
       }
+      this.logLines = null;
       throw new Error("federation data could not be persisted safely");
     }
+    this.logLines = this.events.length;
   }
 }
