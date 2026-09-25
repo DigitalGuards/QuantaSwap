@@ -572,6 +572,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
     lockGraceS: cfg.lockGraceS,
+    sponsorClaims: cfg.sponsorClaims,
   });
 
   switch (decision) {
@@ -701,6 +702,26 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         },
       );
       log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
+      break;
+    }
+
+    case "sponsor": {
+      if (managed.hashlock === null || managed.preimage === null) break;
+      // The preimage is already public; this pays the taker their leg at
+      // our gas cost. Same simulate-then-send path as our own claim, so a
+      // taker who claimed first just fails the simulation harmlessly.
+      const claimData = encodeClaim(iLeg, managed.hashlock, managed.preimage);
+      const hash = await submitPreflightedClaim(
+        legRpc[iLeg],
+        myAddress(iLeg),
+        claimData,
+        async () => {
+          managed.sponsorSentAt = nowS();
+          state.upsert(managed);
+          return sender(iLeg).send(claimData, 0n);
+        },
+      );
+      log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
       break;
     }
 
@@ -881,6 +902,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         takerQrlAccount: null,
         lockSentAt: null,
         claimSentAt: null,
+        sponsorSentAt: null,
         refundSentAt: null,
         createdAt: nowS(),
       };

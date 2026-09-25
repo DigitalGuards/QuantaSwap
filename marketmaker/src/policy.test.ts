@@ -13,6 +13,7 @@ import {
 } from "./htlc.js";
 import {
   canContinueWithoutBook,
+  SPONSOR_MARGIN_S,
   decide,
   earliestValidFillIntent,
   levelQuote,
@@ -56,6 +57,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     takerQrlAccount: `Q${"d".repeat(128)}`,
     lockSentAt: null,
     claimSentAt: null,
+    sponsorSentAt: null,
     refundSentAt: null,
     createdAt: NOW - 120,
     ...overrides,
@@ -104,6 +106,7 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     resendAfterS: 240,
     claimSafetyS: 600,
     lockGraceS: 0,
+    sponsorClaims: false,
     ...overrides,
   };
 }
@@ -588,6 +591,60 @@ describe("refund and settlement", () => {
       nowS: T2 + 100,
     });
     assert.equal(decide(x), "wait");
+  });
+});
+
+describe("sponsored taker claim", () => {
+  const ourLock = (overrides: Partial<LegState> = {}): LegState =>
+    leg(SwapStatus.Open, { timeout: T1, recipient: TAKER_ETH, ...overrides });
+  const revealed = (overrides: Partial<DecideInput> = {}): DecideInput =>
+    input({
+      sponsorClaims: true,
+      iState: ourLock(),
+      rState: leg(SwapStatus.Claimed),
+      rConfirmed: leg(SwapStatus.Claimed),
+      nowS: NOW + 100,
+      ...overrides,
+    });
+
+  it("claims our lock for the taker once our reveal is at depth", () => {
+    assert.equal(decide(revealed()), "sponsor");
+  });
+
+  it("waits while our reveal is not yet at confirmation depth", () => {
+    assert.equal(decide(revealed({ rConfirmed: leg(SwapStatus.Open) })), "wait");
+    assert.equal(decide(revealed({ rConfirmed: null })), "wait");
+  });
+
+  it("stays off when the operator disables it", () => {
+    assert.equal(decide(revealed({ sponsorClaims: false })), "wait");
+  });
+
+  it("never sponsors inside the margin before our timeout", () => {
+    assert.equal(decide(revealed({ nowS: T1 - SPONSOR_MARGIN_S })), "wait");
+    assert.equal(decide(revealed({ nowS: T1 - SPONSOR_MARGIN_S - 1 })), "sponsor");
+    assert.equal(decide(revealed({ nowS: T1 })), "refund");
+  });
+
+  it("never sponsors a lock without a payout target", () => {
+    const eth = ourLock({ recipient: `0x${"0".repeat(40)}` });
+    const qrl = ourLock({ recipient: `Q${"0".repeat(128)}` });
+    assert.equal(decide(revealed({ iState: eth })), "wait");
+    assert.equal(decide(revealed({ iState: qrl })), "wait");
+  });
+
+  it("spaces retries by the resend interval", () => {
+    const recent = managed({ sponsorSentAt: NOW + 100 - 10 });
+    const stale = managed({ sponsorSentAt: NOW + 100 - 241 });
+    assert.equal(decide(revealed({ managed: recent })), "wait");
+    assert.equal(decide(revealed({ managed: stale })), "sponsor");
+  });
+
+  it("settles once the taker's leg is claimed by anyone", () => {
+    assert.equal(
+      decide(revealed({ iState: ourLock({ status: SwapStatus.Claimed }) })),
+      "finish",
+    );
   });
 });
 

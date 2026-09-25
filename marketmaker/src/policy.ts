@@ -120,6 +120,9 @@ export interface ManagedOrder {
   takerQrlAccount: string | null;
   lockSentAt: number | null;
   claimSentAt: number | null;
+  /** Last attempt to claim our own initiator lock on the taker's behalf
+   *  after the preimage went public; null on older records. */
+  sponsorSentAt: number | null;
   refundSentAt: number | null;
   createdAt: number;
 }
@@ -131,6 +134,7 @@ export type Decision =
   | "announce" // taker arrived: generate/reuse secret, announce hashlock
   | "lock" // escrow our initiator leg
   | "claim" // taker's lock verified at depth: claim it (reveals secret)
+  | "sponsor" // secret public: claim our lock for the taker, paying the gas
   | "refund" // our lock is open past its timeout
   | "finish" // both sides settled; stop tracking
   | "abort"; // order evaporated before any funds moved; forget it
@@ -161,7 +165,16 @@ export interface DecideInput {
   /** Seconds to wait after announcing before locking (grace for instant
    *  taker walk-aways). */
   lockGraceS: number;
+  /** Submit the taker's final claim ourselves once the secret is public. */
+  sponsorClaims: boolean;
 }
+
+/** Skip a sponsored claim this close to the lock's timeout: claim()
+ *  reverts at the timeout, so a late send only burns gas. */
+export const SPONSOR_MARGIN_S = 60;
+
+const unsetRecipient = (recipient: string): boolean =>
+  /^(0x|Q)0*$/i.test(recipient);
 
 const retryOk = (
   sentAt: number | null,
@@ -257,6 +270,23 @@ export function decide(x: DecideInput): Decision {
     retryOk(managed.claimSentAt, nowS, x.resendAfterS)
   ) {
     return "claim";
+  }
+
+  // Once our claim of the responder leg is visible at depth, the preimage
+  // is public and anyone may claim our initiator lock: claim() pays only
+  // the recipient fixed at lock time, so doing it ourselves moves nothing
+  // the taker is not already owed. It spares the taker gas on the chain
+  // they receive on, which a newcomer from the other chain may not hold.
+  if (
+    x.sponsorClaims &&
+    x.iState.status === SwapStatus.Open &&
+    !unsetRecipient(x.iState.recipient) &&
+    x.rConfirmed !== null &&
+    x.rConfirmed.status === SwapStatus.Claimed &&
+    nowS < x.iState.timeout - SPONSOR_MARGIN_S &&
+    retryOk(managed.sponsorSentAt, nowS, x.resendAfterS)
+  ) {
+    return "sponsor";
   }
 
   // Escrow our leg after announcing, unless the responder window is
