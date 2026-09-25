@@ -784,7 +784,7 @@ describe("exclusive state process lease", () => {
       );
       assert.throws(
         () => StateProcessLease.acquire(file, identity),
-        /recovery guard .* is stale; refusing unsafe automatic removal/,
+        /recovery guard .* is stale.*Refusing unsafe automatic removal; confirm no market maker process runs/,
       );
       assert.equal(existsSync(`${file}.lock`), false);
       assert.equal(existsSync(`${file}.lock.recovery`), true);
@@ -1030,6 +1030,149 @@ describe("exclusive state process lease", () => {
       assert.equal(lost, 1);
     } finally {
       lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats a heartbeat from the future as stale", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-skew-test-"));
+    const file = join(dir, "state.json");
+    try {
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "fast-clock" });
+      // Inside the tolerated skew the holder still counts as live.
+      ageLock(file, -10_000);
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /-10\.0 s ago/,
+      );
+      ageLock(file, -120_000);
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never applies PID semantics to an unknown namespace", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-unknown-test-"));
+    const file = join(dir, "state.json");
+    try {
+      // This process cannot read its own namespace, so it records the marker.
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: null,
+      });
+      assert.equal(readLock(file).pidNamespace, "unknown");
+      lease.close();
+
+      // A live PID under the marker is still judged by the heartbeat alone.
+      writeLock(file, {
+        pidNamespace: "unknown",
+        processStart: "0",
+        leaseId: "unknown-holder",
+      });
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: "unknown",
+          }),
+        /another PID namespace/,
+      );
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const replacement = StateProcessLease.acquire(file, identity, {
+        pidNamespace: "unknown",
+      });
+      replacement.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes staging files left behind past the heartbeat lifetime", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-staged-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const orphan = `${file}.lock.next.999.abandoned`;
+      const fresh = `${file}.lock.next.998.inflight`;
+      writeFileSync(orphan, "abandoned staging file", { mode: 0o600 });
+      writeFileSync(fresh, "another starter's staging file", { mode: 0o600 });
+      const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
+      utimesSync(orphan, old, old);
+
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      assert.equal(existsSync(orphan), false);
+      assert.equal(existsSync(fresh), true);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a loss when beats keep failing before a peer could take over", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-blind-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+        ttlMs: 200,
+      });
+      let lost = 0;
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 10);
+      // A lease file this process can no longer read, with its own lease id
+      // still plausibly on it. Reading a directory fails for any user.
+      rmSync(`${file}.lock`);
+      mkdirSync(`${file}.lock`);
+      const start = Date.now();
+      await waitFor(() => lost === 1);
+      // 200 ms lifetime and 10 ms beats budget 18 failures, and the loss must
+      // land before the lifetime a peer would count down.
+      assert.ok(Date.now() - start < 200, "loss must precede a peer takeover");
+      await setTimeoutPromise(60);
+      assert.equal(lost, 1);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-reads the lease file on every ownership check", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-recheck-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      lease.assertOwned();
+      // No heartbeat runs here, so only a fresh read can catch this.
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      lease.close();
+      assert.equal(readLock(file).leaseId, "successor");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an ownership check it cannot verify", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-unreadable-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      rmSync(`${file}.lock`);
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      lease.close();
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

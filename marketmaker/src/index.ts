@@ -58,7 +58,12 @@ import {
   deriveOrderV1Id,
   verifyFillIntentV1,
 } from "./protocol-signing.js";
-import { StateFile, StateFilePoisonedError, StateProcessLease } from "./state.js";
+import {
+  StateFile,
+  StateFilePoisonedError,
+  StateLeaseLostError,
+  StateProcessLease,
+} from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
 import { AdmissionBackoff, canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 
@@ -73,6 +78,9 @@ const stateLease = StateProcessLease.acquire(cfg.stateFile, {
   ethAccount: eth.address.toLowerCase(),
   qrlAccount: protocolSigner.address.toLowerCase(),
 });
+// Set the moment this process stops owning the state lease. Every loop reads
+// it, so no further work is attempted while shutdown runs.
+let leaseLost = false;
 stateLease.startHeartbeat(() => void exitOnLostLease());
 let state: StateFile;
 try {
@@ -785,7 +793,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
-  if (cfg.drain || !admissionBackoff.canAttempt(nowS())) return;
+  if (cfg.drain || leaseLost || stopping || !admissionBackoff.canAttempt(nowS()))
+    return;
   const managed = state.all();
   const inflight = managed.filter((m) => {
     const v = views.get(m.id);
@@ -820,6 +829,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
     if (mid === null) continue;
 
     for (const direction of ["eth->qrl", "qrl->eth"] as const) {
+      // Each rung posts a signed listing, so stop the moment this process is
+      // no longer the writer for this state file.
+      if (leaseLost || stopping) return;
       const fromLeg = initiatorLeg(direction);
       // Refill the lowest under-stocked rung of the pair's price ladder
       // (one per tick, per pair and direction, so a taken level reappears
@@ -971,7 +983,7 @@ let tickTimer: ReturnType<typeof setInterval> | undefined;
 let healthServer: Server | undefined;
 
 async function tick(): Promise<void> {
-  if (running || stopping) return;
+  if (running || stopping || leaseLost) return;
   running = true;
   const startingOrderCount = state.all().length;
   health.markTickStarted(startingOrderCount);
@@ -980,10 +992,19 @@ async function tick(): Promise<void> {
     await feed.maybeRefresh(nowS());
     const views = new Map<string, OrderView | null>();
     for (const managed of state.all()) {
+      if (leaseLost) break;
       try {
         views.set(managed.id, await advance(managed));
       } catch (err) {
-        if (err instanceof StateFilePoisonedError) throw err;
+        // A poisoned state file and a lost lease both mean no further write
+        // can land, so they end the whole tick. Counting them per order would
+        // keep the loop running against a state file it cannot touch.
+        if (
+          err instanceof StateFilePoisonedError ||
+          err instanceof StateLeaseLostError
+        ) {
+          throw err;
+        }
         errorCount += 1;
         log(`order ${short(managed.id)} tick error:`, err instanceof Error ? err.message : err);
       }
@@ -994,6 +1015,9 @@ async function tick(): Promise<void> {
     log("tick error:", err instanceof Error ? err.message : err);
     if (err instanceof StateFilePoisonedError) {
       void stop("state durability failure", 1);
+    }
+    if (err instanceof StateLeaseLostError) {
+      void exitOnLostLease();
     }
   } finally {
     let orderCount = startingOrderCount;
@@ -1070,6 +1094,8 @@ async function main(): Promise<void> {
  * closed against the live holder.
  */
 async function exitOnLostLease(): Promise<void> {
+  if (leaseLost) return;
+  leaseLost = true;
   log(
     `FATAL: the state lease ${cfg.stateFile}.lock is held by another process now. ` +
       "This maker was displaced, stopped writing state, and exits so its supervisor can restart it",

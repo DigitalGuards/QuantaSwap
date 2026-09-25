@@ -206,6 +206,8 @@ verification and a clean completed tick. Docker marks the container unhealthy
 after repeated failed checks, but Compose does not restart it merely for being
 unhealthy. Inspect the logs and recovery state before intervening.
 
+### Single active process
+
 Run one active process for each state volume and wallet pair. The maker creates
 a mode-0600 `state.json.lock` lease before it reads recovery state. It records
 the deployment and account identity digest, Linux boot id, PID, process start
@@ -216,25 +218,42 @@ refusal for manual inspection. Shutdown removes only the lease id it acquired,
 so it cannot delete a newer holder's file. Use distinct volumes and keys for
 distinct LP instances.
 
-A holder in another PID namespace or from another host boot, which is what a
-second container on the same state volume looks like, is judged by the lease
-heartbeat alone. Its PID and process start time carry no meaning outside its own
-namespace. The running maker refreshes the lease file's timestamp every 10 s, and
-every observer treats the lease as live for 90 s after the last refresh. That
-gives three properties:
+A holder in another PID namespace, which is what a second container on the same
+state volume looks like, is judged by the lease heartbeat alone. Its PID and
+process start time carry no meaning outside its own namespace. The running maker
+refreshes the lease file's timestamp every 10 s, and every observer treats the
+lease as live for 90 s after the last refresh. That gives three properties:
 
 - a second container on one state volume fails closed while the first one runs,
   with a refusal that names the situation;
 - after a container crashes, is killed, or the host reboots, its replacement
-  waits at most 90 s for the heartbeat to expire and then takes the lease over
+  waits for the heartbeat to expire and then takes the lease over
   automatically. Startup refuses during that window, so keep a restart policy on
-  the container or supervisor;
+  the container or supervisor. With Compose `restart: unless-stopped`, the
+  restart backoff adds to the 90 s heartbeat lifetime, so unattended recovery
+  takes up to roughly two minutes;
 - a maker that loses the lease refuses every further state write, logs the
-  displacement, and exits non-zero so its supervisor restarts it.
+  displacement, and exits non-zero so its supervisor restarts it. It also stops
+  writing when a beat cannot read or stamp the lease file for long enough that a
+  peer would see its heartbeat expire.
+
+This covers containers on **one host**, which share a clock and a kernel boot id.
+A state volume shared between machines is not supported: the heartbeat comparison
+is only as good as the two clocks agreeing, and no part of this design
+coordinates across hosts. Give each machine its own volume and keys.
 
 A lease record written before this change carries no PID namespace and keeps the
 original PID-based semantics, which is correct for a single-host deployment.
 Restart such a maker once so it writes the current record format.
+
+**Manual recovery of a stale guard.** Startup refuses with
+`state lease recovery guard ... is stale` when `state.json.lock.recovery`
+outlived the starter that created it, which a hard kill during acquisition can
+cause. Confirm no market maker process runs on that state volume (`docker
+compose ps`, and check any other supervisor sharing the volume), then remove
+`state.json.lock.recovery` by hand and start the maker again. Orphaned
+`state.json.lock.next.*` staging files are swept automatically once they are
+older than the heartbeat lifetime.
 
 ## State and recovery
 
