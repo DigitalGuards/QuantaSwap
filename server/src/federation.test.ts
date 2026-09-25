@@ -316,6 +316,29 @@ describe("federation event feed", () => {
     });
   });
 
+  it("rotates after an unchecked append and keeps identity after a checkpoint", () => {
+    withTempFile((file) => {
+      const base = [orderEvent("base")];
+      const grown = [...base, orderEvent("grown")];
+      const feed = new FederationFeed(file, 8);
+      feed.reconcileSnapshot(base);
+      const cursor = feed.page(null, 8, () => base).cursor;
+      // A crash after this append leaves the digest unknown.
+      feed.append(orderEvent("grown"), 100);
+      const crashed = new FederationFeed(file, 8);
+      assert.equal(crashed.reconcileSnapshot(grown), true);
+      assert.equal(crashed.requiresReset(cursor), true);
+
+      const afterReset = crashed.page(null, 8, () => grown).cursor;
+      crashed.append(orderEvent("later"), 101);
+      const final = [...grown, orderEvent("later")];
+      crashed.checkpoint(final);
+      const restarted = new FederationFeed(file, 8);
+      assert.equal(restarted.reconcileSnapshot(final), false);
+      assert.equal(restarted.requiresReset(afterReset), false);
+    });
+  });
+
   it("reconciles an oversized snapshot with one identity rotation", () => {
     withTempFile((file) => {
       const snapshot = Array.from({ length: 6 }, (_value, index) =>

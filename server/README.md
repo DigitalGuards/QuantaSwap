@@ -381,8 +381,12 @@ operational data. Encrypt backups and restrict access.
 
 The two files use separate atomic writes. Before serving after a restart, the
 mirror reconciles every retained public proof from `orders.json` into the feed,
-closing a crash window between the two writes. A later feed persistence failure
-starts fatal shutdown rather than accepting mutations peers cannot discover.
+closing a crash window between the two writes. A clean shutdown records a
+digest of the retained public proofs, so an unchanged mirror keeps its feed
+identity and peers continue incrementally. After a crash or a storage failure
+the digest is unknown, and the restart rotates the feed identity so every peer
+takes a reset snapshot. A later feed persistence failure starts fatal shutdown
+rather than accepting mutations peers cannot discover.
 
 Admission is bounded at 200 open orders, 40 per maker pair, and 50 per local
 source IP. Retained recovery state is bounded at 256 orders globally, 64 per

@@ -348,11 +348,16 @@ export class FederationFeed {
     const event = parseFederationEvent(raw);
     const eventId = federationEventId(event);
     const existing = this.events.find((entry) => entry.eventId === eventId);
+    // Without a snapshot the caller's state changed in a way this feed does
+    // not hash on every append, so the stored digest becomes unknown until
+    // the next checkpoint. An unknown digest rotates the feed identity on
+    // restart, the safe response to a crash between the store and feed
+    // writes.
     const nextSnapshotDigest =
-      snapshot === undefined
-        ? this.snapshotDigest
-        : federationSnapshotDigest(snapshot);
+      snapshot === undefined ? null : federationSnapshotDigest(snapshot);
     if (existing !== undefined && nextSnapshotDigest === this.snapshotDigest) {
+      // The caller's snapshot changed behind any cached reset cursor.
+      if (snapshot === undefined) this.cachedResetPage = undefined;
       return publicRecord(existing);
     }
     if (!Number.isSafeInteger(receivedAt) || receivedAt < 0) {
@@ -385,9 +390,12 @@ export class FederationFeed {
         removed.push(trimmed);
       }
     }
+    // A new event reaches holders of a cached reset cursor incrementally. A
+    // replayed event means the snapshot changed behind that cursor.
     if (
       this.cachedResetPage !== undefined &&
-      (nextSnapshotDigest !== previousSnapshotDigest ||
+      (existing !== undefined ||
+        nextSnapshotDigest !== previousSnapshotDigest ||
         this.requiresReset(this.cachedResetPage.page.cursor))
     ) {
       this.cachedResetPage = undefined;
@@ -408,6 +416,21 @@ export class FederationFeed {
       throw error;
     }
     return publicRecord(existing ?? record);
+  }
+
+  /** Record the current store snapshot digest, typically at shutdown, so an
+   *  unchanged store does not rotate the feed identity on restart. */
+  checkpoint(rawEvents: readonly FederationEvent[]): void {
+    const digest = federationSnapshotDigest(rawEvents);
+    if (digest === this.snapshotDigest) return;
+    const previousSnapshotDigest = this.snapshotDigest;
+    this.snapshotDigest = digest;
+    try {
+      this.appendLines([{ type: "digest", snapshotDigest: digest }]);
+    } catch (error) {
+      this.snapshotDigest = previousSnapshotDigest;
+      throw error;
+    }
   }
 
   reconcileSnapshot(rawEvents: readonly FederationEvent[]): boolean {

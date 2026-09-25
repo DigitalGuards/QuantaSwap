@@ -241,11 +241,9 @@ federationFeed.reconcileSnapshot(store.federationSnapshot());
 
 store.subscribeFederation((event) => {
   try {
-    federationFeed.append(
-      event,
-      Math.floor(Date.now() / 1000),
-      store.federationSnapshot(),
-    );
+    // Hashing the whole snapshot on every append costs more than the append;
+    // the digest is written once at exit instead.
+    federationFeed.append(event, Math.floor(Date.now() / 1000));
     federationHealthy = true;
   } catch (error) {
     federationHealthy = false;
@@ -772,6 +770,19 @@ function initiateShutdown(reason: string, exitCode = 0): void {
   }, config.shutdownTimeoutMs);
   shutdownTimer.unref();
 }
+
+// Record the final snapshot digest so an unchanged store keeps the feed
+// identity, and existing peer cursors, across a clean restart. Storage
+// failures exit nonzero, and after them or a crash the digest stays unknown
+// so the next start rotates the identity and peers take a reset snapshot.
+process.once("exit", (code) => {
+  if (code !== 0) return;
+  try {
+    federationFeed.checkpoint(store.federationSnapshot());
+  } catch {
+    console.error("[orderbook] federation checkpoint failed at exit");
+  }
+});
 
 process.once("SIGTERM", () => initiateShutdown("SIGTERM"));
 process.once("SIGINT", () => initiateShutdown("SIGINT"));
