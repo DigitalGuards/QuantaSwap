@@ -232,10 +232,17 @@ lease as live for 90 s after the last refresh. That gives three properties:
   the container or supervisor. With Compose `restart: unless-stopped`, the
   restart backoff adds to the 90 s heartbeat lifetime, so unattended recovery
   takes up to roughly two minutes;
-- a maker that loses the lease refuses every further state write, logs the
-  displacement, and exits non-zero so its supervisor restarts it. It also stops
+- a maker that loses the lease refuses every further state write, logs which
+  case occurred, and exits non-zero so its supervisor restarts it. It also stops
   writing when a beat cannot read or stamp the lease file for long enough that a
-  peer would see its heartbeat expire.
+  peer would see its heartbeat expire. A single unreadable moment only defers
+  the one write it blocked, and the next tick retries it.
+
+One consequence of exiting on a lock file that stayed unreadable: shutdown
+cannot prove the file is still its own, so it leaves the file in place. The
+restart then waits out the 90 s heartbeat lifetime before it can take the lease
+over. Fix the underlying storage problem, or remove the file by hand after
+confirming no maker runs on that volume.
 
 This covers containers on **one host**, which share a clock and a kernel boot id.
 A state volume shared between machines is not supported: the heartbeat comparison

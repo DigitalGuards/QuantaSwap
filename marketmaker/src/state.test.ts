@@ -49,6 +49,7 @@ import {
   StateFile,
   StateFilePoisonedError,
   StateLeaseLostError,
+  StateLeaseUnverifiableError,
   StateProcessLease,
 } from "./state.js";
 
@@ -1151,13 +1152,147 @@ describe("exclusive state process lease", () => {
       const lease = StateProcessLease.acquire(file, identity, {
         pidNamespace: LOCAL_NS,
       });
+      const held = readFileSync(`${file}.lock`, "utf8");
       lease.assertOwned();
       // No heartbeat runs here, so only a fresh read can catch this.
       writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
       assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      // A proven loss latches, so a record that comes back does not revive it.
+      writeFileSync(`${file}.lock`, held, { mode: 0o600 });
+      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
       lease.close();
-      assert.equal(readLock(file).leaseId, "successor");
+      assert.equal(existsSync(`${file}.lock`), true);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a heartbeat interval with no detection margin", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-margin-test-"));
+    const file = join(dir, "state.json");
+    try {
+      const lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+        ttlMs: 100,
+      });
+      assert.throws(
+        () => lease.startHeartbeat(() => undefined, 40),
+        /no detection margin/,
+      );
+      lease.startHeartbeat(() => undefined, 30);
+      lease.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores PID semantics for every record when this namespace is unknown", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-blindns-test-"));
+    const file = join(dir, "state.json");
+    let holder: StateProcessLease | undefined;
+    try {
+      holder = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const { pidNamespace: _dropped, ...v1 } = readLock(file);
+      writeFileSync(`${file}.lock`, JSON.stringify({ ...v1, version: 1 }), {
+        mode: 0o600,
+      });
+      // A starter that knows its namespace still reads the live PID.
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /held by live process/,
+      );
+      // A starter that cannot read its own namespace uses the heartbeat for
+      // this v1 record too, so a fresh one still refuses.
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, { pidNamespace: null }),
+        /another PID namespace/,
+      );
+      ageLock(file, LEASE_TTL_MS + 5_000);
+      const replacement = StateProcessLease.acquire(file, identity, {
+        pidNamespace: null,
+      });
+      replacement.close();
+    } finally {
+      holder?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("dispatches the lost-lease callback after the failing write returns", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-async-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const events: string[] = [];
+      lease.startHeartbeat((reason) => {
+        events.push(`lost: ${reason}`);
+      }, 30_000);
+      writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
+      assert.throws(() => lease?.assertOwned(), StateLeaseLostError);
+      events.push("the refused write unwound");
+      await setTimeoutPromise(20);
+      assert.deepEqual(events, [
+        "the refused write unwound",
+        "lost: the lease file now carries another holder's lease id",
+      ]);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("defers a write it cannot verify and resumes once the file reads again", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-transient-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      const contents = JSON.stringify(
+        envelope([{ ...preFieldRecord, deployment: DEPLOYMENT }]),
+      );
+      writeFileSync(file, contents, "utf8");
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      const owner = lease;
+      const held = readFileSync(`${file}.lock`, "utf8");
+      const state = new StateFile(file, DEPLOYMENT, undefined, () =>
+        owner.assertOwned(),
+      );
+      let lost = 0;
+      // A long interval, so only the write path observes the failure.
+      lease.startHeartbeat(() => {
+        lost += 1;
+      }, 30_000);
+
+      // A lock path this process cannot read, for one write only.
+      rmSync(`${file}.lock`);
+      mkdirSync(`${file}.lock`);
+      assert.throws(
+        () => state.delete(preFieldRecord.id),
+        StateLeaseUnverifiableError,
+      );
+      assert.equal(readFileSync(file, "utf8"), contents);
+      assert.equal(state.all().length, 1);
+
+      rmSync(`${file}.lock`, { recursive: true });
+      writeFileSync(`${file}.lock`, held, { mode: 0o600 });
+      state.delete(preFieldRecord.id);
+      assert.equal(state.all().length, 0);
+      await setTimeoutPromise(20);
+      // A transient failure never latches a loss, so the maker keeps running.
+      assert.equal(lost, 0);
+      lease.assertOwned();
+    } finally {
+      lease?.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

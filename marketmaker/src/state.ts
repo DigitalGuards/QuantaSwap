@@ -142,8 +142,16 @@ export interface StateLeaseAcquireOptions {
 
 export class StateFilePoisonedError extends Error {}
 
-/** Raised once the lease file no longer carries this process's lease id. */
+/** Raised once the lease file provably stopped carrying our lease id. */
 export class StateLeaseLostError extends Error {}
+
+/**
+ * Raised when ownership can neither be confirmed nor disproved, which a
+ * transient read failure causes. The write is refused, so the chain or book
+ * send behind it is never attempted, and the lease is still held: only the
+ * heartbeat's run of consecutive failures turns this into a real loss.
+ */
+export class StateLeaseUnverifiableError extends Error {}
 
 function processStart(pid: number): string | null {
   try {
@@ -235,18 +243,15 @@ function usesPidSemantics(
   record: LeaseRecord,
   liveness: LeaseLiveness,
 ): boolean {
+  // An unknown namespace proves nothing about PID visibility, so the
+  // heartbeat decides. Checked for this process first: without our own
+  // namespace, every record is foreign, including a v1 one.
+  if (liveness.pidNamespace === UNKNOWN_PID_NAMESPACE) return false;
   // A v1 record carries no namespace. Single-host deployments from before
   // this format write those, so they keep the original PID semantics and
   // upgrade themselves on their next restart.
   if (record.pidNamespace === undefined) return true;
-  // An unknown namespace on either side proves nothing about PID visibility,
-  // so the heartbeat decides.
-  if (
-    record.pidNamespace === UNKNOWN_PID_NAMESPACE ||
-    liveness.pidNamespace === UNKNOWN_PID_NAMESPACE
-  ) {
-    return false;
-  }
+  if (record.pidNamespace === UNKNOWN_PID_NAMESPACE) return false;
   return (
     record.pidNamespace === liveness.pidNamespace &&
     record.bootId === liveness.bootId
@@ -389,7 +394,7 @@ function sweepStagedLeaseFiles(
     if (!entry.startsWith(prefix)) continue;
     const staged = join(directory, entry);
     try {
-      if (Date.now() - statSync(staged).mtimeMs < liveness.ttlMs) continue;
+      if (liveness.now() - statSync(staged).mtimeMs < liveness.ttlMs) continue;
       unlinkSync(staged);
     } catch {
       // Another starter may have consumed or removed it already.
@@ -430,12 +435,17 @@ function heldLeaseMessage(
   );
 }
 
+/** Why a lease stopped being ours, named in the shutdown log and refusals. */
+const LEASE_LOSS_REPLACED = "the lease file now carries another holder's lease id";
+const LEASE_LOSS_REMOVED = "the lease file was removed";
+
 /** Exclusive process lease for one state file and operator-key identity. */
 export class StateProcessLease {
   private closed = false;
   private lost = false;
   private heartbeat: ReturnType<typeof setInterval> | undefined;
-  private onLost: (() => void) | undefined;
+  private onLost: ((reason: string) => void) | undefined;
+  private lostReason = LEASE_LOSS_REPLACED;
   private failedBeats = 0;
   private failureBudget = 1;
 
@@ -546,9 +556,16 @@ export class StateProcessLease {
    * being ours. onLost fires at most once and stops the timer with it.
    */
   startHeartbeat(
-    onLost: () => void,
+    onLost: (reason: string) => void,
     intervalMs: number = LEASE_HEARTBEAT_INTERVAL_MS,
   ): void {
+    if (intervalMs * 3 > this.ttlMs) {
+      throw new Error(
+        `state lease heartbeat interval ${intervalMs} ms leaves no detection margin under a ` +
+          `${this.ttlMs} ms lease lifetime; a peer would take the lease over before this process ` +
+          `could notice. Use an interval of at most ${Math.floor(this.ttlMs / 3)} ms`,
+      );
+    }
     if (this.heartbeat !== undefined || this.closed || this.lost) return;
     this.onLost = onLost;
     // A beat that cannot read or stamp the file is a silent failure: our
@@ -576,7 +593,7 @@ export class StateProcessLease {
   assertOwned(): void {
     if (this.lost) {
       throw new StateLeaseLostError(
-        `state lease ${this.path} is no longer held by this process; refusing to write state a displaced maker no longer owns`,
+        `state lease ${this.path} is no longer held by this process (${this.lostReason}); refusing to write state a displaced maker no longer owns`,
       );
     }
     if (this.closed) {
@@ -588,20 +605,27 @@ export class StateProcessLease {
     try {
       observed = readLease(this.path);
     } catch (error) {
-      this.markLost();
-      throw new StateLeaseLostError(
-        `state lease ${this.path} cannot be read, so this process cannot prove it still holds it; refusing the write`,
+      // Unreadable proves nothing. The write is refused so the send behind it
+      // is never attempted, and the lease is still held. Persistent
+      // unreadability reaches the heartbeat's failure budget on its own.
+      throw new StateLeaseUnverifiableError(
+        `state lease ${this.path} cannot be read right now, so this write cannot be proven safe; refusing it and retrying on the next tick`,
         { cause: error },
       );
     }
     if (observed === undefined) {
-      this.markLost();
+      this.markLost(LEASE_LOSS_REMOVED);
       throw new StateLeaseLostError(
-        `state lease ${this.path} is gone, so this process cannot prove it still holds it; refusing the write`,
+        `state lease ${this.path} is gone, so this process no longer holds it; refusing the write`,
       );
     }
-    if (observed.record?.leaseId !== this.leaseId) {
-      this.markLost();
+    if (observed.record === null) {
+      throw new StateLeaseUnverifiableError(
+        `state lease ${this.path} holds no readable record, so this write cannot be proven safe; refusing it and retrying on the next tick`,
+      );
+    }
+    if (observed.record.leaseId !== this.leaseId) {
+      this.markLost(LEASE_LOSS_REPLACED);
       throw new StateLeaseLostError(
         `state lease ${this.path} now carries another holder's lease id; refusing to write state this process no longer owns`,
       );
@@ -612,6 +636,9 @@ export class StateProcessLease {
     if (this.closed) return;
     this.closed = true;
     this.stopHeartbeat();
+    // A lease already known to be lost is never touched again. Whatever sits
+    // at that path now belongs to the process that took it over.
+    if (this.lost) return;
     let current: ObservedLease | undefined;
     try {
       current = readLease(this.path);
@@ -636,8 +663,16 @@ export class StateProcessLease {
       this.countFailedBeat();
       return;
     }
-    if (observed === undefined || observed.record?.leaseId !== this.leaseId) {
-      this.markLost();
+    if (observed === undefined) {
+      this.markLost(LEASE_LOSS_REMOVED);
+      return;
+    }
+    if (observed.record === null) {
+      this.countFailedBeat();
+      return;
+    }
+    if (observed.record.leaseId !== this.leaseId) {
+      this.markLost(LEASE_LOSS_REPLACED);
       return;
     }
     try {
@@ -658,16 +693,25 @@ export class StateProcessLease {
    */
   private countFailedBeat(): void {
     this.failedBeats += 1;
-    if (this.failedBeats >= this.failureBudget) this.markLost();
+    if (this.failedBeats < this.failureBudget) return;
+    this.markLost(
+      `the lease file stayed unverifiable for ${this.failedBeats} consecutive heartbeats`,
+    );
   }
 
-  private markLost(): void {
+  private markLost(reason: string): void {
     if (this.lost) return;
     this.lost = true;
+    this.lostReason = reason;
     this.stopHeartbeat();
     const notify = this.onLost;
     this.onLost = undefined;
-    notify?.();
+    if (notify === undefined) return;
+    // Dispatched off the current stack so the write that detected this
+    // unwinds and throws before shutdown starts tearing the maker down.
+    setImmediate(() => {
+      notify(reason);
+    });
   }
 
   private stopHeartbeat(): void {

@@ -62,6 +62,7 @@ import {
   StateFile,
   StateFilePoisonedError,
   StateLeaseLostError,
+  StateLeaseUnverifiableError,
   StateProcessLease,
 } from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
@@ -81,7 +82,7 @@ const stateLease = StateProcessLease.acquire(cfg.stateFile, {
 // Set the moment this process stops owning the state lease. Every loop reads
 // it, so no further work is attempted while shutdown runs.
 let leaseLost = false;
-stateLease.startHeartbeat(() => void exitOnLostLease());
+stateLease.startHeartbeat((reason) => void exitOnLostLease(reason));
 let state: StateFile;
 try {
   state = new StateFile(cfg.stateFile, deployment, undefined, () =>
@@ -1006,6 +1007,13 @@ async function tick(): Promise<void> {
           throw err;
         }
         errorCount += 1;
+        if (err instanceof StateLeaseUnverifiableError) {
+          // Ownership could not be proven for this one write, so nothing was
+          // persisted and nothing was sent. The lease is still held and the
+          // next tick retries this order.
+          log(`order ${short(managed.id)} deferred:`, err.message);
+          continue;
+        }
         log(`order ${short(managed.id)} tick error:`, err instanceof Error ? err.message : err);
       }
     }
@@ -1017,7 +1025,7 @@ async function tick(): Promise<void> {
       void stop("state durability failure", 1);
     }
     if (err instanceof StateLeaseLostError) {
-      void exitOnLostLease();
+      void exitOnLostLease(err.message);
     }
   } finally {
     let orderCount = startingOrderCount;
@@ -1093,12 +1101,12 @@ async function main(): Promise<void> {
  * supervisor restart us: the restart either re-acquires the lease or fails
  * closed against the live holder.
  */
-async function exitOnLostLease(): Promise<void> {
+async function exitOnLostLease(reason: string): Promise<void> {
   if (leaseLost) return;
   leaseLost = true;
   log(
-    `FATAL: the state lease ${cfg.stateFile}.lock is held by another process now. ` +
-      "This maker was displaced, stopped writing state, and exits so its supervisor can restart it",
+    `FATAL: this maker no longer holds the state lease ${cfg.stateFile}.lock: ${reason}. ` +
+      "It stopped writing state and exits so its supervisor can restart it",
   );
   try {
     await stop("state lease lost", 1);
