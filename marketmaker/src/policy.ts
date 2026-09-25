@@ -404,6 +404,24 @@ export interface RefillInput {
 /** Repost only while under the listing target (rungs times listings per
  *  rung), under the in-flight exposure cap, holding inventory beyond the
  *  reserve, and holding native gas headroom on the ETH leg. */
+/** Inventory or gas below what the next listing needs. */
+export function fundsShort(x: RefillInput): boolean {
+  return (
+    x.balanceWei < x.reserveWei + x.orderWei ||
+    x.gasBalanceWei < x.gasReserveWei
+  );
+}
+
+/** True when inventory or gas, and nothing else, keeps a rung unlisted:
+ *  the ladder wants another listing and capacity allows it. */
+export function inventoryShort(x: RefillInput): boolean {
+  return (
+    x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&
+    x.inflightCount < x.maxInflight &&
+    fundsShort(x)
+  );
+}
+
 export function shouldPost(x: RefillInput): boolean {
   return (
     x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&

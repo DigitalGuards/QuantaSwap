@@ -96,14 +96,31 @@ file; both Node packages require the sibling `config/protocol-v2.json` at runtim
 
 ## Prerequisites
 
-- Docker Engine with Compose v2;
+- Docker Engine with Compose 2.24 or newer;
 - Node.js 20 or newer for the one-time key bootstrap;
 - reachable order-book, Ethereum RPC, and QRL RPC endpoints;
-- independent testnet capital for both legs and gas.
+- independent testnet capital for both legs and gas (see "Funding" below);
+- for release verification: cosign 3.0 or newer and GitHub CLI 2.49 or newer.
 
 Use RPC endpoints you trust. Claim simulation necessarily discloses a preimage
 to the configured RPC immediately before broadcast. The order book remains a
 coordination service and must never be trusted as proof of on-chain state.
+
+### Funding
+
+With the defaults (ETH pair only, two rungs per direction, 0.02 ETH rung-0
+size, rung n sized n+1 times), quoting the full ladder in both directions needs
+about 0.11 Sepolia ETH (0.06 listed plus the 0.05 gas reserve) and the QRL
+value of 0.06 ETH plus the 5 QRL reserve (roughly 260 QRL at 4,200 QRL/ETH). A
+smaller trial profile such as `MM_ORDERS_PER_DIRECTION=1` with
+`MM_ETH_ORDER_WEI=5000000000000000` (0.005 ETH) needs about 0.055 ETH and
+26 QRL. The maker logs one line per pair and direction when inventory or gas
+keeps a rung unlisted, and another when quoting resumes.
+
+Testnet sources: QRL from the [zondscan faucet](https://zondscan.com/faucet)
+(100 QRL per address per 24 hours, so the default ladder takes about three
+days of claims; start with the trial profile), Sepolia ETH from any public
+Sepolia faucet, and Sepolia USDC from [faucet.circle.com](https://faucet.circle.com).
 
 ## Verified image releases
 
@@ -116,7 +133,9 @@ attaches an SBOM and maximum-mode build provenance, creates a GitHub artifact
 attestation, and signs the immutable image digest with Sigstore keyless signing.
 
 For production-like testing, pin the digest printed in the successful release
-workflow rather than relying on a mutable tag:
+workflow. Releases are signed with cosign 3 and carry OCI 1.1 referrer
+bundles: cosign 2.x reports `no signatures found`, and `gh attestation` needs
+GitHub CLI 2.49 or newer.
 
 ```bash
 docker pull ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
@@ -129,9 +148,24 @@ gh attestation verify \
   --repo DigitalGuards/QuantaSwap
 ```
 
-The local Compose file builds from source by default. An operator who selects a
-published image should replace its `build` entry only after reviewing the
-release digest, signature identity, attestation, SBOM, and migration notes.
+The local Compose file builds from source by default. After reviewing the
+release digest, signature identity, attestation, SBOM, and migration notes,
+run the published image with the release overlay, which drops the local build:
+
+```bash
+LP_IMAGE=ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest> \
+  docker compose -f compose.yaml -f compose.release.yaml up -d
+```
+
+### Compose variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LP_IMAGE` | (required by `compose.release.yaml`) | Verified release image, pinned by digest |
+| `LP_KIT_VERSION` | `local` | Tag for a locally built image |
+| `LP_COMPOSE_PROJECT` | `quantaswap-lp` | Compose project name; set per instance |
+| `LP_STATE_VOLUME` | `quantaswap-lp-state` | Named volume holding recovery state; one per instance |
+| `LP_HEALTH_PORT` | `8092` | Host loopback port for `/health` |
 
 ## First boot
 
@@ -153,7 +187,9 @@ It refuses to overwrite either file. Back them up before funding the addresses.
 Edit `.env` and review every endpoint, chain id, HTLC address, asset, reserve,
 order size, price source, and timeout. The example points to the current public
 testnet services, but an independent operator should use RPC infrastructure it
-controls or independently trusts.
+controls or independently trusts. `MM_ORDERBOOK_URL` defaults to the public
+book at `https://quantaswap.io/api`; for a dry run, point it at the staging book
+`https://dev.quantaswap.io/api` first.
 
 Fund the printed addresses with testnet inventory and gas, then start:
 
