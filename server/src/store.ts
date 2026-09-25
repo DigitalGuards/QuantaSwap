@@ -233,7 +233,19 @@ const DEFAULT_PRESENCE_TTL_S = 90;
 const MAX_CONCURRENT_TAKES_PER_IP = 4;
 const MAX_TAKES_PER_IP_PER_DAY = 24;
 const TAKE_WINDOW_S = 24 * 3600;
+// Pending (unreleased, unexpired) proposals per order. Expired and
+// released proposals stay retained as evidence but never hold a slot: when
+// the retained set is full, the oldest non-pending proposal is evicted so a
+// burst of short-lived or self-released intents cannot jam an order.
 const MAX_FILL_INTENTS_PER_ORDER = 8;
+// Direct submissions dated further ahead than this are refused. Honest
+// clients stamp issuance before the wallet prompt, so their proposals
+// arrive in the past; a future-dated one stays hidden from makers until it
+// matures while occupying a pending slot. Federated imports keep the
+// general protocol skew so older peers do not degrade.
+const MAX_INTENT_FUTURE_SKEW_S = 30;
+// How often the per-IP fill-intent admission log is pruned.
+const ADMISSION_PRUNE_INTERVAL_S = 60;
 const MAX_CONFLICT_PROOFS = 2;
 const SIGNED_TERMINAL_GRACE_S = 5 * 60;
 const MAX_FILL_RESPONSE_S = 15 * 60;
@@ -266,6 +278,19 @@ const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
 const AMOUNT_RE = /^[0-9]{1,30}$/;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
+
+/** A proposal the maker may still select: not withdrawn, not expired. */
+const isPendingIntent = (intent: StoredFillIntentV1, now: number): boolean =>
+  intent.releasedAt === undefined && intent.auth.expiresAt > now;
+
+/** Maker-facing priority: signed issuance, clamped to arrival at this book.
+ *  The taker chooses issuedAt, so backdating it must not buy priority over
+ *  proposals that genuinely arrived earlier. Slow wallet approval is fine:
+ *  it only moves the proposal to its real arrival time. */
+const intentPriority = (intent: {
+  auth: { issuedAt: number };
+  receivedAt: number;
+}): number => Math.max(intent.auth.issuedAt, intent.receivedAt);
 
 const sha256Hex = (s: string): string =>
   createHash("sha256").update(s).digest("hex");
@@ -1076,6 +1101,12 @@ export class OrderStore {
   private orders = new Map<string, Order>();
   /** Last maker heartbeat per order id. Deliberately not persisted. */
   private seenAt = new Map<string, number>();
+  /** Direct fill-intent receipt times per source IP hash, kept for the
+   *  whole daily window. Intent records are retained only minutes past
+   *  expiry, so the daily cap cannot be derived from them. Seeded from
+   *  retained intents on load; older admissions do not survive a restart. */
+  private intentAdmissions = new Map<string, number[]>();
+  private admissionsPrunedAt = 0;
   private listeners: Array<() => void> = [];
   private federationListeners: Array<(event: FederationEvent) => void> = [];
   private readonly presenceTtlS: number;
@@ -1087,6 +1118,39 @@ export class OrderStore {
     this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
     this.prepareStorage();
     this.load();
+    this.seedIntentAdmissions();
+  }
+
+  private seedIntentAdmissions(): void {
+    const federatedHash = sha256Hex("federation");
+    const since = nowS() - TAKE_WINDOW_S;
+    for (const order of this.orders.values()) {
+      for (const intent of order.fillIntents ?? []) {
+        if (intent.acceptorIpHash === federatedHash) continue;
+        if (intent.receivedAt <= since) continue;
+        const admissions = this.intentAdmissions.get(intent.acceptorIpHash) ?? [];
+        admissions.push(intent.receivedAt);
+        this.intentAdmissions.set(intent.acceptorIpHash, admissions);
+      }
+    }
+  }
+
+  /** Admissions from one source inside the daily window, pruning the rest. */
+  private recentIntentAdmissions(ipHash: string, now: number): number[] {
+    const recent = (this.intentAdmissions.get(ipHash) ?? []).filter(
+      (receivedAt) => receivedAt > now - TAKE_WINDOW_S,
+    );
+    if (recent.length === 0) this.intentAdmissions.delete(ipHash);
+    else this.intentAdmissions.set(ipHash, recent);
+    return recent;
+  }
+
+  private pruneIntentAdmissions(now: number): void {
+    if (now - this.admissionsPrunedAt < ADMISSION_PRUNE_INTERVAL_S) return;
+    this.admissionsPrunedAt = now;
+    for (const ipHash of [...this.intentAdmissions.keys()]) {
+      this.recentIntentAdmissions(ipHash, now);
+    }
   }
 
   /** Fires after every observable change (mutation persisted, or a maker
@@ -1304,6 +1368,7 @@ export class OrderStore {
   private sweep(): void {
     const now = nowS();
     let dirty = false;
+    this.pruneIntentAdmissions(now);
     for (const order of this.orders.values()) {
       if (order.fillIntents !== undefined) {
         const retained = order.fillIntents.filter(
@@ -1893,6 +1958,12 @@ export class OrderStore {
     if (order.status !== "open" || order.equivocated === true) {
       throw new ApiError(409, "order is no longer open");
     }
+    if (verified.auth.issuedAt > nowS() + MAX_INTENT_FUTURE_SKEW_S) {
+      throw new ApiError(
+        400,
+        "fill request is dated in the future; check your device clock",
+      );
+    }
     if (!this.hasRunway(order, nowS())) {
       throw new ApiError(
         409,
@@ -1975,7 +2046,9 @@ export class OrderStore {
         "fill intent nonce conflicts with another signed intent",
       );
     }
-    if (intents.length >= MAX_FILL_INTENTS_PER_ORDER) {
+    const now = nowS();
+    const pending = intents.filter((intent) => isPendingIntent(intent, now));
+    if (pending.length >= MAX_FILL_INTENTS_PER_ORDER) {
       throw new ApiError(
         429,
         "this order already has too many pending fill intents",
@@ -1983,17 +2056,26 @@ export class OrderStore {
       );
     }
 
-    const now = nowS();
     const ipHash = sha256Hex(takerIp);
     if (!federated) {
+      if (
+        pending.some(
+          (intent) =>
+            intent.intent.takerEthAccount === verified.intent.takerEthAccount ||
+            intent.intent.takerQrlAccount === verified.intent.takerQrlAccount,
+        )
+      ) {
+        throw new ApiError(
+          409,
+          "you already have a pending fill request for this order; wait for it to expire or release it",
+        );
+      }
       const activeIntentCount = [...this.orders.values()].reduce(
         (count, candidate) =>
           count +
           (candidate.fillIntents ?? []).filter(
             (intent) =>
-              intent.acceptorIpHash === ipHash &&
-              intent.releasedAt === undefined &&
-              intent.auth.expiresAt > now,
+              intent.acceptorIpHash === ipHash && isPendingIntent(intent, now),
           ).length,
         0,
       );
@@ -2003,22 +2085,24 @@ export class OrderStore {
           "you already have fill requests in progress; finish or let them expire",
         );
       }
-      const recentIntentCount = [...this.orders.values()].reduce(
-        (count, candidate) =>
-          count +
-          (candidate.fillIntents ?? []).filter(
-            (intent) =>
-              intent.acceptorIpHash === ipHash &&
-              intent.receivedAt > now - TAKE_WINDOW_S,
-          ).length,
-        0,
-      );
-      if (recentIntentCount >= MAX_TAKES_PER_IP_PER_DAY) {
+      if (
+        this.recentIntentAdmissions(ipHash, now).length >=
+        MAX_TAKES_PER_IP_PER_DAY
+      ) {
         throw new ApiError(
           429,
           "daily fill intent limit reached; leave some liquidity for others",
         );
       }
+    }
+
+    // Make room by dropping the oldest non-pending proposal. Pending ones
+    // are below the cap here, so a full retained set always has one.
+    if (intents.length >= MAX_FILL_INTENTS_PER_ORDER) {
+      const oldest = intents
+        .filter((intent) => !isPendingIntent(intent, now))
+        .sort((left, right) => left.auth.expiresAt - right.auth.expiresAt)[0];
+      if (oldest !== undefined) intents.splice(intents.indexOf(oldest), 1);
     }
 
     const stored: StoredFillIntentV1 = {
@@ -2031,6 +2115,12 @@ export class OrderStore {
     intents.push(stored);
     order.fillIntents = intents;
     order.updatedAt = now;
+    if (!federated) {
+      this.intentAdmissions.set(ipHash, [
+        ...this.recentIntentAdmissions(ipHash, now),
+        now,
+      ]);
+    }
     this.persist();
     if (order.visibility === "public") {
       this.publish({
@@ -2071,6 +2161,7 @@ export class OrderStore {
       )
       .sort(
         (left, right) =>
+          intentPriority(left) - intentPriority(right) ||
           left.auth.issuedAt - right.auth.issuedAt ||
           left.intentDigest.localeCompare(right.intentDigest),
       )

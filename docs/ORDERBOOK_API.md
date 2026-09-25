@@ -213,7 +213,9 @@ bound** across local and federated sources, with at most **48 federated public
 portable orders** and **16 first supplied by one direct peer**. These bounds are
 also checked while loading persisted state. Each order retains at most **8
 FillIntentV2 proposals** and **2 conflicting proof artifacts** per conflict
-class. A full retained store rejects new creates while preserving active
+class. Only pending proposals (unreleased and unexpired) count against the
+intent bound: when the retained set is full, a new proposal evicts the
+non-pending one with the earliest expiry. A full retained store rejects new creates while preserving active
 recovery evidence.
 
 These are resource ceilings, not Sybil resistance. A public client with enough
@@ -437,7 +439,9 @@ sybil resistance):
   `locking`, through the earlier of T1 or two hours after acceptance. Release
   frees the slot.
 - **24 actions per rolling 24 h**: portable intents count by mirror receipt
-  time and legacy takes by acceptance time.
+  time and legacy takes by acceptance time. Intent admissions are tracked for
+  the full window independently of intent retention; a restart keeps only
+  admissions still backed by retained intents.
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
@@ -785,13 +789,21 @@ Raw preimages that do not match their signed commitments return `401`.
 For a private order, send the origin's share capability in `X-Share-Token`
 or `shareToken`. → `201 {"intent": {"intentDigest", "intent", "auth",
 "receivedAt"}}`. Exact retries are idempotent. The order remains open until
-the maker publishes FillV2. At most 8 pending intents are retained per order.
+the maker publishes FillV2. At most 8 pending intents are held per order;
+expired and released ones never block new proposals. Each taker ETH or QRL
+account may hold one pending intent per order (`409` otherwise; release it or
+let it expire). Direct submissions issued more than **30 s** in the future are
+refused with `400`: sync the device clock.
 
 ### `GET /orders/:id/intents`: read pending proposals (maker)
 
-→ `200 {"intents": [...]}` ordered by signed `auth.issuedAt`, then semantic
-`intentDigest`. Mirror-local `receivedAt` never decides the winner. Proposals
-issued in the future, expired proposals, and released proposals are omitted.
+→ `200 {"intents": [...]}` in first-come order: lowest
+`max(auth.issuedAt, receivedAt)`, then `auth.issuedAt`, then semantic
+`intentDigest`. The taker chooses `issuedAt`, so the clamp to this book's
+receipt time stops backdated proposals from jumping earlier arrivals; a book
+that under-reports `receivedAt` can only fall back to issuance order.
+Proposals issued in the future, expired proposals, and released proposals are
+omitted.
 Public portable proposals are public data. A private order additionally
 requires `X-Maker-Token` and remains origin-local.
 

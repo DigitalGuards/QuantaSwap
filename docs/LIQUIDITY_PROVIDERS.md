@@ -74,9 +74,11 @@ yours.
 3. **Verify proposals**: poll `GET /orders/:id/intents`. Independently verify
    every FillIntentV2 signature, deployment, order digest, taker accounts,
    release commitment, and expiry. Discard future-issued proposals, then select
-   by signed `auth.issuedAt` and semantic `intentDigest`. Never use mirror-local
-   `receivedAt` as a tie-breaker. Persist that exact proposal before making a
-   terminal decision.
+   first-come: lowest `max(auth.issuedAt, receivedAt)`, then `auth.issuedAt`,
+   then semantic `intentDigest`. The taker picks `issuedAt`, so ranking on it
+   alone rewards backdating; clamping to your book's receipt time removes that,
+   and a book that under-reports `receivedAt` only falls back to issuance
+   order. Persist that exact proposal before making a terminal decision.
 4. **Generate and persist**: generate a fresh 32-byte CSPRNG secret, compute
    `hashlock = sha256(secret)`, choose safe T1/T2, and persist the secret and
    terms. Never reuse a secret across swaps or chains.
