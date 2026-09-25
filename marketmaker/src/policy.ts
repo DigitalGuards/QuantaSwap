@@ -167,14 +167,16 @@ export interface DecideInput {
   lockGraceS: number;
   /** Submit the taker's final claim ourselves once the secret is public. */
   sponsorClaims: boolean;
+  /** Our address on the initiator leg; a sponsored claim only ever
+   *  targets a lock we funded. */
+  ourInitiator: string;
+  /** The taker's address on our initiator leg (the payout target we
+   *  locked for); null when unknown. */
+  takerOnInitiatorLeg: string | null;
+  /** Skip sponsoring this close to the lock's timeout. Must cover a full
+   *  transaction wait, since claim() reverts at the timeout. */
+  sponsorMarginS: number;
 }
-
-/** Skip a sponsored claim this close to the lock's timeout: claim()
- *  reverts at the timeout, so a late send only burns gas. */
-export const SPONSOR_MARGIN_S = 60;
-
-const unsetRecipient = (recipient: string): boolean =>
-  /^(0x|Q)0*$/i.test(recipient);
 
 const retryOk = (
   sentAt: number | null,
@@ -277,13 +279,18 @@ export function decide(x: DecideInput): Decision {
   // the recipient fixed at lock time, so doing it ourselves moves nothing
   // the taker is not already owed. It spares the taker gas on the chain
   // they receive on, which a newcomer from the other chain may not hold.
+  // The lock must be exactly the one we funded for this taker: the
+  // hashlock is public before we lock, so a third party could have taken
+  // it with their own dust swap.
   if (
     x.sponsorClaims &&
     x.iState.status === SwapStatus.Open &&
-    !unsetRecipient(x.iState.recipient) &&
+    sameAddr(x.iState.initiator, x.ourInitiator) &&
+    x.takerOnInitiatorLeg !== null &&
+    sameAddr(x.iState.recipient, x.takerOnInitiatorLeg) &&
     x.rConfirmed !== null &&
     x.rConfirmed.status === SwapStatus.Claimed &&
-    nowS < x.iState.timeout - SPONSOR_MARGIN_S &&
+    nowS < x.iState.timeout - x.sponsorMarginS &&
     retryOk(managed.sponsorSentAt, nowS, x.resendAfterS)
   ) {
     return "sponsor";

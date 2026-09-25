@@ -108,7 +108,9 @@ yours.
    owed, and it spares a taker who arrived from the other chain from holding
    gas where they receive. The reference maker does this by default
    (`MM_SPONSOR_CLAIMS=true`) with the same simulate-then-send path as its own
-   claim, and stops `60 s` before the lock's timeout.
+   claim, only for the exact lock it funded for that taker, and stops one
+   transaction timeout plus 60 s before the lock's timeout. A failed attempt
+   is logged and retried after `MM_RESEND_AFTER_S`.
 9. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.

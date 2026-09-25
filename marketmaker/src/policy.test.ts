@@ -13,7 +13,6 @@ import {
 } from "./htlc.js";
 import {
   canContinueWithoutBook,
-  SPONSOR_MARGIN_S,
   decide,
   earliestValidFillIntent,
   levelQuote,
@@ -106,7 +105,13 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     resendAfterS: 240,
     claimSafetyS: 600,
     lockGraceS: 0,
-    sponsorClaims: false,
+    // Shipping default. The fixture legs share one initiator/recipient
+    // pair, so point the sponsor identity at it: every lifecycle test then
+    // runs with the sponsor branch reachable.
+    sponsorClaims: true,
+    ourInitiator: TAKER_ETH,
+    takerOnInitiatorLeg: `0x${MY_QRL.slice(1)}`,
+    sponsorMarginS: 240,
     ...overrides,
   };
 }
@@ -595,15 +600,16 @@ describe("refund and settlement", () => {
 });
 
 describe("sponsored taker claim", () => {
+  const MARGIN = 240;
   const ourLock = (overrides: Partial<LegState> = {}): LegState =>
-    leg(SwapStatus.Open, { timeout: T1, recipient: TAKER_ETH, ...overrides });
+    leg(SwapStatus.Open, { timeout: T1, ...overrides });
   const revealed = (overrides: Partial<DecideInput> = {}): DecideInput =>
     input({
-      sponsorClaims: true,
       iState: ourLock(),
       rState: leg(SwapStatus.Claimed),
       rConfirmed: leg(SwapStatus.Claimed),
       nowS: NOW + 100,
+      sponsorMarginS: MARGIN,
       ...overrides,
     });
 
@@ -621,16 +627,19 @@ describe("sponsored taker claim", () => {
   });
 
   it("never sponsors inside the margin before our timeout", () => {
-    assert.equal(decide(revealed({ nowS: T1 - SPONSOR_MARGIN_S })), "wait");
-    assert.equal(decide(revealed({ nowS: T1 - SPONSOR_MARGIN_S - 1 })), "sponsor");
+    assert.equal(decide(revealed({ nowS: T1 - MARGIN })), "wait");
+    assert.equal(decide(revealed({ nowS: T1 - MARGIN - 1 })), "sponsor");
     assert.equal(decide(revealed({ nowS: T1 })), "refund");
   });
 
-  it("never sponsors a lock without a payout target", () => {
-    const eth = ourLock({ recipient: `0x${"0".repeat(40)}` });
-    const qrl = ourLock({ recipient: `Q${"0".repeat(128)}` });
-    assert.equal(decide(revealed({ iState: eth })), "wait");
-    assert.equal(decide(revealed({ iState: qrl })), "wait");
+  it("only sponsors the lock we funded for this taker", () => {
+    const someoneElses = ourLock({ initiator: SCAM_TOKEN });
+    const paysSomeoneElse = ourLock({ recipient: SCAM_TOKEN });
+    const unassigned = ourLock({ recipient: `0x${"0".repeat(40)}` });
+    assert.equal(decide(revealed({ iState: someoneElses })), "wait");
+    assert.equal(decide(revealed({ iState: paysSomeoneElse })), "wait");
+    assert.equal(decide(revealed({ iState: unassigned })), "wait");
+    assert.equal(decide(revealed({ takerOnInitiatorLeg: null })), "wait");
   });
 
   it("spaces retries by the resend interval", () => {
