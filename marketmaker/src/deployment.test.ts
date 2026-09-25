@@ -1,20 +1,43 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import {
+  assertPortableDeployment,
   assertRuntimeChainIds,
   makeDeploymentIdentity,
   parseDeploymentIdentity,
   sameDeployment,
 } from "./deployment.js";
+import { protocolV2Config } from "./protocol-v2-config.js";
 
 const CONFIG = {
   ethChainId: "11155111",
   qrlChainId: "1337",
   ethHtlc: "0x910D5d4a7f2037c01F3B4C835167357e89909281",
-  qrlHtlc: "Q238322ad2e8f935b4481fcc379779c31b84decb0",
+  qrlHtlc: `Q${"23".repeat(64)}`,
 };
 
 describe("deployment identity", () => {
+  it("accepts the real checksummed v3 contract and rejects other deployment identities", () => {
+    assert.doesNotThrow(() => assertPortableDeployment(makeDeploymentIdentity(protocolV2Config)));
+    assert.doesNotThrow(() => assertPortableDeployment(makeDeploymentIdentity({
+      ...protocolV2Config, qrlHtlc: `Q${protocolV2Config.qrlHtlc.slice(1).toLowerCase()}`,
+    })));
+    for (const override of [
+      { qrlHtlc: `Q${"11".repeat(64)}` },
+      { ethHtlc: `0x${"11".repeat(20)}` },
+      { qrlChainId: "1337" },
+      { qrlGenesisHash: `0x${"11".repeat(32)}` },
+    ]) {
+      assert.throws(() => assertPortableDeployment(makeDeploymentIdentity({ ...protocolV2Config, ...override })), /signing domain/);
+    }
+  });
+  it("binds the genesis and preserves the legacy identity boundary", () => {
+    const identity = makeDeploymentIdentity(CONFIG);
+    assert.equal(identity.schemaVersion, 2);
+    assert.throws(() => parseDeploymentIdentity({ ...identity, schemaVersion: 1 }, "legacy"), /malformed/);
+    assert.throws(() => parseDeploymentIdentity({ ...identity, qrlGenesisHash: `0x${"1".repeat(64)}` }, "changed genesis"), /fingerprint is invalid/);
+    assert.equal(sameDeployment(identity, makeDeploymentIdentity({ ...CONFIG, qrlGenesisHash: `0x${"1".repeat(64)}` })), false);
+  });
   it("canonicalizes addresses and chain IDs into a stable fingerprint", () => {
     const a = makeDeploymentIdentity(CONFIG);
     const b = makeDeploymentIdentity({

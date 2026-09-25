@@ -44,7 +44,8 @@ describe("WalletConnect adapter", () => {
         qrModalOptions: expect.objectContaining({
           themeMode: "dark",
           themeVariables: expect.objectContaining({
-            "--wcm-accent-color": "#ddc9a6",
+            "--wcm-accent-color": "#33ade6",
+            "--wcm-background-color": "#0e1320",
           }),
         }),
       }),

@@ -1,17 +1,24 @@
 {
   "name": "quantaswap-marketmaker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "QuantaSwap market maker: always-online protocol-mode maker that keeps the order book stocked",
   "license": "GPL-3.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "scripts": {
     "build": "tsc",
+    "init:keys": "npm run build && node dist/init-keys.js",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test dist/deployment.test.js dist/htlc.test.js dist/policy.test.js dist/price.test.js dist/state.test.js"
+    "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {
-    "@theqrl/web3": "^0.4.4",
+    "@qrlwallet/connect": "5.0.0",
+    "@theqrl/mldsa87": "2.1.4",
+    "@theqrl/wallet.js": "6.2.4",
+    "@theqrl/web3": "1.0.3",
     "ethers": "^6.13.4"
   },
   "devDependencies": {

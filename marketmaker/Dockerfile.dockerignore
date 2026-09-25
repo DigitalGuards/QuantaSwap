@@ -1,0 +1,10 @@
+**
+!config/
+!config/protocol-v2.json
+!config/protocol-v2-vectors.json
+!marketmaker/
+!marketmaker/package.json
+!marketmaker/package-lock.json
+!marketmaker/tsconfig.json
+!marketmaker/src/
+!marketmaker/src/**

@@ -6,9 +6,13 @@
 //   node scripts/smoke-prelock.js qrl <htlc-address>   (env: QRL_RPC_URL, QRL_HEXSEED)
 
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
+const { loadArtifact } = require("./artifacts");
+const {
+  QRVM_ZERO_ADDRESS,
+  assertQip55Deployment,
+  assertQip55ToolingAccount,
+} = require("./qip55");
 
 const leg = process.argv[2];
 const htlcAddress = process.argv[3];
@@ -17,8 +21,7 @@ if ((leg !== "eth" && leg !== "qrl") || !htlcAddress) {
   process.exit(1);
 }
 
-const artifactPath = path.join(__dirname, "..", "build", "hyperion", "HTLC.json");
-const { abi } = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+const { abi } = loadArtifact(leg === "eth" ? "evm" : "qrl", "HTLC");
 
 const newSecret = () => {
   const preimage = `0x${crypto.randomBytes(32).toString("hex")}`;
@@ -60,6 +63,8 @@ async function makeDriver() {
   if (!rpc || !hexseed) throw new Error("missing QRL_RPC_URL / QRL_HEXSEED");
   const web3 = new Web3(new Web3.providers.HttpProvider(rpc));
   const acc = web3.qrl.accounts.seedToAccount(hexseed);
+  assertQip55ToolingAccount(acc.address);
+  assertQip55Deployment(htlcAddress);
   web3.qrl.wallet?.add(hexseed);
   web3.qrl.transactionConfirmationBlocks = 1;
   const contract = new web3.qrl.Contract(abi, htlcAddress);
@@ -97,10 +102,10 @@ async function main() {
   const drv = await makeDriver();
   const dust = 1000n;
   // The two legs' web3 stacks return an `address` field with different
-  // prefixes (ethers 0x-hex, @theqrl/web3 Q/Z-prefixed), so compare on the
-  // bare 40 hex chars only.
-  const bare = (a) => a.replace(/^(0x|0z|Q|Z)/i, "").toLowerCase();
-  const ZERO = "0".repeat(40);
+  // prefixes (ethers 0x-hex, @theqrl/web3 Q-prefixed), so compare only
+  // the prefix-free hexadecimal bodies.
+  const bare = (a) => a.replace(/^(0x|Q)/, "").toLowerCase();
+  const ZERO = (leg === "qrl" ? QRVM_ZERO_ADDRESS : `0x${"0".repeat(40)}`).slice(2);
   console.log(`[smoke-prelock] leg ${leg}, account ${drv.address}, htlc ${htlcAddress}`);
 
   // Round trip: open lock -> assign(self) -> claim.

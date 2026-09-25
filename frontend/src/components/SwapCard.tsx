@@ -4,7 +4,7 @@ import { ArrowDownUp, ArrowLeftRight } from "lucide-react";
 import { ETH_LEG, INITIATOR_TIMEOUT_S, QRL_LEG, RESPONDER_TIMEOUT_S } from "@/config";
 import type { ActiveSwap, Direction } from "@/lib/activeSwap";
 import { generateSecret } from "@/lib/secrets";
-import { shortAddr } from "@/lib/htlc";
+import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 import { Input } from "@/components/UI/Input";
@@ -85,7 +85,7 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
             const next = e.target.value.replace(",", ".");
             if (next === "" || /^\d*\.?\d*$/.test(next)) setValue(next);
           }}
-          className="font-data h-12 pr-16 text-lg"
+          className="font-numeric h-12 pr-16 text-lg"
         />
         <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
           {leg.display}
@@ -121,21 +121,25 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
         {legBox("To", toLeg, toAmount, setToAmount)}
 
         <div className="space-y-1.5 rounded-md border border-border/60 bg-muted/20 p-3 text-sm">
-          <div className="flex justify-between">
+          <div className="flex items-start justify-between gap-4">
             <span className="text-muted-foreground">Receive to</span>
-            <span className="font-data text-xs text-identity-accent">
+            <span className="min-w-0 text-right text-xs text-blue-accent">
               {toLeg.key === "qrl"
                 ? qrlAccount
-                  ? shortAddr(qrlAccount)
+                  ? (
+                      <AddressFingerprint address={qrlAccount} />
+                    )
                   : "connect QRL wallet"
                 : ethAccount
-                  ? shortAddr(ethAccount)
+                  ? (
+                      <AddressFingerprint address={ethAccount} />
+                    )
                   : "connect ETH wallet"}
             </span>
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
-            <span className="font-data">2h initiator / 1h responder</span>
+            <span className="font-numeric">2h initiator / 1h responder</span>
           </div>
         </div>
 

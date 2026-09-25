@@ -4,11 +4,14 @@
 // state and re-lock the same hashlock on a replacement contract.
 
 import { createHash } from "node:crypto";
+import { canonicalQip55QrlAddress } from "./qip55.js";
+import { protocolV2Config } from "./protocol-v2-config.js";
 
 export interface DeploymentIdentity {
-  schemaVersion: 1;
+  schemaVersion: 2;
   ethChainId: string;
   qrlChainId: string;
+  qrlGenesisHash: string;
   ethHtlc: string;
   qrlHtlc: string;
   configFingerprint: string;
@@ -19,10 +22,10 @@ export interface DeploymentConfig {
   qrlChainId: string;
   ethHtlc: string;
   qrlHtlc: string;
+  qrlGenesisHash?: string;
 }
 
 const ETH_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const QRL_ADDRESS = /^Q[0-9a-fA-F]{40}$/;
 const FINGERPRINT = /^sha256:[0-9a-f]{64}$/;
 
 /** Canonical decimal chain ID. RPC results may be decimal or 0x-prefixed. */
@@ -43,17 +46,15 @@ function canonicalEthAddress(value: string): string {
 }
 
 function canonicalQrlAddress(value: string): string {
-  if (!QRL_ADDRESS.test(value)) {
-    throw new Error("QRL HTLC must be a Q-prefixed 20-byte address");
-  }
-  return `Q${value.slice(1).toLowerCase()}`;
+  return canonicalQip55QrlAddress(value);
 }
 
 function fingerprint(config: Omit<DeploymentIdentity, "schemaVersion" | "configFingerprint">): string {
   const encoded = [
-    "quantaswap-marketmaker-deployment-v1",
+    "quantaswap-marketmaker-deployment-v2",
     `ethChainId=${config.ethChainId}`,
     `qrlChainId=${config.qrlChainId}`,
+    `qrlGenesisHash=${config.qrlGenesisHash}`,
     `ethHtlc=${config.ethHtlc}`,
     `qrlHtlc=${config.qrlHtlc}`,
   ].join("\n");
@@ -61,14 +62,17 @@ function fingerprint(config: Omit<DeploymentIdentity, "schemaVersion" | "configF
 }
 
 export function makeDeploymentIdentity(config: DeploymentConfig): DeploymentIdentity {
+  const genesis = config.qrlGenesisHash ?? protocolV2Config.qrlGenesisHash;
+  if (!/^0x[0-9a-f]{64}$/.test(genesis)) throw new Error("QRL genesis hash must be canonical");
   const normalized = {
     ethChainId: canonicalChainId(config.ethChainId, "ETH chain ID"),
     qrlChainId: canonicalChainId(config.qrlChainId, "QRL chain ID"),
+    qrlGenesisHash: genesis,
     ethHtlc: canonicalEthAddress(config.ethHtlc),
     qrlHtlc: canonicalQrlAddress(config.qrlHtlc),
   };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ...normalized,
     configFingerprint: fingerprint(normalized),
   };
@@ -80,9 +84,10 @@ export function parseDeploymentIdentity(value: unknown, label: string): Deployme
   }
   const record = value as Record<string, unknown>;
   if (
-    record.schemaVersion !== 1 ||
+    record.schemaVersion !== 2 ||
     typeof record.ethChainId !== "string" ||
     typeof record.qrlChainId !== "string" ||
+    typeof record.qrlGenesisHash !== "string" ||
     typeof record.ethHtlc !== "string" ||
     typeof record.qrlHtlc !== "string" ||
     typeof record.configFingerprint !== "string" ||
@@ -93,12 +98,14 @@ export function parseDeploymentIdentity(value: unknown, label: string): Deployme
   const parsed = makeDeploymentIdentity({
     ethChainId: record.ethChainId,
     qrlChainId: record.qrlChainId,
+    qrlGenesisHash: record.qrlGenesisHash,
     ethHtlc: record.ethHtlc,
     qrlHtlc: record.qrlHtlc,
   });
   if (
     parsed.ethChainId !== record.ethChainId ||
     parsed.qrlChainId !== record.qrlChainId ||
+    parsed.qrlGenesisHash !== record.qrlGenesisHash ||
     parsed.ethHtlc !== record.ethHtlc ||
     parsed.qrlHtlc !== record.qrlHtlc ||
     parsed.configFingerprint !== record.configFingerprint
@@ -113,10 +120,18 @@ export function sameDeployment(a: DeploymentIdentity, b: DeploymentIdentity): bo
     a.schemaVersion === b.schemaVersion &&
     a.ethChainId === b.ethChainId &&
     a.qrlChainId === b.qrlChainId &&
+    a.qrlGenesisHash === b.qrlGenesisHash &&
     a.ethHtlc === b.ethHtlc &&
     a.qrlHtlc === b.qrlHtlc &&
     a.configFingerprint === b.configFingerprint
   );
+}
+
+/** Compare canonical identities, including checksum-normalized QRL addresses. */
+export function assertPortableDeployment(deployment: DeploymentIdentity): void {
+  if (!sameDeployment(deployment, makeDeploymentIdentity(protocolV2Config))) {
+    throw new Error("configured deployment does not match the portable protocol signing domain");
+  }
 }
 
 /** Fail before balances, order-book calls, or any transaction if an RPC

@@ -6,6 +6,11 @@ export type WalletConnectClient = InstanceType<typeof EthereumProvider>;
 let clientPromise: Promise<WalletConnectClient> | undefined;
 const STORAGE_KEY = "quantaswap:ethereum:walletconnect";
 
+// Reown's modal lives in its own shadow DOM and takes plain color strings, so
+// the two theme tokens it needs are resolved here from the QRL Blue palette in
+// index.css: --primary (hsl(199 78% 55%)) and --card (hsl(222 38% 9%)).
+const QRL_BLUE = { accent: "#33ade6", surface: "#0e1320" } as const;
+
 export function isWalletConnectConfigured(): boolean {
   return /^[a-f\d]{32}$/i.test(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID?.trim() ?? "");
 }
@@ -50,12 +55,18 @@ export function getWalletConnectClient(): Promise<WalletConnectClient> {
         },
         telemetryEnabled: false,
         showQrModal: true,
+        // QRL Blue, matching the sibling <qrl-pairing-modal> on the QRL leg.
+        // The provider maps these legacy names onto Reown AppKit variables:
+        // accent-color drives --w3m-accent and the QR modules, background-color
+        // drives --w3m-color-mix, and container-border-radius drives
+        // --w3m-border-radius-master, the base unit AppKit multiplies per
+        // component (3px keeps cards near the app's 12px radius).
         qrModalOptions: {
           themeMode: "dark",
           themeVariables: {
             "--wcm-font-family": '"Instrument Sans Variable", system-ui, sans-serif',
-            "--wcm-accent-color": "#ddc9a6",
-            "--wcm-background-color": "#0d0e11",
+            "--wcm-accent-color": QRL_BLUE.accent,
+            "--wcm-background-color": QRL_BLUE.surface,
             "--wcm-container-border-radius": "3px",
             "--wcm-z-index": "1000",
           },

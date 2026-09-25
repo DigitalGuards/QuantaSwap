@@ -1,0 +1,76 @@
+# Local acceptance lab only. Two containers on one machine prove transport and
+# recovery behavior, but do not provide independent operators or availability.
+
+name: ${ORDERBOOK_LAB_PROJECT:-quantaswap-federation-lab}
+
+x-orderbook-service: &orderbook-service
+  image: ${ORDERBOOK_LAB_IMAGE:-quantaswap-orderbook:lab}
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=32m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pids_limit: 128
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 15s
+
+services:
+  mirror-a:
+    <<: *orderbook-service
+    environment:
+      ORDERBOOK_HOST: 0.0.0.0
+      PORT: "8091"
+      ORDERBOOK_DATA: /var/lib/quantaswap-orderbook/orders.json
+      ORDERBOOK_TRUST_PROXY: none
+      PRESENCE_TTL_S: "90"
+      ORDERBOOK_REQUEST_TIMEOUT_MS: "15000"
+      ORDERBOOK_SHUTDOWN_TIMEOUT_MS: "10000"
+      ORDERBOOK_STREAM_BACKPRESSURE_MS: "10000"
+      ORDERBOOK_FEDERATION_PEERS: http://mirror-b:8091/api
+      ORDERBOOK_FEDERATION_PEER_IDS: mirror-b
+      ORDERBOOK_FEDERATION_PEER_TOKENS: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "true"
+      ORDERBOOK_FEDERATION_READ_TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      ORDERBOOK_FEDERATION_SYNC_MS: "1000"
+      ORDERBOOK_FEDERATION_REQUEST_TIMEOUT_MS: "2000"
+      ORDERBOOK_CORS_ORIGINS: ""
+    volumes:
+      - mirror-a-state:/var/lib/quantaswap-orderbook
+    ports:
+      - "127.0.0.1:${ORDERBOOK_LAB_PORT_A:-18091}:8091"
+
+  mirror-b:
+    <<: *orderbook-service
+    environment:
+      ORDERBOOK_HOST: 0.0.0.0
+      PORT: "8091"
+      ORDERBOOK_DATA: /var/lib/quantaswap-orderbook/orders.json
+      ORDERBOOK_TRUST_PROXY: none
+      PRESENCE_TTL_S: "90"
+      ORDERBOOK_REQUEST_TIMEOUT_MS: "15000"
+      ORDERBOOK_SHUTDOWN_TIMEOUT_MS: "10000"
+      ORDERBOOK_STREAM_BACKPRESSURE_MS: "10000"
+      ORDERBOOK_FEDERATION_PEERS: http://mirror-a:8091/api
+      ORDERBOOK_FEDERATION_PEER_IDS: mirror-a
+      ORDERBOOK_FEDERATION_PEER_TOKENS: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS: "true"
+      ORDERBOOK_FEDERATION_READ_TOKEN: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      ORDERBOOK_FEDERATION_SYNC_MS: "1000"
+      ORDERBOOK_FEDERATION_REQUEST_TIMEOUT_MS: "2000"
+      ORDERBOOK_CORS_ORIGINS: ""
+    volumes:
+      - mirror-b-state:/var/lib/quantaswap-orderbook
+    ports:
+      - "127.0.0.1:${ORDERBOOK_LAB_PORT_B:-18092}:8091"
+
+volumes:
+  mirror-a-state:
+  mirror-b-state:

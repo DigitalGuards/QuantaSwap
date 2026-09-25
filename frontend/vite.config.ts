@@ -21,6 +21,10 @@ export default defineConfig({
         target: "https://qrlwallet.com",
         changeOrigin: true,
         rewrite: () => "/api/qrl-rpc/testnet",
+        configure: (proxy) => {
+          // This server-side development proxy owns its upstream request.
+          proxy.on("proxyReq", (request) => request.removeHeader("origin"));
+        },
       },
       // Must precede /rpc/sepolia: Vite proxy keys prefix-match in order.
       "/rpc/sepolia-logs": {

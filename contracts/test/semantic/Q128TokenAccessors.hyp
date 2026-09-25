@@ -1,0 +1,98 @@
+==== ExternalSource: _canonical/MockTokens.hyp ====
+==== ExternalSource: _canonical/TestStable.hyp ====
+==== Source: Q128TokenAccessors.hyp ====
+import {BlocklistToken, MockERC20} from "_canonical/MockTokens.hyp";
+import {TestStable} from "_canonical/TestStable.hyp";
+
+contract Q128TokenAccessors {
+    MockERC20 private mockToken;
+    BlocklistToken private blocklistToken;
+    TestStable private testStable;
+
+    constructor() {
+        mockToken = new MockERC20();
+        blocklistToken = new BlocklistToken();
+        testStable = new TestStable();
+    }
+
+    function exerciseBalanceAliases(address first, address second) external returns (bool) {
+        mockToken.mint(first, 11);
+        mockToken.mint(second, 13);
+
+        require(mockToken.balanceOf(first) == 11, "first balance aliased");
+        require(mockToken.balanceOf(second) == 13, "second balance aliased");
+        return true;
+    }
+
+    function exerciseNestedAllowanceAliases(
+        address firstOwner,
+        address secondOwner,
+        address firstSpender,
+        address secondSpender
+    ) external returns (bool) {
+        mockToken.seedAllowance(firstOwner, firstSpender, 17);
+        mockToken.seedAllowance(firstOwner, secondSpender, 19);
+        mockToken.seedAllowance(secondOwner, firstSpender, 23);
+        mockToken.seedAllowance(secondOwner, secondSpender, 29);
+
+        require(mockToken.allowance(firstOwner, firstSpender) == 17, "first-first allowance aliased");
+        require(mockToken.allowance(firstOwner, secondSpender) == 19, "first-second allowance aliased");
+        require(mockToken.allowance(secondOwner, firstSpender) == 23, "second-first allowance aliased");
+        require(mockToken.allowance(secondOwner, secondSpender) == 29, "second-second allowance aliased");
+        return true;
+    }
+
+    function exerciseStableAllowanceAliases(address firstSpender, address secondSpender)
+        external
+        returns (bool)
+    {
+        testStable.approve(firstSpender, 31);
+        testStable.approve(secondSpender, 37);
+
+        require(testStable.allowance(address(this), firstSpender) == 31, "stable first allowance aliased");
+        require(testStable.allowance(address(this), secondSpender) == 37, "stable second allowance aliased");
+
+        testStable.approve(firstSpender, 0);
+        require(testStable.allowance(address(this), firstSpender) == 0, "stable reset missed first");
+        require(testStable.allowance(address(this), secondSpender) == 37, "stable reset changed second");
+        return true;
+    }
+
+    function exerciseBlockedAliases(address blockedRecipient, address allowedRecipient)
+        external
+        returns (bool)
+    {
+        blocklistToken.mint(address(this), 2);
+        blocklistToken.setBlocked(blockedRecipient, true);
+        blocklistToken.setBlocked(allowedRecipient, false);
+
+        require(blocklistToken.blocked(blockedRecipient), "blocked recipient getter false");
+        require(!blocklistToken.blocked(allowedRecipient), "allowed recipient getter true");
+
+        bool blockedTransferRejected;
+        try blocklistToken.transfer(blockedRecipient, 1) returns (bool transferred) {
+            blockedTransferRejected = !transferred;
+        } catch {
+            blockedTransferRejected = true;
+        }
+        require(blockedTransferRejected, "blocked transfer succeeded");
+        require(blocklistToken.transfer(allowedRecipient, 1), "allowed transfer failed");
+        require(blocklistToken.balanceOf(allowedRecipient) == 1, "allowed recipient balance");
+
+        blocklistToken.setBlocked(blockedRecipient, false);
+        blocklistToken.setBlocked(allowedRecipient, true);
+        require(!blocklistToken.blocked(blockedRecipient), "first unblock aliased");
+        require(blocklistToken.blocked(allowedRecipient), "second block aliased");
+        return true;
+    }
+}
+// ====
+// compileViaYul: also
+// ----
+// exerciseBalanceAliases(address,address): Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// exerciseNestedAllowanceAliases(address,address,address,address): Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// exerciseStableAllowanceAliases(address,address): Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Approval(address,address,uint256) from Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6: #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x1f
+// ~ emit Approval(address,address,uint256) from Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6: #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x25
+// ~ emit Approval(address,address,uint256) from Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6: #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x00
+// exerciseBlockedAliases(address,address): Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true

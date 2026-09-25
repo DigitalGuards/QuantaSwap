@@ -1,0 +1,24 @@
+{
+  "version": "2",
+  "description": "Fixed V2 test vector: Order maker Q + 128 twos, ETH maker 0x + 40 ones, ETH to QRL, amounts 1000000000000000 and 2000000000000000, public, no prelock; issuedAt 1800000000, expiresAt 1800003600, order nonce 42 repeated, maker token ab repeated, zero share. Intent: Q + 128 threes, ETH 0x + 40 twos, nonce 43 repeated, issuedAt +10, expiresAt +130; release secret 55 repeated. Fill: nonce 44 repeated, issuedAt +20, respondBy +80, hashlock 66 repeated, T1 +3600, T2 +1800. Cancel: nonce 45 repeated, issuedAt +30, reason 1. Hex repetitions denote bytes unless specified as characters.",
+  "domain": {
+    "name": "QuantaSwap",
+    "version": "2",
+    "ethChainId": "11155111",
+    "ethHtlc": "eip155:11155111:0x4d9d3adae3e479ca8a9e13c6e5ee4e4e7bc4f9b5",
+    "qrlChainId": "3151909",
+    "qrlGenesisHash": "0xd15407991193e6c23b733dc6bf9c628deaff8f9b6e252aa0d60030952b3e3ea4",
+    "qrlHtlc": "Q71d5194eaabf33e753b9f5ae7375c9c77f063ed0cb2908de65d0ba00354da0bf40403eb0247a536760625ca6ab9bbb58b875a72c8dcdb67feda2266580d05405"
+  },
+  "expected": {
+    "makerCapabilityZero": "0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549",
+    "shareCapabilityOne": "0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30",
+    "orderId": "680f1ac51008253a70792f659dfd37f2371ee2f3fcddf853605e8eea2711f079",
+    "orderDigest": "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4",
+    "messageDigest": "0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c",
+    "releaseCommitment": "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
+    "intentDigest": "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
+    "fillDigest": "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
+    "cancelDigest": "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd"
+  }
+}

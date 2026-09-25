@@ -7,6 +7,8 @@ import type { BrowserProvider } from "ethers";
 import { ETH_LEG, QRL_LEG, type LegKey } from "../config";
 import { allowanceOf, buildApproveData, qrlRpc } from "./htlc";
 import type { QrlTransport } from "../hooks/useQrlWallet";
+import { assertQip55ExecutionReady } from "./qip55";
+import { assertQrlNetwork } from "./qrlNetwork";
 
 export interface LegSenderHandles {
   browserProvider: BrowserProvider | null;
@@ -42,9 +44,12 @@ export const makeLegSender =
       await tx.wait();
     } else {
       if (!h.qrlAccount) throw new Error("QRL wallet not connected");
+      assertQip55ExecutionReady(h.qrlAccount, QRL_LEG.htlc);
+      await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
       let tx: Record<string, unknown> = {
         from: h.qrlAccount,
         to: QRL_LEG.htlc,
+        chainId: QRL_LEG.chainIdHex,
         data,
         ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
       };
@@ -56,16 +61,13 @@ export const makeLegSender =
         // shape its own internal sends use. Numeric gas under both keys,
         // decimal-string value. The relay wallet estimates itself, so it
         // keeps the minimal hex shape.
-        let gasLimit = 1_500_000;
-        try {
-          const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
-          gasLimit = Number((BigInt(estimated) * 130n) / 100n);
-        } catch {
-          // estimation can fail on some proxies; fall back to a safe limit
-        }
+        const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
+        const gasLimit = Number((BigInt(estimated) * 130n) / 100n);
+        if (!Number.isSafeInteger(gasLimit) || gasLimit <= 0) throw new Error("Invalid QRL gas estimate");
         tx = {
           from: h.qrlAccount,
           to: QRL_LEG.htlc,
+          chainId: QRL_LEG.chainIdHex,
           value: valueWei.toString(),
           data,
           gas: gasLimit,
@@ -73,6 +75,7 @@ export const makeLegSender =
           type: "0x2",
         };
       }
+      await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
       await h.qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
     }
   };
@@ -112,14 +115,18 @@ export const makePreflightedClaimSender =
     }
 
     if (!h.qrlAccount) throw new Error("QRL wallet not connected");
+    assertQip55ExecutionReady(h.qrlAccount, QRL_LEG.htlc);
+    await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
     const callTx: Record<string, unknown> = {
       from: h.qrlAccount,
       to: QRL_LEG.htlc,
+      chainId: QRL_LEG.chainIdHex,
       data,
       ...(valueWei > 0n ? { value: `0x${valueWei.toString(16)}` } : {}),
     };
     try {
-      await qrlRpc("qrl_call", [callTx, "latest"]);
+      const result = await qrlRpc("qrl_call", [callTx, "latest"]);
+      if (typeof result !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(result)) throw new Error("Invalid QRL simulation result");
     } catch {
       throw new Error("QRL claim preflight rejected; the secret was not submitted");
     }
@@ -142,6 +149,7 @@ export const makePreflightedClaimSender =
       sendTx = {
         from: h.qrlAccount,
         to: QRL_LEG.htlc,
+        chainId: QRL_LEG.chainIdHex,
         value: valueWei.toString(),
         data,
         gas: gasLimit,
@@ -149,6 +157,7 @@ export const makePreflightedClaimSender =
         type: "0x2",
       };
     }
+    await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
     try {
       await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] });
     } catch {

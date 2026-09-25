@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BrowserProvider } from "ethers";
 import { ETH_LEG, QRL_LEG } from "../config";
-import { makePreflightedClaimSender, type LegSenderHandles } from "./legSender";
+import { makeLegSender, makePreflightedClaimSender, type LegSenderHandles } from "./legSender";
+
+vi.mock("../config", async importOriginal => {
+  const actual = await importOriginal<typeof import("../config")>();
+  return { ...actual, QRL_LEG: { ...actual.QRL_LEG, htlc: `Q${"ab".repeat(64)}` },
+    ETH_LEG: { ...actual.ETH_LEG, htlc: `0x${"34".repeat(20)}` } };
+});
 
 const DATA = `0x${"12".repeat(68)}`;
 const ETH_ACCOUNT = "0x1111111111111111111111111111111111111111";
-const QRL_ACCOUNT = "Q2222222222222222222222222222222222222222";
+const QRL_ACCOUNT = `Q${"2".repeat(128)}`;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -64,72 +70,29 @@ describe("secret-bearing claim preflight", () => {
     expect(sendTransaction).not.toHaveBeenCalled();
   });
 
-  it("requires qrl_call and strict extension gas estimation before sending", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x" }), { status: 200 }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x186a0" }), {
-          status: 200,
-        }),
-      );
+  it("blocks legacy Q40 accounts before claim simulation or signing", async () => {
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const qrlRequest = vi.fn().mockResolvedValue("0xtx");
     const handles: LegSenderHandles = {
       browserProvider: null,
       ensureSepolia: vi.fn(),
-      qrlAccount: QRL_ACCOUNT,
+      qrlAccount: `Q${"2".repeat(40)}`,
       qrlTransport: "extension",
       qrlRequest,
     };
 
-    await makePreflightedClaimSender(handles)("qrl", DATA, 0n);
-
-    const firstBody = JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string) as {
-      method: string;
-      params: unknown[];
-    };
-    const secondBody = JSON.parse((fetchMock.mock.calls[1]?.[1] as RequestInit).body as string) as {
-      method: string;
-    };
-    expect(firstBody).toEqual({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "qrl_call",
-      params: [{ from: QRL_ACCOUNT, to: QRL_LEG.htlc, data: DATA }, "latest"],
-    });
-    expect(secondBody.method).toBe("qrl_estimateGas");
-    expect(qrlRequest).toHaveBeenCalledWith({
-      method: "qrl_sendTransaction",
-      params: [
-        expect.objectContaining({
-          from: QRL_ACCOUNT,
-          to: QRL_LEG.htlc,
-          data: DATA,
-          gas: 130_000,
-          gasLimit: 130_000,
-          type: "0x2",
-        }),
-      ],
-    });
+    await expect(makePreflightedClaimSender(handles)("qrl", DATA, 0n)).rejects.toThrow(
+      /64-byte address/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(qrlRequest).not.toHaveBeenCalled();
   });
 
-  it("never uses the extension fallback when strict estimation fails", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: "0x" }), { status: 200 }),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "estimate unavailable" } }),
-          { status: 200 },
-        ),
-      );
+  it("refuses a provider on the previous network before simulation", async () => {
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const qrlRequest = vi.fn();
+    const qrlRequest = vi.fn(async ({ method }: { method: string }) => method === "qrl_chainId" ? "0x539" : { number: "0x0", hash: QRL_LEG.genesisHash });
     const send = makePreflightedClaimSender({
       browserProvider: null,
       ensureSepolia: vi.fn(),
@@ -138,7 +101,33 @@ describe("secret-bearing claim preflight", () => {
       qrlRequest,
     });
 
-    await expect(send("qrl", DATA, 0n)).rejects.toThrow(/gas estimation failed/);
-    expect(qrlRequest).not.toHaveBeenCalled();
+    await expect(send("qrl", DATA, 0n)).rejects.toThrow(/identity mismatch/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(qrlRequest).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("qualified QRL sends", () => {
+  it.each([false, true])("pins the chain and rechecks after gas estimation, provider changed: %s", async change => {
+    let providerChain = QRL_LEG.chainIdHex;
+    const qrlRequest = vi.fn(async ({ method }: { method: string }): Promise<unknown> => {
+      if (method === "qrl_chainId") return providerChain;
+      if (method === "qrl_getBlockByNumber") return { number: "0x0", hash: QRL_LEG.genesisHash };
+      if (method === "qrl_sendTransaction") return `0x${"12".repeat(32)}`;
+      throw new Error("Unexpected wallet request");
+    });
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      const { method } = JSON.parse(init.body as string);
+      if (method === "qrl_estimateGas" && change) providerChain = "0x539";
+      return { ok: true, json: async () => ({ result: method === "qrl_chainId" ? QRL_LEG.chainIdHex : method === "qrl_getBlockByNumber" ? { number: "0x0", hash: QRL_LEG.genesisHash } : "0x10000" }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const handles: LegSenderHandles = { browserProvider: null, ensureSepolia: vi.fn(), qrlAccount: QRL_ACCOUNT, qrlTransport: "extension", qrlRequest };
+    const result = makeLegSender(handles)("qrl", DATA, 1n);
+    if (change) await expect(result).rejects.toThrow(/identity mismatch/);
+    else await result;
+    const sends = qrlRequest.mock.calls.filter(([args]) => args.method === "qrl_sendTransaction");
+    expect(sends).toHaveLength(change ? 0 : 1);
+    if (!change) expect(qrlRequest).toHaveBeenCalledWith({ method: "qrl_sendTransaction", params: [expect.objectContaining({ chainId: QRL_LEG.chainIdHex, from: QRL_ACCOUNT, to: QRL_LEG.htlc })] });
   });
 });

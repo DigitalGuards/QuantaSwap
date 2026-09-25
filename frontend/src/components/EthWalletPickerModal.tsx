@@ -134,36 +134,40 @@ export function EthWalletPickerModal({
         )}
         <div>
           <p className="mb-2 text-xs font-medium text-muted-foreground">Use your phone</p>
-          <button
-            type="button"
-            disabled={pendingId !== null}
-            onClick={onMetaMask}
-            className="flex min-h-16 w-full cursor-pointer items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-identity-accent/40 hover:bg-identity-accent/[0.04] focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
-          >
-            <Smartphone className="h-8 w-8 text-identity-accent" />
-            <span className="flex-1">
-              <span className="block font-medium">MetaMask mobile</span>
-              <span className="text-xs text-muted-foreground">Scan a QR code or open the app</span>
-            </span>
-            <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
-          </button>
-          {walletConnectAvailable ? (
+          <div className="space-y-2">
             <button
               type="button"
               disabled={pendingId !== null}
-              onClick={onWalletConnect}
-              className="mt-2 flex min-h-16 w-full cursor-pointer items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-identity-accent/40 hover:bg-identity-accent/[0.04] focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
+              onClick={onMetaMask}
+              className="flex min-h-16 w-full cursor-pointer items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-identity-accent/40 hover:bg-identity-accent/[0.04] focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
             >
-              <QrCode className="h-8 w-8 text-identity-accent" />
+              <Smartphone className="h-8 w-8 text-identity-accent" />
               <span className="flex-1">
-                <span className="block font-medium">WalletConnect</span>
+                <span className="block font-medium">MetaMask mobile</span>
                 <span className="text-xs text-muted-foreground">
-                  Choose a wallet or scan a QR code
+                  Scan a QR code or open the app
                 </span>
               </span>
               <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
             </button>
-          ) : null}
+            {walletConnectAvailable ? (
+              <button
+                type="button"
+                disabled={pendingId !== null}
+                onClick={onWalletConnect}
+                className="flex min-h-16 w-full cursor-pointer items-center gap-3 rounded-lg border border-border px-4 py-3 text-left transition-colors hover:border-identity-accent/40 hover:bg-identity-accent/[0.04] focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60"
+              >
+                <QrCode className="h-8 w-8 text-identity-accent" />
+                <span className="flex-1">
+                  <span className="block font-medium">WalletConnect</span>
+                  <span className="text-xs text-muted-foreground">
+                    Choose a wallet or scan a QR code
+                  </span>
+                </span>
+                <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+            ) : null}
+          </div>
         </div>
         {pendingId ? (
           <p role="status" className="text-sm text-identity-accent">

@@ -4,6 +4,8 @@
 import { FetchRequest, JsonRpcProvider, Wallet } from "ethers";
 import * as qrlweb3 from "@theqrl/web3";
 import type { Config } from "./config.js";
+import { assertQip55ExecutionReady } from "./qip55.js";
+import { assertQrlRuntime, type LegRpc } from "./htlc.js";
 
 /** Bound any promise so a hung library call cannot wedge the single-
  *  threaded tick. Used for @theqrl/web3, which takes no abort signal; the
@@ -57,6 +59,7 @@ export class EthLeg {
   private readonly provider: JsonRpcProvider;
   private readonly htlc: string;
   private readonly txTimeoutMs: number;
+  private readonly chainId: bigint;
 
   constructor(cfg: Config) {
     // FetchRequest.timeout bounds every RPC request (submit, balance, etc.);
@@ -68,6 +71,7 @@ export class EthLeg {
     this.address = this.wallet.address;
     this.htlc = cfg.ethHtlc;
     this.txTimeoutMs = cfg.txTimeoutMs;
+    this.chainId = BigInt(cfg.ethChainId);
   }
 
   async balance(): Promise<bigint> {
@@ -79,7 +83,10 @@ export class EthLeg {
    *  (wait() throws on a reverted tx), never by decoded return data, so
    *  no-return-value tokens (tUSDT) are safe. */
   async send(data: string, valueWei: bigint, to = this.htlc): Promise<string> {
-    const tx = await this.wallet.sendTransaction({ to, data, value: valueWei });
+    if ((await this.provider.getNetwork()).chainId !== this.chainId) {
+      throw new Error("ETH RPC chain mismatch; refusing transaction");
+    }
+    const tx = await this.wallet.sendTransaction({ to, data, value: valueWei, chainId: this.chainId });
     // Bound the confirmation wait: a stuck tx throws instead of hanging the
     // tick forever, and decide() reconciles from chain state next tick.
     await tx.wait(1, this.txTimeoutMs);
@@ -93,32 +100,41 @@ export class QrlLeg {
   private readonly htlc: string;
   private readonly netTimeoutMs: number;
   private readonly txTimeoutMs: number;
+  private readonly chainId: bigint;
+  private readonly rpc: LegRpc;
 
   constructor(cfg: Config) {
     this.web3 = new Web3(new Web3.providers.HttpProvider(cfg.qrlRpcUrl));
     const account = this.web3.qrl.accounts.seedToAccount(cfg.qrlHexseed);
+    assertQip55ExecutionReady(account.address, cfg.qrlHtlc);
     this.address = account.address;
     this.web3.qrl.wallet?.add(cfg.qrlHexseed);
     this.web3.qrl.transactionConfirmationBlocks = 1;
     this.htlc = cfg.qrlHtlc;
     this.netTimeoutMs = cfg.netTimeoutMs;
     this.txTimeoutMs = cfg.txTimeoutMs;
+    this.chainId = BigInt(cfg.qrlChainId);
+    this.rpc = { ns: "qrl", url: cfg.qrlRpcUrl, htlc: cfg.qrlHtlc, timeoutMs: cfg.netTimeoutMs };
   }
 
   async balance(): Promise<bigint> {
+    await assertQrlRuntime(this.rpc);
     return BigInt(await withTimeout(this.web3.qrl.getBalance(this.address), this.netTimeoutMs, "qrl getBalance"));
   }
 
   async send(data: string, valueWei: bigint): Promise<string> {
+    await assertQrlRuntime(this.rpc);
     const base: Record<string, unknown> = {
       from: this.address,
       to: this.htlc,
       data,
+      chainId: this.chainId,
       ...(valueWei > 0n ? { value: valueWei } : {}),
     };
     const gasPrice = await withTimeout(this.web3.qrl.getGasPrice(), this.netTimeoutMs, "qrl getGasPrice");
     const estimated = await withTimeout(this.web3.qrl.estimateGas(base), this.netTimeoutMs, "qrl estimateGas");
     const gas = (BigInt(estimated) * 13n) / 10n;
+    await assertQrlRuntime(this.rpc);
     const receipt = await withTimeout(
       this.web3.qrl.sendTransaction({ ...base, gas, gasPrice }),
       this.txTimeoutMs,

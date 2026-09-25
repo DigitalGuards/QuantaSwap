@@ -15,7 +15,7 @@ import {
   getLegState,
   getSwapEvents,
   hexToQ,
-  NATIVE_TOKEN,
+  nativeTokenForLeg,
   SwapStatus,
   shortAddr,
   type LegState,
@@ -55,6 +55,11 @@ const eventLabel: Record<SwapEvent["kind"], string> = {
   refunded: "refund tx",
 };
 
+// Escrow detail rows whose value is a number or a formatted timestamp, not
+// an address or hash: these get the numeric voice, everything else stays
+// monospace data.
+const NUMERIC_ROW_LABELS = new Set(["Amount", "Timeout"]);
+
 function LegCard({
   leg,
   snapshot,
@@ -73,7 +78,7 @@ function LegCard({
     // shows its symbol and decimals, and an UNKNOWN token must never
     // render as any known asset: it shows raw base units plus the
     // truncated token address instead.
-    if (sameAddr(snapshot.token, NATIVE_TOKEN)) {
+    if (sameAddr(snapshot.token, nativeTokenForLeg(leg))) {
       rows.push(["Amount", `${formatUnits(snapshot.amount, 18)} ${cfg.display}`]);
     } else {
       const known = leg === "eth" ? ethAssetByAddress(snapshot.token) : null;
@@ -123,7 +128,13 @@ function LegCard({
           rows.map(([label, value]) => (
             <div key={label} className="flex items-baseline justify-between gap-4">
               <span className="shrink-0 text-muted-foreground">{label}</span>
-              <span className="break-all text-right font-data text-xs" title={value}>
+              <span
+                className={cn(
+                  "break-all text-right text-xs",
+                  NUMERIC_ROW_LABELS.has(label) ? "font-numeric" : "font-data",
+                )}
+                title={value}
+              >
                 {value.length > 46 ? shortAddr(value) : value}
               </span>
             </div>

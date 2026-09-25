@@ -20,8 +20,8 @@ contract TestStable {
     uint8 public constant decimals = 6;
 
     uint256 public totalSupply;
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -34,11 +34,19 @@ contract TestStable {
         _mint(msg.sender, 10_000 * 10 ** 6);
     }
 
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
     // USDT semantics: no return value, and a nonzero allowance must be
     // reset to zero before it can be changed.
     function approve(address spender, uint256 value) external {
-        require(value == 0 || allowance[msg.sender][spender] == 0, "approval race");
-        allowance[msg.sender][spender] = value;
+        require(value == 0 || _allowances[msg.sender][spender] == 0, "approval race");
+        _allowances[msg.sender][spender] = value;
         emit Approval(msg.sender, spender, value);
     }
 
@@ -47,21 +55,21 @@ contract TestStable {
     }
 
     function transferFrom(address from, address to, uint256 value) external {
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
         _transfer(from, to, value);
     }
 
     function _mint(address to, uint256 value) private {
         totalSupply += value;
-        balanceOf[to] += value;
+        _balances[to] += value;
         emit Transfer(address(0), to, value);
     }
 
     function _transfer(address from, address to, uint256 value) private {
-        require(balanceOf[from] >= value, "balance");
-        balanceOf[from] -= value;
-        balanceOf[to] += value;
+        require(_balances[from] >= value, "balance");
+        _balances[from] -= value;
+        _balances[to] += value;
         emit Transfer(from, to, value);
     }
 }

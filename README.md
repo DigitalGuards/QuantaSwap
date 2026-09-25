@@ -1,6 +1,9 @@
 # QuantaSwap
 
-Trust-minimized cross-chain swaps between Ethereum and QRL. Domain: [quantaswap.io](https://quantaswap.io).
+Trust-minimized cross-chain swaps between Ethereum and QRL. Domain:
+[quantaswap.io](https://quantaswap.io). Isolated development build:
+[dev.quantaswap.io](https://dev.quantaswap.io) (testnet, no market maker,
+`noindex`).
 
 Part of the MyQRLWallet ecosystem (MyQRLWallet, QuantaPool, zondscan, QNS). Open source under GPL-3.0.
 
@@ -17,8 +20,8 @@ Alice (has WETH, wants QRL)                Bob (has QRL, wants WETH)
 
 1. Alice picks secret s, computes h = sha256(s)
 2. Alice locks WETH on Ethereum   -> HTLC(h, recipient: Bob,   timeout: T1)
-3. Bob   locks QRL  on QRL v2     -> HTLC(h, recipient: Alice, timeout: T2), T2 < T1
-4. Alice claims QRL on QRL v2 by revealing s (s becomes public on-chain)
+3. Bob   locks QRL on private v3  -> HTLC(h, recipient: Alice, timeout: T2), T2 < T1
+4. Alice claims QRL on private v3 by revealing s (s becomes public on-chain)
 5. Bob   claims WETH on Ethereum using s, before T1
    (if anything stalls: Bob refunds after T2, Alice refunds after T1)
 ```
@@ -34,41 +37,60 @@ The WETH in the diagram stands for any supported Ethereum-leg asset: the same `l
 
 Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Order book wire reference: [docs/ORDERBOOK_API.md](docs/ORDERBOOK_API.md). Running the maker side yourself: [docs/LIQUIDITY_PROVIDERS.md](docs/LIQUIDITY_PROVIDERS.md).
 
+Protocol-mode discovery is portable and mirrorable. Makers sign complete
+OrderV2 terms with ML-DSA-87, takers sign short-lived FillIntentV2 proposals,
+and each order terminates in one maker-signed FillV2 or CancelV2. Browsers
+verify and aggregate configured mirrors locally. Private and unsigned legacy
+orders remain on their origin, and every funding decision still depends on
+verified HTLC state rather than an orderbook response.
+
+Portable order ids bind the maker QRL account and nonce under a fixed SHA-256
+domain, so independent mirrors converge on the same identity without allowing
+another signer to claim a copied nonce. Federation is replicated discovery,
+not consensus: observed equivocation is quarantined, and HTLC state remains the
+authority for funds.
+
+Signed makers generate per-order capabilities before wallet authorization and
+commit their domain-separated SHA-256 digests inside OrderV2. The browser and
+headless LP stage the exact signed create envelope before its first POST, so an
+uncertain result can be retried without changing the order or losing access.
+Raw capabilities stay on the origin path and never enter federation events.
+
 ## Wallet integration
 
-- **QRL side**: MyQRLWallet via [`@qrlwallet/connect`](https://github.com/DigitalGuards/myqrlwallet-connect) (post-quantum relay protocol, ML-DSA-87 transaction signing). Users keep their own keys; the connected account auto-fills the recipient address.
+- **QRL side**: MyQRLWallet web wallet via [`@qrlwallet/connect` 5.0.1](https://github.com/DigitalGuards/myqrlwallet-connect) or MyQRLWallet Extension. Portable V2 signs canonical ordered message bytes through `qrl_signMessage` with ML-DSA-87, binding both chains, HTLC addresses, and the private v3 genesis. Every proof derives and verifies the full 64-byte signer address. Typed-data-only wallet providers are unsupported for portable orders. Users keep their own keys; the connected account auto-fills the recipient address.
 - **Ethereum side**: any EIP-6963 injected wallet (MetaMask, Rabby, etc.).
 - **No generated custodial wallets.** HTLC claims are permissionless with a fixed recipient, so the QRL leg can be claim-sponsored: a WETH-to-QRL swapper does not need a funded QRL gas wallet.
 
-## Repo layout (planned)
+## Repo layout
 
 ```
 contracts/
-  hyperion/    HTLC source (.hyp, compiled with hypc, deployed to BOTH chains)
+  hyperion/    HTLC source (.hyp, compiled into target-bound EVM and QRL artifacts)
   test/        Test-only mock tokens (never deployed)
   testnet/     tUSDT faucet token (Sepolia stand-in for USDT)
 config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
-server/        Order book service (coordination only, never custody; zero runtime deps)
-marketmaker/   Always-online protocol-mode maker (reference liquidity provider)
+server/        Self-hostable federated signed mirror (coordination only)
+marketmaker/   Reproducible self-hosted protocol-mode LP kit
 solver/        Solver service for solver mode (Phala TEE target), planned
 docs/          Architecture, deployments, order book API, LP guide
 ```
 
-Contracts are Hyperion-only; [QuantaPool](https://github.com/DigitalGuards/QuantaPool) is the reference for live Hyperion contracts on this stack. Both legs run byte-identical hypc bytecode (both chains are EVM-compatible), and the compiled artifact itself is exercised on a throwaway anvil as the canonical test gate (`npm test`). Frontend gates will mirror QuantaPool: `lint` (zero warnings) + `build`.
+Contracts are Hyperion-only; [QuantaPool](https://github.com/DigitalGuards/QuantaPool) is the reference for live Hyperion contracts on this stack. One reviewed source bundle produces an EVM-256 artifact for Ethereum and a QRVM-512 artifact for QRL. Target manifests bind compiler and codegen settings while enforcing source and ABI parity. The canonical gate (`npm test`) exercises the EVM artifact on a throwaway anvil and full-width Q128 semantics on QRVM. Frontend gates mirror QuantaPool: tests plus `build`.
 
 ## Status
 
-Phase 1 complete (July 2026): the HTLC is deployed and live smoke-tested on both testnets, Sepolia + QRL v2 testnet (chain ID 1337). Addresses: [docs/DEPLOYMENTS.md](docs/DEPLOYMENTS.md). Real-value launch waits on QRL v2 mainnet.
+The September 2026 release targets Sepolia (11155111) and the private QRL v3 testnet (3151909), with fresh target-bound HTLC deployments and full 64-byte QRL addresses. Deployment addresses and runtime hashes: [docs/DEPLOYMENTS.md](docs/DEPLOYMENTS.md). The shared profile is [config/protocol-v2.json](config/protocol-v2.json). Network v3, the HTLCv2 contract interface, and portable signing wire V2 are distinct versions. Previous testnet records stay separate for recovery. This is testnet software; a real-value launch requires separately reviewed mainnet readiness.
 
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Repo bootstrap, architecture | done |
 | 1 | HTLC on both chains, local test gate, testnet deploys + smokes | done |
-| 2 | Frontend MVP: protocol mode, connect SDK + EIP-6963 integration | done: sandbox + two-party order book |
+| 2 | Protocol UI, signed mirror federation, and self-hosted LP kit | implemented; testnet rollout and independent operator network pending |
 | 3 | Solver service + Phala TEE attestation, single-sided UX | planned |
-| 4 | Audit pass, mainnet readiness (waits on QRL v2 mainnet) | planned |
+| 4 | Audit pass and mainnet readiness | planned |
 
 ## Provenance
 

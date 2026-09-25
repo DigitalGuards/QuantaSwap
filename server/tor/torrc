@@ -1,0 +1,10 @@
+RunAsDaemon 0
+DataDirectory /var/lib/quantaswap-tor/data
+AvoidDiskWrites 1
+SafeLogging 1
+Log notice stdout
+Log notice file /var/lib/quantaswap-tor/data/notices.log
+
+ControlPort 0
+DNSPort 0
+TransPort 0

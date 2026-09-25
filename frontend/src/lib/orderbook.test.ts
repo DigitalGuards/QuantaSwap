@@ -43,10 +43,10 @@ const order = (overrides: Partial<OrderView> = {}): OrderView => ({
   fromAmount: "10000000000000000000",
   toAmount: "10000",
   makerEthAccount: "0x1111111111111111111111111111111111111111",
-  makerQrlAccount: "Q2222222222222222222222222222222222222222",
+  makerQrlAccount: `Q${"2".repeat(128)}`,
   status: "accepted",
   takerEthAccount: "0x3333333333333333333333333333333333333333",
-  takerQrlAccount: "Q4444444444444444444444444444444444444444",
+  takerQrlAccount: `Q${"4".repeat(128)}`,
   hashlock: null,
   initiatorTimeout: null,
   responderTimeout: null,
@@ -57,7 +57,7 @@ const order = (overrides: Partial<OrderView> = {}): OrderView => ({
 
 const TAKER = {
   takerEthAccount: "0x3333333333333333333333333333333333333333",
-  takerQrlAccount: "Q4444444444444444444444444444444444444444",
+  takerQrlAccount: `Q${"4".repeat(128)}`,
 };
 
 const acceptedTerms = (
@@ -131,7 +131,7 @@ describe("untrusted order term binding", () => {
     expect(() =>
       acceptedTerms(
         displayed,
-        order({ makerQrlAccount: "Q5555555555555555555555555555555555555555" }),
+        order({ makerQrlAccount: `Q${"5".repeat(128)}` }),
       ),
     ).toThrow(/different swap semantics/);
   });
@@ -189,7 +189,7 @@ describe("untrusted order term binding", () => {
     expect(() =>
       acceptedOrderTerms(displayed, order(), "USDC", "same-order", {
         ...TAKER,
-        takerQrlAccount: "Q5555555555555555555555555555555555555555",
+        takerQrlAccount: `Q${"5".repeat(128)}`,
       }),
     ).toThrow(/different swap semantics/);
   });
@@ -270,9 +270,9 @@ describe("untrusted order term binding", () => {
       fromAmount: local.fromAmount!,
       toAmount: local.toAmount!,
       makerEthAccount: "0x1111111111111111111111111111111111111111",
-      makerQrlAccount: "Q2222222222222222222222222222222222222222",
+      makerQrlAccount: `Q${"2".repeat(128)}`,
       takerEthAccount: "0x3333333333333333333333333333333333333333",
-      takerQrlAccount: "Q4444444444444444444444444444444444444444",
+      takerQrlAccount: `Q${"4".repeat(128)}`,
       preimage: `0x${"34".repeat(32)}`,
       hashlock: `0x${"12".repeat(32)}`,
       initiatorTimeout: 1_800_000_000,
@@ -324,7 +324,7 @@ describe("untrusted order term binding", () => {
       fromAmount: "10000000000000000000",
       toAmount: "10000",
       makerEthAccount: "0x1111111111111111111111111111111111111111",
-      makerQrlAccount: "Q2222222222222222222222222222222222222222",
+      makerQrlAccount: `Q${"2".repeat(128)}`,
       ...TAKER,
       preimage: null,
       hashlock: null,

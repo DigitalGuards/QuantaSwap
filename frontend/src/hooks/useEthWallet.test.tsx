@@ -46,10 +46,7 @@ class FakeProvider {
 
 function wallet(name = "MetaMask", rdns = "io.metamask") {
   const provider = new FakeProvider();
-  const detail = {
-    info: { uuid: name, name, rdns, icon: "" },
-    provider,
-  } satisfies ProviderDetail;
+  const detail = { info: { uuid: name, name, rdns, icon: "" }, provider } satisfies ProviderDetail;
   return detail;
 }
 
@@ -245,10 +242,7 @@ describe("Ethereum wallet selection", () => {
 
   it("offers an older injected provider as an explicit choice", async () => {
     const provider = new FakeProvider();
-    Object.defineProperty(window, "ethereum", {
-      configurable: true,
-      value: provider,
-    });
+    Object.defineProperty(window, "ethereum", { configurable: true, value: provider });
     const { result } = renderHook(useEthWallet);
     act(() => result.current.openPicker());
     expect(provider.request).not.toHaveBeenCalled();

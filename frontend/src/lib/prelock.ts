@@ -7,12 +7,10 @@
 
 import { formatUnits } from "ethers";
 import { ETH_ASSETS, MIN_TAKEABLE_RUNWAY_S, type EthAssetSymbol } from "../config";
-import { NATIVE_TOKEN, SwapStatus, getLegState } from "./htlc";
+import { NATIVE_TOKEN, SwapStatus, getLegState, nativeTokenForLeg } from "./htlc";
 import { initiatorLeg } from "./activeSwap";
 import { sameAddr } from "./swapMachine";
 import type { OrderView } from "./orderbook";
-
-const ZERO_ADDR = `0x${"0".repeat(40)}`;
 
 /** Returns a human-readable problem with the escrow, or null when it
  *  checks out. Throws only on RPC failure (callers show "unverified"). */
@@ -25,7 +23,7 @@ export async function prelockEscrowIssue(
   }
   const leg = initiatorLeg(order.direction);
   const asset = ETH_ASSETS[assetSymbol];
-  const expectedToken = leg === "eth" ? (asset.address ?? NATIVE_TOKEN) : NATIVE_TOKEN;
+  const expectedToken = leg === "eth" ? (asset.address ?? NATIVE_TOKEN) : nativeTokenForLeg(leg);
   const state = await getLegState(leg, order.hashlock);
   if (state.status !== SwapStatus.Open) {
     return "no open escrow exists under this order's hashlock";
@@ -37,7 +35,7 @@ export async function prelockEscrowIssue(
     const decimals = leg === "eth" ? asset.decimals : 18;
     return `the escrow holds ${formatUnits(state.amount, decimals)}, not the listed amount`;
   }
-  if (!sameAddr(state.recipient, ZERO_ADDR)) {
+  if (!sameAddr(state.recipient, nativeTokenForLeg(leg))) {
     return "the escrow is already assigned to another taker";
   }
   if (state.timeout - Math.floor(Date.now() / 1000) < MIN_TAKEABLE_RUNWAY_S) {

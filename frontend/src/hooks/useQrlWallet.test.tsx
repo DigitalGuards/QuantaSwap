@@ -1,0 +1,267 @@
+// @vitest-environment jsdom
+
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@qrlwallet/connect", () => {
+  class QRLConnectMock {
+    private readonly handlers = new Map<string, Set<(...args: unknown[]) => void>>();
+
+    disconnect = vi.fn(async () => undefined);
+    getAccounts = vi.fn(() => [] as string[]);
+    getChannelId = vi.fn(() => "relay-channel");
+    getConnectionURI = vi.fn(async () => "qrlconnect://relay-channel");
+    getStatus = vi.fn(() => "disconnected");
+    hasStoredSession = vi.fn(() => false);
+    isConnected = vi.fn(() => false);
+    isMobile = vi.fn(() => false);
+    newConnection = vi.fn(async () => "qrlconnect://fresh-channel");
+    request = vi.fn(async () => [] as string[]);
+
+    on(event: string, handler: (...args: unknown[]) => void) {
+      const listeners = this.handlers.get(event) ?? new Set();
+      listeners.add(handler);
+      this.handlers.set(event, listeners);
+    }
+
+    off(event: string, handler: (...args: unknown[]) => void) {
+      this.handlers.get(event)?.delete(handler);
+    }
+  }
+
+  return {
+    QRLConnect: QRLConnectMock,
+    QRL_CONNECT_PROVIDER_INFO: {
+      uuid: "qrl-connect",
+      name: "MyQRLWallet",
+      icon: "data:image/png;base64,",
+      rdns: "com.qrlwallet.connect",
+    },
+    attemptWalletRedirect: vi.fn(async () => false),
+    getAppStoreUrl: vi.fn(() => "https://qrlwallet.com"),
+  };
+});
+
+import { useQrlWallet } from "./useQrlWallet";
+
+type ProviderRequest = { method: string; params?: unknown[] | object };
+type ProviderHandler = (...args: unknown[]) => void;
+
+class FakeQrlProvider {
+  private readonly handlers = new Map<string, Set<ProviderHandler>>();
+
+  constructor(private readonly requestAccounts: () => Promise<unknown>) {}
+
+  request = vi.fn(async ({ method }: ProviderRequest) => {
+    if (method === "qrl_requestAccounts") return this.requestAccounts();
+    throw new Error(`Unexpected provider method: ${method}`);
+  });
+
+  on(event: string, handler: ProviderHandler) {
+    const listeners = this.handlers.get(event) ?? new Set();
+    listeners.add(handler);
+    this.handlers.set(event, listeners);
+  }
+
+  emit(event: string, value: unknown) {
+    for (const handler of this.handlers.get(event) ?? []) handler(value);
+  }
+}
+
+afterEach(() => {
+  cleanup();
+});
+
+describe("useQrlWallet extension lifecycle", () => {
+  it("connects, clears revoked permission, reconnects, and preserves a 4100 message", async () => {
+    const mixedCaseAccount =
+      "Qd5812F6Cf4a0f645aa620cd57319a0Ed649dd8f5519A9dde7770ae5b0E49e547985f35eB972A2a07041561aa39c65A3991478f9B1e6749e05277dcf58A9A8B72";
+    const canonicalAccount = mixedCaseAccount.toLowerCase().replace(/^q/, "Q");
+    const unauthorized = {
+      code: 4100,
+      message: `The requested account ${canonicalAccount} has not been authorized by the user.`,
+    };
+    const requestAccounts = vi
+      .fn<() => Promise<unknown>>()
+      .mockResolvedValueOnce([mixedCaseAccount])
+      .mockResolvedValueOnce([canonicalAccount])
+      .mockRejectedValueOnce(unauthorized);
+    const provider = new FakeQrlProvider(requestAccounts);
+    const detail = {
+      info: {
+        uuid: "myqrlwallet-extension",
+        name: "MyQRLWallet Extension",
+        icon: "data:image/png;base64,",
+        rdns: "com.qrlwallet.extension",
+      },
+      provider,
+    };
+    const announce = () => {
+      window.dispatchEvent(
+        new CustomEvent("eip6963:announceProvider", { detail }),
+      );
+    };
+    window.addEventListener("eip6963:requestProvider", announce);
+
+    const { result, unmount } = renderHook(() => useQrlWallet());
+
+    await waitFor(() => {
+      expect(result.current.wallets).toEqual([
+        expect.objectContaining({
+          uuid: detail.info.uuid,
+          kind: "myqrlwallet",
+          name: "MyQRLWallet",
+          primaryLabel: "Browser extension",
+          secondaryUuid: null,
+        }),
+      ]);
+    });
+
+    await act(async () => {
+      await result.current.connectWallet(detail.info.uuid);
+    });
+
+    expect(result.current.account).toBe(mixedCaseAccount);
+    expect(result.current.status).toBe("connected");
+    expect(result.current.kind).toBe("extension");
+    expect(result.current.rdns).toBe(detail.info.rdns);
+    expect(result.current.error).toBeNull();
+
+    act(() => {
+      provider.emit("accountsChanged", []);
+    });
+
+    await waitFor(() => {
+      expect(result.current.account).toBeNull();
+      expect(result.current.status).toBe("disconnected");
+      expect(result.current.kind).toBeNull();
+      expect(result.current.rdns).toBeNull();
+    });
+
+    await act(async () => {
+      await result.current.connectWallet(detail.info.uuid);
+    });
+
+    expect(result.current.account).toBe(canonicalAccount);
+    expect(result.current.status).toBe("connected");
+    expect(result.current.kind).toBe("extension");
+
+    act(() => {
+      provider.emit("accountsChanged", []);
+    });
+    await waitFor(() => expect(result.current.status).toBe("disconnected"));
+
+    await act(async () => {
+      await result.current.connectWallet(detail.info.uuid);
+    });
+
+    expect(result.current.account).toBeNull();
+    expect(result.current.status).toBe("disconnected");
+    expect(result.current.kind).toBeNull();
+    expect(result.current.error).toBe(unauthorized.message);
+    expect(requestAccounts).toHaveBeenCalledTimes(3);
+
+    window.removeEventListener("eip6963:requestProvider", announce);
+    unmount();
+  });
+});
+
+describe("useQrlWallet picker rows", () => {
+  it("folds the two MyQRLWallet announcements into one row with a relay action", async () => {
+    const extension = {
+      info: {
+        uuid: "myqrlwallet-extension",
+        name: "MyQRLWallet Extension",
+        icon: "data:image/png;base64,ext",
+        rdns: "com.qrlwallet.extension",
+      },
+      provider: new FakeQrlProvider(async () => []),
+    };
+    const relay = {
+      info: {
+        uuid: "myqrlwallet-relay",
+        name: "MyQRLWallet",
+        icon: "data:image/png;base64,relay",
+        rdns: "com.qrlwallet.connect",
+      },
+      provider: new FakeQrlProvider(async () => []),
+    };
+    const qrlExtension = {
+      info: {
+        uuid: "qrl-web3-wallet",
+        name: "QRL Web3 Wallet",
+        icon: "data:image/png;base64,qrl",
+        rdns: "theqrl.org",
+      },
+      provider: new FakeQrlProvider(async () => []),
+    };
+    const announce = () => {
+      for (const detail of [relay, extension, qrlExtension]) {
+        window.dispatchEvent(
+          new CustomEvent("eip6963:announceProvider", { detail }),
+        );
+      }
+    };
+    window.addEventListener("eip6963:requestProvider", announce);
+
+    const { result, unmount } = renderHook(() => useQrlWallet());
+
+    await waitFor(() => {
+      expect(result.current.wallets).toEqual([
+        expect.objectContaining({
+          kind: "myqrlwallet",
+          uuid: extension.info.uuid,
+          name: "MyQRLWallet",
+          icon: relay.info.icon,
+          primaryLabel: "Browser extension",
+          secondaryUuid: relay.info.uuid,
+          secondaryLabel: "Use phone or desktop app",
+        }),
+        expect.objectContaining({
+          kind: "wallet",
+          uuid: qrlExtension.info.uuid,
+          name: qrlExtension.info.name,
+          rdns: qrlExtension.info.rdns,
+        }),
+      ]);
+    });
+
+    window.removeEventListener("eip6963:requestProvider", announce);
+    unmount();
+  });
+
+  it("starts relay pairing from the row itself when no extension announced", async () => {
+    const relay = {
+      info: {
+        uuid: "myqrlwallet-relay",
+        name: "MyQRLWallet",
+        icon: "data:image/png;base64,relay",
+        rdns: "com.qrlwallet.connect",
+      },
+      provider: new FakeQrlProvider(async () => []),
+    };
+    const announce = () => {
+      window.dispatchEvent(
+        new CustomEvent("eip6963:announceProvider", { detail: relay }),
+      );
+    };
+    window.addEventListener("eip6963:requestProvider", announce);
+
+    const { result, unmount } = renderHook(() => useQrlWallet());
+
+    await waitFor(() => {
+      expect(result.current.wallets).toEqual([
+        expect.objectContaining({
+          kind: "myqrlwallet",
+          uuid: relay.info.uuid,
+          primaryLabel: "Phone, web or desktop",
+          secondaryUuid: null,
+          secondaryLabel: null,
+        }),
+      ]);
+    });
+
+    window.removeEventListener("eip6963:requestProvider", announce);
+    unmount();
+  });
+});

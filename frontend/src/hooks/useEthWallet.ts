@@ -121,12 +121,7 @@ export function useEthWallet() {
     setLegacy(
       provider && typeof provider.request === "function" && !qrlProvidersRef.current.has(provider)
         ? {
-            info: {
-              uuid: "window.ethereum",
-              name: "Browser wallet",
-              icon: "",
-              rdns: "",
-            },
+            info: { uuid: "window.ethereum", name: "Browser wallet", icon: "", rdns: "" },
             provider,
           }
         : null,
@@ -237,9 +232,7 @@ export function useEthWallet() {
       setPendingId(choice.info.uuid);
       setError(null);
       try {
-        const accounts = await choice.provider.request({
-          method: "eth_requestAccounts",
-        });
+        const accounts = await choice.provider.request({ method: "eth_requestAccounts" });
         if (generation === generationRef.current) attach(choice, accounts);
       } catch (cause) {
         if (generation === generationRef.current) {
@@ -280,12 +273,7 @@ export function useEthWallet() {
       }
       attach(
         {
-          info: {
-            uuid: "metamask-mobile",
-            name: "MetaMask",
-            icon: "",
-            rdns: "io.metamask",
-          },
+          info: { uuid: "metamask-mobile", name: "MetaMask", icon: "", rdns: "io.metamask" },
           provider: client.getProvider(),
         },
         accounts,

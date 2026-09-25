@@ -4,9 +4,8 @@
 // Required env (.env): ETH_RPC_URL, ETH_PRIVATE_KEY
 
 require("dotenv").config();
-const fs = require("fs");
-const path = require("path");
 const { ethers } = require("ethers");
+const { loadArtifact } = require("./artifacts");
 
 const rpc = process.env.ETH_RPC_URL;
 const key = process.env.ETH_PRIVATE_KEY;
@@ -16,8 +15,7 @@ if (!rpc || !key || !htlcAddress) {
   process.exit(1);
 }
 
-const artifactPath = path.join(__dirname, "..", "build", "hyperion", "HTLC.json");
-const { abi } = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+const { abi } = loadArtifact("evm", "HTLC");
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(rpc);

@@ -68,7 +68,7 @@ describe("deriveVerdict", () => {
 
   it("degrades to a partial verdict when an RPC is down", () => {
     expect(deriveVerdict(null, leg(SwapStatus.Claimed)).headline).toMatch(/incomplete/i);
-    expect(deriveVerdict(null, leg(SwapStatus.Claimed)).detail).toMatch(/QRL v2/);
+    expect(deriveVerdict(null, leg(SwapStatus.Claimed)).detail).toMatch(/QRL v3/);
     expect(deriveVerdict(leg(SwapStatus.Open), null).detail).toMatch(/Sepolia/);
     expect(deriveVerdict(null, null).detail).toMatch(/either chain/i);
   });

@@ -5,60 +5,81 @@ pragma hyperion >=0.0;
 // must handle. Never deploy these outside local test runs.
 
 contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
 
     function mint(address to, uint256 value) external {
-        balanceOf[to] += value;
+        _balances[to] += value;
+    }
+
+    // Test-only seed for paired Q128 owner and spender mapping regressions.
+    function seedAllowance(address owner, address spender, uint256 value) external {
+        _allowances[owner][spender] = value;
     }
 
     function approve(address spender, uint256 value) external returns (bool) {
-        allowance[msg.sender][spender] = value;
+        _allowances[msg.sender][spender] = value;
         return true;
     }
 
     function transfer(address to, uint256 value) external returns (bool) {
-        require(balanceOf[msg.sender] >= value, "balance");
-        balanceOf[msg.sender] -= value;
-        balanceOf[to] += value;
+        require(_balances[msg.sender] >= value, "balance");
+        _balances[msg.sender] -= value;
+        _balances[to] += value;
         return true;
     }
 
     function transferFrom(address from, address to, uint256 value) external returns (bool) {
-        require(balanceOf[from] >= value, "balance");
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
-        balanceOf[from] -= value;
-        balanceOf[to] += value;
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
         return true;
     }
 }
 
 // USDT-style: state changes but no return value at all.
 contract NoReturnToken {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
 
     function mint(address to, uint256 value) external {
-        balanceOf[to] += value;
+        _balances[to] += value;
     }
 
     function approve(address spender, uint256 value) external {
-        allowance[msg.sender][spender] = value;
+        _allowances[msg.sender][spender] = value;
     }
 
     function transfer(address to, uint256 value) external {
-        require(balanceOf[msg.sender] >= value, "balance");
-        balanceOf[msg.sender] -= value;
-        balanceOf[to] += value;
+        require(_balances[msg.sender] >= value, "balance");
+        _balances[msg.sender] -= value;
+        _balances[to] += value;
     }
 
     function transferFrom(address from, address to, uint256 value) external {
-        require(balanceOf[from] >= value, "balance");
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
-        balanceOf[from] -= value;
-        balanceOf[to] += value;
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
     }
 }
 
@@ -86,68 +107,88 @@ contract FalseToken {
 // approval race guard, so changing a nonzero allowance requires an
 // approve(0) reset first. Clients must handle this to support USDT.
 contract ApprovalRaceToken {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
 
     function mint(address to, uint256 value) external {
-        balanceOf[to] += value;
+        _balances[to] += value;
     }
 
     function approve(address spender, uint256 value) external {
-        require(value == 0 || allowance[msg.sender][spender] == 0, "approval race");
-        allowance[msg.sender][spender] = value;
+        require(value == 0 || _allowances[msg.sender][spender] == 0, "approval race");
+        _allowances[msg.sender][spender] = value;
     }
 
     function transfer(address to, uint256 value) external {
-        require(balanceOf[msg.sender] >= value, "balance");
-        balanceOf[msg.sender] -= value;
-        balanceOf[to] += value;
+        require(_balances[msg.sender] >= value, "balance");
+        _balances[msg.sender] -= value;
+        _balances[to] += value;
     }
 
     function transferFrom(address from, address to, uint256 value) external {
-        require(balanceOf[from] >= value, "balance");
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
-        balanceOf[from] -= value;
-        balanceOf[to] += value;
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
     }
 }
 
 // USDC/USDT-style issuer blocklist: transfers touching a blocked address
 // revert. setBlocked is unpermissioned because this is a test double.
 contract BlocklistToken {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-    mapping(address => bool) public blocked;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    mapping(address => bool) private _blocked;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function blocked(address account) external view returns (bool) {
+        return _blocked[account];
+    }
 
     function mint(address to, uint256 value) external {
-        balanceOf[to] += value;
+        _balances[to] += value;
     }
 
     function setBlocked(address account, bool isBlocked) external {
-        blocked[account] = isBlocked;
+        _blocked[account] = isBlocked;
     }
 
     function approve(address spender, uint256 value) external returns (bool) {
-        allowance[msg.sender][spender] = value;
+        _allowances[msg.sender][spender] = value;
         return true;
     }
 
     function transfer(address to, uint256 value) external returns (bool) {
-        require(!blocked[msg.sender] && !blocked[to], "blocked");
-        require(balanceOf[msg.sender] >= value, "balance");
-        balanceOf[msg.sender] -= value;
-        balanceOf[to] += value;
+        require(!_blocked[msg.sender] && !_blocked[to], "blocked");
+        require(_balances[msg.sender] >= value, "balance");
+        _balances[msg.sender] -= value;
+        _balances[to] += value;
         return true;
     }
 
     function transferFrom(address from, address to, uint256 value) external returns (bool) {
-        require(!blocked[from] && !blocked[to], "blocked");
-        require(balanceOf[from] >= value, "balance");
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
-        balanceOf[from] -= value;
-        balanceOf[to] += value;
+        require(!_blocked[from] && !_blocked[to], "blocked");
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
         return true;
     }
 }
@@ -156,31 +197,39 @@ contract BlocklistToken {
 // ships this mechanism with the fee currently set to zero; the HTLC must
 // reject any token where it is active.
 contract FeeToken {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
 
     function mint(address to, uint256 value) external {
-        balanceOf[to] += value;
+        _balances[to] += value;
     }
 
     function approve(address spender, uint256 value) external returns (bool) {
-        allowance[msg.sender][spender] = value;
+        _allowances[msg.sender][spender] = value;
         return true;
     }
 
     function transfer(address to, uint256 value) external returns (bool) {
-        require(balanceOf[msg.sender] >= value, "balance");
-        balanceOf[msg.sender] -= value;
-        balanceOf[to] += value - value / 100;
+        require(_balances[msg.sender] >= value, "balance");
+        _balances[msg.sender] -= value;
+        _balances[to] += value - value / 100;
         return true;
     }
 
     function transferFrom(address from, address to, uint256 value) external returns (bool) {
-        require(balanceOf[from] >= value, "balance");
-        require(allowance[from][msg.sender] >= value, "allowance");
-        allowance[from][msg.sender] -= value;
-        balanceOf[from] -= value;
-        balanceOf[to] += value - value / 100;
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value - value / 100;
         return true;
     }
 }
