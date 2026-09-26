@@ -11,13 +11,17 @@ import {
   constants as fsConstants,
   existsSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -43,11 +47,17 @@ interface PersistedFederationRecord extends FederationRecord {
   receivedAt: number;
 }
 
-interface FederationEnvelope {
-  version: 2;
+// The feed file is an append-only log of JSON lines. The first line is a
+// header, and each later line is one retained event or a snapshot digest
+// update. The log is compacted into a fresh header plus the retained ring
+// once it holds a quarter more lines than the ring, so an append costs one
+// line and one fsync and the retained proofs are rewritten only at compaction.
+// Version 2 files, a single JSON envelope, are migrated on load.
+interface FederationLogHeader {
+  type: "header";
+  version: 3;
   feedId: string;
   nextSeq: number;
-  events: PersistedFederationRecord[];
   snapshotDigest: string | null;
 }
 
@@ -64,6 +74,10 @@ export interface FederationFeedStatus {
   oldestSequence: number | null;
   latestSequence: number | null;
   lastEventAt: number | null;
+  /** True while compaction keeps failing. Appends stay durable, so the feed
+   *  serves, and the log grows past its retained ring until an operator
+   *  clears the storage fault. */
+  compactionFailing: boolean;
 }
 
 export const MAX_FEDERATION_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -94,6 +108,24 @@ const RESET_CACHE_TTL_MS = 5_000;
 interface CachedResetPage {
   expiresAt: number;
   page: FederationPage;
+}
+
+/** Identifies the log file this process opened, so a file another process put
+ *  in its place is never appended to. */
+interface LogFileIdentity {
+  dev: number;
+  ino: number;
+}
+
+/** The exit checkpoint may only record a digest when this process is ending
+ *  cleanly and every persisted public mutation reached the feed. A skipped
+ *  checkpoint leaves the digest unknown, so the next start rotates the feed
+ *  identity and every peer takes a reset snapshot. */
+export function shouldRecordFederationCheckpoint(state: {
+  exitCode: number;
+  feedHealthy: boolean;
+}): boolean {
+  return state.exitCode === 0 && state.feedHealthy;
 }
 
 export function serializeFederationPage(
@@ -278,6 +310,12 @@ export class FederationFeed {
   private eventIds = new Set<string>();
   private snapshotDigest: string | null = null;
   private cachedResetPage: CachedResetPage | undefined;
+  /** Event and digest lines in the log file, or null before compaction. */
+  private logLines: number | null = null;
+  /** The log file this process wrote, or null before it wrote one. */
+  private logIdentity: LogFileIdentity | null = null;
+  /** Set while compaction failures are being absorbed by durable appends. */
+  private compactionFailing = false;
 
   constructor(
     private readonly file: string,
@@ -311,6 +349,7 @@ export class FederationFeed {
       oldestSequence: first?.seq ?? null,
       latestSequence: last?.seq ?? null,
       lastEventAt: last === undefined ? null : last.receivedAt * 1000,
+      compactionFailing: this.compactionFailing,
     };
   }
 
@@ -339,11 +378,16 @@ export class FederationFeed {
     const event = parseFederationEvent(raw);
     const eventId = federationEventId(event);
     const existing = this.events.find((entry) => entry.eventId === eventId);
+    // Without a snapshot the caller's state changed in a way this feed does
+    // not hash on every append, so the stored digest becomes unknown until
+    // the next checkpoint. An unknown digest rotates the feed identity on
+    // restart, the safe response to a crash between the store and feed
+    // writes.
     const nextSnapshotDigest =
-      snapshot === undefined
-        ? this.snapshotDigest
-        : federationSnapshotDigest(snapshot);
+      snapshot === undefined ? null : federationSnapshotDigest(snapshot);
     if (existing !== undefined && nextSnapshotDigest === this.snapshotDigest) {
+      // The caller's snapshot changed behind any cached reset cursor.
+      if (snapshot === undefined) this.cachedResetPage = undefined;
       return publicRecord(existing);
     }
     if (!Number.isSafeInteger(receivedAt) || receivedAt < 0) {
@@ -357,26 +401,37 @@ export class FederationFeed {
     };
     const previousNextSeq = this.nextSeq;
     const previousSnapshotDigest = this.snapshotDigest;
+    const lines: unknown[] = [];
     if (existing === undefined) {
       this.nextSeq += 1;
       this.events.push(record);
       this.eventIds.add(eventId);
+      lines.push({ type: "event", ...record });
     }
     this.snapshotDigest = nextSnapshotDigest;
-    let removed: PersistedFederationRecord | undefined;
-    while (this.events.length > this.maxEvents) {
-      removed = this.events.shift();
-      if (removed !== undefined) this.eventIds.delete(removed.eventId);
+    if (nextSnapshotDigest !== previousSnapshotDigest) {
+      lines.push({ type: "digest", snapshotDigest: nextSnapshotDigest });
     }
+    const removed: PersistedFederationRecord[] = [];
+    while (this.events.length > this.maxEvents) {
+      const trimmed = this.events.shift();
+      if (trimmed !== undefined) {
+        this.eventIds.delete(trimmed.eventId);
+        removed.push(trimmed);
+      }
+    }
+    // A new event reaches holders of a cached reset cursor incrementally. A
+    // replayed event means the snapshot changed behind that cursor.
     if (
       this.cachedResetPage !== undefined &&
-      (nextSnapshotDigest !== previousSnapshotDigest ||
+      (existing !== undefined ||
+        nextSnapshotDigest !== previousSnapshotDigest ||
         this.requiresReset(this.cachedResetPage.page.cursor))
     ) {
       this.cachedResetPage = undefined;
     }
     try {
-      this.persist();
+      this.appendLines(lines);
     } catch (error) {
       this.nextSeq = previousNextSeq;
       this.snapshotDigest = previousSnapshotDigest;
@@ -384,13 +439,42 @@ export class FederationFeed {
         this.events.pop();
         this.eventIds.delete(eventId);
       }
-      if (removed !== undefined) {
-        this.events.unshift(removed);
-        this.eventIds.add(removed.eventId);
+      for (const entry of removed.reverse()) {
+        this.events.unshift(entry);
+        this.eventIds.add(entry.eventId);
       }
       throw error;
     }
     return publicRecord(existing ?? record);
+  }
+
+  /** Record the current store snapshot digest, typically at shutdown, so an
+   *  unchanged store does not rotate the feed identity on restart. */
+  checkpoint(rawEvents: readonly FederationEvent[]): void {
+    const digest = federationSnapshotDigest(rawEvents);
+    if (digest === this.snapshotDigest) return;
+    const fileStatus = this.logFileStatus();
+    if (fileStatus !== "owned") {
+      // A successor process may already own this path, and its freshly
+      // compacted log must not receive a digest for state this process held.
+      // Skipping leaves the digest unknown, which rotates the identity on the
+      // next start. Only a genuine mismatch is worth a line: a process that
+      // never wrote a log has nothing to checkpoint.
+      if (fileStatus === "replaced") {
+        console.error(
+          "[orderbook] federation checkpoint skipped: another process owns the feed log",
+        );
+      }
+      return;
+    }
+    const previousSnapshotDigest = this.snapshotDigest;
+    this.snapshotDigest = digest;
+    try {
+      this.appendLines([{ type: "digest", snapshotDigest: digest }]);
+    } catch (error) {
+      this.snapshotDigest = previousSnapshotDigest;
+      throw error;
+    }
   }
 
   reconcileSnapshot(rawEvents: readonly FederationEvent[]): boolean {
@@ -403,7 +487,7 @@ export class FederationFeed {
     this.snapshotDigest = digest;
     this.cachedResetPage = undefined;
     try {
-      this.persist();
+      this.compact();
     } catch (error) {
       this.feedId = previousFeedId;
       this.snapshotDigest = previousSnapshotDigest;
@@ -507,11 +591,158 @@ export class FederationFeed {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw new Error(`federation data file could not be read: ${this.file}`);
     }
+    let rewrite: boolean;
+    try {
+      rewrite = this.parseLog(raw);
+    } catch (error) {
+      // The feed is derived state, and reconcileSnapshot rebuilds it from the
+      // order store, so an unreadable log starts a fresh feed under a rotated
+      // identity and peers take a reset snapshot. Crash-looping the order
+      // book over a file it can regenerate would be the worse outcome.
+      this.quarantine(error);
+      return;
+    }
+    if (rewrite) {
+      this.compact();
+      return;
+    }
+    this.logIdentity = this.logFileIdentity();
+  }
+
+  /** Loads the log into memory and reports whether the file must be rewritten
+   *  before it is appended to again. */
+  private parseLog(raw: string): boolean {
+    // A zero-length file is what a crash between create and first write
+    // leaves. It carries no state to recover and no identity to keep, so the
+    // fresh feed writes its own header.
+    if (raw === "") return true;
+    if (!raw.includes("\n")) {
+      // Version 2 stored one JSON envelope without a line terminator. A log
+      // always ends its atomically written header with one.
+      const envelope = this.parseLine(raw, "envelope");
+      if (envelope["version"] !== 2) {
+        throw new Error(
+          `federation data file has an unsupported version: ${this.file}`,
+        );
+      }
+      this.loadLegacyEnvelope(envelope);
+      return true;
+    }
+    const lines = raw.split("\n");
+    // A crash can leave one unterminated final line. It was never
+    // acknowledged, so drop it and rewrite a clean log. Reusing its sequence
+    // number is safe because an append leaves the stored digest unknown until
+    // a clean exit records one: a start that drops a tail either reads an
+    // unknown digest or one the order store no longer matches, so it always
+    // rotates the feed identity and peers take a reset snapshot.
+    const tornTail = lines.pop() !== "";
+    const header = this.parseLine(lines[0], "header");
+    if (header["type"] !== "header" || header["version"] !== 3) {
+      throw new Error(
+        `federation data file has an unsupported version: ${this.file}`,
+      );
+    }
+    const feedId = header["feedId"];
+    const nextSeq = header["nextSeq"];
+    if (typeof feedId !== "string" || !FEED_ID_RE.test(feedId)) {
+      throw new Error(
+        `federation data file has an invalid feed id: ${this.file}`,
+      );
+    }
+    if (
+      typeof nextSeq !== "number" ||
+      !Number.isSafeInteger(nextSeq) ||
+      nextSeq < 1
+    ) {
+      throw new Error(
+        `federation data file has an invalid sequence: ${this.file}`,
+      );
+    }
+    let snapshotDigest = this.parseDigest(header["snapshotDigest"]);
+    const events: PersistedFederationRecord[] = [];
+    const ids = new Set<string>();
+    let lastSeq = 0;
+    for (let index = 1; index < lines.length; index += 1) {
+      const line = this.parseLine(lines[index], `line ${index + 1}`);
+      if (line["type"] === "digest") {
+        snapshotDigest = this.parseDigest(line["snapshotDigest"]);
+        continue;
+      }
+      if (line["type"] !== "event") {
+        throw new Error(
+          `federation data file line ${index + 1} has an unknown type: ${this.file}`,
+        );
+      }
+      const { type: _type, ...rawRecord } = line;
+      const record = parseRecord(rawRecord, index);
+      if (record.seq <= lastSeq) {
+        throw new Error(
+          `federation data file sequences are not increasing: ${this.file}`,
+        );
+      }
+      lastSeq = record.seq;
+      // An event trimmed from the ring may be appended again later.
+      if (ids.has(record.eventId)) {
+        events.splice(
+          events.findIndex((entry) => entry.eventId === record.eventId),
+          1,
+        );
+      }
+      events.push(record);
+      ids.add(record.eventId);
+      while (events.length > this.maxEvents) {
+        const trimmed = events.shift();
+        if (trimmed !== undefined) ids.delete(trimmed.eventId);
+      }
+    }
+    this.feedId = feedId;
+    this.nextSeq = Math.max(nextSeq, lastSeq + 1);
+    this.events = events;
+    this.eventIds = ids;
+    this.snapshotDigest = snapshotDigest;
+    this.logLines = lines.length - 1;
+    return tornTail;
+  }
+
+  /** Moves an unreadable log aside for forensics and starts a fresh feed
+   *  under a rotated identity. */
+  private quarantine(cause: unknown): void {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let aside = `${this.file}.corrupt-${stamp}`;
+    if (existsSync(aside)) aside = `${aside}-${randomBytes(4).toString("hex")}`;
+    try {
+      renameSync(this.file, aside);
+    } catch {
+      throw new Error(
+        `federation data file could not be moved aside: ${this.file}`,
+      );
+    }
+    console.error(
+      `[orderbook] unreadable federation feed log moved to ${aside}, starting a fresh feed: ${
+        cause instanceof Error ? cause.message : "unknown parse failure"
+      }`,
+    );
+    this.feedId = randomBytes(16).toString("hex");
+    this.nextSeq = 1;
+    this.events = [];
+    this.eventIds = new Set();
+    this.snapshotDigest = null;
+    this.cachedResetPage = undefined;
+    this.logLines = null;
+    this.logIdentity = null;
+  }
+
+  private parseLine(
+    line: string | undefined,
+    label: string,
+  ): Record<string, unknown> {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(line ?? "");
     } catch {
-      throw new Error(`federation data file is not valid JSON: ${this.file}`);
+      throw new Error(
+        `federation data file ${label} is not valid JSON: ${this.file}`,
+      );
     }
     if (
       typeof parsed !== "object" ||
@@ -519,19 +750,26 @@ export class FederationFeed {
       Array.isArray(parsed)
     ) {
       throw new Error(
-        `federation data file must contain an object: ${this.file}`,
+        `federation data file ${label} must contain an object: ${this.file}`,
       );
     }
-    const envelope = parsed as Record<string, unknown>;
-    if (envelope["version"] !== 2) {
+    return parsed as Record<string, unknown>;
+  }
+
+  private parseDigest(value: unknown): string | null {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== "string" || !EVENT_ID_RE.test(value)) {
       throw new Error(
-        `federation data file has an unsupported version: ${this.file}`,
+        `federation data file has an invalid snapshot digest: ${this.file}`,
       );
     }
+    return value;
+  }
+
+  private loadLegacyEnvelope(envelope: Record<string, unknown>): void {
     const feedId = envelope["feedId"];
     const nextSeq = envelope["nextSeq"];
     const rawEvents = envelope["events"];
-    const snapshotDigest = envelope["snapshotDigest"];
     if (typeof feedId !== "string" || !FEED_ID_RE.test(feedId)) {
       throw new Error(
         `federation data file has an invalid feed id: ${this.file}`,
@@ -551,15 +789,7 @@ export class FederationFeed {
         `federation data file has an invalid event list: ${this.file}`,
       );
     }
-    if (
-      snapshotDigest !== undefined &&
-      snapshotDigest !== null &&
-      (typeof snapshotDigest !== "string" || !EVENT_ID_RE.test(snapshotDigest))
-    ) {
-      throw new Error(
-        `federation data file has an invalid snapshot digest: ${this.file}`,
-      );
-    }
+    const snapshotDigest = this.parseDigest(envelope["snapshotDigest"]);
     const events = rawEvents.map(parseRecord);
     for (let index = 1; index < events.length; index += 1) {
       if ((events[index - 1]?.seq ?? 0) >= (events[index]?.seq ?? 0)) {
@@ -583,28 +813,146 @@ export class FederationFeed {
     this.nextSeq = nextSeq;
     this.events = events;
     this.eventIds = ids;
-    this.snapshotDigest =
-      typeof snapshotDigest === "string" ? snapshotDigest : null;
+    this.snapshotDigest = snapshotDigest;
   }
 
-  private persist(): void {
+  private appendLines(lines: readonly unknown[]): void {
+    if (lines.length === 0) return;
+    const fileStatus = this.logFileStatus();
+    if (fileStatus === "replaced") {
+      // One order book per data directory. A different file at this path means
+      // an overlapping restart, and appending to it would interleave two
+      // feeds.
+      throw new Error(
+        "federation data file was replaced by another order-book process",
+      );
+    }
+    if (fileStatus === "missing") {
+      // The log was removed under this process. The retained ring in memory
+      // still holds every event a peer can ask for, so write it out again and
+      // keep serving.
+      console.error(
+        "[orderbook] federation feed log is missing, recreating it from the retained ring",
+      );
+    }
+    const linesBefore = this.logLines;
+    if (fileStatus === "missing" || linesBefore === null) {
+      this.compact();
+      return;
+    }
+    const buffer = Buffer.from(
+      lines.map((line) => `${JSON.stringify(line)}\n`).join(""),
+      "utf8",
+    );
+    let fileDescriptor: number | undefined;
+    try {
+      fileDescriptor = openSync(this.file, "a", 0o600);
+      const bytesBefore = fstatSync(fileDescriptor).size;
+      try {
+        // One write(2) can be short, and a half-written line makes every later
+        // start unable to read the log, so write until the buffer is out.
+        let written = 0;
+        while (written < buffer.length) {
+          const count = this.writeChunk(fileDescriptor, buffer, written);
+          if (count <= 0) throw new Error("federation append made no progress");
+          written += count;
+        }
+        fsyncSync(fileDescriptor);
+      } catch (error) {
+        // Roll the file back to its length before this append so no partial
+        // bytes survive. The single-writer requirement above keeps the
+        // recorded length the true end of the log.
+        ftruncateSync(fileDescriptor, bytesBefore);
+        fsyncSync(fileDescriptor);
+        throw error;
+      }
+    } catch {
+      // The rollback above restored the file, and a rewrite before the next
+      // append covers a rollback that failed too.
+      this.logLines = null;
+      throw new Error("federation data could not be persisted safely");
+    } finally {
+      if (fileDescriptor !== undefined) {
+        try {
+          closeSync(fileDescriptor);
+        } catch {
+          // Preserve the original persistence outcome.
+        }
+      }
+    }
+    this.logLines = linesBefore + lines.length;
+    if (this.logLines > this.maxEvents + Math.ceil(this.maxEvents / 4)) {
+      try {
+        this.compact();
+      } catch {
+        // The append above is durable. A failed compaction leaves the log
+        // intact, and the next write retries it before appending. One line per
+        // failure streak keeps a permanent storage fault out of the log while
+        // status reports the feed degraded.
+        if (!this.compactionFailing) {
+          this.compactionFailing = true;
+          console.error(
+            "[orderbook] federation feed log compaction failed, the append is durable and later writes retry it",
+          );
+        }
+      }
+    }
+  }
+
+  /** One write(2). Tests replace this seam to simulate short writes and write
+   *  failures. */
+  private writeChunk(
+    fileDescriptor: number,
+    buffer: Buffer,
+    offset: number,
+  ): number {
+    return writeSync(fileDescriptor, buffer, offset, buffer.length - offset);
+  }
+
+  /** Compares the file at the path with the one this process last wrote. */
+  private logFileStatus(): "unwritten" | "owned" | "missing" | "replaced" {
+    const remembered = this.logIdentity;
+    if (remembered === null) return "unwritten";
+    const current = this.logFileIdentity();
+    if (current === null) return "missing";
+    return current.dev === remembered.dev && current.ino === remembered.ino
+      ? "owned"
+      : "replaced";
+  }
+
+  private logFileIdentity(): LogFileIdentity | null {
+    try {
+      const stats = statSync(this.file);
+      return { dev: stats.dev, ino: stats.ino };
+    } catch {
+      return null;
+    }
+  }
+
+  private compact(): void {
     const directory = dirname(this.file);
     const tmp = join(
       directory,
       `.federation.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
     );
-    const envelope: FederationEnvelope = {
-      version: 2,
+    const header: FederationLogHeader = {
+      type: "header",
+      version: 3,
       feedId: this.feedId,
       nextSeq: this.nextSeq,
-      events: this.events,
       snapshotDigest: this.snapshotDigest,
     };
+    const content = [
+      header,
+      ...this.events.map((record) => ({ type: "event", ...record })),
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
     let fileDescriptor: number | undefined;
     try {
       fileDescriptor = openSync(tmp, "wx", 0o600);
       fchmodSync(fileDescriptor, 0o600);
-      writeFileSync(fileDescriptor, JSON.stringify(envelope), "utf8");
+      writeFileSync(fileDescriptor, content, "utf8");
       fsyncSync(fileDescriptor);
       closeSync(fileDescriptor);
       fileDescriptor = undefined;
@@ -628,7 +976,16 @@ export class FederationFeed {
       } catch {
         // The rename may already have consumed the temporary file.
       }
+      this.logLines = null;
       throw new Error("federation data could not be persisted safely");
+    }
+    this.logLines = this.events.length;
+    this.logIdentity = this.logFileIdentity();
+    if (this.compactionFailing) {
+      this.compactionFailing = false;
+      console.log(
+        "[orderbook] federation feed log compaction succeeded after an earlier failure",
+      );
     }
   }
 }

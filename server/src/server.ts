@@ -16,6 +16,7 @@ import {
   FederationResponseTooLargeError,
   MAX_FEDERATION_RESPONSE_BYTES,
   serializeFederationPage,
+  shouldRecordFederationCheckpoint,
   type FederationPage,
 } from "./federation.js";
 import {
@@ -241,11 +242,9 @@ federationFeed.reconcileSnapshot(store.federationSnapshot());
 
 store.subscribeFederation((event) => {
   try {
-    federationFeed.append(
-      event,
-      Math.floor(Date.now() / 1000),
-      store.federationSnapshot(),
-    );
+    // Hashing the whole snapshot on every append costs more than the append;
+    // the digest is written once at exit instead.
+    federationFeed.append(event, Math.floor(Date.now() / 1000));
     federationHealthy = true;
   } catch (error) {
     federationHealthy = false;
@@ -488,15 +487,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "GET" && path === "/api/status") {
+    const feedStatus = federationFeed.status();
     const storageReady = store.storageReady() && federationFeed.storageReady();
-    const healthy = !shuttingDown && storageReady && federationHealthy;
+    // A failing compaction keeps appends durable, so the mirror still serves
+    // and /api/health stays ready, while status reports the storage fault.
+    const feedReady =
+      federationFeed.storageReady() &&
+      federationHealthy &&
+      !feedStatus.compactionFailing;
+    const healthy = !shuttingDown && storageReady && feedReady;
     sendJson(res, healthy ? 200 : 503, {
       schemaVersion: 1,
       status: healthy ? "ok" : "degraded",
       uptimeS: Math.floor(process.uptime()),
       feed: {
-        ready: federationFeed.storageReady() && federationHealthy,
-        ...federationFeed.status(),
+        ready: feedReady,
+        ...feedStatus,
       },
       federation: peerSync.status(),
     });
@@ -772,6 +778,27 @@ function initiateShutdown(reason: string, exitCode = 0): void {
   }, config.shutdownTimeoutMs);
   shutdownTimer.unref();
 }
+
+// Record the final snapshot digest so an unchanged store keeps the feed
+// identity, and existing peer cursors, across a clean restart. A nonzero exit
+// code or a feed that stopped accepting mutations skips the checkpoint, and
+// then, as after a crash, the digest stays unknown so the next start rotates
+// the identity and peers take a reset snapshot.
+process.once("exit", (code) => {
+  if (
+    !shouldRecordFederationCheckpoint({
+      exitCode: code,
+      feedHealthy: federationHealthy,
+    })
+  ) {
+    return;
+  }
+  try {
+    federationFeed.checkpoint(store.federationSnapshot());
+  } catch {
+    console.error("[orderbook] federation checkpoint failed at exit");
+  }
+});
 
 process.once("SIGTERM", () => initiateShutdown("SIGTERM"));
 process.once("SIGINT", () => initiateShutdown("SIGINT"));
