@@ -15,6 +15,8 @@ pragma hyperion >=0.0;
 //   SilentSuccessToken      answers transfer with true and moves nothing
 //   SilentNoReturnToken     answers transfer with no data and moves nothing
 //   LyingBalanceToken       reports whatever balance it is told to report
+//   RevertBombBalanceToken  reverts from balanceOf with an oversized payload
+//   GasBurnToken            burns every unit of gas it is given in transfer
 //   NonPayableRecipient     cannot receive the native coin at all
 //   GasGuzzlerRecipient     burns its whole delivery budget, or reverts
 //   ReentrantRecipient      re-enters claim, refund or withdraw on receive
@@ -253,6 +255,108 @@ contract LyingBalanceToken {
 
     function transfer(address, uint256) external pure returns (bool) {
         return false;
+    }
+}
+
+// Accepts the lock, then reverts from balanceOf with a caller-chosen payload
+// size. A typed external call re-emits a callee's revert data verbatim, so this
+// is how a hostile token pushes a large payload out of the bounded delivery
+// frame and charges the settling frame for copying it. The payload is raw
+// zeroed memory, which costs the token only the expansion it pays for itself.
+contract RevertBombBalanceToken {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 private _size;
+    bool private _armed;
+
+    function arm(uint256 size) external {
+        _size = size;
+        _armed = true;
+    }
+
+    function disarm() external {
+        _armed = false;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        if (_armed) {
+            uint256 size = _size;
+            assembly {
+                revert(0, size)
+            }
+        }
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function mint(address to, uint256 value) external {
+        _balances[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        _allowances[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
+        return true;
+    }
+}
+
+// Accepts the lock, then burns every unit of gas it is given in transfer. A
+// credit in this token cannot be moved by anyone, which is the token's doing
+// and not the contract's; value stays conserved and accounted.
+contract GasBurnToken {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 private _sink;
+    bool private _armed;
+
+    function arm() external {
+        _armed = true;
+    }
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function mint(address to, uint256 value) external {
+        _balances[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        _allowances[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address, uint256) external returns (bool) {
+        while (_armed) {
+            _sink += 1;
+        }
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
+        return true;
     }
 }
 

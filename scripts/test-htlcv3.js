@@ -155,7 +155,13 @@ async function main() {
   );
 
   console.log("[htlcv3] starting anvil");
-  const anvil = spawn("anvil", ["--port", String(ANVIL_PORT), "--silent"], { stdio: "ignore" });
+  const anvil = spawn(
+    "anvil",
+    // --steps-tracing: debug_traceTransaction only returns structLogs with it,
+    // and the settling frame's own gas cost is measured from those.
+    ["--port", String(ANVIL_PORT), "--silent", "--steps-tracing", "--gas-limit", "30000000"],
+    { stdio: "ignore" }
+  );
   const stopAnvil = () => {
     try {
       anvil.kill();
@@ -217,19 +223,31 @@ async function main() {
   // The assertion uses equality. The general invariant is >=, and nothing in
   // this suite force-feeds the contract native value.
   const makeTracker = (htlc) => {
-    const swaps = [];
+    const swaps = new Map(); // hashlock -> expected preimage, or undefined
     const tokens = new Set([ethers.ZeroAddress]);
+    const accounts = new Set();
     return {
-      track(hashlock, token) {
-        swaps.push(hashlock);
+      // `preimage` is the exact value a claim must persist. Pass it wherever it
+      // is known: the alternative, checking only that the stored word is
+      // nonzero, would accept the wrong secret.
+      track(hashlock, token, preimage) {
+        swaps.set(hashlock, preimage);
         tokens.add(token);
         return hashlock;
       },
+      watch(account) {
+        accounts.add(account);
+        return account;
+      },
       async check(label) {
         const open = new Map();
-        for (const hashlock of swaps) {
+        for (const [hashlock, expected] of swaps) {
           const s = await htlc.getSwap(hashlock);
           assert(s.status !== Status.None, `${label}: tracked swap ${hashlock} exists`);
+          // Credits can only ever accrue to a swap's recipient or its
+          // initiator, so these are the whole domain of the credit ledger.
+          accounts.add(s.initiator);
+          if (s.recipient !== ethers.ZeroAddress) accounts.add(s.recipient);
           if (s.status === Status.Open) {
             open.set(s.token, (open.get(s.token) ?? 0n) + s.amount);
             continue;
@@ -239,7 +257,11 @@ async function main() {
             `${label}: ${hashlock} is Open or terminal`
           );
           if (s.status === Status.Claimed) {
-            assert(s.preimage !== ethers.ZeroHash, `${label}: ${hashlock} kept its preimage`);
+            if (expected === undefined) {
+              assert(s.preimage !== ethers.ZeroHash, `${label}: ${hashlock} kept a preimage`);
+            } else {
+              assertEq(s.preimage, expected, `${label}: ${hashlock} kept its exact preimage`);
+            }
           }
         }
         for (const token of tokens) {
@@ -250,8 +272,45 @@ async function main() {
             (open.get(token) ?? 0n) + credited,
             `${label}: value conservation for token ${token}`
           );
+          // The aggregate has to equal the per-account ledger it summarises.
+          let perAccount = 0n;
+          for (const account of accounts) perAccount += await htlc.creditOf(token, account);
+          assertEq(perAccount, credited, `${label}: credit ledger sums to outstanding (${token})`);
         }
       },
+    };
+  };
+
+  // Gas accounting for the settling frame, read from the trace. The trampoline
+  // is the only depth-1 CALL a settlement makes, so it needs no hardcoded
+  // program counter: everything after it at depth 1 is the settling frame
+  // finishing its work, which is what the credit reserve has to cover.
+  const settleFrameCost = async (txHash) => {
+    const trace = await provider.send("debug_traceTransaction", [
+      txHash,
+      { disableStorage: true, disableMemory: true, disableStack: true },
+    ]);
+    const logs = trace.structLogs;
+    const calls = logs.map((l, i) => [l, i]).filter(([l]) => l.depth === 1 && l.op === "CALL");
+    assertEq(calls.length, 1, "a settlement makes exactly one depth-1 call");
+    const callIdx = calls[0][1];
+    let back = -1;
+    for (let i = callIdx + 1; i < logs.length; i++) {
+      if (logs[i].depth === 1) {
+        back = i;
+        break;
+      }
+    }
+    assert(back > 0, "the settling frame resumed after the delivery attempt");
+    const last = logs[logs.length - 1];
+    return {
+      budget: logs[callIdx].gasCost,
+      childUsed: logs[callIdx].gas - logs[back].gas,
+      afterChild: logs[back].gas - last.gas,
+      retained: logs[back].gas,
+      copies: logs
+        .slice(back)
+        .filter((l) => l.depth === 1 && l.op === "RETURNDATACOPY").length,
     };
   };
 
@@ -298,7 +357,7 @@ async function main() {
     const timeout = (await now()) + 4 * HOUR;
     const amount = ethers.parseEther("1");
     await (await htlc.lockNative(hashlock, bob.address, timeout, { value: amount })).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     const bobBefore = await provider.getBalance(bob.address);
     // relayer submits the claim: sponsored claim, bob spends no gas
     const receipt = await settle(htlc.connect(relayer).claim, hashlock, preimage);
@@ -324,28 +383,40 @@ async function main() {
 
   await withTest("parity: claim closes at timeout, refund opens at timeout", async () => {
     const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
     const { preimage, hashlock } = newSecret();
     const timeout = (await now()) + 2 * HOUR;
     const amount = ethers.parseEther("1");
     await (await htlc.lockNative(hashlock, bob.address, timeout, { value: amount })).wait();
+    track.track(hashlock, ethers.ZeroAddress);
     await expectRevert(htlc.refund(hashlock), "TimeoutNotReached");
     await warpTo(timeout);
+    // A claim that mines at or after the timeout reverts with its preimage
+    // already public and the swap still Open. The cutoff is deliberate and the
+    // margin is the client's job; see docs/FINALITY.md.
     await expectRevert(htlc.claim(hashlock, preimage), "TimeoutPassed");
+    assertEq((await htlc.getSwap(hashlock)).preimage, ethers.ZeroHash, "no preimage was stored");
+    await track.check("claim closed at timeout");
     const aliceBefore = await provider.getBalance(alice.address);
     await settle(htlc.connect(relayer).refund, hashlock);
     assertEq((await provider.getBalance(alice.address)) - aliceBefore, amount, "alice refunded");
     assertEq((await htlc.getSwap(hashlock)).status, Status.Refunded, "status");
+    await track.check("refunded after timeout");
   });
 
   await withTest("parity: settled swaps cannot be claimed or refunded again", async () => {
     const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
     const { preimage, hashlock } = newSecret();
     const timeout = (await now()) + 4 * HOUR;
     await (await htlc.lockNative(hashlock, bob.address, timeout, { value: 1n })).wait();
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     await (await htlc.claim(hashlock, preimage)).wait();
+    await track.check("settled once");
     await expectRevert(htlc.claim(hashlock, preimage), "SwapNotOpen");
     await warpTo(timeout);
     await expectRevert(htlc.refund(hashlock), "SwapNotOpen");
+    await track.check("still settled once");
   });
 
   await withTest("parity: a hashlock is single-use forever", async () => {
@@ -398,7 +469,7 @@ async function main() {
     const { preimage, hashlock } = newSecret();
     const timeout = (await now()) + 4 * HOUR;
     await (await htlc.lockToken(hashlock, bob.address, token.target, amount, timeout)).wait();
-    track.track(hashlock, token.target);
+    track.track(hashlock, token.target, preimage);
     assertEq(await token.balanceOf(htlc.target), amount, "escrowed");
     await track.check("token lock");
     await settle(htlc.connect(relayer).claim, hashlock, preimage);
@@ -409,6 +480,7 @@ async function main() {
 
   await withTest("parity: lockToken + refund returns ERC-20 to the initiator", async () => {
     const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
     const token = await deploy("MockERC20", alice);
     const amount = 500n;
     await (await token.mint(alice.address, amount)).wait();
@@ -416,9 +488,12 @@ async function main() {
     const { hashlock } = newSecret();
     const timeout = (await now()) + 2 * HOUR;
     await (await htlc.lockToken(hashlock, bob.address, token.target, amount, timeout)).wait();
+    track.track(hashlock, token.target);
+    await track.check("token locked");
     await warpTo(timeout);
     await settle(htlc.refund, hashlock);
     assertEq(await token.balanceOf(alice.address), amount, "alice refunded");
+    await track.check("token refunded");
   });
 
   await withTest("parity: no-return (USDT-style) tokens deliver directly", async () => {
@@ -432,7 +507,7 @@ async function main() {
     await (
       await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
     ).wait();
-    track.track(hashlock, token.target);
+    track.track(hashlock, token.target, preimage);
     const receipt = await settle(htlc.claim, hashlock, preimage);
     assertEq(await token.balanceOf(bob.address), amount, "bob token balance");
     assertEq(creditedEvents(htlc, receipt).length, 0, "no-return token needs no credit");
@@ -487,7 +562,7 @@ async function main() {
     const timeout = (await now()) + 4 * HOUR;
     const amount = ethers.parseEther("1");
     await (await htlc.lockNativeOpen(first.hashlock, timeout, { value: amount })).wait();
-    track.track(first.hashlock, ethers.ZeroAddress);
+    track.track(first.hashlock, ethers.ZeroAddress, first.preimage);
     assertEq((await htlc.getSwap(first.hashlock)).recipient, ethers.ZeroAddress, "recipient unset");
     await expectRevert(htlc.connect(relayer).claim(first.hashlock, first.preimage), "NotAssigned");
     await expectRevert(htlc.connect(bob).assign(first.hashlock, bob.address), "NotInitiator");
@@ -504,7 +579,7 @@ async function main() {
     // release: initiator-only, immediate, blocked once assigned.
     const second = newSecret();
     await (await htlc.lockNativeOpen(second.hashlock, timeout, { value: amount })).wait();
-    track.track(second.hashlock, ethers.ZeroAddress);
+    track.track(second.hashlock, ethers.ZeroAddress, second.preimage);
     await expectRevert(htlc.connect(bob).release(second.hashlock), "NotInitiator");
     const before = await provider.getBalance(alice.address);
     const receipt = await settle(htlc.release, second.hashlock);
@@ -518,7 +593,7 @@ async function main() {
     const late = newSecret();
     const lateTimeout = (await now()) + HOUR;
     await (await htlc.lockNativeOpen(late.hashlock, lateTimeout, { value: 1n })).wait();
-    track.track(late.hashlock, ethers.ZeroAddress);
+    track.track(late.hashlock, ethers.ZeroAddress, late.preimage);
     await warpTo(lateTimeout);
     await expectRevert(htlc.assign(late.hashlock, bob.address), "TimeoutPassed");
     await settle(htlc.release, late.hashlock);
@@ -528,6 +603,8 @@ async function main() {
   await withTest("parity: full cross-chain atomic swap across two instances", async () => {
     const ethLeg = await deploy("HTLCv3", carol);
     const qrlLeg = await deploy("HTLCv3", carol);
+    const trackEth = makeTracker(ethLeg);
+    const trackQrl = makeTracker(qrlLeg);
     const weth = await deploy("MockERC20", carol);
 
     const wethAmount = 10_000n;
@@ -544,6 +621,10 @@ async function main() {
       await ethLeg.connect(alice).lockToken(hashlock, bob.address, weth.target, wethAmount, T1)
     ).wait();
     await (await qrlLeg.connect(bob).lockNative(hashlock, alice.address, T2, { value: qrlAmount })).wait();
+    trackEth.track(hashlock, weth.target, preimage);
+    trackQrl.track(hashlock, ethers.ZeroAddress, preimage);
+    await trackEth.check("both legs locked, initiator leg");
+    await trackQrl.check("both legs locked, responder leg");
 
     const aliceBefore = await provider.getBalance(alice.address);
     await settle(qrlLeg.connect(relayer).claim, hashlock, preimage); // sponsored
@@ -553,6 +634,8 @@ async function main() {
     assertEq(revealed, preimage, "preimage public");
     await settle(ethLeg.connect(bob).claim, hashlock, revealed);
     assertEq(await weth.balanceOf(bob.address), wethAmount, "bob got WETH");
+    await trackEth.check("both legs settled, initiator leg");
+    await trackQrl.check("both legs settled, responder leg");
   });
 
   // ---------------------------------------------------------------- part 2
@@ -567,7 +650,7 @@ async function main() {
     const timeout = (await now()) + 2 * HOUR;
     const amount = ethers.parseEther("1");
     await (await htlc.lockNative(hashlock, sink.target, timeout, { value: amount })).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
 
     const receipt = await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
     assertEq(receipt.status, 1, "claim transaction succeeded");
@@ -602,7 +685,7 @@ async function main() {
     const { preimage, hashlock } = newSecret();
     const timeout = (await now()) + 2 * HOUR;
     await (await htlc.lockToken(hashlock, bob.address, usdc.target, amount, timeout)).wait();
-    track.track(hashlock, usdc.target);
+    track.track(hashlock, usdc.target, preimage);
 
     // Issuer blocks the recipient after the lock, so the payout cannot land.
     await (await usdc.setBlocked(bob.address, true)).wait();
@@ -639,8 +722,8 @@ async function main() {
     const timeout = (await now()) + 2 * HOUR;
     await (await htlc.lockToken(claimed.hashlock, bob.address, usdc.target, amount, timeout)).wait();
     await (await htlc.lockToken(refunded.hashlock, bob.address, usdc.target, amount, timeout)).wait();
-    track.track(claimed.hashlock, usdc.target);
-    track.track(refunded.hashlock, usdc.target);
+    track.track(claimed.hashlock, usdc.target, claimed.preimage);
+    track.track(refunded.hashlock, usdc.target, refunded.preimage);
 
     // The issuer freezes the HTLC contract itself: nothing can leave.
     await (await usdc.setBlocked(htlc.target, true)).wait();
@@ -680,7 +763,7 @@ async function main() {
       await (
         await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
       ).wait();
-      track.track(hashlock, token.target);
+      track.track(hashlock, token.target, preimage);
       const receipt = await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
       assertEq(receipt.status, 1, `${mockName}: claim transaction succeeded`);
       assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, `${mockName}: terminal`);
@@ -708,7 +791,7 @@ async function main() {
       await (
         await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
       ).wait();
-      track.track(hashlock, token.target);
+      track.track(hashlock, token.target, preimage);
       const claimAs = htlc.connect(relayer).claim;
       const estimate = await claimAs.estimateGas(hashlock, preimage);
       const receipt = await (
@@ -743,7 +826,7 @@ async function main() {
       await (
         await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
       ).wait();
-      track.track(hashlock, token.target);
+      track.track(hashlock, token.target, preimage);
       const receipt = await settle(htlc.connect(relayer).claim, hashlock, preimage);
       assertEq(receipt.status, 1, `${mockName}: claim transaction succeeded`);
       assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, `${mockName}: terminal`);
@@ -797,8 +880,27 @@ async function main() {
     assertEq(receipt.status, 1, "claim after two capped credits succeeded");
     assertEq((await htlc.getSwap(third.hashlock)).status, Status.Claimed, "claim is terminal");
     assertEq(await htlc.creditOf(liar.target, bob.address), cap, "recipient credited");
-    // Native locks are capped the same way.
-    await expectRevert(htlc.lockNativeOpen(newSecret().hashlock, timeout, { value: 0 }), "InvalidParams");
+    // Native locks carry the same cap. The node refuses to submit any
+    // transaction whose value reaches 2^128 whatever the sender's balance, so
+    // the above-cap cases are proven the way every other revert in this suite
+    // is, by simulating the call, and the at-cap acceptance is only reachable
+    // through the token path above.
+    await provider.send("anvil_setBalance", [dave.address, "0x" + (1n << 200n).toString(16)]);
+    await expectRevert(
+      htlc.connect(dave).lockNativeOpen(newSecret().hashlock, timeout, { value: cap + 1n }),
+      "InvalidParams"
+    );
+    await expectRevert(
+      htlc.connect(dave).lockNative(newSecret().hashlock, bob.address, timeout, { value: cap + 1n }),
+      "InvalidParams"
+    );
+    // A native lock just under the cap is accepted, so the bound is the cap.
+    const underCap = newSecret();
+    const nearCap = cap / 2n;
+    await (await htlc.connect(dave).lockNativeOpen(underCap.hashlock, timeout, { value: nearCap })).wait();
+    track.track(underCap.hashlock, ethers.ZeroAddress, underCap.preimage);
+    assertEq((await htlc.getSwap(underCap.hashlock)).amount, nearCap, "native lock under the cap");
+    await settle(htlc.connect(dave).release, underCap.hashlock);
     await track.check("capped ledger");
   });
 
@@ -812,7 +914,7 @@ async function main() {
     await (
       await htlc.lockNative(hashlock, guzzler.target, (await now()) + HOUR, { value: amount })
     ).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     await settle(htlc.connect(relayer).claim, hashlock, preimage);
     assertEq(await htlc.creditOf(ethers.ZeroAddress, guzzler.target), amount, "credited");
 
@@ -845,7 +947,7 @@ async function main() {
       await (
         await htlc.lockNative(hashlock, guzzler.target, (await now()) + HOUR, { value: amount })
       ).wait();
-      track.track(hashlock, ethers.ZeroAddress);
+      track.track(hashlock, ethers.ZeroAddress, preimage);
       const receipt = await (
         await htlc.connect(relayer).claim(hashlock, preimage, { gasLimit: 1_000_000 })
       ).wait();
@@ -878,8 +980,8 @@ async function main() {
     // A second open swap the callback tries to claim during the first payout.
     await (await htlc.lockNative(target.hashlock, attacker.target, timeout, { value: amount })).wait();
     await (await htlc.lockNative(victim.hashlock, attacker.target, timeout, { value: amount })).wait();
-    track.track(target.hashlock, ethers.ZeroAddress);
-    track.track(victim.hashlock, ethers.ZeroAddress);
+    track.track(target.hashlock, ethers.ZeroAddress, target.preimage);
+    track.track(victim.hashlock, ethers.ZeroAddress, victim.preimage);
     await (
       await attacker.configure(
         htlc.target,
@@ -914,8 +1016,8 @@ async function main() {
     const amount = ethers.parseEther("1");
     await (await htlc.lockNative(other.hashlock, attacker.target, timeout, { value: amount })).wait();
     await (await htlc.lockNative(victim.hashlock, attacker.target, timeout, { value: amount })).wait();
-    track.track(other.hashlock, ethers.ZeroAddress);
-    track.track(victim.hashlock, ethers.ZeroAddress);
+    track.track(other.hashlock, ethers.ZeroAddress, other.preimage);
+    track.track(victim.hashlock, ethers.ZeroAddress, victim.preimage);
     await (
       await attacker.configure(htlc.target, 2, false, other.hashlock, other.preimage, ethers.ZeroAddress)
     ).wait(); // MODE_REFUND, propagate
@@ -943,7 +1045,7 @@ async function main() {
     await (
       await htlc.lockNative(hashlock, attacker.target, (await now()) + HOUR, { value: amount })
     ).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     // Force the credit path by starving the delivery attempt of budget.
     await (await attacker.configure(htlc.target, 3, false, hashlock, preimage, ethers.ZeroAddress)).wait();
     await (await htlc.connect(relayer).claim(hashlock, preimage, { gasLimit: 1_000_000 })).wait();
@@ -975,7 +1077,7 @@ async function main() {
     await (
       await htlc.lockNative(hashlock, sink.target, (await now()) + HOUR, { value: amount })
     ).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
     assertEq(await htlc.creditOf(ethers.ZeroAddress, sink.target), amount, "credited");
 
@@ -1008,7 +1110,7 @@ async function main() {
     await (
       await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
     ).wait();
-    track.track(hashlock, token.target);
+    track.track(hashlock, token.target, preimage);
     await (await token.setBlocked(bob.address, true)).wait();
     await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
     assertEq(await htlc.creditOf(token.target, bob.address), amount, "credited");
@@ -1046,7 +1148,7 @@ async function main() {
     await (
       await htlc.lockNative(hashlock, recipient.target, (await now()) + HOUR, { value: amount })
     ).wait();
-    track.track(hashlock, ethers.ZeroAddress);
+    track.track(hashlock, ethers.ZeroAddress, preimage);
     await (await htlc.connect(relayer).claim(hashlock, preimage)).wait();
     assertEq(await htlc.creditOf(ethers.ZeroAddress, recipient.target), amount, "credited");
 
@@ -1074,8 +1176,8 @@ async function main() {
     const timeout = (await now()) + HOUR;
     await (await htlc.lockToken(timedOut.hashlock, bob.address, usdc.target, amount, timeout)).wait();
     await (await htlc.lockTokenOpen(released.hashlock, usdc.target, amount, timeout)).wait();
-    track.track(timedOut.hashlock, usdc.target);
-    track.track(released.hashlock, usdc.target);
+    track.track(timedOut.hashlock, usdc.target, timedOut.preimage);
+    track.track(released.hashlock, usdc.target, released.preimage);
 
     await (await usdc.setBlocked(alice.address, true)).wait();
     await (await htlc.release(released.hashlock)).wait();
@@ -1109,7 +1211,7 @@ async function main() {
     // The documented rule (estimate + budget + reserve) delivers directly.
     const direct = newSecret();
     await (await htlc.lockNative(direct.hashlock, bob.address, timeout, { value: amount })).wait();
-    track.track(direct.hashlock, ethers.ZeroAddress);
+    track.track(direct.hashlock, ethers.ZeroAddress, direct.preimage);
     const bobBefore = await provider.getBalance(bob.address);
     const receipt = await settle(claimAs, direct.hashlock, direct.preimage);
     assertEq(creditedEvents(htlc, receipt).length, 0, "documented gas rule delivers directly");
@@ -1123,7 +1225,7 @@ async function main() {
     for (const extra of [0n, 25_000n, 70_000n, SETTLE_GAS_BUFFER, 400_000n]) {
       const secret = newSecret();
       await (await htlc.lockNative(secret.hashlock, bob.address, timeout, { value: amount })).wait();
-      track.track(secret.hashlock, ethers.ZeroAddress);
+      track.track(secret.hashlock, ethers.ZeroAddress, secret.preimage);
       const estimate = await claimAs.estimateGas(secret.hashlock, secret.preimage);
       const limit = estimate + extra;
       const r = await (
@@ -1147,6 +1249,149 @@ async function main() {
     );
   });
 
+  await withTest("#47 gas: a revert bomb out of the delivery frame costs the settling frame nothing", async () => {
+    // The settling frame copies whatever the delivery attempt reverted with.
+    // That copy is only harmless while the payload is bounded, and a typed
+    // external call re-emits a callee's revert data verbatim, so a token whose
+    // balanceOf reverts with a large payload used to charge the settling frame
+    // for the memory expansion out of the reserve that records the credit.
+    // Measured before this was closed: 97,764 gas of a 150,000 reserve at a
+    // 120,832-byte payload. The contract now reads balances through a
+    // low-level call, so every revert leaving the attempt is a custom error or
+    // a panic and the copy is a constant.
+    const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
+    const timeout = (await now()) + 4 * HOUR;
+    const claimAs = htlc.connect(relayer).claim;
+
+    const lockBomb = async (token, amount) => {
+      const secret = newSecret();
+      await (await token.mint(alice.address, amount)).wait();
+      await (await token.approve(htlc.target, amount)).wait();
+      await (await htlc.lockToken(secret.hashlock, bob.address, token.target, amount, timeout)).wait();
+      track.track(secret.hashlock, token.target, secret.preimage);
+      return secret;
+    };
+
+    // Baseline: the same shape with a four-byte revert out of the attempt.
+    const baseToken = await deploy("RevertBombBalanceToken", alice);
+    const base = await lockBomb(baseToken, 10n);
+    await (await baseToken.arm(4n)).wait();
+    const baseEstimate = await claimAs.estimateGas(base.hashlock, base.preimage);
+    const baseTx = await claimAs(base.hashlock, base.preimage, {
+      gasLimit: baseEstimate + SETTLE_GAS_BUFFER,
+    });
+    await baseTx.wait();
+    const baseline = await settleFrameCost(baseTx.hash);
+    assertEq(await htlc.creditOf(baseToken.target, bob.address), 10n, "baseline credited");
+    // The tracker reads balanceOf, which an armed bomb refuses to answer.
+    await (await baseToken.disarm()).wait();
+    await track.check("revert bomb baseline");
+    // The pre-settlement cost of a claim, which the reserve-floor case needs.
+    const preSettle = baseEstimate - BigInt(baseline.afterChild);
+
+    let worst = 0n;
+    for (const size of [4n, 32768n, 65536n, 98304n, 120832n]) {
+      const token = await deploy("RevertBombBalanceToken", alice);
+      const secret = await lockBomb(token, 10n);
+      await (await token.arm(size)).wait();
+      const estimate = await claimAs.estimateGas(secret.hashlock, secret.preimage);
+      const tx = await claimAs(secret.hashlock, secret.preimage, {
+        gasLimit: estimate + SETTLE_GAS_BUFFER,
+      });
+      const receipt = await tx.wait();
+      assertEq(receipt.status, 1, `${size} bytes: claim transaction succeeded`);
+      assertEq((await htlc.getSwap(secret.hashlock)).status, Status.Claimed, `${size} bytes: terminal`);
+      assertEq(await htlc.creditOf(token.target, bob.address), 10n, `${size} bytes: credited`);
+      const cost = await settleFrameCost(tx.hash);
+      if (BigInt(cost.afterChild) > worst) worst = BigInt(cost.afterChild);
+      assert(
+        BigInt(cost.afterChild) <= BigInt(baseline.afterChild) + 2_000n,
+        `${size} bytes: settling frame cost ${cost.afterChild} vs baseline ${baseline.afterChild}`
+      );
+      await (await token.disarm()).wait();
+      await track.check(`revert bomb ${size} bytes`);
+    }
+    console.log(
+      `       revert bomb: settling frame ${baseline.afterChild} baseline, ${worst} worst, ` +
+        `reserve ${DELIVERY_GAS_RESERVE}`
+    );
+    assert(
+      worst * 2n < DELIVERY_GAS_RESERVE,
+      `the worst settling-frame cost (${worst}) leaves over half the reserve unused`
+    );
+
+    // Boundary case: pin the settling frame at the reserve floor, meaning the
+    // attempt gets its full budget and the frame keeps exactly the reserve.
+    const edgeToken = await deploy("RevertBombBalanceToken", alice);
+    const edge = await lockBomb(edgeToken, 10n);
+    await (await edgeToken.arm(120832n)).wait();
+    const edgeLimit = preSettle + DELIVERY_GAS_RESERVE + DELIVERY_GAS_LIMIT;
+    const edgeTx = await claimAs(edge.hashlock, edge.preimage, { gasLimit: edgeLimit });
+    const edgeReceipt = await edgeTx.wait();
+    assertEq(edgeReceipt.status, 1, "reserve floor: claim transaction succeeded");
+    assertEq((await htlc.getSwap(edge.hashlock)).status, Status.Claimed, "reserve floor: terminal");
+    assertEq(await htlc.creditOf(edgeToken.target, bob.address), 10n, "reserve floor: credited");
+    await (await edgeToken.disarm()).wait();
+    const edgeCost = await settleFrameCost(edgeTx.hash);
+    assert(
+      BigInt(edgeCost.retained) <= DELIVERY_GAS_RESERVE + 4_000n,
+      `reserve floor: the frame retained ${edgeCost.retained}, expected about ${DELIVERY_GAS_RESERVE}`
+    );
+    assert(
+      BigInt(edgeCost.afterChild) <= BigInt(baseline.afterChild) + 2_000n,
+      `reserve floor: settling frame cost ${edgeCost.afterChild} vs baseline ${baseline.afterChild}`
+    );
+    console.log(
+      `       reserve floor: retained ${edgeCost.retained}, spent ${edgeCost.afterChild}, ` +
+        `child used ${edgeCost.childUsed}`
+    );
+    await track.check("reserve floor");
+  });
+
+  await withTest("#47 token: a token that burns all gas in transfer immobilises only itself", async () => {
+    // A hostile token can make its own credits unmovable through every exit.
+    // Value stays conserved and accounted, and no other token is affected.
+    // Bounding the gas handed to the transfer would not change this: a token
+    // that refuses to cooperate cannot be made to cooperate, and a bounded
+    // withdrawal that reported success without moving value would be worse.
+    const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
+    const token = await deploy("GasBurnToken", alice);
+    const good = await deploy("MockERC20", alice);
+    const amount = 1_000n;
+    await (await token.mint(alice.address, amount)).wait();
+    await (await token.approve(htlc.target, amount)).wait();
+    await (await good.mint(alice.address, amount)).wait();
+    await (await good.approve(htlc.target, amount)).wait();
+    const hostile = newSecret();
+    const healthy = newSecret();
+    const timeout = (await now()) + HOUR;
+    await (await htlc.lockToken(hostile.hashlock, bob.address, token.target, amount, timeout)).wait();
+    await (await htlc.lockToken(healthy.hashlock, carol.address, good.target, amount, timeout)).wait();
+    track.track(hostile.hashlock, token.target, hostile.preimage);
+    track.track(healthy.hashlock, good.target, healthy.preimage);
+
+    await (await token.arm()).wait();
+    const receipt = await settle(htlc.connect(relayer).claim, hostile.hashlock, hostile.preimage);
+    assertEq(receipt.status, 1, "claim transaction succeeded");
+    assertEq((await htlc.getSwap(hostile.hashlock)).status, Status.Claimed, "claim is terminal");
+    assertEq(await htlc.creditOf(token.target, bob.address), amount, "credited");
+    await track.check("gas-burn token credited");
+
+    // Every exit fails, and each failure leaves the credit intact.
+    await expectAnyRevert(htlc.connect(bob).withdrawAll(token.target, bob.address), "withdrawAll");
+    await expectAnyRevert(htlc.connect(bob).withdraw(token.target, dave.address, 1n), "withdraw");
+    await expectAnyRevert(htlc.pushCredit(token.target, bob.address), "pushCredit");
+    assertEq(await htlc.creditOf(token.target, bob.address), amount, "credit intact");
+
+    // The healthy token in the same contract is untouched.
+    await settle(htlc.connect(relayer).claim, healthy.hashlock, healthy.preimage);
+    assertEq(await good.balanceOf(carol.address), amount, "healthy token delivered");
+    assertEq(await htlc.outstandingCredit(good.target), 0n, "no credit for the healthy token");
+    await track.check("gas-burn containment");
+  });
+
   await withTest("#47 gas: the credit reserve survives a recipient burning the whole budget", async () => {
     const htlc = await deploy("HTLCv3", alice);
     const track = makeTracker(htlc);
@@ -1159,7 +1404,7 @@ async function main() {
     // delivery budget and the reserve still has to record the credit.
     const secret = newSecret();
     await (await htlc.lockNative(secret.hashlock, guzzler.target, timeout, { value: amount })).wait();
-    track.track(secret.hashlock, ethers.ZeroAddress);
+    track.track(secret.hashlock, ethers.ZeroAddress, secret.preimage);
     const claimAs = htlc.connect(relayer).claim;
     const estimate = await claimAs.estimateGas(secret.hashlock, secret.preimage);
     const receipt = await (
@@ -1187,7 +1432,7 @@ async function main() {
     for (let extra = 0n; extra <= SETTLE_GAS_BUFFER + 100_000n; extra += 17_000n) {
       const probe = newSecret();
       await (await htlc.lockNative(probe.hashlock, guzzler.target, timeout, { value: amount })).wait();
-      track.track(probe.hashlock, ethers.ZeroAddress);
+      track.track(probe.hashlock, ethers.ZeroAddress, probe.preimage);
       const limit = (await claimAs.estimateGas(probe.hashlock, probe.preimage)) + extra;
       let status = 0;
       try {
@@ -1247,7 +1492,7 @@ async function main() {
       } else {
         await (await htlc.lockToken(p.hashlock, p.to, p.token, p.amount, timeout)).wait();
       }
-      track.track(p.hashlock, p.token);
+      track.track(p.hashlock, p.token, p.preimage);
       await track.check(`locked ${p.hashlock.slice(0, 10)}`);
     }
 

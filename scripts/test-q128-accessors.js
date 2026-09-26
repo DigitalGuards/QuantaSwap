@@ -18,41 +18,37 @@ const qrvmoneLibrary =
   process.env.QRVMONE_LIBRARY ||
   path.join(qrvmoneRoot, "build", "lib", "libqrvmone.so.0.11.0");
 
-const WIDE_KEY_PUBLIC_GETTER = /mapping\s*\(\s*address\b[^;]*\)\s+public\b/;
+const { assertAddressSurface } = require("./abi-guards");
+const { compileDirs } = require("./hypc");
 
+// Legacy QRVM-512 codegen truncates a wide key in a compiler-generated mapping
+// getter, so nothing that ships to the QRL target may expose one. The guard runs
+// over the compiled ABI of every contract in the bundle, on the QRL target
+// itself: a source pattern would miss a nested mapping whose inner key is the
+// address, a public struct or array holding addresses, and any declaration
+// spelled across lines.
 function requireSafeSources() {
-  for (const sourcePath of [
-    path.join(contractTestRoot, "MockTokens.hyp"),
-    path.join(contractTestnetRoot, "TestStable.hyp"),
-  ]) {
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.doesNotMatch(
-      source,
-      WIDE_KEY_PUBLIC_GETTER,
-      `${path.basename(sourcePath)} exposes a compiler-generated address mapping getter`
-    );
-    assert.match(source, /function\s+balanceOf\s*\(\s*address\b/);
-    assert.match(source, /function\s+allowance\s*\(\s*address\b[^)]*address\b/);
+  const artifacts = compileDirs([contractRoot, contractTestRoot, contractTestnetRoot], "qrl");
+  const names = Object.keys(artifacts).sort();
+  assert.ok(names.length > 0, "no contracts compiled for the QRL target");
+  for (const name of names) {
+    assertAddressSurface(name, artifacts[name].abi);
   }
-
-  // Legacy QRVM-512 codegen truncates wide keys in compiler-generated
-  // mapping getters, so every contract keyed by an account address has to
-  // expose explicit view functions instead.
-  for (const sourcePath of [
-    path.join(contractRoot, "HTLC.hyp"),
-    path.join(contractRoot, "HTLCv3.hyp"),
-    path.join(contractTestRoot, "MockRecipients.hyp"),
+  // The explicit accessors that replace the generated getters have to exist.
+  for (const [name, required] of [
+    ["MockERC20", ["balanceOf(address)", "allowance(address,address)"]],
+    ["TestStable", ["balanceOf(address)", "allowance(address,address)"]],
+    ["BlocklistToken", ["blocked(address)"]],
+    ["HTLCv3", ["creditOf(address,address)", "outstandingCredit(address)"]],
   ]) {
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.doesNotMatch(
-      source,
-      WIDE_KEY_PUBLIC_GETTER,
-      `${path.basename(sourcePath)} exposes a compiler-generated address mapping getter`
-    );
+    const signatures = artifacts[name].abi
+      .filter((entry) => entry.type === "function")
+      .map((entry) => `${entry.name}(${entry.inputs.map((i) => i.type).join(",")})`);
+    for (const signature of required) {
+      assert.ok(signatures.includes(signature), `${name} is missing ${signature}`);
+    }
   }
-  const htlcv3 = fs.readFileSync(path.join(contractRoot, "HTLCv3.hyp"), "utf8");
-  assert.match(htlcv3, /function\s+creditOf\s*\(\s*address\b[^)]*address\b/);
-  assert.match(htlcv3, /function\s+outstandingCredit\s*\(\s*address\b/);
+  console.log(`[q128] address surface pinned for ${names.length} contracts on the QRL target`);
 }
 
 function createTestTree() {

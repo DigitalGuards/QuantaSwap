@@ -8,6 +8,7 @@ const {
   validateArtifactEnvelope,
   validateManifest,
 } = require("./artifacts");
+const { addressSurface, assertAddressSurface } = require("./abi-guards");
 
 const repoRoot = path.join(__dirname, "..");
 
@@ -141,4 +142,41 @@ test("artifact validation rejects swapped targets and envelope or metadata chang
     () => validateArtifactEnvelope(wrongRuntime, evmManifest, "evm", "HTLC"),
     /runtime bytecode hash mismatch/
   );
+});
+
+test("the address surface of both settlement contracts is pinned on both targets", () => {
+  // A compiler-generated getter over a wide key truncates it on QRVM-512, so the
+  // external surface that mentions an address is pinned exactly. The guard has
+  // to reject an addition, or it guards nothing.
+  for (const target of ["evm", "qrl"]) {
+    for (const name of ["HTLC", "HTLCv3"]) {
+      assertAddressSurface(name, loadArtifact(target, name).abi);
+    }
+  }
+
+  const abi = loadArtifact("evm", "HTLCv3").abi;
+  const withExtra = [
+    ...abi,
+    {
+      type: "function",
+      name: "credits",
+      stateMutability: "view",
+      inputs: [{ name: "", type: "address" }, { name: "", type: "address" }],
+      outputs: [{ name: "", type: "uint256" }],
+    },
+  ];
+  assert.throws(() => assertAddressSurface("HTLCv3", withExtra), /address surface changed/);
+  assert.throws(() => assertAddressSurface("NotAContract", abi), /no pinned address surface/);
+
+  // A struct member counts: getSwap returns addresses inside a tuple.
+  assert.ok(addressSurface(abi).includes("getSwap(bytes32)"));
+
+  // HTLCv2 gained nothing from the v3 work.
+  assert.deepEqual(addressSurface(loadArtifact("evm", "HTLC").abi), [
+    "assign(bytes32,address)",
+    "getSwap(bytes32)",
+    "lockNative(bytes32,address,uint256)",
+    "lockToken(bytes32,address,address,uint256,uint256)",
+    "lockTokenOpen(bytes32,address,uint256,uint256)",
+  ]);
 });

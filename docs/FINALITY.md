@@ -69,8 +69,13 @@ Browser (`frontend/src/lib/swapMachine.ts`):
   snapshot, verified the same way (`:209-218`), plus the own leg still Open.
 - Claim of the initiator leg after a reveal (`:335-341`) requires no depth at
   all, which is correct: the preimage stays valid whatever that chain does.
-- A depth read that fails is dropped, and a stale snapshot is never reused
-  (`frontend/src/components/SwapFlow.tsx:120-141`), so every gate fails closed.
+- A failed depth read is omitted from the snapshot it would have filled
+  (`frontend/src/components/SwapFlow.tsx:120-141`), so a gate that needs it
+  cannot pass. It is not a full fail-closed, though: the refresh keeps the
+  previous `confirmedLegs` value when the head read itself fails
+  (`SwapFlow.tsx:126-129`), so a gate can act on the last good snapshot rather
+  than on nothing. Dropping stale snapshots on any read failure belongs with the
+  integration work in section 3, alongside pinning the block hash.
 
 Reference maker (`marketmaker/src/policy.ts`):
 
@@ -85,8 +90,9 @@ Reference maker (`marketmaker/src/policy.ts`):
 - Its own lock (`:304-314`) requires no chain observation at all. It is gated on
   book status, a persisted authenticated FillV2 acknowledgement,
   `MM_LOCK_GRACE_S` (30 s) and `now < t2 - MM_CLAIM_SAFETY_S`.
-- Refund (`:318-324`) uses the announced `t1`. The browser uses the on-chain
-  timeout instead (`swapMachine.ts:340`).
+- Refund (`:318-324`) uses the announced `t1`, while the browser refunds on the
+  on-chain timeout (`swapMachine.ts:356-359`). The browser's claim gate at
+  `swapMachine.ts:335-341` reads the on-chain timeout too.
 
 Neither client records the block hash of the depth snapshot it read, so a reorg
 between two polls is invisible to both.
@@ -172,7 +178,38 @@ Ordered, with no step skippable:
 Step 4 replaces `MM_CLAIM_SAFETY_S = 600` with a value derived from measured
 finality.
 
-### 3.3 Timelock ordering and margins
+### 3.3 The claim cutoff is a hard client invariant
+
+`claim` closes at `timeout` in the contract, and that cutoff is deliberate:
+overlapping the claim and refund windows would create a worse ambiguity. The
+consequence is that a claim which is broadcast in good time and mines at or after
+the timeout reverts with its preimage already public and the swap still Open.
+That is the same loss shape as issue #47, produced by inclusion latency instead
+of by a payout, and HTLCv3 cannot remove it. It is recorded as A14 in
+`docs/audit/HTLCV3_SCOPE.md`.
+
+So it is a client invariant, and it is not optional:
+
+> Never broadcast a claim inside `Final(leg) + Retry(leg)` of that leg's
+> on-chain timeout. Treat the margin as a refusal: a client inside it must
+> abandon the claim and fall back to the refund path.
+
+The knobs that carry this today are `MM_CLAIM_SAFETY_S` (600 s, checked against
+the on-chain timeout and the announced T2 in `marketmaker/src/policy.ts:261-275`),
+the browser's `CLAIM_MARGIN_S` (1800 s, `frontend/src/config.ts:163`, applied to
+the taker's pre-lock check and the maker's pre-reveal check in
+`frontend/src/lib/swapMachine.ts:188-218`), and the sponsor margin
+(240 s derived, `marketmaker/src/index.ts:600`). Section 3.4 sizes all three
+from measured finality. Two gaps to close with them:
+
+- The browser's own claim step (`swapMachine.ts:335-341`) gates on
+  `nowS < iState.timeout` with no margin at all. It has to carry the same margin
+  as the pre-reveal check.
+- A margin checked when a claim is composed is not a margin at broadcast. The
+  check has to be repeated immediately before submission, next to the existing
+  claim preflight, and the preflight has to fail closed on it.
+
+### 3.4 Timelock ordering and margins
 
 Notation, per chain X: `Incl(X)` is the worst-case inclusion time for a
 fee-competitive transaction, `Final(X)` is the worst-case time from inclusion to
@@ -217,7 +254,7 @@ this is a parameter change and not a wire change. Swapping the direction, with
 QRL as the initiator leg, changes which `Final` appears where; the formula is
 symmetric and has to be evaluated per direction.
 
-### 3.4 Sponsored claims
+### 3.5 Sponsored claims
 
 A sponsored claim is a third party submitting the claim so the recipient needs
 no gas on the paying chain. Two margins apply.
@@ -240,7 +277,7 @@ If one defers anyway, the sponsor completes it with `pushCredit(token, account)`
 which is permissionless and can only pay the credited account, so the recipient
 still spends no gas and still keeps the destination the fund owner chose.
 
-### 3.5 Observation of credits
+### 3.6 Observation of credits
 
 An indexer or UI that reports a deferred payout from a `PayoutCredited` event
 has to apply the same finality rule it applies to a claim. A credit read at the
@@ -254,14 +291,15 @@ of its own.
 |---|---|---|
 | Depth mechanism | `head - N` numeric tag | `finalized` tag (Ethereum), beacon finality checkpoint or measured epoch depth (QRL) |
 | Browser depth | 0 on both legs | finality-gated on both legs |
-| Maker depth | `MM_CONFIRMATIONS = 3`, one knob for both legs | per-chain finality source |
-| Initiator-leg observation by the maker | `latest`, no depth | finality-gated before its own reveal |
+| Maker depth | `MM_CONFIRMATIONS = 3`, applied to the responder leg only, with one knob whichever chain that leg is | a per-chain finality source, so the two legs stop sharing a number |
+| Initiator-leg observation by the maker | `latest`, no depth (section 2.1) | finality-gated before its own reveal |
 | Maker lock decision | no chain observation | initiator lock finalized before the responder funds |
 | Reorg detection | none | block hash pinned and re-verified per poll |
 | Non-finality handling | none | circuit breaker on a stalled finalized checkpoint |
 | Claim margin | 600 s flat | derived from measured finality |
 | Sponsor margin | 240 s derived from the tx timeout | derived from measured finality |
 | Timelock ordering | `T1 >= 2 * T2`, enforced at announce | unchanged rule, larger windows |
+| Claim cutoff margin | 600 s in the maker, 1800 s in the browser's pre-reveal check, none in its own claim step | one margin derived from measured finality, applied at broadcast (section 3.3) |
 | Refund trigger | announced `t1` in the maker, on-chain timeout in the browser | on-chain timeout everywhere |
 | Timing policy location | code constants and maker env vars, duplicated in four files | one reviewed source both clients read |
 | Payout-failure atomicity | HTLCv2 rolls the claim back | HTLCv3 credit path, this branch |

@@ -98,14 +98,15 @@ pragma hyperion >=0.0;
  *       roughly three times its measured cost. The QRL gas schedule has to be
  *       measured before deployment; the headroom exists to absorb a wider
  *       64-byte storage slot without a second deployment.
- *     - The attempt never copies return data into this frame, so a recipient
- *       or token that returns a very large blob cannot exhaust the reserve
- *       through memory expansion. The child frame pays for that copy inside
- *       its own bounded budget. The two constants also make the attack
- *       arithmetically impossible even against a frame that did copy: a child
- *       holding DELIVERY_GAS_LIMIT can allocate and return at most about
- *       5,000 words, whose copy would cost about 65,000 gas, under the
- *       reserve.
+ *     - The settling frame does copy whatever the attempt reverted with. The
+ *       high-level call below discards the value and the generated code still
+ *       copies the bytes, on both targets. What bounds that copy is the
+ *       payload: every revert leaving selfDeliver is a custom error or a
+ *       panic, because nothing on that path makes a typed external call, and
+ *       a typed call is the only construct that re-emits a callee's revert
+ *       data verbatim. An out-of-gas child returns no data at all. The copy is
+ *       therefore a constant. What a token chooses to return does not change
+ *       it. See _selfBalance for the measurement that made this explicit.
  *     - A settlement is never refused because a payout failed. A caller that
  *       supplies little gas shrinks the budget and pushes the payout into the
  *       credit path. That is deliberate: it conserves value, pays the same
@@ -114,6 +115,16 @@ pragma hyperion >=0.0;
  *       one: a transaction still has to carry enough gas to reach the state
  *       write and record the credit, and no contract can defend against a
  *       caller under-funding its own transaction.
+ *
+ *   One revert after the preimage check survives by design: claim() closes at
+ *   `timeout`. A claim that is broadcast in time and mines at or after the
+ *   timeout reverts TimeoutPassed with its preimage already public and the swap
+ *   still Open, which is the #47 shape driven by inclusion latency, with no
+ *   payout involved. Moving the cutoff would overlap the claim and refund
+ *   windows
+ *   and create a worse ambiguity, so it stays, and the margin belongs to the
+ *   client: never broadcast a claim inside a finality-sized margin of the
+ *   timeout. docs/FINALITY.md states that as a hard client invariant.
  *
  *   A Claimed swap no longer implies the recipient holds the funds. Read
  *   creditOf(token, recipient), or the presence of PayoutCredited in the same
@@ -443,9 +454,9 @@ contract HTLCv3 {
     ) private {
         if (token == address(0) || token.code.length == 0) revert InvalidParams();
         _lock(hashlock, recipient, token, amount, timeout, openRecipient);
-        uint256 before = IPayoutERC20(token).balanceOf(address(this));
+        uint256 before = _selfBalance(token);
         _tokenCall(token, abi.encodeWithSelector(IPayoutERC20.transferFrom.selector, msg.sender, address(this), amount));
-        if (IPayoutERC20(token).balanceOf(address(this)) - before != amount) revert UnsupportedToken();
+        if (_selfBalance(token) - before != amount) revert UnsupportedToken();
     }
 
     function _lock(
@@ -536,9 +547,40 @@ contract HTLCv3 {
             if (!sent) revert TransferFailed();
             return;
         }
-        uint256 before = IPayoutERC20(token).balanceOf(address(this));
+        uint256 before = _selfBalance(token);
         _tokenCall(token, abi.encodeWithSelector(IPayoutERC20.transfer.selector, to, amount));
-        if (before - IPayoutERC20(token).balanceOf(address(this)) != amount) revert TransferFailed();
+        if (before - _selfBalance(token) != amount) revert TransferFailed();
+    }
+
+    /// @dev Read this contract's own balance of `token` without ever re-emitting
+    ///      the token's failure.
+    ///
+    ///      This is load-bearing. A typed external call
+    ///      bubbles the callee's revert data verbatim, and the settling frame
+    ///      copies whatever the delivery attempt reverted with (the high-level
+    ///      call in _settle discards the value, and the generated code still
+    ///      copies the bytes; that holds on both targets). A token whose
+    ///      balanceOf reverts with a large payload could therefore charge the
+    ///      settling frame for memory expansion out of the reserve that has to
+    ///      record the credit. Measured on the EVM target before this was
+    ///      closed: a 120,832-byte revert payload cost the settling frame
+    ///      97,764 gas of the 150,000 reserve. With it closed the settling
+    ///      frame costs 47,074 for that payload and for a four-byte one alike,
+    ///      which the test suite pins by reading both from a trace.
+    ///
+    ///      Reading through a low-level call keeps the copy inside the frame
+    ///      that pays for it, which is the delivery attempt's own bounded
+    ///      budget, and turns every failure into a four-byte custom error. No
+    ///      revert leaving selfDeliver can now exceed a custom error or a
+    ///      panic, so the settling frame's copy is a constant. The contract
+    ///      contains no typed external call at all, which makes that property
+    ///      checkable, and not only reviewable.
+    function _selfBalance(address token) private view returns (uint256) {
+        (bool ok, bytes memory ret) = token.staticcall(
+            abi.encodeWithSelector(IPayoutERC20.balanceOf.selector, address(this))
+        );
+        if (!ok || ret.length == 0) revert TransferFailed();
+        return abi.decode(ret, (uint256));
     }
 
     /// @dev Dependency-free safe ERC-20 call. Used to pull funds in while

@@ -20,6 +20,8 @@ real-value NO-GO.
 | `contracts/test/semantic/Q128HTLCv3.hyp` | QRVM-512 wide-address regression for the credit ledger |
 | `scripts/test-htlcv3.js` | the EVM behavioural suite |
 | `scripts/test-q128-accessors.js` | the QRVM-512 semantic harness |
+| `scripts/abi-guards.js` | the pinned address-touching ABI surface of every contract in the bundle |
+| `scripts/measure-delivery-gas.js` | the mainnet-fork measurement behind the delivery budget |
 | `scripts/compile.js`, `scripts/hypc.js`, `scripts/artifacts.js` | artifact production and envelope validation |
 | `config/hyperion-targets.json` | pinned compiler versions, codegen settings, address widths |
 | `docs/FINALITY.md` | the finality policy the deployment depends on |
@@ -61,10 +63,10 @@ Hashes of the tree under review:
 
 | Item | SHA-256 |
 |---|---|
-| Reviewed source bundle (both contracts) | `8918faaf480c8d000858c93a4eb7914f13f3255f85c70124210028c2d92f0c17` |
+| Reviewed source bundle (both contracts) | `c2d17fd8b2c569bd31557a3d5d8a9e79c080cab59a68727a2625ed679b3ef6fe` |
 | HTLCv3 ABI (identical on both targets) | `dd6863d43d4c8e104e6137eba7b9f249ad1edb2a46b91e9fcd07e39bbfe4078b` |
-| HTLCv3 EVM runtime | `86156ba21729ea0a16068a32412d5e7fd2d35fddba73eb8ac5119b8ba1855395` |
-| HTLCv3 QRVM-512 runtime | `06b986e5210f4548bf27786576b7a75a1e456702fea3f6dc96f999547784b33d` |
+| HTLCv3 EVM runtime | `ed73e86007b25aebfbc96c18fa13037a09cd6fc04002ac551d4729f7d997b858` |
+| HTLCv3 QRVM-512 runtime | `0de1866b8a8b78cbeebdcbf5f328b95d9b2d9502f5f42ebdffaa10e3ed3a26e6` |
 | HTLCv2 EVM runtime (unchanged, matches the live deployment) | `9ad68221efceaf9f958d96a9f650946f6fce37f2ddcaf12e2b6194d7578a5e8f` |
 | HTLCv2 QRVM-512 runtime (unchanged, matches the live deployment) | `7d9b70ef0d4a427f357a721b9c897cc253abaff077465cbcd8513a696cd70903` |
 
@@ -72,7 +74,28 @@ The two HTLCv2 runtime hashes are the values recorded for the live deployment in
 `docs/DEPLOYMENTS.md`, reproduced from this tree. Adding HTLCv3 to the bundle
 changed the bundle hash and left HTLCv2's bytecode byte-for-byte identical.
 
-Runtime sizes: 5741 bytes on EVM, 6497 bytes on QRVM-512.
+Runtime sizes: 5191 bytes on EVM, 6208 bytes on QRVM-512.
+
+### Measured delivery cost against the live Ethereum tokens
+
+`DELIVERY_GAS_LIMIT` has to cover what the delivery attempt actually consumes:
+one `balanceOf`, the `transfer`, and the second `balanceOf` that asserts the
+balance moved. Measured against the deployed WETH, USDC and USDT
+implementations on a read-only anvil fork of Ethereum mainnet at block
+26,063,714, traced with `debug_traceTransaction` and read as the gas the
+`selfDeliver` frame consumed. Nothing was broadcast and no key was used.
+
+| Token | Recipient with no prior balance | Recipient with a balance |
+|---|---|---|
+| WETH | 36,407 | 19,307 |
+| USDC | 48,707 | 31,607 |
+| USDT | 48,763 | 31,663 |
+
+Worst real case 48,763 against a 100,000 budget, a 2.05x margin. Every case
+delivered directly. Reproduce with `node scripts/measure-delivery-gas.js`, which
+is outside `npm test` because it needs network access. See
+A15 for the accepted risk that the constant is immutable while USDC and USDT are
+upgradeable proxies.
 
 ## 3. Trust model
 
@@ -103,8 +126,8 @@ Trusted by assumption, and stated so that a reviewer can price it:
   63/64 call rule, on a child frame's revert undoing its own state, and on
   storage write costs being within the reserve. The suite exercises this on the
   EVM target. The semantic suite exercises QRVM-512 correctness; gas is outside
-  its scope.
-  A reviewer should confirm the reserve against the QRL v3 gas schedule.
+  its scope, so the reserve has to be confirmed against the QRL v3 gas schedule
+  before deployment (A9, and the measurement in section 8).
 
 ## 4. Invariants
 
@@ -125,8 +148,10 @@ assignment, and never `address(this)`.
 
 **I4 Claim is unconditional once the preimage checks out.** After
 `sha256(preimage) == hashlock` passes, `status = Claimed` and the preimage are
-written, and nothing later in the transaction can revert them. In particular no
-token, recipient, or gas condition can.
+written, and no token and no recipient can make the transaction revert them. Two
+bounds, both documented: a transaction that does not carry enough gas to reach
+the write reverts like any other (A3), and the check is only reached before
+`timeout` (A14).
 
 **I5 Conservation, per token.** For every token `t`, including `address(0)` for
 the native coin:
@@ -135,15 +160,20 @@ the native coin:
 balance(t) >= sum(amount of Open swaps whose token is t) + outstandingCredit(t)
 ```
 
-Equality holds except for native value forced in without a call. Every path
-either moves `amount` out of the contract or adds exactly `amount` to a credit,
-never both and never neither.
+Every path either moves `amount` out of the contract or adds exactly `amount` to
+a credit, one of the two and not both. Two things make this an inequality rather
+than an equality: native value forced in without a call (A7), and a token that
+misreports this contract's balance, since the left side is whatever the token
+says it is (A5).
 
 **I6 Credit ownership.** A credit can only ever reach `account`, or a
 destination `account` named itself. `withdraw` and `withdrawAll` key on
 `msg.sender` and take a destination; `pushCredit` is permissionless and has no
-destination parameter, so it can only pay `account`. No other party can
-redirect or freeze a credit.
+destination parameter, so it can only pay `account`. Redirect authority is what
+is airtight: no other party can send a credit anywhere `account` did not choose.
+Availability is not, and cannot be at this layer, because the token decides
+whether a transfer succeeds. An issuer blocklist or a gas-burning token can
+freeze a credit in place (A16), which conserves it without delivering it.
 
 **I7 Delivery atomicity.** A delivery attempt either succeeds and moves exactly
 `amount`, or fails and moves nothing. Two independent mechanisms hold it up. The
@@ -251,16 +281,32 @@ immediately for a few hundred gas, and the frame keeps everything it had, which
 may still be less than the credit path costs. The only actor who can land in
 that window is the submitter, who already holds the preimage.
 
-**A4 A credit held by a contract that cannot make calls is stuck.** The credit is
-owned by the recipient address the fund owner chose. If that address is a
-contract with no way to call `withdraw`, the value stays in the ledger. There is
-no recovery path and no owner, by design.
+**A4 A native credit owed to a contract that cannot receive is stuck.** A credit
+is owned by the recipient address the fund owner chose. `pushCredit` is
+permissionless and pays that address, so a token credit owed to a contract that
+cannot make calls is still recoverable by anyone. The unrecoverable case is
+narrower: a native credit owed to a contract that can neither call `withdraw`
+nor accept a plain transfer. Then every exit fails and the value stays in the
+ledger. There is no recovery path and no owner, by design.
 
-**A5 Malicious-token accounting within that token.** A token that lies about its
-own balance in `balanceOf` can affect its own escrow accounting at lock time
-(I11 depends on `balanceOf`). Damage stays inside that token. Delivery does not
-consult `balanceOf`, deliberately: a reverting `balanceOf` in the settlement
-path would reintroduce the #47 failure shape.
+**A5 Malicious-token accounting within that token.** Both the lock path (I11)
+and the delivery path (I7) ask the token for this contract's own balance, so a
+token that lies about it can distort its own escrow accounting and its own
+delivery decisions. Damage stays inside that token: escrow, credits and the
+conservation invariant are per-token.
+
+Consulting `balanceOf` during a settlement is safe because of where it runs. The
+read is a low-level call inside the `selfDeliver` child frame, so a `balanceOf`
+that reverts, runs out of gas, or answers with an oversized payload fails the
+delivery attempt, and a failed attempt is a credit. The revert leaving
+`selfDeliver` is this contract's own four-byte error, never the token's payload.
+The contract contains no typed external call at all, which is what makes that
+property checkable: a typed call is the only construct that re-emits a callee's
+revert data verbatim, and the settling frame copies whatever the attempt
+reverted with. Before this was closed, a token reverting from `balanceOf` with a
+120,832-byte payload cost the settling frame 97,764 gas of the 150,000 reserve.
+The measured figure now is 47,074 for every payload size, identical to a
+four-byte revert.
 
 **A6 A token whose return data is not a canonical boolean.** `_tokenCall`
 decodes the return word through the compiler, so a non-boolean word makes the
@@ -276,23 +322,30 @@ sweep and no owner, so it is unrecoverable. No swap is affected.
 the timeout with little gas and push the initiator into the credit path. Same
 trade as A1.
 
-**A9 Reserve sizing is validated on EVM only.** By opcode accounting the credit
-path costs about 46,000 gas on the EVM target: two cold storage writes at 22,100
-each (a reverted child frame rolls back its access-list warming, so both slots
-are cold), a `LOG3` with one data word, and the guard reset. The reserve is
-150,000, so the margin is roughly three times the measured cost, and the
-behavioural suite confirms it empirically at a gas limit that leaves the
-settling frame holding exactly the reserve.
+**A9 Reserve sizing is measured on EVM only.** The settling frame's whole cost
+after the delivery attempt is **47,074 gas** on the EVM target, traced with
+`debug_traceTransaction` at a gas limit that leaves the frame holding exactly
+`DELIVERY_GAS_RESERVE`. That covers two cold storage writes (the settling frame
+writes the credit slots only after the attempt fails, so it never warmed them
+itself, and a reverted child frame's access-list warming is rolled back with it),
+a `LOG3` with one data word, the guard reset, and the copy of the attempt's
+revert payload. The figure is identical for a four-byte revert and for a
+120,832-byte one, which is the property A5 describes.
 
-QRVM-512 is where this needs a reviewer. The semantic suite proves QRVM-512
-correctness and says nothing about QRVM-512 gas. If a 64-byte storage slot
-costs more than about three times an EVM slot, the credit path exceeds the
-reserve and every deferred settlement on the QRL leg reverts after the preimage
-check, deterministically, which is the exact failure this contract removes. The
-reserve carries a 3x multiplier by construction, and the cost of carrying it is
-only the documented transaction-limit buffer, since unused gas is refunded.
-**Measuring the credit path on the QRL target is a deployment blocker, not a
-caveat.**
+Against a 150,000 reserve that is a **3.19x margin**, and the suite asserts that
+twice the worst observed cost still fits. The figure previously quoted here,
+41,000, was an opcode estimate; the real number is measured and pinned by
+`#47 gas: a revert bomb out of the delivery frame costs the settling frame
+nothing`.
+
+QRVM-512 is where this still needs a reviewer. The semantic suite proves
+QRVM-512 correctness and says nothing about QRVM-512 gas. If the settling
+frame's cost there exceeds 150,000, every deferred settlement on the QRL leg
+reverts after the preimage check, deterministically, which is the exact failure
+this contract removes. Carrying the reserve costs only the documented
+transaction-limit buffer, since unused gas is refunded. **Measuring the settling
+frame on the QRL target is a deployment blocker**; section 8 gives
+the measurement to run.
 
 **A12 The conservation invariant has an observation window during a token
 lock.** `_lock` writes the `Open` record and emits `Locked` before
@@ -312,6 +365,48 @@ delivery. An integrator that reads either as "funds received" mis-accounts every
 deferred payout. The distinguishing signals are `PayoutCredited` in the same
 receipt and `creditOf(token, recipient)`.
 
+**A14 The claim window closes hard at `timeout`.** A claim broadcast in good time
+that mines at or after `timeout` reverts `TimeoutPassed` with its preimage
+already public and the swap still `Open`. That is the #47 shape produced by
+inclusion latency, and it is the one revert after the preimage check that remains
+by design: moving the cutoff would overlap the claim and refund windows and
+create a worse ambiguity. The margin therefore belongs to the client, as a hard
+invariant: never broadcast a claim inside a finality-sized margin of the timeout.
+`docs/FINALITY.md` section 3.3 states it and names the existing knobs
+(`MM_CLAIM_SAFETY_S`, the browser's `CLAIM_MARGIN_S`, and the taker's claim
+margin). Covered by `parity: claim closes at timeout, refund opens at timeout`,
+which also asserts that no preimage was stored.
+
+**A15 The delivery budget is a constant in an immutable contract, and two
+supported tokens are upgradeable.** `DELIVERY_GAS_LIMIT` is 100,000. Measured
+against the live implementations on a mainnet fork (section 2), the worst real
+case is 48,763 for USDT to a recipient with no prior balance, a 2.05x margin.
+USDC and USDT are both upgradeable proxies, so a future implementation could
+raise their cost past the budget. The failure degrades service without losing value: the payout defers to a
+credit, `withdraw` and `pushCredit` forward all remaining gas with no cap, and
+`pushCredit` is permissionless, so even a recipient with no gas on the paying
+chain can be paid by anyone. Raising the constant would widen the griefing
+ceiling a hostile recipient can impose on a sponsor, which is why it stays at a
+measured 2x.
+
+**A16 A token that burns all the gas it is given immobilises its own credits.**
+Every exit reaches the token, so a token whose `transfer` consumes every unit of
+gas cannot be made to pay anyone. Value stays conserved and accounted, no other
+token is affected, and the swap stays terminal. Routing the withdrawal through a
+bounded trampoline would not help: a token that refuses to cooperate cannot be
+made to, and the alternative, treating a bounded failure as a success, would
+destroy the credit. Covered by `#47 token: a token that burns all gas in transfer
+immobilises only itself`.
+
+**A17 Hashlock squatting on the counterparty leg.** A hashlock is single-use per
+contract forever, so anyone who learns one before the counterparty locks can burn
+it there with a dust lock. Inherited unchanged from HTLCv2. The cost is a wasted
+setup, with no loss: the squatted leg cannot be funded, and the client rule
+is to verify the hashlock is unused on the responder chain before assigning or
+funding, then abort and relist with a fresh secret. `docs/ARCHITECTURE.md`
+section 2 already states that rule for prelocks. It remains a real griefing
+surface for a permissionless mainnet deployment.
+
 **A10 Preimage disclosure window.** The RPC endpoint that receives a claim sees
 the preimage. That is unchanged from HTLCv2 and is a deployment concern, covered
 in `docs/ARCHITECTURE.md` section 7 and `docs/FINALITY.md`.
@@ -326,7 +421,7 @@ Gate: `npm test` at the repository root, which compiles both targets, validates
 manifests and artifact envelopes, runs the HTLCv2 suite on a throwaway anvil,
 runs the HTLCv3 suite on a throwaway anvil, and runs the QRVM-512 semantic suite
 in four modes (legacy and via-IR, each unoptimized and optimized). Result on the
-reviewed tree: 5 node tests, 31 HTLCv2 scenarios, 36 HTLCv3 scenarios, 6
+reviewed tree: 6 node tests, 31 HTLCv2 scenarios, 38 HTLCv3 scenarios, 6
 semantic runs, 0 failures.
 
 Issue #47 acceptance criteria mapped to tests. All test names are from
@@ -346,13 +441,16 @@ Issue #47 acceptance criteria mapped to tests. All test names are from
 | HTLC-wide freezes | `#47 token: an HTLC-wide freeze credits every settlement` |
 | nonpayable recipients | `#47 native: a nonpayable recipient ends the claim as a credit`; `#47 credits: a nonpayable recipient contract collects through a payable destination` |
 | malicious callback recipients | the three `#47 reentrancy` tests; `#47 native: a gas-guzzling and a reverting recipient both credit`; `#47 gas: the credit reserve survives a recipient burning the whole budget`; `#47 token: a 64k-word return bomb cannot exhaust the credit reserve` |
-| value conservation, EVM target | every HTLCv3 test that moves value asserts `balance == sum(Open) + outstandingCredit` after each step through the shared tracker; `#47 invariants: a mixed multi-swap sequence conserves value throughout` |
+| value conservation, EVM target | every HTLCv3 test that moves value runs the shared tracker after each step, which re-derives `balance == sum(Open) + outstandingCredit` from chain state and also checks that the per-account credit ledger sums to `outstandingCredit`; `#47 invariants: a mixed multi-swap sequence conserves value throughout` |
 | value conservation and terminal state, QRL target | `Q128HTLCv3.exerciseTokenCreditAliases`, `.exerciseWithdrawDestinationAliases`, `.exerciseNativeCreditAliases`, `.exerciseDeliveredTokenAliases`, `.exerciseDeliveredNativeAliases`, each in four codegen modes. The last two exist because the credit cases all fail delivery on purpose, so only they prove the bounded `selfDeliver` self-call round-trips a 64-byte payout address and lands on the right account |
 | a token that reports success and moves nothing | `#47 token: a token that reports success and moves nothing credits` |
-| a return bomb whose leading word decodes as success | `#47 token: a return bomb cannot exhaust the credit reserve`, at four tail sizes, each at a gas limit that leaves the settling frame holding only the reserve |
+| a return bomb whose leading word decodes as success | `#47 token: a return bomb cannot exhaust the credit reserve`, at four tail sizes. Note what this one does and does not show: above roughly 122,880 bytes the child runs out of gas inside its own budget and returns nothing, so the large sizes exercise the out-of-gas path. The settling frame's exposure to a payload that does reach it is measured separately |
+| a revert payload bubbled out of the delivery frame | `#47 gas: a revert bomb out of the delivery frame costs the settling frame nothing`: five payload sizes up to 120,832 bytes plus a case pinned at the reserve floor, each asserting the settling frame's traced cost stays at the four-byte-revert baseline |
 | the credit ledger cannot be pushed into an overflow | `#47 ledger: the lockable amount is capped so credits cannot overflow` |
 | a gasless recipient can be paid without choosing the destination | `#47 credits: anyone can push a credit, and only to its owner` |
-| terminal-state invariants | the tracker asserts every tracked swap is Open or terminal and that a Claimed swap kept its preimage, after every step |
+| a token that burns every unit of gas it is given | `#47 token: a token that burns all gas in transfer immobilises only itself` |
+| no compiler-generated getter over a wide key, on either target | `scripts/abi-guards.js` pins the address-touching ABI surface of all 20 contracts in the bundle; `scripts/test-q128-accessors.js` applies it to the QRL-target build and `scripts/artifacts.test.js` to both targets, including a self-test that the guard rejects an added getter |
+| terminal-state invariants | the tracker asserts every tracked swap is Open or terminal after every step, and compares a Claimed swap's stored preimage against the exact expected value wherever the test knows it |
 | HTLCv2 properties preserved | the 15 `parity:` tests |
 | new immutable deployment, current addresses untouched | `scripts/artifacts.test.js` asserts the HTLCv2 ABI has no `withdraw` and that the v3 `getSwap` tuple shape matches v2; the HTLCv2 runtime hashes in section 2 reproduce the live deployment |
 
@@ -364,7 +462,11 @@ Invariants to tests:
 | I2 | `parity: a hashlock is single-use forever` |
 | I3 | `parity: open locks, assign write-once, release, NotAssigned guard`; `parity: lock rejects invalid parameters, including the HTLC itself` |
 | I4 | every `#47` credit test asserts `status == Claimed` and the stored preimage |
-| I5, I9 | the tracker in every test; `#47 invariants: a mixed multi-swap sequence conserves value throughout` |
+| I5 | the tracker in every test; `#47 invariants: a mixed multi-swap sequence conserves value throughout` |
+| I9 | the tracker sums `creditOf` over every account that appears as an initiator or a recipient of a tracked swap and compares it with `outstandingCredit`; those are the only accounts a credit can accrue to |
+| I13 | `#47 ledger: the lockable amount is capped so credits cannot overflow` |
+| A14 | `parity: claim closes at timeout, refund opens at timeout` |
+| A16 | `#47 token: a token that burns all gas in transfer immobilises only itself` |
 | I6 | `#47 credits: only the credited account can move them` |
 | I7 | `#47 token: false-return, reverting and return-bomb transfers all credit`; `#47 token: a token that reports success and moves nothing credits` |
 | I13 | `#47 ledger: the lockable amount is capped so credits cannot overflow` |
@@ -372,7 +474,51 @@ Invariants to tests:
 | I10 | the three `#47 reentrancy` tests; `#47 trampoline: selfDeliver is not reachable from outside` |
 | I11 | `parity: fee-on-transfer tokens are rejected at both lock entries` |
 
-## 8. Review questions we would most like answered
+## 8. The measurement to run on the QRL v3 devnet before deployment
+
+A9 is a deployment blocker and this is what settles it. Run it on the private
+QRL v3 devnet (chain 3151909), against the QRL-target artifact, with no real
+value.
+
+**What to deploy.** `build/hyperion/qrl/HTLCv3.json` plus two adversarial
+tokens from `contracts/test/MockRecipients.hyp`: `SilentSuccessToken` (a
+delivery that fails cheaply) and `RevertBombBalanceToken` (a delivery that fails
+with a large payload).
+
+**Scenario A, the settling frame's cost.** For each token: `lockToken` a small
+amount to a fresh 64-byte recipient, then `claim` from a third account with a
+gas limit of `estimateGas + DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE`, which
+pins the settling frame at the reserve floor. Arm the bomb at 4 bytes, then at
+120,832 bytes. The figure to record is the gas the settling frame consumes after
+the delivery attempt returns, the same quantity `settleFrameCost` reads from a
+trace in `scripts/test-htlcv3.js`. On the EVM target it is 47,074 for both
+payload sizes.
+
+**Bound.** That figure must stay **under 150,000** (`DELIVERY_GAS_RESERVE`), and
+it must not grow with the payload size. The EVM margin is 3.19x. If the QRL
+figure exceeds 150,000, raise `DELIVERY_GAS_RESERVE` and redeploy before any
+value moves; if it grows with the payload size, the target re-emits a callee's
+revert data somewhere this review did not find, and that has to be understood
+before deployment.
+
+**Scenario B, the delivery budget.** The QRL leg settles the native coin, so the
+token path is only reachable if a QRC-20 leg is ever added. Measure the native
+delivery attempt to a plain 64-byte account and to a contract that rejects the
+transfer, and record both. The figure must stay under 100,000
+(`DELIVERY_GAS_LIMIT`). On the EVM target a native delivery to an account costs
+about 9,700 and the worst measured token delivery is 48,763 (section 2).
+
+**Scenario C, the claim floor.** Sweep the claim gas limit upward from below the
+estimate and confirm the same property the EVM suite asserts: every transaction
+that completes leaves the swap terminal, and every transaction that fails leaves
+it `Open` with no preimage stored.
+
+If the QRL execution client exposes no step tracer, Scenario A can be run
+differentially instead: claim once with a cheap failure and once with the bomb
+armed, at the same gas limit, and compare total gas used. The two must be equal
+to within a few hundred gas.
+
+## 9. Review questions we would most like answered
 
 1. Is `DELIVERY_GAS_RESERVE` sufficient on the QRVM-512 gas schedule, in the
    worst case where both credit slots are cold and the child frame consumed its
