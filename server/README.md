@@ -494,5 +494,24 @@ npm test
 npm start
 ```
 
+## Concurrency load test
+
+`src/loadtest/` holds a harness that starts a real book process on loopback
+with a throwaway data directory, seeds signed portable V2 orders from synthetic
+makers, and drives hundreds of synthetic takers, makers, listing pollers and
+stream subscribers at it. It compiles with the package and is excluded from
+`npm test`.
+
+```bash
+nice -n 15 npm run loadtest -- --takers 200 --duration 20
+```
+
+It reports per-endpoint latency percentiles, accepted and rejected admissions
+with reasons, fairness against the documented intent ordering, SSE delivery
+lag, and the end-of-run invariant checks: book against federation feed, one
+stored fill per order under a deliberate double-fill race, and an identical
+reload after a restart. Results and analysis for this deployment are in
+[`../docs/LOAD_TEST.md`](../docs/LOAD_TEST.md).
+
 The complete wire protocol remains in
 [`../docs/ORDERBOOK_API.md`](../docs/ORDERBOOK_API.md).

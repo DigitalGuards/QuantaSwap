@@ -12,6 +12,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "npm run build && node --test dist/*.test.js && node smoke.js && node federation-smoke.js",
+    "loadtest": "npm run build && node dist/loadtest/main.js",
     "smoke:federation": "npm run build && node federation-smoke.js"
   },
   "devDependencies": {
