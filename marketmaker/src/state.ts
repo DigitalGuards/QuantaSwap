@@ -126,6 +126,21 @@ export const LEASE_HEARTBEAT_INTERVAL_MS = 10_000;
  */
 export const LEASE_CLOCK_SKEW_MS = 30_000;
 
+/**
+ * Staleness threshold for a recovery guard from another PID namespace, which
+ * is the one case where no process id can be inspected. A guard is held for a
+ * few file operations and is never refreshed, so any age beyond this is a dead
+ * creator with an enormous margin. The threshold is far longer than the lease
+ * lifetime on purpose: the rename that installs a taken-over lease and the
+ * read that confirms it are two operations, so two starters that both judged
+ * one guard dead could in principle both confirm their own record. This margin
+ * puts that precondition, a starter stalled inside the guard window for this
+ * long, at the level of a machine fault, which the write fence and the
+ * heartbeat then contain. A shorter threshold would invite it at ordinary
+ * scheduling latency.
+ */
+export const GUARD_STALE_MS = 600_000;
+
 /** Recorded when this process cannot read its own PID namespace. */
 export const UNKNOWN_PID_NAMESPACE = "unknown";
 
@@ -291,6 +306,29 @@ function isLiveLease(
   return age < liveness.ttlMs;
 }
 
+/**
+ * Liveness of a recovery guard. Its creator's process id decides inside our own
+ * namespace and boot, exactly as for the lease. From any other namespace the
+ * heartbeat rule applies with GUARD_STALE_MS, so taking a guard over stays
+ * conservative where no process id can be read.
+ */
+function isLiveGuard(
+  observed: ObservedLease | undefined,
+  liveness: LeaseLiveness,
+): observed is LiveObservedLease {
+  if (observed === undefined || observed.record === null) return false;
+  const record = observed.record;
+  if (usesPidSemantics(record, liveness)) {
+    return (
+      record.bootId === liveness.bootId &&
+      processStart(record.pid) === record.processStart
+    );
+  }
+  const age = heartbeatAgeMs(observed, liveness);
+  if (age < -LEASE_CLOCK_SKEW_MS) return false;
+  return age < GUARD_STALE_MS;
+}
+
 function readLease(path: string): ObservedLease | undefined {
   let descriptor: number | undefined;
   try {
@@ -366,14 +404,13 @@ function replaceStaleLeaseFile(
 }
 
 /**
- * Manual step named by the one refusal that still needs an operator. It names
- * the recovery guard exactly and says to keep the lease file, so nobody
- * removes the lease a live holder owns.
+ * Manual step for the one refusal that still needs an operator. The refusal
+ * names the guard path just before this text, and this text says to keep the
+ * lease file, so nobody removes the lease a live holder owns.
  */
-const leaseManualRecovery = (recoveryPath: string): string =>
-  `confirm no market maker process runs on this state volume, then remove the recovery guard ` +
-  `${recoveryPath} by hand and leave the lease file itself in place (see "Single active process" ` +
-  `in marketmaker/README.md)`;
+const LEASE_MANUAL_RECOVERY =
+  `confirm no market maker process runs on this state volume, then remove that guard file by hand and ` +
+  `leave the lease file itself in place (see "Single active process" in marketmaker/README.md)`;
 
 /**
  * Drop staging files a crashed starter left behind between creating and
@@ -473,6 +510,10 @@ export class StateProcessLease {
     const identityDigest = createHash("sha256")
       .update(JSON.stringify(identity))
       .digest("hex");
+    // Fails closed on an unreadable /proc, so this process never writes a
+    // record at all. The order book's port of this file instead records the
+    // unknown PID namespace there and falls back to heartbeat liveness, which
+    // is the one intentional behavior difference between the two copies.
     const currentStart = processStart(process.pid);
     if (currentStart === null)
       throw new Error("cannot determine market maker process identity");
@@ -514,7 +555,7 @@ export class StateProcessLease {
         if (
           recoveryOwner === undefined ||
           recoveryOwner.record === null ||
-          isLiveLease(recoveryOwner, liveness)
+          isLiveGuard(recoveryOwner, liveness)
         ) {
           // A live guard, a guard that vanished between the failed create and
           // this read, or a half-written one whose owner may still be running.
@@ -523,8 +564,9 @@ export class StateProcessLease {
           continue;
         }
         // The starter that created this guard is gone: its process is dead in
-        // this namespace, or the guard outlived the heartbeat lifetime, and a
-        // guard is never refreshed while it is held. A guard left behind by a
+        // this namespace, or the guard is older than GUARD_STALE_MS, which is
+        // ten minutes for a window that lasts a few file operations and is
+        // never refreshed. A guard left behind by a
         // kill between its creation and its release would otherwise block
         // every later start forever, which is a restart loop no operator can
         // resolve without deleting files. Taking it over is safe on its own:
@@ -567,7 +609,7 @@ export class StateProcessLease {
     throw new Error(
       `state lease ${path} remained contended during stale-lock recovery: another starter keeps ` +
         `holding the recovery guard ${recoveryPath}. If this repeats, ` +
-        leaseManualRecovery(recoveryPath),
+        LEASE_MANUAL_RECOVERY,
     );
   }
 

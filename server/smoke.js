@@ -549,8 +549,8 @@ try {
   const bidA = await mkBid(2n * 10n ** 18n, ONE_ETH); // rate 2.0, online
   const bidB = await mkBid(19n * 10n ** 17n, ONE_ETH); // rate 1.9, online
   // Presence is the premise of the next two checks, so a future regression in
-  // the presence window fails here with a name instead of hiding as a
-  // mismatched take.
+  // the presence window fails here with a name, so a mismatched take cannot
+  // hide it.
   const bidAView = await api("GET", `/orders/${bidA.id}`);
   check(
     "fresh bid counts as online before the take",

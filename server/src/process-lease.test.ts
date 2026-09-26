@@ -15,6 +15,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, it } from "node:test";
 import {
   BookLease,
+  GUARD_STALE_MS,
   LEASE_CLOCK_SKEW_MS,
   LEASE_TTL_MS,
   ProcessLease,
@@ -262,8 +263,7 @@ describe("order book single-writer lease", () => {
     assert.equal(existsSync(`${file}.lock.recovery`), false);
   });
 
-  it("takes over a foreign-namespace guard past the heartbeat lifetime", () => {
-    const file = join(makeTemp(), "orders.json");
+  const writeForeignGuard = (file: string, ageMs: number): void => {
     writeFileSync(
       `${file}.lock.recovery`,
       JSON.stringify({
@@ -277,13 +277,32 @@ describe("order book single-writer lease", () => {
       }),
       { mode: 0o600 },
     );
-    const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
-    utimesSync(`${file}.lock.recovery`, old, old);
+    const stamp = new Date(Date.now() - ageMs);
+    utimesSync(`${file}.lock.recovery`, stamp, stamp);
+  };
+
+  it("takes over a foreign-namespace guard past the guard lifetime", () => {
+    const file = join(makeTemp(), "orders.json");
+    writeForeignGuard(file, GUARD_STALE_MS + 5_000);
     const lease = track(
       ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
     );
     lease.assertOwned();
     assert.equal(existsSync(`${file}.lock.recovery`), false);
+  });
+
+  it("keeps a foreign-namespace guard past the lease lifetime alone", () => {
+    const file = join(makeTemp(), "orders.json");
+    // A guard is judged on its own, much longer threshold, so the window where
+    // two starters could both take one guard over needs a stall of minutes.
+    writeForeignGuard(file, LEASE_TTL_MS + 5_000);
+    const guard = readFileSync(`${file}.lock.recovery`, "utf8");
+    assert.throws(
+      () => ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
+      /remained contended.*remove that guard file by hand/s,
+    );
+    assert.equal(readFileSync(`${file}.lock.recovery`, "utf8"), guard);
+    assert.equal(existsSync(`${file}.lock`), false);
   });
 
   it("waits on a half-written guard whose owner may still run", () => {
@@ -293,7 +312,7 @@ describe("order book single-writer lease", () => {
     });
     assert.throws(
       () => ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
-      /remained contended.*remove the recovery guard .*\.lock\.recovery/s,
+      /remained contended.*recovery guard .*\.lock\.recovery.*remove that guard file by hand/s,
     );
     // Neither file was touched, so a live starter's guard is safe.
     assert.equal(

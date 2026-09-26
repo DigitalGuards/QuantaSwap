@@ -685,11 +685,6 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "GET" && path === "/api/federation/v2/events") {
-    // A reset snapshot is this mirror's public state under its current feed
-    // identity, so it is served only while this process still owns that data.
-    // The snapshot below is also taken without the expiry sweep, so the route
-    // cannot rewrite the orders file even when ownership holds.
-    assertBookOwned();
     const unexpected = [...url.searchParams.keys()].some(
       (key) => key !== "cursor" && key !== "limit",
     );
@@ -738,6 +733,15 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         status.oldestSequence,
         status.latestSequence,
       );
+      // A reset snapshot is this mirror's public state under its current feed
+      // identity, so it is served only while this process still owns that
+      // data. Checked after the per-source request, reset and concurrency
+      // limiters, so an unauthenticated flood is metered before it can cost
+      // two lease reads, and inside their try/finally so the concurrency slot
+      // is released either way. The snapshot below is also taken without the
+      // expiry sweep, so this route cannot rewrite the orders file even while
+      // ownership holds.
+      assertBookOwned();
       const body = federationResponseCache.getOrCreate(cacheKey, () => {
         const page = federationFeed.page(cursor, limit, () =>
           // No expiry sweep on a read path: the sweep persists, and this

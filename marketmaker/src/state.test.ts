@@ -45,6 +45,7 @@ import {
   type ProtocolAuthV1,
 } from "./protocol-signing.js";
 import {
+  GUARD_STALE_MS,
   LEASE_TTL_MS,
   StateFile,
   StateFilePoisonedError,
@@ -800,26 +801,30 @@ describe("exclusive state process lease", () => {
     }
   });
 
-  it("takes over a foreign-namespace guard past the heartbeat lifetime", () => {
+  const writeForeignGuard = (file: string, ageMs: number): void => {
+    writeFileSync(
+      `${file}.lock.recovery`,
+      JSON.stringify({
+        version: 2,
+        pid: process.pid,
+        processStart: "0",
+        bootId: "other-boot",
+        pidNamespace: FOREIGN_NS,
+        identityDigest: "other-identity",
+        leaseId: "dead-container",
+      }),
+      { mode: 0o600 },
+    );
+    const stamp = new Date(Date.now() - ageMs);
+    utimesSync(`${file}.lock.recovery`, stamp, stamp);
+  };
+
+  it("takes over a foreign-namespace guard past the guard lifetime", () => {
     const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-guard-ns-test-"));
     const file = join(dir, "state.json");
     let lease: StateProcessLease | undefined;
     try {
-      writeFileSync(
-        `${file}.lock.recovery`,
-        JSON.stringify({
-          version: 2,
-          pid: process.pid,
-          processStart: "0",
-          bootId: "other-boot",
-          pidNamespace: FOREIGN_NS,
-          identityDigest: "other-identity",
-          leaseId: "dead-container",
-        }),
-        { mode: 0o600 },
-      );
-      const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
-      utimesSync(`${file}.lock.recovery`, old, old);
+      writeForeignGuard(file, GUARD_STALE_MS + 5_000);
       lease = StateProcessLease.acquire(file, identity, {
         pidNamespace: LOCAL_NS,
       });
@@ -827,6 +832,29 @@ describe("exclusive state process lease", () => {
       assert.equal(existsSync(`${file}.lock.recovery`), false);
     } finally {
       lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a foreign-namespace guard past the lease lifetime alone", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-guard-young-test-"));
+    const file = join(dir, "state.json");
+    try {
+      // A guard is judged on its own, much longer threshold, so the window
+      // where two starters could both take one guard over needs a stall of
+      // minutes.
+      writeForeignGuard(file, LEASE_TTL_MS + 5_000);
+      const guard = readFileSync(`${file}.lock.recovery`, "utf8");
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+          }),
+        /remained contended.*remove that guard file by hand/s,
+      );
+      assert.equal(readFileSync(`${file}.lock.recovery`, "utf8"), guard);
+      assert.equal(existsSync(`${file}.lock`), false);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -840,7 +868,7 @@ describe("exclusive state process lease", () => {
       });
       assert.throws(
         () => StateProcessLease.acquire(file, identity),
-        /remained contended.*confirm no market maker process runs.*remove the recovery guard/s,
+        /remained contended.*recovery guard .*\.lock\.recovery.*remove that guard file by hand/s,
       );
       // Neither file was touched, so a live starter's guard is safe.
       assert.equal(

@@ -121,10 +121,11 @@ Rules the lease follows:
 - A holder in another container, which is another PID namespace, cannot be
   inspected by process id. It is judged by the heartbeat it refreshes on its
   lease files every 10 seconds, and it counts as live for 90 seconds after the
-  last refresh. After a crash or a `docker kill`, a replacement therefore
-  refuses to start for up to 90 seconds, and a restart backoff can make
-  unattended recovery take about two minutes. A clean stop releases the lease
-  and needs no wait.
+  last refresh. After a crash or a `docker kill`, a replacement refuses to start
+  and exits non-zero for up to 90 seconds; the container or supervisor restart
+  policy is what retries until the heartbeat expires, so expect refusal lines in
+  the logs during that window and unattended recovery in about two minutes with
+  a restart backoff. A clean stop releases the lease and needs no wait.
 - The guarantee covers containers on one host, which share a clock and a kernel
   boot id. A state volume shared between machines, for example over NFS, is not
   supported.
@@ -140,22 +141,47 @@ Rules the lease follows:
 
 A `orders.json.lock.recovery` guard file appears for milliseconds while a
 starter takes over a stale lease. A kill in that window leaves it behind, and
-the next start takes it over by itself once its creator is provably gone: a dead
-process id on this host, or a guard older than the 90 second heartbeat lifetime,
-which no live starter ever produces because a guard is never refreshed. No
-restart loop needs an operator for that.
+the next start takes it over by itself once its creator is provably gone. Two
+thresholds decide that, and they differ because only one of the two cases can
+read a process id:
+
+- a guard from this host and PID namespace is judged by its creator's process
+  id, so a dead creator is taken over at once;
+- a guard from another PID namespace, which is another container, is judged by
+  its age, and the threshold is 10 minutes. A guard covers a handful of file
+  operations and is never refreshed, so no live starter produces one that old.
+  This is deliberately far longer than the 90 second lease heartbeat lifetime,
+  for the reason in the threat note below.
+
+No restart loop needs an operator for either case.
 
 One case is still manual, and its refusal names the exact file: a guard that
-keeps looking live, which means a genuinely running starter or a half-written
-guard record. Confirm no order book process runs on this data directory, then
-remove that one `.lock.recovery` file by hand and leave the `.lock` files in
-place. Never remove a `.lock` lease to make a start succeed; that is exactly the
-second writer the lease exists to prevent.
+keeps looking live, which means a genuinely running starter, a guard from
+another container younger than 10 minutes, or a half-written guard record.
+Confirm no order book process runs on this data directory, then remove that one
+`.lock.recovery` file by hand and leave the `.lock` files in place. Never remove
+a `.lock` lease to make a start succeed; that is exactly the second writer the
+lease exists to prevent.
+
+**Accepted residual: a guard taken over twice.** Installing a taken-over lease
+is a rename followed by a read that confirms the record, and those are two
+operations. POSIX offers no compare-and-delete on a file, and `flock` needs a
+native addon this service deliberately does not carry, so the confirming read
+narrows this window without closing it. Two starters in different containers can
+therefore both return from acquisition if, and only if, one of them stalls
+inside the guard window for longer than the 10 minute guard threshold and the
+other interleaves its own rename and confirmation exactly inside that stall. The
+consequence is bounded: both processes verify ownership again before their first
+persisted write, and each refreshes a heartbeat the other reads, so the loser
+exits non-zero at or before that write and the winner keeps the data. The 10
+minute threshold puts the precondition at the level of a machine fault, far past
+ordinary scheduling latency.
 
 Keep `ORDERBOOK_SHUTDOWN_TIMEOUT_MS` (default 10 s) below the container's
 `stop_grace_period` (15 s in the supplied Compose file). A stop that runs out of
 grace ends in `SIGKILL`, which leaves both lease files behind, and a replacement
-in a fresh container then waits out the 90 second heartbeat lifetime.
+in a fresh container then keeps refusing until the 90 second heartbeat lifetime
+expires.
 
 An older binary ignores these files, so leaving them in place is safe on a
 rollback. They are also safe to leave inside a state backup: a restored
