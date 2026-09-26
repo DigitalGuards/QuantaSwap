@@ -18,6 +18,8 @@ const qrvmoneLibrary =
   process.env.QRVMONE_LIBRARY ||
   path.join(qrvmoneRoot, "build", "lib", "libqrvmone.so.0.11.0");
 
+const WIDE_KEY_PUBLIC_GETTER = /mapping\s*\(\s*address\b[^;]*\)\s+public\b/;
+
 function requireSafeSources() {
   for (const sourcePath of [
     path.join(contractTestRoot, "MockTokens.hyp"),
@@ -26,12 +28,31 @@ function requireSafeSources() {
     const source = fs.readFileSync(sourcePath, "utf8");
     assert.doesNotMatch(
       source,
-      /mapping\s*\(\s*address\b[^;]*\)\s+public\b/,
+      WIDE_KEY_PUBLIC_GETTER,
       `${path.basename(sourcePath)} exposes a compiler-generated address mapping getter`
     );
     assert.match(source, /function\s+balanceOf\s*\(\s*address\b/);
     assert.match(source, /function\s+allowance\s*\(\s*address\b[^)]*address\b/);
   }
+
+  // Legacy QRVM-512 codegen truncates wide keys in compiler-generated
+  // mapping getters, so every contract keyed by an account address has to
+  // expose explicit view functions instead.
+  for (const sourcePath of [
+    path.join(contractRoot, "HTLC.hyp"),
+    path.join(contractRoot, "HTLCv3.hyp"),
+    path.join(contractTestRoot, "MockRecipients.hyp"),
+  ]) {
+    const source = fs.readFileSync(sourcePath, "utf8");
+    assert.doesNotMatch(
+      source,
+      WIDE_KEY_PUBLIC_GETTER,
+      `${path.basename(sourcePath)} exposes a compiler-generated address mapping getter`
+    );
+  }
+  const htlcv3 = fs.readFileSync(path.join(contractRoot, "HTLCv3.hyp"), "utf8");
+  assert.match(htlcv3, /function\s+creditOf\s*\(\s*address\b[^)]*address\b/);
+  assert.match(htlcv3, /function\s+outstandingCredit\s*\(\s*address\b/);
 }
 
 function createTestTree() {
@@ -75,8 +96,16 @@ function createTestTree() {
     path.join(externalRoot, "HTLC.hyp")
   );
   fs.copyFileSync(
+    path.join(contractRoot, "HTLCv3.hyp"),
+    path.join(externalRoot, "HTLCv3.hyp")
+  );
+  fs.copyFileSync(
     path.join(semanticSourceRoot, "Q128HTLC.hyp"),
     path.join(semanticRoot, "Q128HTLC.hyp")
+  );
+  fs.copyFileSync(
+    path.join(semanticSourceRoot, "Q128HTLCv3.hyp"),
+    path.join(semanticRoot, "Q128HTLCv3.hyp")
   );
 
   return temporaryRoot;
@@ -118,7 +147,7 @@ function main() {
 
   const temporaryRoot = createTestTree();
   try {
-    for (const testName of ["Q128TokenAccessors", "Q128HTLC"]) {
+    for (const testName of ["Q128TokenAccessors", "Q128HTLC", "Q128HTLCv3"]) {
       runSemanticMode(temporaryRoot, testName, false);
       runSemanticMode(temporaryRoot, testName, true);
     }
@@ -126,7 +155,10 @@ function main() {
     fs.rmSync(temporaryRoot, { force: true, recursive: true });
   }
 
-  console.log("[q128] explicit token accessors and HTLC fields passed full-address alias regressions");
+  console.log(
+    "[q128] explicit token accessors, HTLC fields and HTLCv3 credit ledger passed " +
+      "full-address alias regressions"
+  );
 }
 
 if (require.main === module) {

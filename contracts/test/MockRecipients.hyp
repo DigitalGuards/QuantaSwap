@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma hyperion >=0.0;
+
+// Test-only adversarial payout targets and tokens for the HTLCv3 delivery
+// path (issue #47). Never deploy these outside local test runs.
+//
+// The ERC-20 return conventions the HTLC has to survive live in
+// MockTokens.hyp (no-return, always-false, fee-on-transfer, issuer
+// blocklist, approval race). This file adds the cases that only matter once
+// a failed delivery has to become a credit:
+//
+//   FalseTransferToken      accepts transferFrom, then declines transfer
+//   RevertingTransferToken  accepts transferFrom, then reverts in transfer
+//   ReturnBombToken         accepts transferFrom, then returns a huge blob
+//   NonPayableRecipient     cannot receive the native coin at all
+//   GasGuzzlerRecipient     burns its whole delivery budget, or reverts
+//   ReentrantRecipient      re-enters claim, refund or withdraw on receive
+
+/// @dev The only HTLCv3 surface the mocks need.
+interface IHTLCv3Mock {
+    function claim(bytes32 hashlock, bytes32 preimage) external;
+
+    function refund(bytes32 hashlock) external;
+
+    function withdraw(address token, address to, uint256 amount) external;
+
+    function withdrawAll(address token, address to) external;
+}
+
+// Accepts the lock (transferFrom returns true) and then declines every
+// outbound transfer without reverting. Nothing moves, so a credit recorded
+// for the full amount stays fully backed.
+contract FalseTransferToken {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function mint(address to, uint256 value) external {
+        _balances[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        _allowances[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
+        return true;
+    }
+}
+
+// Accepts the lock and then reverts in transfer. Models a token whose
+// outbound path can fail for reasons the HTLC cannot inspect.
+contract RevertingTransferToken {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function mint(address to, uint256 value) external {
+        _balances[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        _allowances[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        revert("transfer disabled");
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
+        return true;
+    }
+}
+
+// Accepts the lock, then answers transfer with an oversized return payload.
+// The selector is still transfer(address,uint256); only the declared return
+// type differs, which is exactly how a hostile token would try to make its
+// caller pay for memory expansion. Nothing moves, so the credit stays
+// backed.
+contract ReturnBombToken {
+    mapping(address => uint256) private _balances;
+    mapping(address => mapping(address => uint256)) private _allowances;
+    uint256 private _words = 4096;
+
+    function balanceOf(address account) external view returns (uint256) {
+        return _balances[account];
+    }
+
+    function allowance(address owner, address spender) external view returns (uint256) {
+        return _allowances[owner][spender];
+    }
+
+    function mint(address to, uint256 value) external {
+        _balances[to] += value;
+    }
+
+    function setWords(uint256 words) external {
+        _words = words;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        _allowances[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transfer(address, uint256) external view returns (bytes memory) {
+        return new bytes(_words * 32);
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(_balances[from] >= value, "balance");
+        require(_allowances[from][msg.sender] >= value, "allowance");
+        _allowances[from][msg.sender] -= value;
+        _balances[from] -= value;
+        _balances[to] += value;
+        return true;
+    }
+}
+
+// A contract that cannot accept the native coin: no receive, no fallback.
+// It can still collect its credit and name a destination that can.
+contract NonPayableRecipient {
+    function pull(address htlc, address token, address to, uint256 amount) external {
+        IHTLCv3Mock(htlc).withdraw(token, to, amount);
+    }
+
+    function pullAll(address htlc, address token, address to) external {
+        IHTLCv3Mock(htlc).withdrawAll(token, to);
+    }
+}
+
+// Burns the entire delivery budget until the child frame runs out of gas
+// (mode 1), reverts outright (mode 2), or accepts normally (mode 0).
+contract GasGuzzlerRecipient {
+    uint256 private _sink;
+    uint8 private _mode;
+
+    function setMode(uint8 mode) external {
+        _mode = mode;
+    }
+
+    function pull(address htlc, address token, address to, uint256 amount) external {
+        IHTLCv3Mock(htlc).withdraw(token, to, amount);
+    }
+
+    receive() external payable {
+        if (_mode == 2) revert("rejected");
+        while (_mode == 1) {
+            _sink += 1;
+        }
+    }
+}
+
+// Re-enters the HTLC from its receive hook. With `swallow` the revert is
+// caught and the delivery still completes, which shows the guard stopped the
+// reentry without costing the recipient its payout. Without it the hook
+// propagates, the delivery fails, and the amount has to become a credit.
+contract ReentrantRecipient {
+    uint8 public constant MODE_IDLE = 0;
+    uint8 public constant MODE_CLAIM = 1;
+    uint8 public constant MODE_REFUND = 2;
+    uint8 public constant MODE_WITHDRAW = 3;
+
+    address private _htlc;
+    uint8 private _mode;
+    bool private _swallow;
+    bytes32 private _hashlock;
+    bytes32 private _preimage;
+    address private _token;
+    uint256 private _reentries;
+    bool private _lastReentryReverted;
+
+    function configure(
+        address htlc,
+        uint8 mode,
+        bool swallow,
+        bytes32 hashlock,
+        bytes32 preimage,
+        address token
+    ) external {
+        _htlc = htlc;
+        _mode = mode;
+        _swallow = swallow;
+        _hashlock = hashlock;
+        _preimage = preimage;
+        _token = token;
+    }
+
+    function reentries() external view returns (uint256) {
+        return _reentries;
+    }
+
+    function lastReentryReverted() external view returns (bool) {
+        return _lastReentryReverted;
+    }
+
+    function pull(address token, address to, uint256 amount) external {
+        IHTLCv3Mock(_htlc).withdraw(token, to, amount);
+    }
+
+    receive() external payable {
+        uint8 mode = _mode;
+        if (mode == MODE_IDLE) return;
+        _reentries += 1;
+        if (_swallow) {
+            _lastReentryReverted = !_tryReenter(mode);
+            return;
+        }
+        _reenter(mode);
+    }
+
+    function _tryReenter(uint8 mode) private returns (bool) {
+        if (mode == MODE_CLAIM) {
+            try IHTLCv3Mock(_htlc).claim(_hashlock, _preimage) {
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        if (mode == MODE_REFUND) {
+            try IHTLCv3Mock(_htlc).refund(_hashlock) {
+                return true;
+            } catch {
+                return false;
+            }
+        }
+        try IHTLCv3Mock(_htlc).withdrawAll(_token, address(this)) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function _reenter(uint8 mode) private {
+        if (mode == MODE_CLAIM) {
+            IHTLCv3Mock(_htlc).claim(_hashlock, _preimage);
+            return;
+        }
+        if (mode == MODE_REFUND) {
+            IHTLCv3Mock(_htlc).refund(_hashlock);
+            return;
+        }
+        IHTLCv3Mock(_htlc).withdrawAll(_token, address(this));
+    }
+}

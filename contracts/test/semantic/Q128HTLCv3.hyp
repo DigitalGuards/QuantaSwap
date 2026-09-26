@@ -1,0 +1,124 @@
+==== ExternalSource: _canonical/HTLCv3.hyp ====
+==== ExternalSource: _canonical/MockTokens.hyp ====
+==== Source: Q128HTLCv3.hyp ====
+import {HTLCv3} from "_canonical/HTLCv3.hyp";
+import {BlocklistToken} from "_canonical/MockTokens.hyp";
+
+// Holds a credit on behalf of the harness. It has no receive function, so a
+// native payout to it always fails and has to become a credit, and it can
+// still name a destination that works.
+contract CreditHolder {
+    function pull(address htlc, address token, address to, uint256 amount) external {
+        HTLCv3(htlc).withdraw(token, to, amount);
+    }
+}
+
+contract Q128HTLCv3 {
+    HTLCv3 private htlc;
+    BlocklistToken private token;
+    CreditHolder private holder;
+
+    constructor() {
+        htlc = new HTLCv3();
+        token = new BlocklistToken();
+        holder = new CreditHolder();
+    }
+
+    function exerciseTokenCreditAliases(address firstRecipient, address secondRecipient)
+        external
+        returns (bool)
+    {
+        token.mint(address(this), 100);
+        token.approve(address(htlc), 100);
+        token.setBlocked(firstRecipient, true);
+        token.setBlocked(secondRecipient, true);
+
+        bytes32 firstPreimage = bytes32(uint256(0xa1));
+        bytes32 secondPreimage = bytes32(uint256(0xb2));
+        bytes32 firstHashlock = sha256(abi.encodePacked(firstPreimage));
+        bytes32 secondHashlock = sha256(abi.encodePacked(secondPreimage));
+        uint256 timeout = type(uint256).max;
+
+        htlc.lockToken(firstHashlock, firstRecipient, address(token), 11, timeout);
+        htlc.lockToken(secondHashlock, secondRecipient, address(token), 13, timeout);
+        htlc.claim(firstHashlock, firstPreimage);
+        htlc.claim(secondHashlock, secondPreimage);
+
+        require(htlc.creditOf(address(token), firstRecipient) == 11, "first credit aliased");
+        require(htlc.creditOf(address(token), secondRecipient) == 13, "second credit aliased");
+        require(htlc.outstandingCredit(address(token)) == 24, "outstanding total wrong");
+        require(htlc.creditOf(address(token), address(this)) == 0, "credit leaked to the claimer");
+
+        HTLCv3.Swap memory first = htlc.getSwap(firstHashlock);
+        HTLCv3.Swap memory second = htlc.getSwap(secondHashlock);
+        require(first.recipient == firstRecipient, "first recipient aliased");
+        require(second.recipient == secondRecipient, "second recipient aliased");
+        require(first.recipient != second.recipient, "recipient identities collapsed");
+        require(first.preimage == firstPreimage, "first preimage not persisted");
+        require(second.preimage == secondPreimage, "second preimage not persisted");
+        require(uint8(first.status) == 2, "first swap not Claimed");
+        require(uint8(second.status) == 2, "second swap not Claimed");
+        return true;
+    }
+
+    function exerciseWithdrawDestinationAliases(address firstDestination, address secondDestination)
+        external
+        returns (bool)
+    {
+        token.mint(address(this), 100);
+        token.approve(address(htlc), 100);
+        token.setBlocked(address(holder), true);
+
+        bytes32 preimage = bytes32(uint256(0xc3));
+        bytes32 hashlock = sha256(abi.encodePacked(preimage));
+        htlc.lockToken(hashlock, address(holder), address(token), 17, type(uint256).max);
+        htlc.claim(hashlock, preimage);
+        require(htlc.creditOf(address(token), address(holder)) == 17, "holder not credited");
+
+        holder.pull(address(htlc), address(token), firstDestination, 5);
+        holder.pull(address(htlc), address(token), secondDestination, 12);
+
+        require(token.balanceOf(firstDestination) == 5, "first destination aliased");
+        require(token.balanceOf(secondDestination) == 12, "second destination aliased");
+        require(htlc.creditOf(address(token), address(holder)) == 0, "credit not cleared");
+        return true;
+    }
+
+    function exerciseNativeCreditAliases(address destination) external payable returns (bool) {
+        require(msg.value >= 2, "value");
+        bytes32 preimage = bytes32(uint256(0xd4));
+        bytes32 hashlock = sha256(abi.encodePacked(preimage));
+
+        htlc.lockNative{value: 2}(hashlock, address(holder), type(uint256).max);
+        htlc.claim(hashlock, preimage);
+
+        require(htlc.creditOf(address(0), address(holder)) == 2, "native credit missing");
+        require(htlc.outstandingCredit(address(0)) == 2, "native outstanding wrong");
+        holder.pull(address(htlc), address(0), destination, 2);
+        require(destination.balance == 2, "native destination not paid");
+        require(htlc.creditOf(address(0), address(holder)) == 0, "native credit not cleared");
+        require(htlc.outstandingCredit(address(0)) == 0, "native outstanding not cleared");
+        return true;
+    }
+}
+// ====
+// compileViaYul: also
+// ----
+// exerciseTokenCreditAliases(address,address): 0x1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x270ad80878818d7287518221427c535e200f156a38c295a95ccbbe3516552cf1, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qf0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, 0x0b, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x49bc1ddb3406efb9e66e94162205a3794ab2800f980b3c78767225c0287b08dc, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, Qf0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, 0x0d, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Claimed(bytes32,bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x270ad80878818d7287518221427c535e200f156a38c295a95ccbbe3516552cf1, 0xa10000000000000000000000000000000000000000000000000000000000000000, Q254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff
+// ~ emit PayoutCredited(address,address,bytes32,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q0000000000000000000000000000000000000000000000000000000000000000f0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, #Q1111111111111111111111111111111111111111111111111111111111111111c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, #0x270ad80878818d7287518221427c535e200f156a38c295a95ccbbe3516552cf1, 0x0b
+// ~ emit Claimed(bytes32,bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x49bc1ddb3406efb9e66e94162205a3794ab2800f980b3c78767225c0287b08dc, 0xb20000000000000000000000000000000000000000000000000000000000000000, Q254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff
+// ~ emit PayoutCredited(address,address,bytes32,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q0000000000000000000000000000000000000000000000000000000000000000f0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, #Qa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, #0x49bc1ddb3406efb9e66e94162205a3794ab2800f980b3c78767225c0287b08dc, 0x0d
+// exerciseWithdrawDestinationAliases(address,address): 0x2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0xb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x120ec93ba3572a8f39c23f1b65cc76e01f0267fe80a407e6063730f766e91d7e, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, Qf0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, 0x11, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Claimed(bytes32,bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x120ec93ba3572a8f39c23f1b65cc76e01f0267fe80a407e6063730f766e91d7e, 0xc30000000000000000000000000000000000000000000000000000000000000000, Q254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff
+// ~ emit PayoutCredited(address,address,bytes32,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q0000000000000000000000000000000000000000000000000000000000000000f0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, #0x120ec93ba3572a8f39c23f1b65cc76e01f0267fe80a407e6063730f766e91d7e, 0x11
+// ~ emit PayoutWithdrawn(address,address,address,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q0000000000000000000000000000000000000000000000000000000000000000f0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, Q2222222222222222222222222222222222222222222222222222222222222222c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x05
+// ~ emit PayoutWithdrawn(address,address,address,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q0000000000000000000000000000000000000000000000000000000000000000f0fd799a912e1629912707b5182316522f2ff12caf984a9e20a51ea57ccf6c4d, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, Qb6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x0c
+// exerciseNativeCreditAliases(address), 2 quanta: 0x3333333333333333333333333333333333333333333333333333333333333333c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 -> true
+// ~ emit Locked(bytes32,address,address,address,uint256,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x987d92a0a6fe8105323116026611f1c258bdb9bd3600a23bbed67614c65e6e17, #Q0000000000000000000000000000000000000000000000000000000000000000254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, Q00, 0x02, 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+// ~ emit Claimed(bytes32,bytes32,address) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #0x987d92a0a6fe8105323116026611f1c258bdb9bd3600a23bbed67614c65e6e17, 0xd40000000000000000000000000000000000000000000000000000000000000000, Q254f38cb8201943b6e48e06b3847a41d40c0c5f7cf5c0c3f4b4006528454c7ff
+// ~ emit PayoutCredited(address,address,bytes32,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, #0x987d92a0a6fe8105323116026611f1c258bdb9bd3600a23bbed67614c65e6e17, 0x02
+// ~ emit PayoutWithdrawn(address,address,address,uint256) from Q0000000000000000000000000000000000000000000000000000000000000000a2c09b0901c4385dddc8a62d8dd8cb54995b78bbd757bfdee5a32af7ef8f0059: #Q00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, #Q000000000000000000000000000000000000000000000000000000000000000002fcb59f92d2779a22e4778d3db70b929873c158e2ca82bb15a4afae7818b0d6, Q3333333333333333333333333333333333333333333333333333333333333333c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3, 0x02
