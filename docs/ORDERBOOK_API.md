@@ -498,20 +498,29 @@ offline.
 
 ### `GET /status`
 
-Sanitized operator diagnostics. The response uses `200` while local storage and
-the feed are ready, or `503` for the same local failures as `/health`:
+Sanitized operator diagnostics. The response uses `200` while local storage,
+the feed, and the single-writer lease are all ready, and `503` otherwise. This
+is a stricter check than `/health`: a failing feed compaction and an
+unverifiable lease both degrade `/status` to `503` while `/health` stays `200`,
+because reads keep serving and a container restart would not help:
 
 ```jsonc
 {
   "schemaVersion": 1,
   "status": "ok",
   "uptimeS": 3600,
+  "lease": {
+    "ready": true,
+    "lost": false,
+    "unverifiableSince": null,
+  },
   "feed": {
     "ready": true,
     "retainedEvents": 42,
     "oldestSequence": 1,
     "latestSequence": 42,
     "lastEventAt": 1786924800000,
+    "compactionFailing": false,
   },
   "federation": {
     "enabled": true,
@@ -535,6 +544,16 @@ the feed are ready, or `503` for the same local failures as `/health`:
   },
 }
 ```
+
+`lease` reports the single-writer lease that makes one process the only writer
+of the service's data files. `ready` is false while writes are being refused:
+`lost` is true once another process provably took the data over, and this
+service is shutting down; `unverifiableSince` is the Unix millisecond time of
+the first refusal caused by a lease file that could not be read, and returns to
+`null` once a later check succeeds. Reads keep serving in both cases, and
+`/health` is unaffected. `feed.compactionFailing` is true while feed log
+compaction keeps failing; appends stay durable and the feed still serves, so
+this also degrades `/status` without changing `/health`.
 
 All `*At` fields are Unix milliseconds. Federation-wide state is `disabled`,
 `starting`, `healthy`, or `degraded`; a peer is `pending`, `syncing`, `healthy`,
@@ -1024,5 +1043,5 @@ signed intent/fill reference.
 | 413    | Body over 4096 bytes, or signed-protocol body over 32 KiB              |
 | 415    | POST content type is not `application/json`                            |
 | 429    | Rate limit, take caps, or per-maker/per-source open-order cap          |
-| 503    | Book full, SSE connection cap, shutdown, or unavailable storage        |
+| 503    | Book full, SSE cap, shutdown, unavailable storage, or refused write    |
 | 500    | Unhandled server error                                                 |

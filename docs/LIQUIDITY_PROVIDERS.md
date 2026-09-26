@@ -200,7 +200,8 @@ risk:
   exclusive mode-0600 `state.json.lock` lease before reading state. The lease
   binds the deployment fingerprint and both operator accounts, identifies the
   Linux boot, process start time and PID namespace, refuses a live second
-  process, and safely recovers a stale file after a crash or reboot. A holder in
+  process, and safely recovers a stale lease file, or a recovery guard whose
+  creator is provably gone, after a crash or reboot. A holder in
   another PID namespace, which is how a second container on the same state volume
   appears, is judged by the lease heartbeat: the holder refreshes it every 10 s
   and it stays live for 90 s after the last refresh, so a crashed container's

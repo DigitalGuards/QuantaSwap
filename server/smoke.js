@@ -13,7 +13,9 @@ const smokeDir = mkdtempSync(join(tmpdir(), "quantaswap-ob-"));
 const dataFile = join(smokeDir, "orders.json");
 const federationDataFile = join(smokeDir, "federation.json");
 
-// PRESENCE_TTL_S=1 so maker-presence expiry is testable with a short sleep.
+// PRESENCE_TTL_S=3 so maker-presence expiry is testable with a short sleep.
+// Presence compares whole seconds, so a one-second TTL made every order
+// created just before a second boundary read as offline on the next call.
 const child = spawn(
   process.execPath,
   [new URL("./dist/server.js", import.meta.url).pathname],
@@ -32,7 +34,7 @@ const child = spawn(
       ORDERBOOK_FEDERATION_READ_TOKEN: "",
       ORDERBOOK_TRUST_PROXY: "loopback",
       ORDERBOOK_CORS_ORIGINS: "https://dev.quantaswap.io",
-      PRESENCE_TTL_S: "1",
+      PRESENCE_TTL_S: "3",
     },
     stdio: ["ignore", "inherit", "inherit"],
   },
@@ -501,7 +503,7 @@ try {
     "fresh order shows the maker online",
     fresh.body.order.makerSeen === true,
   );
-  await sleep(1200); // one presence TTL
+  await sleep(3200); // one presence TTL plus a whole-second margin
   const stale = await api("GET", `/orders/${p1.id}`);
   check("silent maker goes offline", stale.body.order.makerSeen === false);
   const hbBad = await api("POST", `/orders/${p1.id}/heartbeat`, {
@@ -543,9 +545,17 @@ try {
   const sniper = { "X-Forwarded-For": "203.0.113.30" };
 
   const offlineBest = await mkBid(3n * 10n ** 18n, ONE_ETH); // best rate, but will be offline
-  await sleep(1200);
+  await sleep(3200);
   const bidA = await mkBid(2n * 10n ** 18n, ONE_ETH); // rate 2.0, online
   const bidB = await mkBid(19n * 10n ** 17n, ONE_ETH); // rate 1.9, online
+  // Presence is the premise of the next two checks, so a future regression in
+  // the presence window fails here with a name instead of hiding as a
+  // mismatched take.
+  const bidAView = await api("GET", `/orders/${bidA.id}`);
+  check(
+    "fresh bid counts as online before the take",
+    bidAView.body.order.makerSeen === true,
+  );
   const takeBest = await api("POST", "/orders/take", terms, sniper);
   check(
     "take-by-terms fills the best online order, skipping offline makers",
@@ -577,7 +587,7 @@ try {
     takeRevived.status === 200 && takeRevived.body.order.id === offlineBest.id,
   );
   const offlineById = await mkBid(2n * 10n ** 18n, ONE_ETH);
-  await sleep(1200);
+  await sleep(3200);
   const explicitTake = await api(
     "POST",
     `/orders/${offlineById.id}/accept`,
@@ -733,7 +743,7 @@ try {
     minReceive: ONE_ETH.toString(),
     ...taker,
   };
-  // The smoke suite uses a one-second presence TTL. Keep the ETH control row
+  // The smoke suite uses a three-second presence TTL. Keep the ETH control row
   // online after the USDC assertions so scheduler variance cannot hide it.
   await api("POST", `/orders/${ethOverlap.body.order.id}/heartbeat`, {
     token: ethOverlap.body.makerToken,

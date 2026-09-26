@@ -1124,12 +1124,19 @@ export class OrderStore {
   private listeners: Array<() => void> = [];
   private federationListeners: Array<(event: FederationEvent) => void> = [];
   private readonly presenceTtlS: number;
+  /**
+   * Ownership gate for every rewrite of the orders file. The single-writer
+   * lease passes its assertOwned here, so a book displaced by another process
+   * stops writing the file the new holder now owns.
+   */
+  private readonly assertOwned: () => void;
 
   constructor(
     private readonly dataFile: string,
-    opts: { presenceTtlS?: number } = {},
+    opts: { presenceTtlS?: number; assertOwned?: () => void } = {},
   ) {
     this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
+    this.assertOwned = opts.assertOwned ?? ((): void => {});
     this.prepareStorage();
     this.load();
     this.seedIntentAdmissions();
@@ -1309,6 +1316,10 @@ export class OrderStore {
   }
 
   private persist(): void {
+    // The only path that rewrites the orders file, so one check here blocks
+    // every write a displaced process could still attempt. It throws before
+    // the file is touched, so a refused write leaves the file byte-identical.
+    this.assertOwned();
     const directory = dirname(this.dataFile);
     const suffix = randomBytes(8).toString("hex");
     const tmp = join(directory, `.orders.${process.pid}.${suffix}.tmp`);
@@ -2471,8 +2482,14 @@ export class OrderStore {
     return this.pub(order);
   }
 
-  federationSnapshot(): FederationEvent[] {
-    this.sweep();
+  /**
+   * Every live public proof, for feed reconciliation and reset snapshots.
+   * `sweep: false` skips the expiry pass, so the call cannot rewrite the
+   * orders file. Read paths use it; a stale row is bounded by the caller's own
+   * retention and by the next sweep a mutation performs.
+   */
+  federationSnapshot(opts: { sweep?: boolean } = {}): FederationEvent[] {
+    if (opts.sweep !== false) this.sweep();
     const now = nowS();
     const events: FederationEvent[] = [];
     const orders = [...this.orders.values()]

@@ -28,6 +28,11 @@ import {
 } from "./federation-reset.js";
 import { FederationPeerSync } from "./peer-sync.js";
 import { FederationPeerTransport } from "./peer-transport.js";
+import {
+  BookLease,
+  ProcessLeaseLostError,
+  ProcessLeaseUnverifiableError,
+} from "./process-lease.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
@@ -226,10 +231,130 @@ async function readJsonBody(
   }
 }
 
+// One writer per data set. Both files are taken before either is opened, so a
+// second book pointed at the same data refuses to start. Two writers would
+// interleave an orders rewrite with this process's feed appends.
+const bookLease = ((): BookLease => {
+  try {
+    return BookLease.acquire([config.dataFile, config.federationDataFile]);
+  } catch (error) {
+    console.error(
+      `[orderbook] FATAL: cannot take the single-writer lease: ${
+        error instanceof Error ? error.message : "unknown lease failure"
+      }`,
+    );
+    process.exit(1);
+  }
+})();
+
+/** Set once ownership is provably gone. Every write path is refused after it. */
+let leaseLost = false;
+/** Unix ms of the first refusal caused by ownership that cannot be proven. */
+let leaseUnverifiableSince: number | null = null;
+/** Set once the HTTP server object exists, so shutdown may be used. */
+let serverConstructed = false;
+/** Set while the exit handler runs, where starting a shutdown is pointless. */
+let exiting = false;
+
+/** Stop non-zero, however far startup got, and let the supervisor restart us. */
+function stopForLeaseFailure(reason: string, detail: string): void {
+  console.error(`[orderbook] FATAL: ${detail}`);
+  // The exit handler is the last code to run, so there is nothing left to stop
+  // and the caller's own error handling covers the refused write.
+  if (exiting) return;
+  if (!serverConstructed) process.exit(1);
+  initiateShutdown(reason, 1);
+  // Safety net for a connection that outlives the graceful deadline. Unref'd,
+  // so it never keeps an otherwise finished process alive.
+  setTimeout(() => {
+    process.exit(1);
+  }, config.shutdownTimeoutMs + 1000).unref();
+}
+
+/**
+ * Another process owns the data now, so this one was displaced and every
+ * further write is already refused. The restart either re-acquires the lease
+ * or fails closed against the live holder.
+ */
+function onLeaseLost(reason: string): void {
+  if (leaseLost) return;
+  leaseLost = true;
+  stopForLeaseFailure(
+    "single-writer lease lost",
+    `this process no longer holds the single-writer lease (${reason}). ` +
+      "It stopped writing and exits so its supervisor can restart it",
+  );
+}
+
+/**
+ * Ownership check for an entry point that is about to change state. A proven
+ * loss stops the process. An unverifiable lease surfaces in /api/status and
+ * lets the caller defer. Both rethrow, so nothing is mutated either way.
+ */
+function assertBookOwned(): void {
+  try {
+    bookLease.assertOwned();
+  } catch (error) {
+    if (error instanceof ProcessLeaseLostError) {
+      onLeaseLost(error.message);
+      throw error;
+    }
+    if (error instanceof ProcessLeaseUnverifiableError) {
+      if (leaseUnverifiableSince === null) {
+        leaseUnverifiableSince = Date.now();
+        console.error(`[orderbook] ${error.message}`);
+      }
+      throw error;
+    }
+    throw error;
+  }
+  if (leaseUnverifiableSince !== null) {
+    leaseUnverifiableSince = null;
+    console.log(
+      "[orderbook] single-writer lease is verifiable again after an earlier read failure",
+    );
+  }
+}
+
+/**
+ * The fence inside the store and the feed, checked once more immediately
+ * before each file is touched. An entry point already proved ownership, so
+ * reaching either failure here means ownership changed after the in-memory
+ * state did. The files are untouched, memory is ahead of them, and the safe
+ * resolution is the same in both cases: stop, and let the restart reload from
+ * disk.
+ */
+function assertBookOwnedForWrite(): void {
+  try {
+    bookLease.assertOwned();
+  } catch (error) {
+    if (error instanceof ProcessLeaseLostError) {
+      onLeaseLost(error.message);
+      throw error;
+    }
+    if (error instanceof ProcessLeaseUnverifiableError) {
+      if (leaseUnverifiableSince === null) leaseUnverifiableSince = Date.now();
+      stopForLeaseFailure(
+        "single-writer lease unverifiable mid-write",
+        `${error.message}. The data files were left untouched and this process exits ` +
+          "so its restart reloads them",
+      );
+      throw error;
+    }
+    throw error;
+  }
+}
+
 const store = new OrderStore(config.dataFile, {
   presenceTtlS: config.presenceTtlS,
+  assertOwned: assertBookOwnedForWrite,
 });
-const federationFeed = new FederationFeed(config.federationDataFile);
+const federationFeed = new FederationFeed(
+  config.federationDataFile,
+  undefined,
+  undefined,
+  assertBookOwnedForWrite,
+);
 const peerTransport = new FederationPeerTransport(config.federationOnionProxy, {
   connectTimeoutMs: config.federationRequestTimeoutMs,
 });
@@ -265,6 +390,9 @@ const peerSync = new FederationPeerSync({
   ),
   apply: (event, peer) => {
     try {
+      // Applying a peer event rewrites the orders file and appends to the
+      // feed, so ownership is proved before the in-memory change.
+      assertBookOwned();
       const peerIndex = config.federationPeers.indexOf(peer);
       const peerId =
         peerIndex === -1
@@ -273,6 +401,15 @@ const peerSync = new FederationPeerSync({
       store.applyFederationEvent(event, peerId);
       return "applied";
     } catch (error) {
+      if (error instanceof ProcessLeaseUnverifiableError) {
+        // Nothing was applied. The peer cursor stays put and the next sync
+        // pass retries this event once ownership can be proven again.
+        return "deferred";
+      }
+      if (error instanceof ProcessLeaseLostError) {
+        // Shutdown is already running. Rethrowing stops this sync pass.
+        throw error;
+      }
       if (error instanceof OrderStorePersistenceError) {
         console.error(
           "[orderbook] fatal persistence failure during federation sync",
@@ -341,7 +478,29 @@ function pushBook(): void {
     lastBookPayload = null;
     return;
   }
-  const payload = bookPayload();
+  let payload: string;
+  try {
+    // Listing sweeps expired orders, and that sweep can rewrite the orders
+    // file, so a push needs the same ownership proof as a request. Skipping a
+    // push is harmless: the next mutation or stream tick pushes the book.
+    assertBookOwned();
+    payload = bookPayload();
+  } catch (error) {
+    if (
+      error instanceof ProcessLeaseUnverifiableError ||
+      error instanceof ProcessLeaseLostError
+    ) {
+      return;
+    }
+    if (error instanceof OrderStorePersistenceError) {
+      console.error(
+        "[orderbook] fatal persistence failure while pushing the book; stopping",
+      );
+      initiateShutdown("storage failure", 1);
+      return;
+    }
+    throw error;
+  }
   if (payload === lastBookPayload) return;
   lastBookPayload = payload;
   for (const writer of [...streamClients.values()]) {
@@ -495,11 +654,28 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       federationFeed.storageReady() &&
       federationHealthy &&
       !feedStatus.compactionFailing;
-    const healthy = !shuttingDown && storageReady && feedReady;
+    // Probe on every status call, so a book with no write traffic still
+    // reports an unreadable lease promptly and stops reporting a cleared
+    // fault. The check is two small reads and writes nothing.
+    try {
+      assertBookOwned();
+    } catch {
+      // Unverifiable or a proven loss, and both are already recorded.
+    }
+    // An unverifiable lease refuses writes while reads keep serving, so, like
+    // a failing compaction, it reports the fault here without flipping
+    // /api/health and restarting the container over a transient read error.
+    const leaseReady = !leaseLost && leaseUnverifiableSince === null;
+    const healthy = !shuttingDown && storageReady && feedReady && leaseReady;
     sendJson(res, healthy ? 200 : 503, {
       schemaVersion: 1,
       status: healthy ? "ok" : "degraded",
       uptimeS: Math.floor(process.uptime()),
+      lease: {
+        ready: leaseReady,
+        lost: leaseLost,
+        unverifiableSince: leaseUnverifiableSince,
+      },
       feed: {
         ready: feedReady,
         ...feedStatus,
@@ -509,6 +685,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "GET" && path === "/api/federation/v2/events") {
+    // A reset snapshot is this mirror's public state under its current feed
+    // identity, so it is served only while this process still owns that data.
+    // The snapshot below is also taken without the expiry sweep, so the route
+    // cannot rewrite the orders file even when ownership holds.
+    assertBookOwned();
     const unexpected = [...url.searchParams.keys()].some(
       (key) => key !== "cursor" && key !== "limit",
     );
@@ -559,7 +740,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       );
       const body = federationResponseCache.getOrCreate(cacheKey, () => {
         const page = federationFeed.page(cursor, limit, () =>
-          store.federationSnapshot(),
+          // No expiry sweep on a read path: the sweep persists, and this
+          // response is cached for seconds anyway, so a row that expires here
+          // is dropped by the next mutation's sweep.
+          store.federationSnapshot({ sweep: false }),
         );
         return federationPageBody(page);
       });
@@ -569,6 +753,15 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     }
     return;
   }
+  // Every route below can reach a persisted write: a mutation, or the
+  // opportunistic expiry sweep that a plain read performs. Proving ownership
+  // before the in-memory change keeps a refused write from leaving a change
+  // the caller was told had failed. Only /api/health and /api/status are
+  // exempt, because they must keep answering while the lease is unverifiable
+  // so an operator can see it. The federation feed read above proves
+  // ownership itself and takes its snapshot without the sweep.
+  assertBookOwned();
+
   if (method === "GET" && path === "/api/orders/stream") {
     openStream(req, res, ip);
     return;
@@ -726,6 +919,19 @@ const server = createServer((req, res) => {
   route(req, res).catch((err: unknown) => {
     if (err instanceof ApiError) {
       sendJson(res, err.status, { error: err.message });
+    } else if (err instanceof ProcessLeaseLostError) {
+      // Nothing durable changed. The shutdown is already running for a loss
+      // the checks above detected, and this call is idempotent.
+      onLeaseLost(err.message);
+      sendJson(res, 503, {
+        error: "order book no longer owns its data and is stopping",
+      });
+    } else if (err instanceof ProcessLeaseUnverifiableError) {
+      // Ownership could neither be confirmed nor disproved, so this request
+      // was refused before anything was written. The caller may retry.
+      sendJson(res, 503, {
+        error: "order book storage ownership is unverifiable, retry shortly",
+      });
     } else if (err instanceof OrderStorePersistenceError) {
       console.error("[orderbook] fatal persistence failure; stopping");
       sendJson(res, 503, { error: "order book storage is unavailable" });
@@ -741,6 +947,12 @@ server.requestTimeout = config.requestTimeoutMs;
 server.headersTimeout = config.requestTimeoutMs;
 server.keepAliveTimeout = 5000;
 server.maxRequestsPerSocket = 1000;
+serverConstructed = true;
+
+// Refresh the lease heartbeat so a book in another container can tell this one
+// still runs, and detect the moment the lease stops being ours. Started once
+// shutdown is usable; startup itself is far shorter than the lease lifetime.
+bookLease.startHeartbeat(onLeaseLost);
 
 let shutdownTimer: NodeJS.Timeout | undefined;
 
@@ -785,18 +997,26 @@ function initiateShutdown(reason: string, exitCode = 0): void {
 // then, as after a crash, the digest stays unknown so the next start rotates
 // the identity and peers take a reset snapshot.
 process.once("exit", (code) => {
-  if (
-    !shouldRecordFederationCheckpoint({
-      exitCode: code,
-      feedHealthy: federationHealthy,
-    })
-  ) {
-    return;
-  }
+  exiting = true;
   try {
-    federationFeed.checkpoint(store.federationSnapshot());
-  } catch {
-    console.error("[orderbook] federation checkpoint failed at exit");
+    if (
+      !shouldRecordFederationCheckpoint({
+        exitCode: code,
+        feedHealthy: federationHealthy,
+      })
+    ) {
+      return;
+    }
+    try {
+      federationFeed.checkpoint(store.federationSnapshot());
+    } catch {
+      console.error("[orderbook] federation checkpoint failed at exit");
+    }
+  } finally {
+    // Release last, so the checkpoint above still ran as the owner. A clean
+    // exit removes the lease files and the next start takes them at once; a
+    // crash leaves them for the dead-PID or heartbeat-expiry path.
+    bookLease.close();
   }
 });
 
@@ -816,5 +1036,8 @@ server.on("error", (error) => {
 server.listen(config.port, config.host, () => {
   console.log(
     `[orderbook] listening on ${config.host}:${config.port}, data file ${config.dataFile}`,
+  );
+  console.log(
+    `[orderbook] single-writer lease held on ${bookLease.paths.join(", ")}`,
   );
 });

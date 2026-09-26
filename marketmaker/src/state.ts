@@ -132,6 +132,8 @@ export const UNKNOWN_PID_NAMESPACE = "unknown";
 export interface StateLeaseAcquireOptions {
   /** Test and embedding seam for deterministic acquisition interleavings. */
   afterStaleObservation?: () => void;
+  /** Test seam: runs between writing the lease record and confirming it. */
+  afterLeaseWritten?: () => void;
   /** Test seam: observe the lease as a process in this PID namespace. */
   pidNamespace?: string | null;
   /** Test seam: clock used for foreign-namespace heartbeat freshness. */
@@ -364,11 +366,14 @@ function replaceStaleLeaseFile(
 }
 
 /**
- * Manual step named by every contention refusal, so one wording covers the
- * recovery guard and the lease itself.
+ * Manual step named by the one refusal that still needs an operator. It names
+ * the recovery guard exactly and says to keep the lease file, so nobody
+ * removes the lease a live holder owns.
  */
-const LEASE_MANUAL_RECOVERY =
-  'confirm no market maker process runs on this state volume, then remove the file by hand (see "Single active process" in marketmaker/README.md)';
+const leaseManualRecovery = (recoveryPath: string): string =>
+  `confirm no market maker process runs on this state volume, then remove the recovery guard ` +
+  `${recoveryPath} by hand and leave the lease file itself in place (see "Single active process" ` +
+  `in marketmaker/README.md)`;
 
 /**
  * Drop staging files a crashed starter left behind between creating and
@@ -507,18 +512,26 @@ export class StateProcessLease {
       if (!tryCreateLeaseFile(recoveryPath, recoveryRecord, directory)) {
         const recoveryOwner = readLease(recoveryPath);
         if (
-          recoveryOwner !== undefined &&
-          recoveryOwner.record !== null &&
-          !isLiveLease(recoveryOwner, liveness)
+          recoveryOwner === undefined ||
+          recoveryOwner.record === null ||
+          isLiveLease(recoveryOwner, liveness)
         ) {
-          throw new Error(
-            `state lease recovery guard ${recoveryPath} is stale: its owner is gone and, for a guard ` +
-              `from another PID namespace, its heartbeat expired. Refusing unsafe automatic removal; ` +
-              LEASE_MANUAL_RECOVERY,
-          );
+          // A live guard, a guard that vanished between the failed create and
+          // this read, or a half-written one whose owner may still be running.
+          // All three are retried.
+          waitForLeaseRecovery();
+          continue;
         }
-        waitForLeaseRecovery();
-        continue;
+        // The starter that created this guard is gone: its process is dead in
+        // this namespace, or the guard outlived the heartbeat lifetime, and a
+        // guard is never refreshed while it is held. A guard left behind by a
+        // kill between its creation and its release would otherwise block
+        // every later start forever, which is a restart loop no operator can
+        // resolve without deleting files. Taking it over is safe on its own:
+        // exclusion is decided by the checks on the lease path below, and the
+        // confirmation read after the write catches a second starter that took
+        // the same guard over concurrently.
+        replaceStaleLeaseFile(recoveryPath, recoveryRecord, directory);
       }
 
       try {
@@ -538,15 +551,23 @@ export class StateProcessLease {
         } else {
           replaceStaleLeaseFile(path, record, directory);
         }
+        options.afterLeaseWritten?.();
+        // Confirm the record at the path is the one just written. A guard
+        // taken over from a dead starter can in principle be held twice, and
+        // this is where the loser of that race finds out before it believes it
+        // owns anything. The next attempt then sees the winner's live lease
+        // and refuses with the ordinary message.
+        const confirmed = readLease(path);
+        if (confirmed?.record?.leaseId !== leaseId) continue;
         return new StateProcessLease(path, leaseId, liveness.ttlMs);
       } finally {
         releaseOwnedLeaseFile(recoveryPath, recoveryLeaseId, directory);
       }
     }
     throw new Error(
-      `state lease ${path} remained contended during stale-lock recovery: another starter holds the ` +
-        `recovery guard ${recoveryPath}, or a guard file outlived its owner. If this repeats, ` +
-        LEASE_MANUAL_RECOVERY,
+      `state lease ${path} remained contended during stale-lock recovery: another starter keeps ` +
+        `holding the recovery guard ${recoveryPath}. If this repeats, ` +
+        leaseManualRecovery(recoveryPath),
     );
   }
 
