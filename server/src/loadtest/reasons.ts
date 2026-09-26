@@ -24,6 +24,18 @@ const PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ["shutting down", "shutting_down"],
 ];
 
+/** Reasons the book answers before the router reaches signature verification.
+ *  The per-source HTTP limiter and the shutdown gate both sit in front of
+ *  every handler, so those replies cost almost nothing to produce. */
+const PRE_VERIFICATION_CODES = new Set([
+  "http_per_ip_rate_limit",
+  "shutting_down",
+]);
+
+export function isPreVerificationShed(reason: string): boolean {
+  return PRE_VERIFICATION_CODES.has(reason);
+}
+
 export function classifyReason(
   status: number,
   body: Record<string, unknown> | undefined,

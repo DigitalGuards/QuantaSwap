@@ -46,12 +46,34 @@ export function identitySeed(role: Role, index: number): Uint8Array {
     .digest();
 }
 
+/** Usable host addresses per documentation /24, skipping .0 and .255. */
+const HOSTS_PER_BLOCK = 254;
+const TAKER_BLOCKS = ["198.51.100", "203.0.113"] as const;
+export const MAX_MAKERS = HOSTS_PER_BLOCK;
+export const MAX_TAKERS = HOSTS_PER_BLOCK * TAKER_BLOCKS.length;
+
 /** RFC 5737 documentation addresses only, so nothing in the results or the
- *  tracked report can be mistaken for real infrastructure. */
+ *  tracked report can be mistaken for real infrastructure. Each synthetic
+ *  client needs its own address for the per-source budgets to mean anything,
+ *  so running out of documentation space is an error and never a silent
+ *  collision. */
 function syntheticIp(role: Role, index: number): string {
-  if (role === "maker") return `192.0.2.${(index % 254) + 1}`;
-  const block = index < 254 ? "198.51.100" : "203.0.113";
-  return `${block}.${(index % 254) + 1}`;
+  if (role === "maker") {
+    if (index >= MAX_MAKERS) {
+      throw new Error(
+        `maker ${String(index)} exceeds the ${String(MAX_MAKERS)} addressable documentation hosts`,
+      );
+    }
+    return `192.0.2.${String(index + 1)}`;
+  }
+  if (index >= MAX_TAKERS) {
+    throw new Error(
+      `taker ${String(index)} exceeds the ${String(MAX_TAKERS)} addressable documentation hosts; lower --takers`,
+    );
+  }
+  const block = TAKER_BLOCKS[Math.floor(index / HOSTS_PER_BLOCK)];
+  if (block === undefined) throw new Error("taker address block missing");
+  return `${block}.${String((index % HOSTS_PER_BLOCK) + 1)}`;
 }
 
 function deriveIdentity(role: Role, index: number): Identity {

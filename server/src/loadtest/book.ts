@@ -1,10 +1,13 @@
-// Runs a real order-book process for the harness: the built dist/server.js
-// with a throwaway data file and feed file, the production persistence path,
-// and nothing stubbed out.
+// Runs a real order-book process for the harness: server.js compiled beside
+// the harness from the same sources and the same compiler options, with a
+// throwaway data file and feed file, the production persistence path, and
+// nothing stubbed out.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { setPriority } from "node:os";
+import { fileURLToPath } from "node:url";
 import { request } from "node:http";
 
 export interface BookOptions {
@@ -39,10 +42,30 @@ const BOOK_ENV_BASE: Record<string, string> = {
   ORDERBOOK_CORS_ORIGINS: "http://127.0.0.1:5173",
 };
 
+/** Refuses to start when something already listens on the port. An orphaned
+ *  book from an earlier aborted run would otherwise answer the health probe
+ *  and the whole scenario would silently measure the wrong process. */
+async function assertPortFree(port: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const probe = createServer();
+    probe.once("error", (error: NodeJS.ErrnoException) => {
+      reject(
+        new Error(
+          `port ${String(port)} is already in use (${error.code ?? "unknown"}); an earlier book may still be running`,
+        ),
+      );
+    });
+    probe.listen(port, "127.0.0.1", () => {
+      probe.close(() => resolve());
+    });
+  });
+}
+
 export async function startBook(options: BookOptions): Promise<Book> {
+  await assertPortFree(options.port);
   const child: ChildProcess = spawn(
     process.execPath,
-    [new URL("../server.js", import.meta.url).pathname],
+    [fileURLToPath(new URL("../server.js", import.meta.url))],
     {
       env: {
         ...process.env,
@@ -71,12 +94,25 @@ export async function startBook(options: BookOptions): Promise<Book> {
   child.stderr?.on("data", collect);
 
   const state = { exited: false, exitCode: null as number | null };
-  child.once("exit", (code) => {
-    state.exited = true;
-    state.exitCode = code;
+  const exited = new Promise<number | null>((resolve) => {
+    child.once("exit", (code) => {
+      state.exited = true;
+      state.exitCode = code;
+      resolve(code);
+    });
   });
 
-  await waitForHealth(options.port, 20_000);
+  // Race the child's own exit against the health wait, so a book that dies on
+  // startup fails immediately and carries its log into the error.
+  const ready = await Promise.race([
+    waitForHealth(options.port, 20_000).then(() => "ready" as const),
+    exited.then(() => "exited" as const),
+  ]);
+  if (ready === "exited") {
+    throw new Error(
+      `order book exited during startup with code ${String(state.exitCode)}: ${options.log.slice(-4).join(" | ")}`,
+    );
+  }
 
   return {
     pid,

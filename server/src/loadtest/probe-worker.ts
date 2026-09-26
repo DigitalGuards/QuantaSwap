@@ -2,6 +2,9 @@
 // harness's event loop, which drives dozens of concurrent clients, cannot
 // inflate the number that is supposed to describe the book's responsiveness.
 //
+// Samples are streamed one JSON line at a time, so a probe that is killed
+// still leaves every sample it took.
+//
 // argv: <port> <intervalMs> <forwardedFor>
 
 import { probeHealth } from "./book.js";
@@ -9,7 +12,10 @@ import { probeHealth } from "./book.js";
 export interface ProbeSample {
   latencyMs: number;
   status: number;
-  /** Scheduling delay of this probe's own timer, in its own process. */
+  /** Fixed-grid ticks skipped because the previous request was still open. */
+  missedTicks: number;
+  /** Scheduling delay against the fixed grid, clamped at the tick interval so
+   *  a long request shows up as missed ticks and never as inflated drift. */
   driftMs: number;
 }
 
@@ -20,7 +26,6 @@ if (!Number.isInteger(port) || !Number.isInteger(intervalMs)) {
   throw new Error("probe requires an integer port and interval");
 }
 
-const samples: ProbeSample[] = [];
 let running = true;
 
 const sleep = (ms: number): Promise<void> =>
@@ -28,27 +33,43 @@ const sleep = (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
-function emit(): void {
-  process.stdout.write(`${JSON.stringify({ samples })}\n`);
+function emit(sample: ProbeSample): void {
+  process.stdout.write(`${JSON.stringify(sample)}\n`);
 }
 
 process.once("SIGTERM", () => {
   running = false;
 });
+process.once("SIGINT", () => {
+  running = false;
+});
 
-let expected = performance.now() + intervalMs;
+// A fixed grid anchored once at startup. A request that outlasts its tick
+// consumes the ticks it overran, and those are reported as missed, so a stall
+// keeps its full weight and the schedule never quietly shifts.
+const startedAt = performance.now();
+let tick = 1;
 while (running) {
-  await sleep(Math.max(0, expected - performance.now()));
+  const target = startedAt + tick * intervalMs;
+  const now = performance.now();
+  if (now < target) await sleep(target - now);
   if (!running) break;
-  const driftMs = performance.now() - expected;
+  const arrivedAt = performance.now();
+  // Scheduling lateness only. The request's own duration is reported through
+  // the missed ticks below, so drift never absorbs it.
+  const driftMs = Math.min(Math.max(0, arrivedAt - target), intervalMs);
   const result = await probeHealth(port, forwardedFor);
-  // Re-anchor after the probe completes, so the drift figure stays a pure
-  // per-tick scheduling delay and never absorbs the request's own duration.
-  expected = performance.now() + intervalMs;
-  samples.push({
+  const finishedAt = performance.now();
+  // Grid slots whose scheduled moment passed while this request was open. One
+  // slow reply from a saturated book consumes many slots, and saying so is how
+  // a stall stays visible when the sample count alone would hide it.
+  const nextTick = Math.floor((finishedAt - startedAt) / intervalMs) + 1;
+  const missedTicks = Math.max(0, nextTick - tick - 1);
+  emit({
     latencyMs: result.latencyMs,
     status: result.status,
+    missedTicks,
     driftMs,
   });
+  tick = Math.max(tick + 1, nextTick);
 }
-emit();

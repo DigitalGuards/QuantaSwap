@@ -23,16 +23,25 @@ export interface ClientOptions {
 
 export class BookClient {
   private readonly agent: Agent;
+  private metrics: EndpointMetrics;
   readonly port: number;
 
   constructor(private readonly options: ClientOptions) {
     this.port = options.port;
+    this.metrics = options.metrics;
     this.agent = new Agent({
       keepAlive: true,
       maxSockets: options.maxSockets,
       maxFreeSockets: options.maxSockets,
       keepAliveMsecs: 4000,
     });
+  }
+
+  /** Routes later requests into a different sink. Preparation, the measured
+   *  window and the end-of-run audit each own their own metrics, so setup and
+   *  verification traffic never lands in the measured numbers. */
+  useMetrics(metrics: EndpointMetrics): void {
+    this.metrics = metrics;
   }
 
   destroy(): void {
@@ -95,13 +104,9 @@ export class BookClient {
       req.end();
     });
     if (reply.transportError === undefined) {
-      this.options.metrics.record(label, reply.latencyMs, reply.status);
+      this.metrics.record(label, reply.latencyMs, reply.status);
     } else {
-      this.options.metrics.recordError(
-        label,
-        reply.latencyMs,
-        reply.transportError,
-      );
+      this.metrics.recordError(label, reply.latencyMs, reply.transportError);
     }
     return reply;
   }

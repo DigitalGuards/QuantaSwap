@@ -1,11 +1,16 @@
 // Load scenarios for the order book. Each one runs against a freshly started
 // book with its own data directory, so per-source daily caps and retained
 // state from an earlier scenario never bleed into the next measurement.
+//
+// Every scenario is two phases. `prepareWorkload` signs all the proofs the run
+// will send, which costs tens of milliseconds per ML-DSA-87 signature and must
+// never land inside the measured window. The run function then sends what was
+// prepared and nothing else.
 
 import { Latency, Tally, type LatencySummary } from "./metrics.js";
 import { BookClient, SseSubscriber } from "./client.js";
 import { readerIp, subscriberIp } from "./addresses.js";
-import { classifyReason } from "./reasons.js";
+import { classifyReason, isPreVerificationShed } from "./reasons.js";
 import { drainQueue, mapPool } from "./pool.js";
 import { sleep } from "./book.js";
 import type { Identity } from "./identity.js";
@@ -15,6 +20,7 @@ import {
   prepareFill,
   prepareIntent,
   prepareOrder,
+  type PreparedCancel,
   type PreparedIntent,
   type PreparedOrder,
 } from "./proofs.js";
@@ -23,10 +29,19 @@ import { signAll, type SignRequest } from "./sign-pool.js";
 export const ENDPOINT_POST_ORDER = "POST /orders/signed";
 export const ENDPOINT_POST_INTENT = "POST /orders/:id/intents";
 export const ENDPOINT_GET_INTENTS = "GET /orders/:id/intents";
+export const ENDPOINT_GET_ORDER = "GET /orders/:id";
 export const ENDPOINT_GET_ORDERS = "GET /orders";
 export const ENDPOINT_POST_CANCEL = "POST /orders/:id/cancel/signed";
 export const ENDPOINT_POST_FILL = "POST /orders/:id/fill";
-export const ENDPOINT_GET_HEALTH = "GET /health";
+
+/** Documented admission ceilings, mirrored here so the harness can assert
+ *  against them and fail loudly when a policy number regresses. */
+export const DOCUMENTED_LIVE_INTENTS_PER_ORDER = 8;
+export const DOCUMENTED_CONCURRENT_TAKES_PER_SOURCE = 4;
+/** Signed fill-intent lifetime ceiling from the wire protocol. */
+export const SIGNED_INTENT_LIFETIME_S = 120;
+
+export type ScenarioKey = "a" | "b" | "c" | "d" | "e" | "f";
 
 export interface SeededOrder {
   orderId: string;
@@ -54,17 +69,19 @@ export interface ScenarioContext {
 
 export interface IntentOutcome {
   submitted: number;
-  accepted: number;
-  rejected: number;
+  admitted: number;
+  refused: number;
   transportErrors: number;
   reasons: Record<string, number>;
-  acceptedDigests: string[];
-  /** Admitted proposals pay signature verification plus a full store
-   *  rewrite and fsync; rejected ones pay verification and stop there.
-   *  Splitting the two separates the crypto cost from the persistence cost
-   *  without instrumenting the service. */
-  acceptedLatency: LatencySummary;
-  rejectedLatency: LatencySummary;
+  admittedDigests: string[];
+  /** Admitted proposals pay signature verification plus a whole-store rewrite
+   *  and fsync. */
+  admittedLatency: LatencySummary;
+  /** Refused after verification: the proof was verified and then the
+   *  admission caps rejected it, with no persistence. */
+  refusedAfterVerifyLatency: LatencySummary;
+  /** Shed by the per-source HTTP limiter before any verification happens. */
+  shedBeforeVerifyLatency: LatencySummary;
 }
 
 export interface FairnessReport {
@@ -83,12 +100,25 @@ export interface SseReport {
   subscribers: number;
   accepted: number;
   rejected: number;
+  /** Order creations the harness asked the subscribers to watch for. */
+  trackedOrders: number;
+  /** Tracked orders at least one subscriber saw. */
   observedOrders: number;
-  /** Tracked orders that did not reach every accepted subscriber. */
+  /** Tracked orders that failed to reach every accepted subscriber,
+   *  including the ones no subscriber saw at all. */
   incompleteDeliveries: number;
   publishLatency: LatencySummary;
   fanoutSpread: LatencySummary;
   droppedSubscribers: number;
+}
+
+/** One assertion against a documented admission ceiling. */
+export interface CapCheck {
+  name: string;
+  rule: string;
+  expected: string;
+  observed: number;
+  ok: boolean;
 }
 
 export interface ScenarioOutcome {
@@ -96,6 +126,7 @@ export interface ScenarioOutcome {
   fairness?: FairnessReport;
   sse?: SseReport;
   phases?: Record<string, LatencySummary>;
+  capChecks: CapCheck[];
   notes: string[];
 }
 
@@ -118,7 +149,7 @@ function takerAt(ctx: ScenarioContext, index: number): Identity {
 // --- seeding ---------------------------------------------------------------
 
 /** Posts `count` signed public orders, marking the first `hotCount` as the
- *  rows every taker will fight over. */
+ *  rows every taker will fight over. Runs before the measured window. */
 export async function seedOrders(
   ctx: ScenarioContext,
   count: number,
@@ -191,44 +222,239 @@ export async function seedOrders(
   return seeded;
 }
 
+// --- preparation -----------------------------------------------------------
+
+export interface MakerCycle {
+  target: SeededOrder;
+  cancel: PreparedCancel;
+  repost: PreparedOrder;
+}
+
+export interface PreparedWorkload {
+  rounds: number;
+  /** Pre-signed proposals, indexed by taker then round. */
+  perTaker: PreparedIntent[][];
+  /** The order every taker races in the hot-order scenario. */
+  hot: SeededOrder;
+  /** Cancel plus repost pairs driving the maker traffic in the mixed run. */
+  makerCycles: MakerCycle[];
+  /** A second proposal per taker aimed at the same order as its first, used
+   *  by the sequential scenario to time a refusal that still pays full
+   *  signature verification. Empty for every other scenario. */
+  refusalPass: PreparedIntent[];
+  /** Seconds of signed proposal validity left when preparation finished. */
+  signedValidityRemainingS: number;
+  prepareMs: number;
+  signatures: number;
+}
+
+type OrderPicker = (takerIndex: number, round: number) => SeededOrder;
+
+function pickerFor(
+  key: ScenarioKey,
+  orders: readonly SeededOrder[],
+  hot: SeededOrder,
+): OrderPicker {
+  const at = (index: number): SeededOrder => {
+    const order = orders[index % orders.length];
+    if (order === undefined) throw new Error("order selection failed");
+    return order;
+  };
+  switch (key) {
+    case "a":
+      return () => hot;
+    case "d":
+      return (takerIndex, round) => at(takerIndex * 7 + round);
+    case "f":
+      return (takerIndex, round) => at(takerIndex + round * 3);
+    default:
+      return (takerIndex, round) => at(takerIndex + round);
+  }
+}
+
+function roundsFor(
+  key: ScenarioKey,
+  rounds: number,
+  takers: number,
+  serviceSamples: number,
+): number {
+  if (key !== "f") return rounds;
+  return Math.max(1, Math.ceil(serviceSamples / Math.max(1, takers)));
+}
+
+/** Signs every proof a scenario will send. Nothing here is measured. */
+export async function prepareWorkload(
+  ctx: ScenarioContext,
+  key: ScenarioKey,
+  orders: readonly SeededOrder[],
+  options: { rounds: number; serviceSamples: number; makerCycles: number },
+): Promise<PreparedWorkload> {
+  if (orders.length === 0) throw new Error("preparation needs seeded orders");
+  const hot = orders.find((order) => order.hot) ?? orders[0];
+  if (hot === undefined) throw new Error("preparation needs a hot order");
+  const startedAt = performance.now();
+  const rounds = roundsFor(
+    key,
+    options.rounds,
+    ctx.takers.length,
+    options.serviceSamples,
+  );
+  const pick = pickerFor(key, orders, hot);
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const perTaker: PreparedIntent[][] = ctx.takers.map((taker) =>
+    Array.from({ length: rounds }, (_v, round) =>
+      prepareIntent(
+        taker,
+        pick(taker.index, round),
+        issuedAt,
+        SIGNED_INTENT_LIFETIME_S,
+      ),
+    ),
+  );
+
+  // The sequential scenario also needs proposals that are certain to be
+  // refused after verification: a second proposal from the same taker for the
+  // same order, which the one-pending-proposal-per-account rule rejects once
+  // the first is admitted.
+  const refusalPass: PreparedIntent[] =
+    key === "f"
+      ? ctx.takers.map((taker) =>
+          prepareIntent(
+            taker,
+            pick(taker.index, 0),
+            issuedAt,
+            SIGNED_INTENT_LIFETIME_S,
+          ),
+        )
+      : [];
+
+  const cycleTargets = key === "c" ? orders.slice(0, options.makerCycles) : [];
+  const cancels = cycleTargets.map((order) =>
+    prepareCancel(makerAt(ctx, order.makerIndex), order, issuedAt),
+  );
+  const reposts = cycleTargets.map((order, index) =>
+    prepareOrder(makerAt(ctx, order.makerIndex), 1000 + index, issuedAt, 3600),
+  );
+
+  const requests: SignRequest[] = [
+    ...ctx.takers.map((taker, index) => ({
+      seedHex: taker.seedHex,
+      messages: [
+        ...(perTaker[index] ?? []).map((intent) => intent.proof.messageBytes),
+        ...(refusalPass[index] === undefined
+          ? []
+          : [refusalPass[index].proof.messageBytes]),
+      ],
+    })),
+    ...cancels.map((cancel, index) => ({
+      seedHex: makerAt(ctx, cycleTargets[index]?.makerIndex ?? 0).seedHex,
+      messages: [cancel.proof.messageBytes],
+    })),
+    ...reposts.map((order) => ({
+      seedHex: makerAt(ctx, order.makerIndex).seedHex,
+      messages: [order.proof.messageBytes],
+    })),
+  ];
+  const signatures = await signAll(requests, ctx.signWorkers);
+  perTaker.forEach((intents, index) => {
+    const produced = signatures[index] ?? [];
+    attachSignatures(
+      intents.map((intent) => intent.proof),
+      produced.slice(0, intents.length),
+    );
+    const refusal = refusalPass[index];
+    if (refusal !== undefined) {
+      attachSignatures([refusal.proof], produced.slice(intents.length));
+    }
+  });
+  const takerCount = ctx.takers.length;
+  cancels.forEach((cancel, index) => {
+    attachSignatures(
+      [cancel.proof],
+      [signatures[takerCount + index]?.[0] ?? ""],
+    );
+  });
+  reposts.forEach((order, index) => {
+    attachSignatures(
+      [order.proof],
+      [signatures[takerCount + cancels.length + index]?.[0] ?? ""],
+    );
+  });
+
+  const makerCycles: MakerCycle[] = cycleTargets.flatMap((target, index) => {
+    const cancel = cancels[index];
+    const repost = reposts[index];
+    if (cancel === undefined || repost === undefined) return [];
+    return [{ target, cancel, repost }];
+  });
+
+  const signedValidityRemainingS =
+    issuedAt + SIGNED_INTENT_LIFETIME_S - Math.floor(Date.now() / 1000);
+  const total = requests.reduce(
+    (count, request) => count + request.messages.length,
+    0,
+  );
+  ctx.log(
+    `prepared ${String(total)} signatures in ${(performance.now() - startedAt).toFixed(0)} ms, ${String(signedValidityRemainingS)} s of signed proposal validity left`,
+  );
+  if (signedValidityRemainingS * 1000 < ctx.durationMs + 20_000) {
+    ctx.log(
+      "warning: preparation consumed most of the signed proposal lifetime; lower --takers or --rounds",
+    );
+  }
+  return {
+    rounds,
+    perTaker,
+    hot,
+    makerCycles,
+    refusalPass,
+    signedValidityRemainingS,
+    prepareMs: performance.now() - startedAt,
+    signatures: total,
+  };
+}
+
 // --- intent submission -----------------------------------------------------
 
 interface IntentCollector {
   submitted: number;
-  accepted: number;
-  rejected: number;
+  admitted: number;
+  refused: number;
   transportErrors: number;
   reasons: Tally;
-  acceptedDigests: string[];
+  admittedDigests: string[];
   winsByTaker: Map<number, number>;
-  acceptedLatency: Latency;
-  rejectedLatency: Latency;
+  admittedLatency: Latency;
+  refusedAfterVerifyLatency: Latency;
+  shedBeforeVerifyLatency: Latency;
 }
 
 function newCollector(): IntentCollector {
   return {
     submitted: 0,
-    accepted: 0,
-    rejected: 0,
+    admitted: 0,
+    refused: 0,
     transportErrors: 0,
     reasons: new Tally(),
-    acceptedDigests: [],
+    admittedDigests: [],
     winsByTaker: new Map(),
-    acceptedLatency: new Latency(),
-    rejectedLatency: new Latency(),
+    admittedLatency: new Latency(),
+    refusedAfterVerifyLatency: new Latency(),
+    shedBeforeVerifyLatency: new Latency(),
   };
 }
 
 function finishCollector(collector: IntentCollector): IntentOutcome {
   return {
     submitted: collector.submitted,
-    accepted: collector.accepted,
-    rejected: collector.rejected,
+    admitted: collector.admitted,
+    refused: collector.refused,
     transportErrors: collector.transportErrors,
     reasons: collector.reasons.toObject(),
-    acceptedDigests: collector.acceptedDigests,
-    acceptedLatency: collector.acceptedLatency.summary(),
-    rejectedLatency: collector.rejectedLatency.summary(),
+    admittedDigests: collector.admittedDigests,
+    admittedLatency: collector.admittedLatency.summary(),
+    refusedAfterVerifyLatency: collector.refusedAfterVerifyLatency.summary(),
+    shedBeforeVerifyLatency: collector.shedBeforeVerifyLatency.summary(),
   };
 }
 
@@ -247,8 +473,8 @@ async function submitIntent(
     { intent: intent.proof.body, auth: intent.proof.auth },
   );
   if (reply.status === 201) {
-    collector.accepted += 1;
-    collector.acceptedLatency.add(reply.latencyMs);
+    collector.admitted += 1;
+    collector.admittedLatency.add(reply.latencyMs);
     collector.winsByTaker.set(
       intent.takerIndex,
       (collector.winsByTaker.get(intent.takerIndex) ?? 0) + 1,
@@ -258,94 +484,140 @@ async function submitIntent(
       typeof returned === "object" && returned !== null
         ? (returned as Record<string, unknown>)["intentDigest"]
         : undefined;
-    if (typeof digest === "string") collector.acceptedDigests.push(digest);
+    if (typeof digest === "string") collector.admittedDigests.push(digest);
     return;
   }
-  if (reply.transportError !== undefined) collector.transportErrors += 1;
-  else {
-    collector.rejected += 1;
-    collector.rejectedLatency.add(reply.latencyMs);
+  if (reply.transportError !== undefined) {
+    collector.transportErrors += 1;
+    collector.reasons.add(`transport:${reply.transportError}`);
+    return;
   }
-  collector.reasons.add(
-    classifyReason(reply.status, reply.body, reply.transportError),
-  );
+  collector.refused += 1;
+  const reason = classifyReason(reply.status, reply.body);
+  collector.reasons.add(reason);
+  // The per-source HTTP limiter answers before the router reaches signature
+  // verification, so those replies cost the book almost nothing. Keeping them
+  // in their own bucket stops them from flattering the verified-and-refused
+  // figure.
+  if (isPreVerificationShed(reason)) {
+    collector.shedBeforeVerifyLatency.add(reply.latencyMs);
+  } else {
+    collector.refusedAfterVerifyLatency.add(reply.latencyMs);
+  }
 }
 
-/** Pre-signs `rounds` intents per taker against the given orders. */
-async function prepareIntents(
-  ctx: ScenarioContext,
-  pick: (takerIndex: number, round: number) => SeededOrder,
+function flatQueue(
+  perTaker: readonly PreparedIntent[][],
   rounds: number,
-): Promise<PreparedIntent[][]> {
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const perTaker: PreparedIntent[][] = ctx.takers.map((taker) =>
-    Array.from({ length: rounds }, (_v, round) =>
-      prepareIntent(taker, pick(taker.index, round), issuedAt, 120),
-    ),
-  );
-  const requests: SignRequest[] = ctx.takers.map((taker, index) => ({
-    seedHex: taker.seedHex,
-    messages: (perTaker[index] ?? []).map((intent) => intent.proof.messageBytes),
-  }));
-  const signatures = await signAll(requests, ctx.signWorkers);
-  perTaker.forEach((intents, index) => {
-    attachSignatures(
-      intents.map((intent) => intent.proof),
-      signatures[index] ?? [],
-    );
-  });
-  // A signed intent lives at most 120 s, so a slow pre-signing pass would
-  // hand the run proofs that expire mid-measurement. Say so, so a wall of
-  // expiry rejections is never reported as a result.
-  const remainingS = issuedAt + 120 - Math.floor(Date.now() / 1000);
-  ctx.log(
-    `pre-signed ${String(perTaker.length * rounds)} intents, ${String(remainingS)} s of signed validity left`,
-  );
-  if (remainingS * 1000 < ctx.durationMs + 20_000) {
-    ctx.log(
-      "warning: pre-signing consumed most of the signed intent lifetime; lower --takers or --rounds",
-    );
+): PreparedIntent[] {
+  const queue: PreparedIntent[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    for (const intents of perTaker) {
+      const intent = intents[round];
+      if (intent !== undefined) queue.push(intent);
+    }
   }
-  return perTaker;
+  return queue;
+}
+
+// --- cap assertions --------------------------------------------------------
+
+function capCheck(
+  name: string,
+  rule: string,
+  observed: number,
+  predicate: (value: number) => boolean,
+  expected: string,
+): CapCheck {
+  return { name, rule, expected, observed, ok: predicate(observed) };
+}
+
+function hotOrderCapChecks(takers: number, admitted: number): CapCheck[] {
+  const expected = Math.min(takers, DOCUMENTED_LIVE_INTENTS_PER_ORDER);
+  return [
+    capCheck(
+      "hot order admissions",
+      "MAX_FILL_INTENTS_PER_ORDER",
+      admitted,
+      (value) => value === expected,
+      `exactly ${String(expected)}`,
+    ),
+  ];
+}
+
+function spreadCapChecks(
+  takers: number,
+  orderCount: number,
+  admitted: number,
+): CapCheck[] {
+  const perOrderCeiling = DOCUMENTED_LIVE_INTENTS_PER_ORDER * orderCount;
+  const perSourceCeiling = DOCUMENTED_CONCURRENT_TAKES_PER_SOURCE * takers;
+  return [
+    capCheck(
+      "admissions against the per-order ceiling",
+      "MAX_FILL_INTENTS_PER_ORDER x seeded orders",
+      admitted,
+      (value) => value <= perOrderCeiling,
+      `at most ${String(perOrderCeiling)}`,
+    ),
+    capCheck(
+      "admissions against the per-source ceiling",
+      "MAX_CONCURRENT_TAKES_PER_IP x takers",
+      admitted,
+      (value) => value <= perSourceCeiling,
+      `at most ${String(perSourceCeiling)}`,
+    ),
+  ];
+}
+
+function sharedSourceCapChecks(takers: number, admitted: number): CapCheck[] {
+  const expected = Math.min(takers, DOCUMENTED_CONCURRENT_TAKES_PER_SOURCE);
+  return [
+    capCheck(
+      "shared source admissions",
+      "MAX_CONCURRENT_TAKES_PER_IP",
+      admitted,
+      (value) => value === expected,
+      `exactly ${String(expected)}`,
+    ),
+  ];
 }
 
 // --- scenario a: race on one hot order -------------------------------------
 
 export async function scenarioHotRace(
   ctx: ScenarioContext,
-  orders: readonly SeededOrder[],
-  rounds: number,
+  plan: PreparedWorkload,
 ): Promise<ScenarioOutcome> {
-  const hot = orders.find((order) => order.hot);
-  if (hot === undefined) throw new Error("scenario needs a seeded hot order");
-  const perTaker = await prepareIntents(ctx, () => hot, rounds);
+  const hot = plan.hot;
   const collector = newCollector();
   const winnersPerRound: number[] = [];
   const deadline = performance.now() + ctx.durationMs;
 
-  for (let round = 0; round < rounds; round += 1) {
+  for (let round = 0; round < plan.rounds; round += 1) {
     if (performance.now() >= deadline) break;
     const batch = shuffle(
-      perTaker
+      plan.perTaker
         .map((intents) => intents[round])
         .filter((intent): intent is PreparedIntent => intent !== undefined),
       round,
     );
-    const before = collector.accepted;
+    const before = collector.admitted;
     await mapPool(batch, ctx.concurrency, (intent) =>
       submitIntent(ctx, intent, collector),
     );
-    winnersPerRound.push(collector.accepted - before);
-    // Live intents hold their slot until signed expiry, so a later round can
+    winnersPerRound.push(collector.admitted - before);
+    // Live proposals hold their slot until signed expiry, so a later round can
     // only win capacity the protocol frees. The pause keeps rounds distinct
-    // without waiting out the full 120 s intent lifetime.
-    if (round + 1 < rounds) await sleep(250);
+    // without waiting out the full signed lifetime.
+    if (round + 1 < plan.rounds) await sleep(250);
   }
 
   const fairness = await inspectFairness(ctx, [hot], collector, winnersPerRound);
   return {
     intents: finishCollector(collector),
     fairness,
+    capChecks: hotOrderCapChecks(ctx.takers.length, collector.admitted),
     notes: [
       `all takers raced order ${hot.orderId.slice(0, 12)} for ${String(winnersPerRound.length)} rounds`,
     ],
@@ -357,41 +629,29 @@ export async function scenarioHotRace(
 export async function scenarioSpread(
   ctx: ScenarioContext,
   orders: readonly SeededOrder[],
-  rounds: number,
+  plan: PreparedWorkload,
 ): Promise<ScenarioOutcome> {
-  if (orders.length === 0) throw new Error("scenario needs seeded orders");
-  const pick = (takerIndex: number, round: number): SeededOrder => {
-    const order = orders[(takerIndex + round) % orders.length];
-    if (order === undefined) throw new Error("order selection failed");
-    return order;
-  };
-  const perTaker = await prepareIntents(ctx, pick, rounds);
   const collector = newCollector();
   const deadline = performance.now() + ctx.durationMs;
-  const queue: PreparedIntent[] = [];
-  for (let round = 0; round < rounds; round += 1) {
-    for (const intents of perTaker) {
-      const intent = intents[round];
-      if (intent !== undefined) queue.push(intent);
-    }
-  }
-  const drained = await drainQueue(
-    queue,
-    ctx.concurrency,
-    deadline,
-    0,
-    (intent) => submitIntent(ctx, intent, collector),
+  const queue = flatQueue(plan.perTaker, plan.rounds);
+  const drained = await drainQueue(queue, ctx.concurrency, deadline, 0, (intent) =>
+    submitIntent(ctx, intent, collector),
   );
 
   const fairness = await inspectFairness(ctx, orders, collector, []);
   return {
     intents: finishCollector(collector),
     fairness,
+    capChecks: spreadCapChecks(
+      ctx.takers.length,
+      orders.length,
+      collector.admitted,
+    ),
     notes: [
-      `${String(drained.sent)} of ${String(queue.length)} pre-signed intents submitted across ${String(orders.length)} orders in ${drained.wallMs.toFixed(0)} ms`,
+      `${String(drained.sent)} of ${String(queue.length)} pre-signed proposals submitted across ${String(orders.length)} orders in ${drained.wallMs.toFixed(0)} ms`,
       drained.exhausted
         ? "the run ended when the pre-signed supply drained, before the duration elapsed"
-        : "the run ended at the configured duration with pre-signed intents left over",
+        : "the run ended at the configured duration with pre-signed proposals left over",
     ],
   };
 }
@@ -401,58 +661,14 @@ export async function scenarioSpread(
 export interface MixedOptions {
   readers: number;
   subscribers: number;
-  makerCycles: number;
 }
 
 export async function scenarioMixed(
   ctx: ScenarioContext,
   orders: readonly SeededOrder[],
-  rounds: number,
+  plan: PreparedWorkload,
   options: MixedOptions,
 ): Promise<ScenarioOutcome> {
-  const pick = (takerIndex: number, round: number): SeededOrder => {
-    const order = orders[(takerIndex + round) % orders.length];
-    if (order === undefined) throw new Error("order selection failed");
-    return order;
-  };
-  const perTaker = await prepareIntents(ctx, pick, rounds);
-
-  // Maker traffic: cancel a seeded order, then post a fresh one. Both are
-  // signed proofs, so they exercise the same verify-then-persist path.
-  const cancelTargets = orders.slice(0, options.makerCycles);
-  const issuedAt = Math.floor(Date.now() / 1000);
-  const cancels = cancelTargets.map((order) =>
-    prepareCancel(makerAt(ctx, order.makerIndex), order, issuedAt),
-  );
-  const reposts = cancelTargets.map((order, index) =>
-    prepareOrder(
-      makerAt(ctx, order.makerIndex),
-      1000 + index,
-      issuedAt,
-      3600,
-    ),
-  );
-  const makerRequests: SignRequest[] = [
-    ...cancels.map((cancel, index) => ({
-      seedHex: makerAt(ctx, cancelTargets[index]?.makerIndex ?? 0).seedHex,
-      messages: [cancel.proof.messageBytes],
-    })),
-    ...reposts.map((order) => ({
-      seedHex: makerAt(ctx, order.makerIndex).seedHex,
-      messages: [order.proof.messageBytes],
-    })),
-  ];
-  const makerSignatures = await signAll(makerRequests, ctx.signWorkers);
-  cancels.forEach((cancel, index) => {
-    attachSignatures([cancel.proof], [makerSignatures[index]?.[0] ?? ""]);
-  });
-  reposts.forEach((order, index) => {
-    attachSignatures(
-      [order.proof],
-      [makerSignatures[cancels.length + index]?.[0] ?? ""],
-    );
-  });
-
   const subscribers: SseSubscriber[] = [];
   const publishLatency = new Latency();
   const fanoutSpread = new Latency();
@@ -461,7 +677,7 @@ export async function scenarioMixed(
   // measures its delivery; later frames would just re-report it.
   const firstSeen = new Map<string, Map<number, number>>();
   const requestStarts = new Map<string, number>();
-  const trackedIds = new Set(reposts.map((order) => order.orderId));
+  const trackedIds = new Set(plan.makerCycles.map((cycle) => cycle.repost.orderId));
 
   // Each subscriber scans only the ids it has not seen yet, so the harness's
   // own event loop does not become the thing being measured.
@@ -507,13 +723,7 @@ export async function scenarioMixed(
 
   const collector = newCollector();
   const deadline = performance.now() + ctx.durationMs;
-  const queue: PreparedIntent[] = [];
-  for (let round = 0; round < rounds; round += 1) {
-    for (const intents of perTaker) {
-      const intent = intents[round];
-      if (intent !== undefined) queue.push(intent);
-    }
-  }
+  const queue = flatQueue(plan.perTaker, plan.rounds);
   const readerLoops = Array.from({ length: options.readers }, (_v, index) =>
     (async () => {
       const ip = ctx.sharedIp ?? readerIp(index);
@@ -524,38 +734,32 @@ export async function scenarioMixed(
     })(),
   );
   const makerLoop = (async () => {
-    for (let index = 0; index < cancelTargets.length; index += 1) {
+    for (const cycle of plan.makerCycles) {
       if (performance.now() >= deadline) break;
-      const target = cancelTargets[index];
-      const cancel = cancels[index];
-      const repost = reposts[index];
-      if (target === undefined || cancel === undefined || repost === undefined) {
-        break;
-      }
-      const maker = makerAt(ctx, target.makerIndex);
+      const maker = makerAt(ctx, cycle.target.makerIndex);
       await ctx.client.send(
         ENDPOINT_POST_CANCEL,
         "POST",
-        `/api/orders/${target.orderId}/cancel/signed`,
+        `/api/orders/${cycle.target.orderId}/cancel/signed`,
         ipFor(ctx, maker),
-        { cancel: cancel.proof.body, auth: cancel.proof.auth },
-        { "X-Maker-Token": target.makerToken },
+        { cancel: cycle.cancel.proof.body, auth: cycle.cancel.proof.auth },
+        { "X-Maker-Token": cycle.target.makerToken },
       );
-      requestStarts.set(repost.orderId, performance.now());
+      requestStarts.set(cycle.repost.orderId, performance.now());
       const posted = await ctx.client.send(
         ENDPOINT_POST_ORDER,
         "POST",
         "/api/orders/signed",
         ipFor(ctx, maker),
         {
-          order: repost.proof.body,
-          auth: repost.proof.auth,
-          makerToken: repost.makerToken,
+          order: cycle.repost.proof.body,
+          auth: cycle.repost.proof.auth,
+          makerToken: cycle.repost.makerToken,
         },
       );
       if (posted.status !== 201) {
-        requestStarts.delete(repost.orderId);
-        trackedIds.delete(repost.orderId);
+        requestStarts.delete(cycle.repost.orderId);
+        trackedIds.delete(cycle.repost.orderId);
         collector.reasons.add(
           `repost:${classifyReason(posted.status, posted.body, posted.transportError)}`,
         );
@@ -575,17 +779,28 @@ export async function scenarioMixed(
   // Let the last coalesced push reach the subscribers before measuring.
   await sleep(300);
 
+  // A frame that reached nobody has no entry in firstSeen, so completeness is
+  // counted over every id still tracked, including the invisible ones.
   let incompleteDeliveries = 0;
-  for (const [id, perSubscriber] of firstSeen) {
-    const startedAt = requestStarts.get(id);
-    if (startedAt === undefined) continue;
+  let observedOrders = 0;
+  for (const id of trackedIds) {
+    if (requestStarts.get(id) === undefined) continue;
+    const perSubscriber = firstSeen.get(id);
+    if (perSubscriber === undefined || perSubscriber.size === 0) {
+      incompleteDeliveries += 1;
+      continue;
+    }
+    observedOrders += 1;
+    if (perSubscriber.size < acceptedSubscribers) incompleteDeliveries += 1;
     const sorted = [...perSubscriber.values()].sort(
       (left, right) => left - right,
     );
     const first = sorted[0];
     const last = sorted[sorted.length - 1];
-    if (first === undefined || last === undefined) continue;
-    if (perSubscriber.size < acceptedSubscribers) incompleteDeliveries += 1;
+    const startedAt = requestStarts.get(id);
+    if (first === undefined || last === undefined || startedAt === undefined) {
+      continue;
+    }
     publishLatency.add(first - startedAt);
     fanoutSpread.add(last - first);
   }
@@ -602,15 +817,23 @@ export async function scenarioMixed(
       subscribers: subscribers.length,
       accepted: acceptedSubscribers,
       rejected: subscribers.length - acceptedSubscribers,
-      observedOrders: firstSeen.size,
+      trackedOrders: [...trackedIds].filter(
+        (id) => requestStarts.get(id) !== undefined,
+      ).length,
+      observedOrders,
       incompleteDeliveries,
       publishLatency: publishLatency.summary(),
       fanoutSpread: fanoutSpread.summary(),
       droppedSubscribers: dropped,
     },
+    capChecks: spreadCapChecks(
+      ctx.takers.length,
+      orders.length,
+      collector.admitted,
+    ),
     notes: [
-      `${String(options.readers)} listing pollers, ${String(acceptedSubscribers)} live SSE subscribers, ${String(cancelTargets.length)} maker cancel plus repost cycles`,
-      `${String(drained.sent)} of ${String(queue.length)} pre-signed intents submitted in ${drained.wallMs.toFixed(0)} ms`,
+      `${String(options.readers)} listing pollers, ${String(acceptedSubscribers)} live SSE subscribers, ${String(plan.makerCycles.length)} maker cancel plus repost cycles`,
+      `${String(drained.sent)} of ${String(queue.length)} pre-signed proposals submitted in ${drained.wallMs.toFixed(0)} ms`,
     ],
   };
 }
@@ -620,19 +843,13 @@ export async function scenarioMixed(
 export async function scenarioBurstSteady(
   ctx: ScenarioContext,
   orders: readonly SeededOrder[],
-  rounds: number,
+  plan: PreparedWorkload,
 ): Promise<ScenarioOutcome> {
-  const pick = (takerIndex: number, round: number): SeededOrder => {
-    const order = orders[(takerIndex * 7 + round) % orders.length];
-    if (order === undefined) throw new Error("order selection failed");
-    return order;
-  };
-  const perTaker = await prepareIntents(ctx, pick, rounds);
   const collector = newCollector();
   const burst = new Latency();
   const steady = new Latency();
 
-  const burstBatch = perTaker
+  const burstBatch = plan.perTaker
     .map((intents) => intents[0])
     .filter((intent): intent is PreparedIntent => intent !== undefined);
   const burstStart = performance.now();
@@ -644,8 +861,8 @@ export async function scenarioBurstSteady(
   const burstMs = performance.now() - burstStart;
 
   const steadyQueue: PreparedIntent[] = [];
-  for (let round = 1; round < rounds; round += 1) {
-    for (const intents of perTaker) {
+  for (let round = 1; round < plan.rounds; round += 1) {
+    for (const intents of plan.perTaker) {
       const intent = intents[round];
       if (intent !== undefined) steadyQueue.push(intent);
     }
@@ -672,10 +889,32 @@ export async function scenarioBurstSteady(
       burst: burst.summary(),
       steady: steady.summary(),
     },
+    capChecks: spreadCapChecks(
+      ctx.takers.length,
+      orders.length,
+      collector.admitted,
+    ),
     notes: [
-      `burst of ${String(burstBatch.length)} intents finished in ${burstMs.toFixed(0)} ms at in-flight cap ${String(ctx.concurrency)}`,
-      `steady state sent ${String(drained.sent)} of ${String(steadyQueue.length)} intents at cap ${String(steadyConcurrency)} over ${drained.wallMs.toFixed(0)} ms`,
+      `burst of ${String(burstBatch.length)} proposals finished in ${burstMs.toFixed(0)} ms at in-flight cap ${String(ctx.concurrency)}`,
+      `steady state sent ${String(drained.sent)} of ${String(steadyQueue.length)} proposals at cap ${String(steadyConcurrency)} over ${drained.wallMs.toFixed(0)} ms`,
     ],
+  };
+}
+
+// --- scenario e: one shared source address ---------------------------------
+
+export async function scenarioSharedSource(
+  ctx: ScenarioContext,
+  orders: readonly SeededOrder[],
+  plan: PreparedWorkload,
+): Promise<ScenarioOutcome> {
+  const outcome = await scenarioSpread(ctx, orders, plan);
+  return {
+    ...outcome,
+    capChecks: sharedSourceCapChecks(
+      ctx.takers.length,
+      outcome.intents?.admitted ?? 0,
+    ),
   };
 }
 
@@ -689,36 +928,23 @@ export async function scenarioBurstSteady(
 export async function scenarioServiceTime(
   ctx: ScenarioContext,
   orders: readonly SeededOrder[],
+  plan: PreparedWorkload,
   samples: number,
 ): Promise<ScenarioOutcome> {
-  const pick = (takerIndex: number, round: number): SeededOrder => {
-    const order = orders[(takerIndex + round * 3) % orders.length];
-    if (order === undefined) throw new Error("order selection failed");
-    return order;
-  };
-  const rounds = Math.max(1, Math.ceil(samples / Math.max(1, ctx.takers.length)));
-  const perTaker = await prepareIntents(ctx, pick, rounds);
   const collector = newCollector();
-  const queue: PreparedIntent[] = [];
-  for (let round = 0; round < rounds; round += 1) {
-    for (const intents of perTaker) {
-      const intent = intents[round];
-      if (intent !== undefined) queue.push(intent);
-    }
-  }
   const readLatency = new Latency();
   const deadline = performance.now() + ctx.durationMs;
-  const bounded = queue.slice(0, samples);
-  // Every mutation rewrites the whole store, and each retained intent adds
+  const bounded = flatQueue(plan.perTaker, plan.rounds).slice(0, samples);
+  // Every mutation rewrites the whole store, and each retained proposal adds
   // roughly 15 KB of hex-encoded ML-DSA-87 material, so service time is
   // recorded in submission order: the first and last slices show whether the
   // cost grows with the persisted state.
   const admittedInOrder: number[] = [];
-  const before = collector.accepted;
+  const before = collector.admitted;
   await drainQueue(bounded, 1, deadline, 0, async (intent) => {
     const at = performance.now();
     await submitIntent(ctx, intent, collector);
-    if (collector.accepted > before + admittedInOrder.length) {
+    if (collector.admitted > before + admittedInOrder.length) {
       admittedInOrder.push(performance.now() - at);
     }
   });
@@ -728,6 +954,23 @@ export async function scenarioServiceTime(
     return latency.summary();
   };
   const window = Math.max(1, Math.floor(admittedInOrder.length / 4));
+
+  // Second sequential pass: the same taker proposes for the same order again,
+  // which the one-pending-proposal-per-account rule refuses only after full
+  // signature verification. With no queue that latency is the verification
+  // cost on its own, so the gap to the admitted figure is the price of
+  // persistence.
+  const refusedInOrder: number[] = [];
+  const refusalPass = plan.refusalPass.slice(0, samples);
+  await drainQueue(refusalPass, 1, deadline, 0, async (intent) => {
+    const seen = collector.refusedAfterVerifyLatency.count;
+    const at = performance.now();
+    await submitIntent(ctx, intent, collector);
+    if (collector.refusedAfterVerifyLatency.count > seen) {
+      refusedInOrder.push(performance.now() - at);
+    }
+  });
+
   const reader = ctx.sharedIp ?? readerIp(0);
   for (let index = 0; index < 60; index += 1) {
     if (performance.now() >= deadline) break;
@@ -745,12 +988,19 @@ export async function scenarioServiceTime(
     intents: finishCollector(collector),
     fairness,
     phases: {
+      "sequential admitted": slice(admittedInOrder),
+      "sequential refused after verify": slice(refusedInOrder),
       "sequential listing read": readLatency.summary(),
       "first admitted quarter": slice(admittedInOrder.slice(0, window)),
       "last admitted quarter": slice(admittedInOrder.slice(-window)),
     },
+    capChecks: spreadCapChecks(
+      ctx.takers.length,
+      orders.length,
+      collector.admitted,
+    ),
     notes: [
-      `strictly sequential: ${String(bounded.length)} intent submissions and ${String(readLatency.count)} listing reads with no concurrent load`,
+      `strictly sequential: ${String(bounded.length)} admitted-path submissions, ${String(refusalPass.length)} refused-path submissions and ${String(readLatency.count)} listing reads, all with no concurrent load`,
     ],
   };
 }
@@ -850,27 +1100,39 @@ export interface DoubleFillProbe {
   attempted: boolean;
   order?: string;
   responses: number[];
-  storedFills: number;
-  conflictDigests: number;
+  /** Semantic digests of the two proofs the harness raced. */
+  racedDigests: string[];
+  /** The fill digest the store kept, from the served order row. */
+  storedFillDigest?: string;
+  /** Conflict digests the order retained as equivocation evidence. */
+  retainedConflicts: string[];
   status?: string;
-  /** True when exactly one fill is stored no matter how many were accepted. */
-  singleFillHeld: boolean;
+  /** True when the store kept exactly one of the two raced proofs, that proof
+   *  is one the harness sent, and the losing proof is retained as conflict
+   *  evidence. Anything else means two fills were accepted or the loser was
+   *  dropped. */
+  exactlyOneFillSelected: boolean;
   note: string;
 }
 
 /** Fires two contradictory FillV2 proofs at one order at the same instant.
- *  The documented outcome is exactly one stored fill plus retained
- *  equivocation evidence. */
+ *  The documented outcome is exactly one stored fill plus the losing proof
+ *  retained as equivocation evidence.
+ *
+ *  Maker traffic always uses the per-maker forwarded address, including in the
+ *  shared-source scenario, because this probe verifies terminal-state
+ *  correctness and must not be refused by the shared source's mutation budget. */
 export async function probeDoubleFill(
   ctx: ScenarioContext,
   orders: readonly SeededOrder[],
 ): Promise<DoubleFillProbe> {
   for (const order of orders) {
+    const maker = makerAt(ctx, order.makerIndex);
     const listed = await ctx.client.send(
       ENDPOINT_GET_INTENTS,
       "GET",
       `/api/orders/${order.orderId}/intents`,
-      makerAt(ctx, order.makerIndex).ip,
+      maker.ip,
       undefined,
       { "X-Maker-Token": order.makerToken },
     );
@@ -878,8 +1140,8 @@ export async function probeDoubleFill(
     const raw = listed.body?.["intents"];
     if (!Array.isArray(raw) || raw.length < 2) continue;
     const now = Math.floor(Date.now() / 1000);
-    // A FillV2 must be issued inside its intent's signed window, so only
-    // intents that are still live can be raced.
+    // A FillV2 must be issued inside its proposal's signed window, so only
+    // proposals that are still live can be raced.
     const picks = raw
       .map((entry) => entry as Record<string, unknown>)
       .filter((pick) => {
@@ -895,7 +1157,6 @@ export async function probeDoubleFill(
       })
       .slice(0, 2);
     if (picks.length < 2) continue;
-    const maker = makerAt(ctx, order.makerIndex);
     const fills = picks.map((pick) => {
       const body = pick["intent"] as Record<string, unknown>;
       const auth = pick["auth"] as Record<string, unknown>;
@@ -928,6 +1189,7 @@ export async function probeDoubleFill(
     fills.forEach((entry, index) => {
       attachSignatures([entry.fill.proof], [produced[index] ?? ""]);
     });
+    const racedDigests = fills.map((entry) => entry.fill.fillDigest);
     const replies = await Promise.all(
       fills.map((entry) =>
         ctx.client.send(
@@ -946,7 +1208,7 @@ export async function probeDoubleFill(
       ),
     );
     const after = await ctx.client.send(
-      "GET /orders/:id",
+      ENDPOINT_GET_ORDER,
       "GET",
       `/api/orders/${order.orderId}`,
       maker.ip,
@@ -956,28 +1218,43 @@ export async function probeDoubleFill(
       typeof stored === "object" && stored !== null
         ? (stored as Record<string, unknown>)
         : {};
-    const conflicts = record["conflictDigests"];
-    const storedFills = record["fill"] === undefined ? 0 : 1;
+    const storedFillDigest =
+      typeof record["fillDigest"] === "string"
+        ? record["fillDigest"]
+        : undefined;
+    const rawConflicts = record["conflictDigests"];
+    const retainedConflicts = Array.isArray(rawConflicts)
+      ? rawConflicts.filter((value): value is string => typeof value === "string")
+      : [];
+    const winners = racedDigests.filter(
+      (digest) => digest === storedFillDigest,
+    );
+    const losers = racedDigests.filter((digest) => digest !== storedFillDigest);
+    const exactlyOneFillSelected =
+      storedFillDigest !== undefined &&
+      winners.length === 1 &&
+      losers.every((digest) => retainedConflicts.includes(digest));
     return {
       attempted: true,
       order: order.orderId,
       responses: replies.map((reply) => reply.status),
-      storedFills,
-      conflictDigests: Array.isArray(conflicts) ? conflicts.length : 0,
+      racedDigests,
+      ...(storedFillDigest === undefined ? {} : { storedFillDigest }),
+      retainedConflicts,
       ...(typeof record["status"] === "string"
         ? { status: record["status"] }
         : {}),
-      singleFillHeld: storedFills <= 1,
+      exactlyOneFillSelected,
       note: "two contradictory FillV2 proofs raced one order",
     };
   }
   return {
     attempted: false,
     responses: [],
-    storedFills: 0,
-    conflictDigests: 0,
-    singleFillHeld: true,
-    note: "no order held two live intents, so the double-fill race was skipped",
+    racedDigests: [],
+    retainedConflicts: [],
+    exactlyOneFillSelected: false,
+    note: "no order held two live proposals, so the double-fill race was skipped",
   };
 }
 

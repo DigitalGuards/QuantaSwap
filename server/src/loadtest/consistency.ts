@@ -17,24 +17,38 @@ export interface BookRow {
 }
 
 export interface FeedTotals {
-  events: number;
-  orderEvents: number;
-  intentEvents: number;
-  fillEvents: number;
-  cancelEvents: number;
-  releaseEvents: number;
-  pages: number;
+  /** Events read from the append-only log, paged like a mirror peer. */
+  logEvents: number;
+  logOrderEvents: number;
+  logIntentEvents: number;
+  logFillEvents: number;
+  logCancelEvents: number;
+  logReleaseEvents: number;
+  logPages: number;
+  /** True when the log was paged from its oldest retained sequence. */
+  logReadFromStart: boolean;
+  /** Rows in the reset snapshot, which is the store's current state rendered
+   *  as events, so it is a store view and not a log view. */
+  snapshotRows: number;
+  snapshotFillEvents: number;
+  feedId: string | undefined;
+  oldestSequence: number | undefined;
+  latestSequence: number | undefined;
 }
 
 export interface ConsistencyReport {
   bookRows: number;
   feed: FeedTotals;
-  /** Accepted intent responses against fill-intent events on the feed. */
-  acceptedIntents: number;
-  intentEventsMatchAccepted: boolean;
-  /** Open public rows whose order-v2 proof is missing from the feed. */
-  ordersMissingFromFeed: string[];
-  ordersWithMultipleFills: string[];
+  /** Admitted proposals against fill-intent events on the append-only log. */
+  admittedIntents: number;
+  intentLogEventsMatchAdmitted: boolean;
+  /** Open public rows whose order-v2 proof is missing from the log. */
+  ordersMissingFromLog: string[];
+  /** Open public rows missing from the reset snapshot: store against snapshot. */
+  ordersMissingFromSnapshot: string[];
+  ordersWithMultipleStoredFills: string[];
+  /** Highest live proposal count any order held, against the documented 8. */
+  maxLiveIntentsOnOneOrder: number;
   restart: {
     performed: boolean;
     reloadedRows: number;
@@ -72,72 +86,132 @@ export async function readBook(client: BookClient): Promise<BookRow[]> {
   return rows.sort((left, right) => left.id.localeCompare(right.id));
 }
 
-interface FeedEvent {
+export interface FeedEvent {
   kind: string;
   payload: Record<string, unknown>;
 }
 
-/** Pages the documented federation feed, so the check exercises the same view
- *  a mirror peer would pull. The private log file stays untouched. */
-export async function readFeed(
-  client: BookClient,
-): Promise<{ totals: FeedTotals; events: FeedEvent[] }> {
+export interface FeedRead {
+  totals: FeedTotals;
+  /** Events from the append-only log, in sequence order. */
+  logEvents: FeedEvent[];
+  /** Events from the reset snapshot, which describes current store state. */
+  snapshotEvents: FeedEvent[];
+}
+
+const CURSOR_RE = /^([0-9a-f]{32}):([0-9]+)$/;
+
+function collectEvents(body: Record<string, unknown>, key: string): FeedEvent[] {
+  const list = body[key];
+  if (!Array.isArray(list)) return [];
   const events: FeedEvent[] = [];
-  let cursor: string | undefined;
-  let pages = 0;
-  for (let page = 0; page < 64; page += 1) {
-    const path =
-      cursor === undefined
-        ? "/api/federation/v2/events?limit=256"
-        : `/api/federation/v2/events?limit=256&cursor=${encodeURIComponent(cursor)}`;
-    const reply = await client.send(
-      "GET /federation/v2/events",
-      "GET",
-      path,
-      AUDIT_IP,
-    );
-    if (reply.status !== 200) break;
-    pages += 1;
-    const body = reply.body ?? {};
-    for (const key of ["snapshot", "events"] as const) {
-      const list = body[key];
-      if (!Array.isArray(list)) continue;
-      for (const entry of list) {
-        if (typeof entry !== "object" || entry === null) continue;
-        const event = (entry as Record<string, unknown>)["event"];
-        if (typeof event !== "object" || event === null) continue;
-        const record = event as Record<string, unknown>;
-        const payload = record["payload"];
-        events.push({
-          kind: String(record["kind"]),
-          payload:
-            typeof payload === "object" && payload !== null
-              ? (payload as Record<string, unknown>)
-              : {},
-        });
-      }
-    }
-    const nextCursor = body["cursor"];
-    if (body["hasMore"] !== true || typeof nextCursor !== "string") break;
-    cursor = nextCursor;
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const event = (entry as Record<string, unknown>)["event"];
+    if (typeof event !== "object" || event === null) continue;
+    const record = event as Record<string, unknown>;
+    const payload = record["payload"];
+    events.push({
+      kind: String(record["kind"]),
+      payload:
+        typeof payload === "object" && payload !== null
+          ? (payload as Record<string, unknown>)
+          : {},
+    });
   }
-  const count = (kind: string): number =>
+  return events;
+}
+
+/** Reads the feed the way a mirror peer catches up. The first request carries
+ *  no cursor and answers with a reset snapshot plus the feed identity. The
+ *  harness then rewinds to the oldest retained sequence and pages the
+ *  append-only log forward, so log events are counted separately from the
+ *  snapshot rows that describe current store state. */
+export async function readFeed(client: BookClient): Promise<FeedRead> {
+  const reset = await client.send(
+    "GET /federation/v2/events",
+    "GET",
+    "/api/federation/v2/events?limit=256",
+    AUDIT_IP,
+  );
+  const resetBody = reset.body ?? {};
+  const snapshotEvents = collectEvents(resetBody, "snapshot");
+  const resetCursor = resetBody["cursor"];
+  const cursorMatch =
+    typeof resetCursor === "string" ? CURSOR_RE.exec(resetCursor) : null;
+  const feedId = cursorMatch?.[1];
+
+  const status = await client.send(
+    "GET /status",
+    "GET",
+    "/api/status",
+    AUDIT_IP,
+  );
+  const feedStatus = status.body?.["feed"];
+  const feedRecord =
+    typeof feedStatus === "object" && feedStatus !== null
+      ? (feedStatus as Record<string, unknown>)
+      : {};
+  const oldest = feedRecord["oldestSequence"];
+  const latest = feedRecord["latestSequence"];
+  const oldestSequence = typeof oldest === "number" ? oldest : undefined;
+  const latestSequence = typeof latest === "number" ? latest : undefined;
+
+  const logEvents: FeedEvent[] = [];
+  let logPages = 0;
+  let logReadFromStart = false;
+  if (feedId !== undefined && oldestSequence !== undefined) {
+    // A cursor of feedId:(oldest - 1) asks for everything the log still
+    // retains. The book answers a reset instead when that point has already
+    // been compacted away, which the flag below records.
+    let cursor = `${feedId}:${String(Math.max(0, oldestSequence - 1))}`;
+    logReadFromStart = true;
+    for (let page = 0; page < 256; page += 1) {
+      const reply = await client.send(
+        "GET /federation/v2/events",
+        "GET",
+        `/api/federation/v2/events?limit=256&cursor=${encodeURIComponent(cursor)}`,
+        AUDIT_IP,
+      );
+      if (reply.status !== 200) break;
+      const body = reply.body ?? {};
+      if (body["reset"] === true) {
+        logReadFromStart = false;
+        break;
+      }
+      logPages += 1;
+      logEvents.push(...collectEvents(body, "events"));
+      const nextCursor = body["cursor"];
+      if (body["hasMore"] !== true || typeof nextCursor !== "string") break;
+      if (nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+  }
+
+  const count = (events: readonly FeedEvent[], kind: string): number =>
     events.filter((event) => event.kind === kind).length;
   return {
     totals: {
-      events: events.length,
-      orderEvents: count("order-v2"),
-      intentEvents: count("fill-intent-v2"),
-      fillEvents: count("fill-v2"),
-      cancelEvents: count("cancel-v2"),
-      releaseEvents: count("release-v2"),
-      pages,
+      logEvents: logEvents.length,
+      logOrderEvents: count(logEvents, "order-v2"),
+      logIntentEvents: count(logEvents, "fill-intent-v2"),
+      logFillEvents: count(logEvents, "fill-v2"),
+      logCancelEvents: count(logEvents, "cancel-v2"),
+      logReleaseEvents: count(logEvents, "release-v2"),
+      logPages,
+      logReadFromStart,
+      snapshotRows: snapshotEvents.length,
+      snapshotFillEvents: count(snapshotEvents, "fill-v2"),
+      feedId,
+      oldestSequence,
+      latestSequence,
     },
-    events,
+    logEvents,
+    snapshotEvents,
   };
 }
 
-export function feedOrderIds(events: readonly { kind: string; payload: Record<string, unknown> }[]): Set<string> {
+export function feedOrderIds(events: readonly FeedEvent[]): Set<string> {
   const ids = new Set<string>();
   for (const event of events) {
     if (event.kind !== "order-v2") continue;
@@ -157,21 +231,20 @@ export function feedOrderIds(events: readonly { kind: string; payload: Record<st
   return ids;
 }
 
-export function fillsPerOrder(
-  events: readonly { kind: string; payload: Record<string, unknown> }[],
-): Map<string, Set<string>> {
-  const byOrder = new Map<string, Set<string>>();
+/** Order ids that carry at least one fill-v2 event, from either view. An
+ *  equivocated order legitimately shows two fill-v2 events, one for the
+ *  selected fill and one for the retained conflict, so the event count alone
+ *  never decides whether the store kept two fills. */
+export function ordersWithFillEvents(
+  events: readonly FeedEvent[],
+): Set<string> {
+  const ids = new Set<string>();
   for (const event of events) {
     if (event.kind !== "fill-v2") continue;
     const orderId = event.payload["orderId"];
-    const fill = event.payload["fill"];
-    if (typeof orderId !== "string") continue;
-    const digest = JSON.stringify(fill);
-    const set = byOrder.get(orderId) ?? new Set<string>();
-    set.add(digest);
-    byOrder.set(orderId, set);
+    if (typeof orderId === "string") ids.add(orderId);
   }
-  return byOrder;
+  return ids;
 }
 
 export async function intentCounts(

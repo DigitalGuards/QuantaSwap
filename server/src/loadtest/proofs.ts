@@ -13,6 +13,7 @@ import {
   computeMakerTokenCommitment,
   computeReleaseCommitment,
   deriveOrderV1Id,
+  fillDigest as computeFillDigest,
   orderDigest as computeOrderDigest,
   protocolMessageBytes,
   type CancelV1Terms,
@@ -269,6 +270,8 @@ export interface FillBody extends Record<string, unknown> {
 export interface PreparedFill {
   orderId: string;
   intentDigest: string;
+  /** Semantic digest of this fill, so a race can name which proof won. */
+  fillDigest: string;
   proof: UnsignedProof<FillBody>;
 }
 
@@ -317,6 +320,7 @@ export function prepareFill(
   return {
     orderId: order.orderId,
     intentDigest: intent.intentDigest,
+    fillDigest: computeFillDigest(terms),
     proof: {
       body,
       auth: {

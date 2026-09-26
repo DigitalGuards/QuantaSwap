@@ -11,8 +11,10 @@ const SUBSCRIBER_PREFIX = "2001:db8:2::";
 export const PROBE_IP = "2001:db8:9::1";
 /** Source address used by the end-of-scenario invariant checks. */
 export const AUDIT_IP = "2001:db8:9::2";
-/** The one address every client shares in the shared-source scenario. */
-export const SHARED_IP = "203.0.113.200";
+/** The one address every client shares in the shared-source scenario. It sits
+ *  outside the maker and taker blocks so it can never collide with a
+ *  per-client address at any taker count. */
+export const SHARED_IP = "2001:db8:3::1";
 
 export function readerIp(index: number): string {
   return `${READER_PREFIX}${(index + 1).toString(16)}`;
