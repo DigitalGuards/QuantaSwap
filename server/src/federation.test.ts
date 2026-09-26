@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -38,6 +39,26 @@ interface WriteSeam {
 
 const writeSeam = (feed: FederationFeed): WriteSeam =>
   feed as unknown as WriteSeam;
+
+/** Collects the lines the feed logs while run() executes. */
+function captureLogs(run: () => void): string[] {
+  const lines: string[] = [];
+  const previousError = console.error;
+  const previousLog = console.log;
+  console.error = (line: unknown) => {
+    lines.push(String(line));
+  };
+  console.log = (line: unknown) => {
+    lines.push(String(line));
+  };
+  try {
+    run();
+  } finally {
+    console.error = previousError;
+    console.log = previousLog;
+  }
+  return lines;
+}
 
 function quarantinedFiles(file: string): string[] {
   return readdirSync(dirname(file)).filter((name) =>
@@ -87,6 +108,7 @@ describe("federation event feed", () => {
         oldestSequence: first.seq,
         latestSequence: second.seq,
         lastEventAt: 102_000,
+        compactionFailing: false,
       });
       assert.equal(JSON.stringify(feed.status()).includes("feedId"), false);
 
@@ -281,13 +303,32 @@ describe("federation event feed", () => {
       failing.compact = () => {
         throw new Error("simulated compaction failure");
       };
-      const appended = feed.append(orderEvent("four"), 101);
-      assert.equal(appended.seq, 4);
-      assert.equal(feed.status().latestSequence, 4);
+      const failureLines = captureLogs(() => {
+        assert.equal(feed.append(orderEvent("four"), 101).seq, 4);
+        // A permanent fault logs one line for the streak.
+        feed.append(orderEvent("five"), 102);
+        feed.append(orderEvent("six"), 103);
+      });
+      assert.equal(
+        failureLines.filter((line) => line.includes("compaction failed")).length,
+        1,
+      );
+      assert.equal(feed.status().latestSequence, 6);
+      assert.equal(feed.status().compactionFailing, true);
+      assert.equal(new FederationFeed(file, 2).status().latestSequence, 6);
+
       Reflect.deleteProperty(failing, "compact");
-      assert.equal(new FederationFeed(file, 2).status().latestSequence, 4);
-      feed.append(orderEvent("five"), 102);
-      assert.equal(new FederationFeed(file, 2).status().latestSequence, 5);
+      const recoveryLines = captureLogs(() => {
+        feed.append(orderEvent("seven"), 104);
+      });
+      assert.equal(
+        recoveryLines.filter((line) =>
+          line.includes("compaction succeeded after an earlier failure"),
+        ).length,
+        1,
+      );
+      assert.equal(feed.status().compactionFailing, false);
+      assert.equal(new FederationFeed(file, 2).status().latestSequence, 7);
     });
   });
 
@@ -442,6 +483,44 @@ describe("federation event feed", () => {
     });
   });
 
+  it("recreates a feed log that was removed under the process", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      feed.append(orderEvent("two"), 101);
+      unlinkSync(file);
+
+      const lines = captureLogs(() => {
+        feed.append(orderEvent("three"), 102);
+      });
+      assert.equal(
+        lines.filter((line) => line.includes("missing, recreating it")).length,
+        1,
+      );
+      assert.equal(readFileSync(file, "utf8").trimEnd().split("\n").length, 4);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      for (const id of ["one", "two", "three"]) {
+        assert.equal(restored.has(federationEventId(orderEvent(id))), true);
+      }
+      restored.append(orderEvent("four"), 103);
+      assert.equal(new FederationFeed(file, 8).status().latestSequence, 4);
+    });
+  });
+
+  it("loads a zero-length feed file as an empty feed", () => {
+    withTempFile((file) => {
+      writeFileSync(file, "", "utf8");
+      const feed = new FederationFeed(file, 8);
+      assert.equal(feed.status().retainedEvents, 0);
+      assert.equal(quarantinedFiles(file).length, 0);
+      assert.equal(feed.append(orderEvent("one"), 100).seq, 1);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.requiresReset(null), true);
+    });
+  });
+
   it("refuses to write once another process replaced the log file", () => {
     withTempFile((file) => {
       const departing = new FederationFeed(file, 8);
@@ -455,7 +534,15 @@ describe("federation event feed", () => {
         () => departing.append(orderEvent("two"), 101),
         /replaced by another order-book process/,
       );
-      departing.checkpoint([orderEvent("two")]);
+      const lines = captureLogs(() => {
+        departing.checkpoint([orderEvent("two")]);
+      });
+      assert.equal(
+        lines.filter((line) =>
+          line.includes("another process owns the feed log"),
+        ).length,
+        1,
+      );
       assert.equal(readFileSync(file, "utf8"), successorLog);
       assert.deepEqual(new FederationFeed(file, 8).status(), successor.status());
     });
@@ -476,6 +563,16 @@ describe("federation event feed", () => {
     );
 
     withTempFile((file) => {
+      // A process that never wrote a log has nothing to checkpoint, and says
+      // nothing about it.
+      const unwritten = new FederationFeed(join(file, "..", "absent.json"), 8);
+      assert.deepEqual(
+        captureLogs(() => {
+          unwritten.checkpoint([orderEvent("base")]);
+        }),
+        [],
+      );
+
       const base = [orderEvent("base")];
       const feed = new FederationFeed(file, 8);
       feed.reconcileSnapshot(base);

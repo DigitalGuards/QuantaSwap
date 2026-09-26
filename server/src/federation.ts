@@ -74,6 +74,10 @@ export interface FederationFeedStatus {
   oldestSequence: number | null;
   latestSequence: number | null;
   lastEventAt: number | null;
+  /** True while compaction keeps failing. Appends stay durable, so the feed
+   *  serves, and the log grows past its retained ring until an operator
+   *  clears the storage fault. */
+  compactionFailing: boolean;
 }
 
 export const MAX_FEDERATION_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -310,8 +314,8 @@ export class FederationFeed {
   private logLines: number | null = null;
   /** The log file this process wrote, or null before it wrote one. */
   private logIdentity: LogFileIdentity | null = null;
-  /** Set when a compaction failure was absorbed by a durable append. */
-  private compactionFailed = false;
+  /** Set while compaction failures are being absorbed by durable appends. */
+  private compactionFailing = false;
 
   constructor(
     private readonly file: string,
@@ -345,6 +349,7 @@ export class FederationFeed {
       oldestSequence: first?.seq ?? null,
       latestSequence: last?.seq ?? null,
       lastEventAt: last === undefined ? null : last.receivedAt * 1000,
+      compactionFailing: this.compactionFailing,
     };
   }
 
@@ -448,14 +453,18 @@ export class FederationFeed {
   checkpoint(rawEvents: readonly FederationEvent[]): void {
     const digest = federationSnapshotDigest(rawEvents);
     if (digest === this.snapshotDigest) return;
-    if (this.logIdentity === null || !this.ownsLogFile()) {
-      // A successor process already owns this path, so its freshly compacted
-      // log must not receive a digest for state this process held. Skipping
-      // leaves the digest unknown, which rotates the identity on the next
-      // start.
-      console.error(
-        "[orderbook] federation checkpoint skipped: this process does not own the feed log",
-      );
+    const fileStatus = this.logFileStatus();
+    if (fileStatus !== "owned") {
+      // A successor process may already own this path, and its freshly
+      // compacted log must not receive a digest for state this process held.
+      // Skipping leaves the digest unknown, which rotates the identity on the
+      // next start. Only a genuine mismatch is worth a line: a process that
+      // never wrote a log has nothing to checkpoint.
+      if (fileStatus === "replaced") {
+        console.error(
+          "[orderbook] federation checkpoint skipped: another process owns the feed log",
+        );
+      }
       return;
     }
     const previousSnapshotDigest = this.snapshotDigest;
@@ -603,6 +612,10 @@ export class FederationFeed {
   /** Loads the log into memory and reports whether the file must be rewritten
    *  before it is appended to again. */
   private parseLog(raw: string): boolean {
+    // A zero-length file is what a crash between create and first write
+    // leaves. It carries no state to recover and no identity to keep, so the
+    // fresh feed writes its own header.
+    if (raw === "") return true;
     if (!raw.includes("\n")) {
       // Version 2 stored one JSON envelope without a line terminator. A log
       // always ends its atomically written header with one.
@@ -805,15 +818,25 @@ export class FederationFeed {
 
   private appendLines(lines: readonly unknown[]): void {
     if (lines.length === 0) return;
-    if (this.logIdentity !== null && !this.ownsLogFile()) {
-      // One order book per data directory. Another file at this path means an
-      // overlapping restart, and appending to it would interleave two feeds.
+    const fileStatus = this.logFileStatus();
+    if (fileStatus === "replaced") {
+      // One order book per data directory. A different file at this path means
+      // an overlapping restart, and appending to it would interleave two
+      // feeds.
       throw new Error(
         "federation data file was replaced by another order-book process",
       );
     }
+    if (fileStatus === "missing") {
+      // The log was removed under this process. The retained ring in memory
+      // still holds every event a peer can ask for, so write it out again and
+      // keep serving.
+      console.error(
+        "[orderbook] federation feed log is missing, recreating it from the retained ring",
+      );
+    }
     const linesBefore = this.logLines;
-    if (linesBefore === null) {
+    if (fileStatus === "missing" || linesBefore === null) {
       this.compact();
       return;
     }
@@ -863,11 +886,15 @@ export class FederationFeed {
         this.compact();
       } catch {
         // The append above is durable. A failed compaction leaves the log
-        // intact, and the next write retries it before appending.
-        this.compactionFailed = true;
-        console.error(
-          "[orderbook] federation feed log compaction failed, the append is durable and the next write retries it",
-        );
+        // intact, and the next write retries it before appending. One line per
+        // failure streak keeps a permanent storage fault out of the log while
+        // status reports the feed degraded.
+        if (!this.compactionFailing) {
+          this.compactionFailing = true;
+          console.error(
+            "[orderbook] federation feed log compaction failed, the append is durable and later writes retry it",
+          );
+        }
       }
     }
   }
@@ -882,14 +909,15 @@ export class FederationFeed {
     return writeSync(fileDescriptor, buffer, offset, buffer.length - offset);
   }
 
-  private ownsLogFile(): boolean {
+  /** Compares the file at the path with the one this process last wrote. */
+  private logFileStatus(): "unwritten" | "owned" | "missing" | "replaced" {
+    const remembered = this.logIdentity;
+    if (remembered === null) return "unwritten";
     const current = this.logFileIdentity();
-    return (
-      current !== null &&
-      this.logIdentity !== null &&
-      current.dev === this.logIdentity.dev &&
-      current.ino === this.logIdentity.ino
-    );
+    if (current === null) return "missing";
+    return current.dev === remembered.dev && current.ino === remembered.ino
+      ? "owned"
+      : "replaced";
   }
 
   private logFileIdentity(): LogFileIdentity | null {
@@ -953,8 +981,8 @@ export class FederationFeed {
     }
     this.logLines = this.events.length;
     this.logIdentity = this.logFileIdentity();
-    if (this.compactionFailed) {
-      this.compactionFailed = false;
+    if (this.compactionFailing) {
+      this.compactionFailing = false;
       console.log(
         "[orderbook] federation feed log compaction succeeded after an earlier failure",
       );

@@ -105,7 +105,11 @@ log is compacted into the retained ring once it holds a quarter more lines than
 the ring. A torn final line left by a crash is dropped on the next start. Any
 other unreadable log is moved aside as `<file>.corrupt-<timestamp>`, logged, and
 replaced by a fresh feed under a new identity, which every peer answers with a
-reset snapshot; the retained proofs in `orders.json` rebuild the feed. The first
+reset snapshot; the retained proofs in `orders.json` rebuild the feed. A
+zero-length file loads as an empty feed. A log removed under a running process
+is logged and rewritten from the retained ring. A compaction that keeps failing
+logs one line per failure streak, keeps appends durable, and reports the feed
+degraded in `GET /status` while `GET /health` stays ready. The first
 start of this version migrates a version 2 feed file in place, and earlier
 images cannot read the result, so roll back by restoring the state snapshot
 taken before the update.
@@ -116,6 +120,14 @@ refuses to append to, or checkpoint into, a file another process put in its
 place. The local mirror then fails its storage check, and two feeds never
 interleave. Restart with a full stop before the replacement start, never with an
 overlapping reload.
+
+That check catches a replaced file only. Two processes started on the same data
+directory with no replacement between them append to the same inode, which is
+invisible to a device and inode comparison, and the rollback that truncates a
+failed append back to its previous length assumes it is the only writer.
+`orders.json` carries the same exposure and always has. The fix is to port the
+market maker's state lease to the order book, so a second process refuses to
+start while a lease is held.
 
 Two workers pull up to 16 configured peers. The request timeout is one total
 deadline for every page, parse, and application step for a peer. Incremental

@@ -487,15 +487,22 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "GET" && path === "/api/status") {
+    const feedStatus = federationFeed.status();
     const storageReady = store.storageReady() && federationFeed.storageReady();
-    const healthy = !shuttingDown && storageReady && federationHealthy;
+    // A failing compaction keeps appends durable, so the mirror still serves
+    // and /api/health stays ready, while status reports the storage fault.
+    const feedReady =
+      federationFeed.storageReady() &&
+      federationHealthy &&
+      !feedStatus.compactionFailing;
+    const healthy = !shuttingDown && storageReady && feedReady;
     sendJson(res, healthy ? 200 : 503, {
       schemaVersion: 1,
       status: healthy ? "ok" : "degraded",
       uptimeS: Math.floor(process.uptime()),
       feed: {
-        ready: federationFeed.storageReady() && federationHealthy,
-        ...federationFeed.status(),
+        ready: feedReady,
+        ...feedStatus,
       },
       federation: peerSync.status(),
     });
