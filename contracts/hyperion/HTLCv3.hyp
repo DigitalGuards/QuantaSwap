@@ -1,0 +1,495 @@
+// SPDX-License-Identifier: GPL-3.0
+pragma hyperion >=0.0;
+
+/**
+ * @title QuantaSwap HTLCv3
+ * @notice Hashed timelock contract for cross-chain atomic swaps between
+ *         Ethereum and QRL. One reviewed source compiles into target-bound
+ *         EVM-256 and QRVM-512 artifacts with the same ABI. The two legs are
+ *         linked by one shared sha256 hashlock.
+ *
+ * @dev HTLCv3 is a new immutable contract. `HTLC.hyp` (deployed HTLCv2) stays
+ *      byte-for-byte unchanged and keeps its own addresses. v3 is deployed
+ *      separately; there is no migration and no upgrade path.
+ *
+ * Everything HTLCv2 guarantees still holds:
+ *   - No owner, no pause, no upgrade path. What is deployed is final.
+ *   - claim() is permissionless with the payout target fixed at lock time,
+ *     or, for open-recipient locks, at the initiator's one-time assign().
+ *     The recipient is write-once: once nonzero it can never change, and
+ *     claim() reverts while it is unset, so a sponsored claim (a relayer
+ *     submitting for a recipient who has no gas on this chain) can still
+ *     only pay the target the fund-owner chose.
+ *   - An open-recipient lock is refundable by its initiator at any time via
+ *     release() UNTIL assigned; after assign() it behaves identically to a
+ *     classic lock (refund only at timeout).
+ *   - claim() closes at `timeout`, refund() opens at `timeout`, and assign()
+ *     also closes at `timeout`. The windows never overlap.
+ *   - A hashlock is single-use per contract instance, forever.
+ *   - sha256 (not keccak256) so non-EVM counterparties stay possible later.
+ *   - Fee-on-transfer and rebasing tokens are rejected at lock time: the
+ *     contract verifies its balance grew by exactly `amount`, so a token that
+ *     skims a transfer fee cannot create a swap whose payout would be funded
+ *     by other swaps' escrow.
+ *   - getSwap() returns the same 7-field Swap tuple in the same order as
+ *     HTLCv2, so existing decoders read v3 records unchanged.
+ *
+ * What v3 changes (issue #47, payout delivery can no longer roll back a claim):
+ *
+ *   HTLCv2 validated the preimage, wrote Claimed, then pushed the payout. A
+ *   failing push reverted the whole transaction back to Open while the
+ *   preimage had already been published through calldata, the RPC, the
+ *   mempool or a block builder. The counterparty could then claim the other
+ *   leg with a secret the claimant paid for and never got value from. A
+ *   blocklisted stablecoin recipient, a frozen token contract, or a
+ *   nonpayable native recipient each produce that shape.
+ *
+ *   In v3 every settlement is two separated steps:
+ *
+ *     1. Terminal state first. claim() writes Claimed and persists the
+ *        preimage; refund() and release() write Refunded. This part cannot
+ *        fail for payout reasons.
+ *     2. Delivery second, and best-effort. The payout is attempted through a
+ *        self-call with a bounded gas budget. If that attempt fails for any
+ *        reason, the amount becomes a credit for (token, payee) and
+ *        PayoutCredited is emitted. No value is created or destroyed, and no
+ *        terminal state is undone.
+ *
+ *   A credit is owned by the payee alone. Only the credited account can move
+ *   it, through withdraw() / withdrawAll(), to any destination it names. An
+ *   arbitrary claimer therefore never gains redirect authority: it can at
+ *   most decide whether the payee is paid directly or through a credit, and
+ *   both outcomes pay the same account the fund owner chose.
+ *
+ *   After Claimed the amount belongs to the recipient, as a direct payment or
+ *   as a credit. refund() reverts SwapNotOpen, so a failed delivery can never
+ *   turn into an initiator refund. refund() and release() use the same credit
+ *   fallback for the initiator, which also removes HTLCv2's stranded-refund
+ *   case where a blocklisted initiator could not be paid at all.
+ *
+ *   Value conservation invariant, per token (address(0) = native coin):
+ *
+ *     balance(token) >= sum(amount of Open swaps in token)
+ *                       + outstandingCredit(token)
+ *
+ *   Equality holds unless value was forced in without a call (native coin
+ *   only, for example by a self-destructing contract or a block reward).
+ *   Forced value is unaccounted and unrecoverable by design; there is no
+ *   sweep and no owner.
+ *
+ *   Delivery is atomic. The attempt runs in a child frame (selfDeliver), so a
+ *   failed attempt rolls back everything it touched. "Not delivered" therefore
+ *   means nothing moved, and a credit is always fully backed, including
+ *   against a token that moves value and then reports failure.
+ *
+ *   Gas notes for the bounded delivery attempt:
+ *     - DELIVERY_GAS_LIMIT caps what a payout recipient may consume, so a
+ *       gas-guzzling or reverting recipient cannot burn a claimer's whole gas
+ *       limit. It is sized above a worst-case blocklist-checking ERC-20
+ *       transfer.
+ *     - DELIVERY_GAS_RESERVE is kept in this frame so recording the credit
+ *       always fits after the attempt fails, including after an out-of-gas
+ *       child frame. The 63/64 rule alone does not guarantee that: one 64th
+ *       of the gas at the call site can be far less than a cold storage
+ *       write.
+ *     - The attempt never copies return data into this frame, so a recipient
+ *       or token that returns a very large blob cannot exhaust the reserve
+ *       through memory expansion. The child frame pays for that copy inside
+ *       its own bounded budget.
+ *     - Nothing here can revert a settlement. A caller that supplies little
+ *       gas shrinks the budget and pushes the payout into the credit path.
+ *       That is deliberate: it conserves value, pays the same account, and
+ *       costs the payee one withdrawal, where reverting would republish a
+ *       secret and leave the swap Open. A settlement is never refused for
+ *       lack of gas.
+ *
+ *   Integration rule, because of the point above: submit a settlement with
+ *
+ *     gasLimit = estimateGas(call) + DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE
+ *
+ *   Gas estimation minimises gas, and the credit path is cheaper than a
+ *   successful token transfer, so a bare estimate lands on the credit path
+ *   and defers a payout that would have gone through. The two constants are
+ *   readable on-chain through deliveryGasPolicy(). Unused gas is refunded, so
+ *   the buffer costs a reservation and not a fee. This matters most for a
+ *   sponsored claim, where the recipient has no gas on the paying chain and a
+ *   deferred payout would leave it unable to withdraw.
+ *
+ * Ethereum-leg assets: WETH, USDC and USDT (registry: config/tokens.json);
+ * the QRL leg uses the native coin. USDT's non-standard ERC-20 surface (no
+ * return values) is tolerated on every path.
+ */
+interface IPayoutERC20 {
+    function transfer(address to, uint256 value) external returns (bool);
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
+contract HTLCv3 {
+    enum Status {
+        None,
+        Open,
+        Claimed,
+        Refunded
+    }
+
+    struct Swap {
+        address initiator; // funded this leg, refund target
+        address recipient; // claim payout target; address(0) while an open lock awaits assign()
+        address token; // ERC-20 address, or the zero address for the native coin
+        uint256 amount;
+        uint256 timeout; // unix time: claim() before it, refund() from it
+        Status status;
+        bytes32 preimage; // stored on claim for cross-chain observers
+    }
+
+    /// @dev Maximum gas handed to one payout attempt.
+    uint256 private constant DELIVERY_GAS_LIMIT = 100000;
+    /// @dev Gas kept in this frame so the credit fallback always fits.
+    uint256 private constant DELIVERY_GAS_RESERVE = 70000;
+
+    mapping(bytes32 => Swap) private _swaps;
+
+    /// @dev token => account => undelivered payout owned by that account.
+    ///      Read through creditOf(); never exposed as a compiler-generated
+    ///      getter, because legacy QRVM-512 codegen truncates wide keys in
+    ///      public mapping getters.
+    mapping(address => mapping(address => uint256)) private _credits;
+
+    /// @dev token => sum of all outstanding credits in that token.
+    mapping(address => uint256) private _outstanding;
+
+    uint256 private _entered = 1;
+
+    event Locked(
+        bytes32 indexed hashlock,
+        address indexed initiator,
+        address indexed recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    );
+    event Assigned(bytes32 indexed hashlock, address indexed recipient);
+    event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller);
+    event Refunded(bytes32 indexed hashlock);
+    /// @notice Delivery of a settled swap failed or was skipped; `amount` is
+    ///         now owned by `account` as a credit it can withdraw.
+    event PayoutCredited(
+        address indexed token,
+        address indexed account,
+        bytes32 indexed hashlock,
+        uint256 amount
+    );
+    /// @notice `account` moved part or all of its credit to `to`.
+    event PayoutWithdrawn(
+        address indexed token,
+        address indexed account,
+        address to,
+        uint256 amount
+    );
+
+    error HashlockAlreadyUsed();
+    error InvalidParams();
+    error SwapNotOpen();
+    error WrongPreimage();
+    error TimeoutNotReached();
+    error TimeoutPassed();
+    error TransferFailed();
+    error UnsupportedToken();
+    error Reentrancy();
+    error NotInitiator();
+    error AlreadyAssigned();
+    error NotAssigned();
+    error NoCredit();
+    error InsufficientCredit();
+    error Unauthorized();
+
+    modifier nonReentrant() {
+        if (_entered != 1) revert Reentrancy();
+        _entered = 2;
+        _;
+        _entered = 1;
+    }
+
+    /// @notice Lock native coin under `hashlock` for `recipient`.
+    function lockNative(bytes32 hashlock, address recipient, uint256 timeout) external payable nonReentrant {
+        _lock(hashlock, recipient, address(0), msg.value, timeout, false);
+    }
+
+    /// @notice Lock `amount` of ERC-20 `token` under `hashlock` for `recipient`.
+    /// @dev Requires prior approval for exactly `amount`. Reverts with
+    ///      UnsupportedToken unless the contract's balance grows by exactly
+    ///      `amount` (rejects fee-on-transfer behavior).
+    function lockToken(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    ) external nonReentrant {
+        _lockToken(hashlock, recipient, token, amount, timeout, false);
+    }
+
+    /// @notice Lock native coin under `hashlock` with the recipient left
+    ///         unset (a pre-funded listing). Fix the payout target later with
+    ///         assign(), or take the funds back at any time with release()
+    ///         while still unassigned.
+    function lockNativeOpen(bytes32 hashlock, uint256 timeout) external payable nonReentrant {
+        _lock(hashlock, address(0), address(0), msg.value, timeout, true);
+    }
+
+    /// @notice Lock `amount` of ERC-20 `token` under `hashlock` with the
+    ///         recipient left unset (a pre-funded listing). Same approval and
+    ///         exact-received-amount rules as lockToken.
+    function lockTokenOpen(
+        bytes32 hashlock,
+        address token,
+        uint256 amount,
+        uint256 timeout
+    ) external nonReentrant {
+        _lockToken(hashlock, address(0), token, amount, timeout, true);
+    }
+
+    /// @notice Fix the claim payout target of an open-recipient lock.
+    ///         Initiator-only and one-time: the recipient is write-once, and
+    ///         once it is set the swap is indistinguishable from a classic
+    ///         lock. Closes at `timeout` alongside claim().
+    function assign(bytes32 hashlock, address recipient) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (msg.sender != s.initiator) revert NotInitiator();
+        if (s.recipient != address(0)) revert AlreadyAssigned();
+        if (recipient == address(0) || recipient == address(this)) revert InvalidParams();
+        if (block.timestamp >= s.timeout) revert TimeoutPassed();
+
+        s.recipient = recipient;
+        emit Assigned(hashlock, recipient);
+    }
+
+    /// @notice Return an open-recipient lock's funds to the initiator on
+    ///         demand. Valid only while unassigned, before and after `timeout`
+    ///         alike; once assign() lands, the timeout-gated refund() is the
+    ///         only way back. Emits Refunded: to every observer a release is a
+    ///         refund that happened early.
+    function release(bytes32 hashlock) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (msg.sender != s.initiator) revert NotInitiator();
+        if (s.recipient != address(0)) revert AlreadyAssigned();
+
+        address token = s.token;
+        address payee = s.initiator;
+        uint256 amount = s.amount;
+
+        s.status = Status.Refunded;
+        emit Refunded(hashlock);
+
+        _settle(hashlock, token, payee, amount);
+    }
+
+    /// @notice Pay out to the swap's recipient by revealing the preimage.
+    ///         Callable by anyone before `timeout` (sponsored claims).
+    /// @dev Once the preimage checks out the swap is Claimed and the preimage
+    ///      is persisted, unconditionally. Delivery is attempted afterwards
+    ///      and may end as a credit for the recipient; it can never undo this
+    ///      state, which is what keeps a revealed secret from being usable on
+    ///      the other leg while this leg is still Open.
+    function claim(bytes32 hashlock, bytes32 preimage) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        // An unassigned open lock has no payout target yet; without this
+        // guard a native claim would burn the funds to address(0).
+        if (s.recipient == address(0)) revert NotAssigned();
+        if (block.timestamp >= s.timeout) revert TimeoutPassed();
+        if (sha256(abi.encodePacked(preimage)) != hashlock) revert WrongPreimage();
+
+        address token = s.token;
+        address payee = s.recipient;
+        uint256 amount = s.amount;
+
+        s.status = Status.Claimed;
+        s.preimage = preimage;
+        emit Claimed(hashlock, preimage, msg.sender);
+
+        _settle(hashlock, token, payee, amount);
+    }
+
+    /// @notice Return the locked funds to the initiator once `timeout` passed.
+    ///         Callable by anyone; payout target is fixed to the initiator.
+    function refund(bytes32 hashlock) external nonReentrant {
+        Swap storage s = _swaps[hashlock];
+        if (s.status != Status.Open) revert SwapNotOpen();
+        if (block.timestamp < s.timeout) revert TimeoutNotReached();
+
+        address token = s.token;
+        address payee = s.initiator;
+        uint256 amount = s.amount;
+
+        s.status = Status.Refunded;
+        emit Refunded(hashlock);
+
+        _settle(hashlock, token, payee, amount);
+    }
+
+    /// @notice Move `amount` of the caller's `token` credit to `to`.
+    /// @dev Only the credited account can move its own credit, and it names
+    ///      the destination. This is the "withdraw, or pay an alternate
+    ///      address" path; nobody else can redirect or spend the credit. The
+    ///      transfer is strict here: if it fails the whole withdrawal reverts
+    ///      and the credit stays intact, because a reverted withdrawal
+    ///      discloses nothing and loses nothing.
+    function withdraw(address token, address to, uint256 amount) external nonReentrant {
+        _withdraw(token, to, amount);
+    }
+
+    /// @notice Move the caller's entire `token` credit to `to`.
+    function withdrawAll(address token, address to) external nonReentrant {
+        _withdraw(token, to, _credits[token][msg.sender]);
+    }
+
+    /// @notice The full swap record, identical in shape to HTLCv2's getSwap.
+    function getSwap(bytes32 hashlock) external view returns (Swap memory) {
+        return _swaps[hashlock];
+    }
+
+    /// @notice Undelivered payout owned by `account` in `token`
+    ///         (address(0) = native coin).
+    function creditOf(address token, address account) external view returns (uint256) {
+        return _credits[token][account];
+    }
+
+    /// @notice Sum of every outstanding credit in `token`. With the open
+    ///         escrow it accounts for the contract's whole balance in that
+    ///         token.
+    function outstandingCredit(address token) external view returns (uint256) {
+        return _outstanding[token];
+    }
+
+    /// @notice The delivery gas budget and the reserve kept for the credit
+    ///         fallback. Submit a settlement with
+    ///         `estimateGas + gasLimit_ + gasReserve_` so a payout that can
+    ///         go through is not deferred by a minimal gas estimate.
+    function deliveryGasPolicy() external pure returns (uint256 gasLimit_, uint256 gasReserve_) {
+        return (DELIVERY_GAS_LIMIT, DELIVERY_GAS_RESERVE);
+    }
+
+    /// @notice Payout trampoline. Callable by this contract only, and only as
+    ///         the bounded child frame of a settlement.
+    /// @dev This exists so an untrusted token or recipient can fail, revert,
+    ///      run out of gas, or return an oversized blob entirely inside a
+    ///      frame whose gas is capped, without any of that reaching the frame
+    ///      that has to record the credit. Do not call it directly; an
+    ///      external caller is rejected with Unauthorized.
+    function selfDeliver(address token, address to, uint256 amount) external {
+        if (msg.sender != address(this)) revert Unauthorized();
+        _strictPayout(token, to, amount);
+    }
+
+    function _withdraw(address token, address to, uint256 amount) private {
+        if (to == address(0) || to == address(this)) revert InvalidParams();
+        if (amount == 0) revert NoCredit();
+        uint256 credit = _credits[token][msg.sender];
+        if (credit < amount) revert InsufficientCredit();
+
+        _credits[token][msg.sender] = credit - amount;
+        _outstanding[token] -= amount;
+        emit PayoutWithdrawn(token, msg.sender, to, amount);
+
+        _strictPayout(token, to, amount);
+    }
+
+    function _lockToken(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout,
+        bool openRecipient
+    ) private {
+        if (token == address(0) || token.code.length == 0) revert InvalidParams();
+        _lock(hashlock, recipient, token, amount, timeout, openRecipient);
+        uint256 before = IPayoutERC20(token).balanceOf(address(this));
+        _tokenCall(token, abi.encodeWithSelector(IPayoutERC20.transferFrom.selector, msg.sender, address(this), amount));
+        if (IPayoutERC20(token).balanceOf(address(this)) - before != amount) revert UnsupportedToken();
+    }
+
+    function _lock(
+        bytes32 hashlock,
+        address recipient,
+        address token,
+        uint256 amount,
+        uint256 timeout,
+        bool openRecipient
+    ) private {
+        if (_swaps[hashlock].status != Status.None) revert HashlockAlreadyUsed();
+        if (hashlock == bytes32(0) || amount == 0) revert InvalidParams();
+        if (!openRecipient && (recipient == address(0) || recipient == address(this))) {
+            revert InvalidParams();
+        }
+        if (openRecipient && recipient != address(0)) revert InvalidParams();
+        if (timeout <= block.timestamp) revert InvalidParams();
+
+        _swaps[hashlock] = Swap({
+            initiator: msg.sender,
+            recipient: recipient,
+            token: token,
+            amount: amount,
+            timeout: timeout,
+            status: Status.Open,
+            preimage: bytes32(0)
+        });
+
+        emit Locked(hashlock, msg.sender, recipient, token, amount, timeout);
+    }
+
+    /// @dev Settle a swap that has already reached its terminal state: try to
+    ///      deliver, and credit the payee if the attempt does not go through.
+    function _settle(bytes32 hashlock, address token, address payee, uint256 amount) private {
+        uint256 available = gasleft();
+        uint256 budget = available > DELIVERY_GAS_RESERVE ? available - DELIVERY_GAS_RESERVE : 0;
+        if (budget > DELIVERY_GAS_LIMIT) budget = DELIVERY_GAS_LIMIT;
+        // Return data is deliberately discarded: copying it would let an
+        // untrusted callee spend this frame's reserve on memory expansion.
+        // The child frame is where an oversized blob, an out-of-gas loop, or
+        // a revert has to be paid for, and its revert undoes any partial
+        // movement, so a credit below is always fully backed.
+        (bool delivered, ) = address(this).call{gas: budget}(
+            abi.encodeWithSelector(this.selfDeliver.selector, token, payee, amount)
+        );
+        if (delivered) return;
+
+        _credits[token][payee] += amount;
+        _outstanding[token] += amount;
+        emit PayoutCredited(token, payee, hashlock, amount);
+    }
+
+    /// @dev Push `amount` of `token` to `to`, reverting on any failure.
+    ///      Identical ERC-20 handling to HTLCv2's `_transferCall`: tolerates
+    ///      no-return tokens (USDT) and rejects a returned `false`. The
+    ///      return word is decoded through the compiler so the ABI slot width
+    ///      stays target-specific; QRVM-512 slots are 64 bytes wide and a
+    ///      hardcoded 32-byte expectation would reject every well-behaved
+    ///      token on the QRL target.
+    ///
+    ///      A token whose return data cannot be decoded as a boolean makes
+    ///      this revert. On the settlement path that is contained: the
+    ///      selfDeliver frame reverts, nothing moved, and the payout becomes
+    ///      a credit. On the withdrawal path it reverts the withdrawal and
+    ///      the credit stays intact.
+    function _strictPayout(address token, address to, uint256 amount) private {
+        if (token == address(0)) {
+            (bool sent, ) = to.call{value: amount}("");
+            if (!sent) revert TransferFailed();
+            return;
+        }
+        _tokenCall(token, abi.encodeWithSelector(IPayoutERC20.transfer.selector, to, amount));
+    }
+
+    /// @dev Dependency-free safe ERC-20 call. Used to pull funds in while
+    ///      locking, where reverting is correct and harmless because no state
+    ///      is terminal yet and no secret is involved.
+    function _tokenCall(address token, bytes memory data) private {
+        (bool ok, bytes memory ret) = token.call(data);
+        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+}
