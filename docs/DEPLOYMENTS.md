@@ -38,6 +38,13 @@ separate recovery data and are never automatically migrated into this deployment
 The current reviewed Hyperion source builds into two target-bound artifacts. Ethereum uses the
 EVM-256 compiler target at `build/hyperion/evm/HTLC.json`; QRL uses the QRVM-512 Q128 target at
 `build/hyperion/qrl/HTLC.json`. Both builds enable the optimizer at 200 runs and `viaIR: true`.
+
+Source-bundle note: `contracts/hyperion/` now also holds the undeployed `HTLCv3.hyp`
+(issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)). The bundle hash covers every
+source in that directory, so it moved to
+`1af6b104b6b63ad875fc1da13a21e6f46b315e901dd2ef82ab31f3150a4b4061`. `HTLC.hyp` itself is
+unchanged, and the two deployed runtime hashes above still reproduce byte for byte from the
+current tree, which is what verifies the live contracts.
 Their manifests require the same source-bundle hash and ABI, and record distinct compiler versions,
 address widths, runtimes, and bytecode hashes. Deployment and smoke scripts load only the artifact
 for their named chain and reject a mismatched manifest or artifact before network traffic.
