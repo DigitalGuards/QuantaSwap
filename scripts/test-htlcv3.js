@@ -154,6 +154,20 @@ async function main() {
     "creditOf takes (token, account)"
   );
 
+  // A typed external call is the only construct that re-emits a callee's revert
+  // data verbatim, and the settling frame copies whatever the delivery attempt
+  // reverted with, so the contract holds no interface cast at all. This is a
+  // tripwire; the gate that actually proves the property is the revert-bomb test
+  // below, which measures the settling frame's cost from a trace.
+  const htlcSource = require("fs").readFileSync(
+    path.join(repoRoot, "contracts", "hyperion", "HTLCv3.hyp"),
+    "utf8"
+  );
+  assert(
+    !/IPayoutERC20\s*\(/.test(htlcSource),
+    "HTLCv3 must make no typed external call: a revert would be re-emitted verbatim"
+  );
+
   console.log("[htlcv3] starting anvil");
   const anvil = spawn(
     "anvil",
