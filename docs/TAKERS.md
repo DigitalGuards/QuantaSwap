@@ -145,7 +145,8 @@ balances, records the take, proposes, waits for the maker's FillV2, verifies
 the maker escrow at depth, funds your leg, claims when the preimage appears,
 and refunds if the maker abandons the swap. Exit status is 0 on a completed
 claim, 1 when the take ended without funding, and 2 on an uneven settlement
-that needs attention.
+that needs attention. A `--once` pass that leaves the take in flight exits 0;
+`status` then shows where it stands and `resume` continues it.
 
 Limits are whole units of the asset on that leg: `--max-in 250` means at most
 250 QRL when you pay the QRL leg, and `--min-out 0.02` means at least
