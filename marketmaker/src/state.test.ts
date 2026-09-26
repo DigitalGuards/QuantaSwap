@@ -767,10 +767,13 @@ describe("exclusive state process lease", () => {
     }
   });
 
-  it("refuses automatic recovery when the recovery guard itself is stale", () => {
+  it("takes over a recovery guard whose creator is gone", () => {
     const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-guard-test-"));
     const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
     try {
+      // A guard left behind by a kill between its creation and its release.
+      // Blocking on it forever would be a restart loop with no way out.
       writeFileSync(
         `${file}.lock.recovery`,
         JSON.stringify({
@@ -783,12 +786,96 @@ describe("exclusive state process lease", () => {
         }),
         { mode: 0o600 },
       );
+      lease = StateProcessLease.acquire(file, identity);
+      lease.assertOwned();
+      // The guard was released again, so it cannot block the next start.
+      assert.equal(existsSync(`${file}.lock.recovery`), false);
       assert.throws(
         () => StateProcessLease.acquire(file, identity),
-        /recovery guard .* is stale.*Refusing unsafe automatic removal; confirm no market maker process runs/,
+        /held by live process/,
+      );
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("takes over a foreign-namespace guard past the heartbeat lifetime", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-guard-ns-test-"));
+    const file = join(dir, "state.json");
+    let lease: StateProcessLease | undefined;
+    try {
+      writeFileSync(
+        `${file}.lock.recovery`,
+        JSON.stringify({
+          version: 2,
+          pid: process.pid,
+          processStart: "0",
+          bootId: "other-boot",
+          pidNamespace: FOREIGN_NS,
+          identityDigest: "other-identity",
+          leaseId: "dead-container",
+        }),
+        { mode: 0o600 },
+      );
+      const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
+      utimesSync(`${file}.lock.recovery`, old, old);
+      lease = StateProcessLease.acquire(file, identity, {
+        pidNamespace: LOCAL_NS,
+      });
+      lease.assertOwned();
+      assert.equal(existsSync(`${file}.lock.recovery`), false);
+    } finally {
+      lease?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits on a half-written guard whose owner may still run", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-guard-half-test-"));
+    const file = join(dir, "state.json");
+    try {
+      writeFileSync(`${file}.lock.recovery`, "half a guard record", {
+        mode: 0o600,
+      });
+      assert.throws(
+        () => StateProcessLease.acquire(file, identity),
+        /remained contended.*confirm no market maker process runs.*remove the recovery guard/s,
+      );
+      // Neither file was touched, so a live starter's guard is safe.
+      assert.equal(
+        readFileSync(`${file}.lock.recovery`, "utf8"),
+        "half a guard record",
       );
       assert.equal(existsSync(`${file}.lock`), false);
-      assert.equal(existsSync(`${file}.lock.recovery`), true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to return a lease another starter replaced before confirmation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mm-state-lease-confirm-test-"));
+    const file = join(dir, "state.json");
+    try {
+      let interfered = false;
+      assert.throws(
+        () =>
+          StateProcessLease.acquire(file, identity, {
+            pidNamespace: LOCAL_NS,
+            afterLeaseWritten: () => {
+              if (interfered) return;
+              interfered = true;
+              // Another starter that took the same guard over wins the write.
+              writeLock(file, {
+                pidNamespace: FOREIGN_NS,
+                leaseId: "winner",
+              });
+            },
+          }),
+        /another PID namespace/,
+      );
+      assert.equal(readLock(file).leaseId, "winner");
+      assert.equal(existsSync(`${file}.lock.recovery`), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

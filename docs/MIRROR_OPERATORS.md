@@ -138,11 +138,24 @@ Rules the lease follows:
 - `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
   startup rejects those paths because the suffix names the lease files.
 
-Recovery is manual only in one case: a `orders.json.lock.recovery` guard file
-left behind by a starter that died mid-recovery. The refusal names the file.
-Confirm no order book process runs on this data directory, then remove that one
-file by hand. Never remove a `.lock` file to make a start succeed without that
-check; that is exactly the second writer the lease exists to prevent.
+A `orders.json.lock.recovery` guard file appears for milliseconds while a
+starter takes over a stale lease. A kill in that window leaves it behind, and
+the next start takes it over by itself once its creator is provably gone: a dead
+process id on this host, or a guard older than the 90 second heartbeat lifetime,
+which no live starter ever produces because a guard is never refreshed. No
+restart loop needs an operator for that.
+
+One case is still manual, and its refusal names the exact file: a guard that
+keeps looking live, which means a genuinely running starter or a half-written
+guard record. Confirm no order book process runs on this data directory, then
+remove that one `.lock.recovery` file by hand and leave the `.lock` files in
+place. Never remove a `.lock` lease to make a start succeed; that is exactly the
+second writer the lease exists to prevent.
+
+Keep `ORDERBOOK_SHUTDOWN_TIMEOUT_MS` (default 10 s) below the container's
+`stop_grace_period` (15 s in the supplied Compose file). A stop that runs out of
+grace ends in `SIGKILL`, which leaves both lease files behind, and a replacement
+in a fresh container then waits out the 90 second heartbeat lifetime.
 
 An older binary ignores these files, so leaving them in place is safe on a
 rollback. They are also safe to leave inside a state backup: a restored

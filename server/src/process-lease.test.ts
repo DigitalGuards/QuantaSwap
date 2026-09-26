@@ -234,10 +234,12 @@ describe("order book single-writer lease", () => {
     holder.close();
   });
 
-  it("refuses automatic recovery when the recovery guard itself is stale", () => {
+  it("takes over a recovery guard whose creator is gone", () => {
     const file = join(makeTemp(), "orders.json");
     // A guard record from this namespace and boot, so it is judged by its PID,
-    // with a process start time no live PID can match.
+    // with a process start time no live PID can match. A kill between the
+    // guard's creation and its release leaves exactly this, and blocking on it
+    // forever would be a restart loop with no way out.
     const probe = ProcessLease.acquire(file, DIGEST, {
       pidNamespace: LOCAL_NS,
     });
@@ -252,12 +254,73 @@ describe("order book single-writer lease", () => {
       }),
       { mode: 0o600 },
     );
+    const lease = track(
+      ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
+    );
+    lease.assertOwned();
+    // The guard was released again, so it cannot block the next start either.
+    assert.equal(existsSync(`${file}.lock.recovery`), false);
+  });
+
+  it("takes over a foreign-namespace guard past the heartbeat lifetime", () => {
+    const file = join(makeTemp(), "orders.json");
+    writeFileSync(
+      `${file}.lock.recovery`,
+      JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        processStart: "0",
+        bootId: "other-boot",
+        pidNamespace: FOREIGN_NS,
+        identityDigest: DIGEST,
+        leaseId: "dead-container",
+      }),
+      { mode: 0o600 },
+    );
+    const old = new Date(Date.now() - (LEASE_TTL_MS + 5_000));
+    utimesSync(`${file}.lock.recovery`, old, old);
+    const lease = track(
+      ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
+    );
+    lease.assertOwned();
+    assert.equal(existsSync(`${file}.lock.recovery`), false);
+  });
+
+  it("waits on a half-written guard whose owner may still run", () => {
+    const file = join(makeTemp(), "orders.json");
+    writeFileSync(`${file}.lock.recovery`, "half a guard record", {
+      mode: 0o600,
+    });
     assert.throws(
       () => ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
-      /recovery guard .* is stale.*confirm no order book process runs/,
+      /remained contended.*remove the recovery guard .*\.lock\.recovery/s,
+    );
+    // Neither file was touched, so a live starter's guard is safe.
+    assert.equal(
+      readFileSync(`${file}.lock.recovery`, "utf8"),
+      "half a guard record",
     );
     assert.equal(existsSync(`${file}.lock`), false);
-    assert.equal(existsSync(`${file}.lock.recovery`), true);
+  });
+
+  it("refuses to return a lease another starter replaced before confirmation", () => {
+    const file = join(makeTemp(), "orders.json");
+    let interfered = false;
+    assert.throws(
+      () =>
+        ProcessLease.acquire(file, DIGEST, {
+          pidNamespace: LOCAL_NS,
+          afterLeaseWritten: () => {
+            if (interfered) return;
+            interfered = true;
+            // Another starter that took the same guard over wins the write.
+            writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "winner" });
+          },
+        }),
+      /another PID namespace/,
+    );
+    assert.equal(readLock(file).leaseId, "winner");
+    assert.equal(existsSync(`${file}.lock.recovery`), false);
   });
 
   it("sweeps staging files past the heartbeat lifetime and keeps fresh ones", () => {

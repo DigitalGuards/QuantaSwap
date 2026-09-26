@@ -2482,8 +2482,14 @@ export class OrderStore {
     return this.pub(order);
   }
 
-  federationSnapshot(): FederationEvent[] {
-    this.sweep();
+  /**
+   * Every live public proof, for feed reconciliation and reset snapshots.
+   * `sweep: false` skips the expiry pass, so the call cannot rewrite the
+   * orders file. Read paths use it; a stale row is bounded by the caller's own
+   * retention and by the next sweep a mutation performs.
+   */
+  federationSnapshot(opts: { sweep?: boolean } = {}): FederationEvent[] {
+    if (opts.sweep !== false) this.sweep();
     const now = nowS();
     const events: FederationEvent[] = [];
     const orders = [...this.orders.values()]

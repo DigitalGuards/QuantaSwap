@@ -6,6 +6,7 @@ import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -297,6 +298,155 @@ describe("two order book processes on one data directory", () => {
         leaseId: string;
       };
       assert.equal(after.leaseId, "b".repeat(64));
+    },
+  );
+
+  it(
+    "defers every write route, the feed read included, while the lease is unreadable",
+    { timeout: 120_000 },
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), "quantaswap-lease-defer-"));
+      tempDirectories.push(directory);
+      const dataFile = join(directory, "orders.json");
+      const federationDataFile = join(directory, "orders.json.federation");
+
+      const book = startBook(dataFile, federationDataFile, await freePort());
+      await waitForHealth(book.port);
+      const created = await postOrder(book.port, 1);
+      assert.equal(created.status, 201);
+      await created.json();
+      const before = {
+        orders: fingerprint(dataFile),
+        feed: fingerprint(federationDataFile),
+      };
+      const listed = (await fetch(
+        `http://127.0.0.1:${book.port}/api/orders`,
+      ).then((res) => res.json())) as { orders: unknown[] };
+      assert.equal(listed.orders.length, 1);
+
+      // A lease path this process can no longer read. Reading a directory as a
+      // file fails for every user, so ownership becomes unverifiable without
+      // being disproved.
+      const held = readFileSync(`${dataFile}.lock`, "utf8");
+      rmSync(`${dataFile}.lock`);
+      mkdirSync(`${dataFile}.lock`);
+
+      const deferred = await postOrder(book.port, 2);
+      assert.equal(deferred.status, 503);
+      assert.deepEqual(await deferred.json(), {
+        error: "order book storage ownership is unverifiable, retry shortly",
+      });
+      // The reset-snapshot pull is a read, and it reached the orders store
+      // before this fence existed. It defers the same way now.
+      const feedRead = await fetch(
+        `http://127.0.0.1:${book.port}/api/federation/v2/events`,
+      );
+      assert.equal(feedRead.status, 503);
+      assert.deepEqual(await feedRead.json(), {
+        error: "order book storage ownership is unverifiable, retry shortly",
+      });
+      const readRoute = await fetch(
+        `http://127.0.0.1:${book.port}/api/orders`,
+      );
+      assert.equal(readRoute.status, 503);
+      await readRoute.json();
+
+      // Diagnostics stay available and report the fault without traffic, and
+      // readiness stays up because reads can resume on their own.
+      const status = await fetch(`http://127.0.0.1:${book.port}/api/status`);
+      assert.equal(status.status, 503);
+      const statusBody = (await status.json()) as {
+        status: string;
+        lease: { ready: boolean; lost: boolean; unverifiableSince: number };
+      };
+      assert.equal(statusBody.status, "degraded");
+      assert.equal(statusBody.lease.ready, false);
+      assert.equal(statusBody.lease.lost, false);
+      assert.ok(statusBody.lease.unverifiableSince > 0);
+      const health = await fetch(`http://127.0.0.1:${book.port}/api/health`);
+      assert.equal(health.status, 200);
+      await health.json();
+
+      // Nothing was written and nothing was lost, so the book resumes.
+      assert.deepEqual(fingerprint(dataFile), before.orders);
+      assert.deepEqual(fingerprint(federationDataFile), before.feed);
+      rmSync(`${dataFile}.lock`, { recursive: true });
+      writeFileSync(`${dataFile}.lock`, held, { mode: 0o600 });
+
+      const resumed = await postOrder(book.port, 2);
+      assert.equal(resumed.status, 201);
+      await resumed.json();
+      const after = (await fetch(`http://127.0.0.1:${book.port}/api/orders`)
+        .then((res) => res.json())) as { orders: unknown[] };
+      // The deferred create left no phantom row behind, so the resumed create
+      // is the second order and not a duplicate of a half-applied one.
+      assert.equal(after.orders.length, 2);
+      const recovered = await fetch(`http://127.0.0.1:${book.port}/api/status`);
+      assert.equal(recovered.status, 200);
+      const recoveredBody = (await recovered.json()) as {
+        lease: { ready: boolean; unverifiableSince: null };
+      };
+      assert.equal(recoveredBody.lease.ready, true);
+      assert.equal(recoveredBody.lease.unverifiableSince, null);
+
+      book.child.kill("SIGTERM");
+      assert.equal(await book.exited, 0);
+    },
+  );
+
+  it(
+    "releases the leases on SIGINT and survives a kill without a wait",
+    { timeout: 120_000 },
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), "quantaswap-lease-signal-"));
+      tempDirectories.push(directory);
+      const dataFile = join(directory, "orders.json");
+      const federationDataFile = join(directory, "orders.json.federation");
+
+      // SIGINT is the default stop signal of common process supervisors.
+      const first = startBook(dataFile, federationDataFile, await freePort());
+      await waitForHealth(first.port);
+      const created = await postOrder(first.port, 1);
+      assert.equal(created.status, 201);
+      await created.json();
+      first.child.kill("SIGINT");
+      assert.equal(await first.exited, 0);
+      assert.deepEqual(
+        readdirSync(directory).filter((name) => name.endsWith(".lock")),
+        [],
+      );
+
+      // SIGKILL leaves both lease files behind. The replacement runs in this
+      // PID namespace, so it sees a dead process id and takes over at once,
+      // with no heartbeat lifetime to wait out.
+      const killed = startBook(dataFile, federationDataFile, await freePort());
+      await waitForHealth(killed.port);
+      killed.child.kill("SIGKILL");
+      await killed.exited;
+      assert.deepEqual(
+        readdirSync(directory)
+          .filter((name) => name.endsWith(".lock"))
+          .sort(),
+        ["orders.json.federation.lock", "orders.json.lock"],
+      );
+
+      const started = Date.now();
+      const replacement = startBook(
+        dataFile,
+        federationDataFile,
+        await freePort(),
+      );
+      await waitForHealth(replacement.port);
+      assert.ok(
+        Date.now() - started < 30_000,
+        "a same-host replacement must not wait out the heartbeat lifetime",
+      );
+      const orders = (await fetch(
+        `http://127.0.0.1:${replacement.port}/api/orders`,
+      ).then((res) => res.json())) as { orders: unknown[] };
+      assert.equal(orders.orders.length, 1);
+      replacement.child.kill("SIGTERM");
+      assert.equal(await replacement.exited, 0);
     },
   );
 });

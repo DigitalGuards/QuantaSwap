@@ -253,10 +253,15 @@ let leaseLost = false;
 let leaseUnverifiableSince: number | null = null;
 /** Set once the HTTP server object exists, so shutdown may be used. */
 let serverConstructed = false;
+/** Set while the exit handler runs, where starting a shutdown is pointless. */
+let exiting = false;
 
 /** Stop non-zero, however far startup got, and let the supervisor restart us. */
 function stopForLeaseFailure(reason: string, detail: string): void {
   console.error(`[orderbook] FATAL: ${detail}`);
+  // The exit handler is the last code to run, so there is nothing left to stop
+  // and the caller's own error handling covers the refused write.
+  if (exiting) return;
   if (!serverConstructed) process.exit(1);
   initiateShutdown(reason, 1);
   // Safety net for a connection that outlives the graceful deadline. Unref'd,
@@ -649,14 +654,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       federationFeed.storageReady() &&
       federationHealthy &&
       !feedStatus.compactionFailing;
-    if (leaseUnverifiableSince !== null) {
-      // Re-probe here so a cleared fault stops being reported even on a book
-      // with no write traffic. The check itself writes nothing.
-      try {
-        assertBookOwned();
-      } catch {
-        // Still unverifiable, or now a proven loss, and both are recorded.
-      }
+    // Probe on every status call, so a book with no write traffic still
+    // reports an unreadable lease promptly and stops reporting a cleared
+    // fault. The check is two small reads and writes nothing.
+    try {
+      assertBookOwned();
+    } catch {
+      // Unverifiable or a proven loss, and both are already recorded.
     }
     // An unverifiable lease refuses writes while reads keep serving, so, like
     // a failing compaction, it reports the fault here without flipping
@@ -681,6 +685,11 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "GET" && path === "/api/federation/v2/events") {
+    // A reset snapshot is this mirror's public state under its current feed
+    // identity, so it is served only while this process still owns that data.
+    // The snapshot below is also taken without the expiry sweep, so the route
+    // cannot rewrite the orders file even when ownership holds.
+    assertBookOwned();
     const unexpected = [...url.searchParams.keys()].some(
       (key) => key !== "cursor" && key !== "limit",
     );
@@ -731,7 +740,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       );
       const body = federationResponseCache.getOrCreate(cacheKey, () => {
         const page = federationFeed.page(cursor, limit, () =>
-          store.federationSnapshot(),
+          // No expiry sweep on a read path: the sweep persists, and this
+          // response is cached for seconds anyway, so a row that expires here
+          // is dropped by the next mutation's sweep.
+          store.federationSnapshot({ sweep: false }),
         );
         return federationPageBody(page);
       });
@@ -744,9 +756,10 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Every route below can reach a persisted write: a mutation, or the
   // opportunistic expiry sweep that a plain read performs. Proving ownership
   // before the in-memory change keeps a refused write from leaving a change
-  // the caller was told had failed. The routes above (health, status and the
-  // federation feed read) never write, and must keep answering while the
-  // lease is unverifiable so an operator can see it.
+  // the caller was told had failed. Only /api/health and /api/status are
+  // exempt, because they must keep answering while the lease is unverifiable
+  // so an operator can see it. The federation feed read above proves
+  // ownership itself and takes its snapshot without the sweep.
   assertBookOwned();
 
   if (method === "GET" && path === "/api/orders/stream") {
@@ -984,6 +997,7 @@ function initiateShutdown(reason: string, exitCode = 0): void {
 // then, as after a crash, the digest stays unknown so the next start rotates
 // the identity and peers take a reset snapshot.
 process.once("exit", (code) => {
+  exiting = true;
   try {
     if (
       !shouldRecordFederationCheckpoint({

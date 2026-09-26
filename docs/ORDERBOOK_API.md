@@ -498,8 +498,11 @@ offline.
 
 ### `GET /status`
 
-Sanitized operator diagnostics. The response uses `200` while local storage and
-the feed are ready, or `503` for the same local failures as `/health`:
+Sanitized operator diagnostics. The response uses `200` while local storage,
+the feed, and the single-writer lease are all ready, and `503` otherwise. This
+is a stricter check than `/health`: a failing feed compaction and an
+unverifiable lease both degrade `/status` to `503` while `/health` stays `200`,
+because reads keep serving and a container restart would not help:
 
 ```jsonc
 {
