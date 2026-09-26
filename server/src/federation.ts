@@ -321,6 +321,13 @@ export class FederationFeed {
     private readonly file: string,
     private readonly maxEvents = DEFAULT_MAX_EVENTS,
     private readonly now: () => number = Date.now,
+    /**
+     * Ownership gate for every write to the feed log. The single-writer lease
+     * passes its assertOwned here, so a book displaced by another process
+     * stops appending to, compacting, or quarantining the log the new holder
+     * now owns.
+     */
+    private readonly assertOwned: () => void = () => {},
   ) {
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1) {
       throw new Error("federation maxEvents must be a positive integer");
@@ -707,6 +714,10 @@ export class FederationFeed {
   /** Moves an unreadable log aside for forensics and starts a fresh feed
    *  under a rotated identity. */
   private quarantine(cause: unknown): void {
+    // Moving the log aside is a write to the protected file set, so it needs
+    // the same ownership proof as an append. This runs during startup, while
+    // the lease is freshly acquired, so a throw here fails the start.
+    this.assertOwned();
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     let aside = `${this.file}.corrupt-${stamp}`;
     if (existsSync(aside)) aside = `${aside}-${randomBytes(4).toString("hex")}`;
@@ -818,6 +829,9 @@ export class FederationFeed {
 
   private appendLines(lines: readonly unknown[]): void {
     if (lines.length === 0) return;
+    // Checked before the log is opened, so a refused append leaves the file
+    // byte-identical and the caller rolls its in-memory ring back.
+    this.assertOwned();
     const fileStatus = this.logFileStatus();
     if (fileStatus === "replaced") {
       // One order book per data directory. A different file at this path means
@@ -930,6 +944,9 @@ export class FederationFeed {
   }
 
   private compact(): void {
+    // Compaction replaces the whole log, so it is the write with the most to
+    // lose to a second writer. Checked before the staging file is created.
+    this.assertOwned();
     const directory = dirname(this.file);
     const tmp = join(
       directory,

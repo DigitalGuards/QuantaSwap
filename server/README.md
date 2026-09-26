@@ -402,6 +402,22 @@ in memory, so every process restart obtains a fresh reset snapshot from each
 peer. Neither file is signing-key material, but the volume is still private
 operational data. Encrypt backups and restrict access.
 
+One process owns these files at a time. At startup the service takes an
+exclusive lease beside each of them, `orders.json.lock` and
+`orders.json.federation.lock`, inside the same volume. A second process on the
+same data logs `FATAL: cannot take the single-writer lease` and exits non-zero
+without touching a byte. A crashed holder on this host is recognised by its
+dead process id; a holder in another container is recognised by the heartbeat
+it refreshes every 10 seconds and counts as live for 90 seconds after the last
+refresh, so an unclean stop delays a replacement by up to that long. A clean
+stop releases the lease immediately. Ownership is proved again before every
+persisted write: a proven loss exits 1 for the supervisor to restart, and a
+lease file that cannot be read refuses that one write with `503` and shows up
+as `lease.ready: false` in `/api/status`. Operator detail, including the one
+manual recovery case, is in
+[../docs/MIRROR_OPERATORS.md](../docs/MIRROR_OPERATORS.md) under "Single active
+writer".
+
 The two files use separate atomic writes. Before serving after a restart, the
 mirror reconciles every retained public proof from `orders.json` into the feed,
 closing a crash window between the two writes. A clean shutdown records a

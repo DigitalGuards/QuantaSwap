@@ -68,6 +68,20 @@ describe("order-book runtime configuration", () => {
         }),
       /must be different files/,
     );
+    // The single-writer lease owns "<data file>.lock", so a data path with
+    // that suffix would collide with another path's lease.
+    assert.throws(
+      () => readConfig({ ORDERBOOK_DATA: "./data/orders.lock" }),
+      /ORDERBOOK_DATA must not end with \.lock/,
+    );
+    assert.throws(
+      () =>
+        readConfig({
+          ORDERBOOK_DATA: "./data/orders.json",
+          ORDERBOOK_FEDERATION_DATA: "./data/orders.json.lock",
+        }),
+      /ORDERBOOK_FEDERATION_DATA must not end with \.lock/,
+    );
     assert.throws(
       () => readConfig({ ORDERBOOK_FEDERATION_PEERS: "file:///tmp/book" }),
       /plain HTTP\(S\)/,

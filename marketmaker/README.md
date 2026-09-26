@@ -213,9 +213,10 @@ a mode-0600 `state.json.lock` lease before it reads recovery state. It records
 the deployment and account identity digest, Linux boot id, PID, process start
 time, PID namespace, and a random lease id. A live holder makes a second process
 fail closed; a stale main lease from a crash or reboot is atomically replaced
-while a separate recovery guard is held. A stale recovery guard causes fail-safe
-refusal for manual inspection. Shutdown removes only the lease id it acquired,
-so it cannot delete a newer holder's file. Use distinct volumes and keys for
+while a separate recovery guard is held. A recovery guard whose creator is
+provably gone is taken over the same way, so a kill during acquisition cannot
+block every later start. Shutdown removes only the lease id it acquired, so it
+cannot delete a newer holder's file. Use distinct volumes and keys for
 distinct LP instances.
 
 A holder in another PID namespace, which is what a second container on the same
@@ -253,14 +254,37 @@ A lease record written before this change carries no PID namespace and keeps the
 original PID-based semantics, which is correct for a single-host deployment.
 Restart such a maker once so it writes the current record format.
 
-**Manual recovery of a stale guard.** Startup refuses with
-`state lease recovery guard ... is stale` when `state.json.lock.recovery`
-outlived the starter that created it, which a hard kill during acquisition can
-cause. Confirm no market maker process runs on that state volume (`docker
-compose ps`, and check any other supervisor sharing the volume), then remove
-`state.json.lock.recovery` by hand and start the maker again. Orphaned
+**Recovery guards.** `state.json.lock.recovery` exists for milliseconds while a
+starter replaces a stale lease. A hard kill in that window leaves it behind, and
+the next start takes it over by itself once its creator is provably gone. Two
+thresholds decide that, because only one of the two cases can read a process id:
+a guard from this host and PID namespace is judged by its creator's process id
+and a dead creator is taken over at once, and a guard from another PID namespace,
+which is another container, is judged by its age with a 10 minute threshold. A
+guard covers a handful of file operations and is never refreshed, so no live
+starter produces one that old. Startup refuses with
+`state lease ... remained contended` only while a guard keeps looking live, which
+means a genuinely running starter, a guard from another container younger than 10
+minutes, or a half-written guard record. Confirm no market maker process runs on
+that state volume (`docker compose ps`, and check any other supervisor sharing
+the volume), then remove `state.json.lock.recovery` by hand, leave
+`state.json.lock` in place, and start the maker again. Orphaned
 `state.json.lock.next.*` staging files are swept automatically once they are
 older than the heartbeat lifetime.
+
+**Accepted residual: a guard taken over twice.** Installing a taken-over lease is
+a rename followed by a read that confirms the record, and those are two
+operations. POSIX offers no compare-and-delete on a file, and `flock` needs a
+native addon this kit deliberately does not carry, so the confirming read narrows
+this window without closing it. Two starters in different containers can
+therefore both return from acquisition if, and only if, one of them stalls inside
+the guard window for longer than the 10 minute guard threshold and the other
+interleaves its own rename and confirmation exactly inside that stall. The
+consequence is bounded: every state write verifies ownership again, and each
+holder refreshes a heartbeat the other reads, so the loser exits non-zero at or
+before its first write and the winner keeps the state. The 10 minute threshold
+puts the precondition at the level of a machine fault, far past ordinary
+scheduling latency.
 
 ## State and recovery
 

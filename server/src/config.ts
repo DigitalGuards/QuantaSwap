@@ -225,6 +225,18 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   if (resolve(dataFile) === resolve(federationDataFile)) {
     throw new Error("ORDERBOOK_DATA and ORDERBOOK_FEDERATION_DATA must be different files");
   }
+  // The single-writer lease lives at "<data file>.lock" beside each protected
+  // file, so a data path with that suffix would collide with another path's
+  // lease. The ".lock.recovery" guard and ".lock.next.*" staging names are
+  // covered by the same rule.
+  for (const [name, file] of [
+    ["ORDERBOOK_DATA", dataFile],
+    ["ORDERBOOK_FEDERATION_DATA", federationDataFile],
+  ] as const) {
+    if (file.endsWith(".lock")) {
+      throw new Error(`${name} must not end with .lock, which names the single-writer lease file`);
+    }
+  }
   const peerTokens = federationPeerTokens(env, peers);
   const onionProxy = federationOnionProxy(env);
   const onionOnly = booleanEnv(env, "ORDERBOOK_FEDERATION_ONION_ONLY", false);
