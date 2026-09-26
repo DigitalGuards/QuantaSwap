@@ -16,6 +16,7 @@ import {
   FederationResponseTooLargeError,
   MAX_FEDERATION_RESPONSE_BYTES,
   serializeFederationPage,
+  shouldRecordFederationCheckpoint,
   type FederationPage,
 } from "./federation.js";
 import {
@@ -772,11 +773,19 @@ function initiateShutdown(reason: string, exitCode = 0): void {
 }
 
 // Record the final snapshot digest so an unchanged store keeps the feed
-// identity, and existing peer cursors, across a clean restart. Storage
-// failures exit nonzero, and after them or a crash the digest stays unknown
-// so the next start rotates the identity and peers take a reset snapshot.
+// identity, and existing peer cursors, across a clean restart. A nonzero exit
+// code or a feed that stopped accepting mutations skips the checkpoint, and
+// then, as after a crash, the digest stays unknown so the next start rotates
+// the identity and peers take a reset snapshot.
 process.once("exit", (code) => {
-  if (code !== 0) return;
+  if (
+    !shouldRecordFederationCheckpoint({
+      exitCode: code,
+      feedHealthy: federationHealthy,
+    })
+  ) {
+    return;
+  }
   try {
     federationFeed.checkpoint(store.federationSnapshot());
   } catch {

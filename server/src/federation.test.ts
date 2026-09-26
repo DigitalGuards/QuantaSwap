@@ -1,7 +1,14 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { CryptoBytes, CryptoPublicKeyBytes } from "@theqrl/mldsa87";
 import {
@@ -12,6 +19,7 @@ import {
   canonicalFederationJson,
   federationEventId,
   serializeFederationPage,
+  shouldRecordFederationCheckpoint,
   type FederationEvent,
   type FederationRecord,
 } from "./federation.js";
@@ -21,6 +29,21 @@ const orderEvent = (id: string): FederationEvent => ({
   kind: "order-v2",
   payload: { auth: { nonce: id }, order: { asset: "ETH", amount: "1" } },
 });
+
+/** The private single write(2) the feed appends through. These tests shorten
+ *  it and make it fail, which covers torn-line recovery. */
+interface WriteSeam {
+  writeChunk(fileDescriptor: number, buffer: Buffer, offset: number): number;
+}
+
+const writeSeam = (feed: FederationFeed): WriteSeam =>
+  feed as unknown as WriteSeam;
+
+function quarantinedFiles(file: string): string[] {
+  return readdirSync(dirname(file)).filter((name) =>
+    name.includes(".corrupt-"),
+  );
+}
 
 function withTempFile(run: (file: string) => void): void {
   const directory = mkdtempSync(join(tmpdir(), "quantaswap-federation-"));
@@ -204,7 +227,7 @@ describe("federation event feed", () => {
     });
   });
 
-  it("persists feed identity and rejects corrupted content ids", () => {
+  it("persists feed identity and quarantines corrupted content ids", () => {
     withTempFile((file) => {
       const first = new FederationFeed(file, 8);
       first.append(orderEvent("one"), 100);
@@ -217,7 +240,9 @@ describe("federation event feed", () => {
       event.eventId = "0".repeat(64);
       lines[1] = JSON.stringify(event);
       writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
-      assert.throws(() => new FederationFeed(file, 8), /mismatched id/);
+      const rotated = new FederationFeed(file, 8);
+      assert.equal(rotated.requiresReset(cursor), true);
+      assert.equal(quarantinedFiles(file).length, 1);
     });
   });
 
@@ -284,6 +309,183 @@ describe("federation event feed", () => {
       assert.equal(readFileSync(file, "utf8").endsWith("\n"), true);
       restored.append(orderEvent("three"), 102);
       assert.equal(new FederationFeed(file, 8).status().latestSequence, 3);
+    });
+  });
+
+  it("completes an append the kernel splits into short writes", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      const seam = writeSeam(feed);
+      seam.writeChunk = (fileDescriptor, buffer, offset) =>
+        writeSync(fileDescriptor, buffer, offset, 1);
+      feed.append(orderEvent("two"), 101);
+      Reflect.deleteProperty(seam, "writeChunk");
+
+      assert.equal(readFileSync(file, "utf8").endsWith("\n"), true);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.has(federationEventId(orderEvent("two"))), true);
+    });
+  });
+
+  it("leaves the log byte-identical when an append write fails", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      const before = readFileSync(file, "utf8");
+      const seam = writeSeam(feed);
+      seam.writeChunk = (fileDescriptor, buffer, offset) => {
+        // A partial line reaches the file before the failure.
+        writeSync(fileDescriptor, buffer, offset, 8);
+        throw new Error("simulated write failure");
+      };
+      assert.throws(
+        () => feed.append(orderEvent("two"), 101),
+        /persisted safely/,
+      );
+      assert.equal(readFileSync(file, "utf8"), before);
+      assert.equal(feed.status().latestSequence, 1);
+      Reflect.deleteProperty(seam, "writeChunk");
+
+      feed.append(orderEvent("two"), 101);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.status().latestSequence, 2);
+    });
+  });
+
+  const quarantineCases: Array<{
+    label: string;
+    corrupt: (lines: string[]) => string[];
+    marker: string;
+  }> = [
+    {
+      label: "garbage in the middle of the log",
+      corrupt: (lines) => [lines[0] ?? "", "{not json", ...lines.slice(1)],
+      marker: "{not json",
+    },
+    {
+      label: "a sequence that goes backwards",
+      corrupt: (lines) => {
+        const record = JSON.parse(lines[2] ?? "") as { seq: number };
+        record.seq = 1;
+        return [lines[0] ?? "", lines[1] ?? "", JSON.stringify(record)];
+      },
+      marker: '"seq":1',
+    },
+    {
+      label: "a header from an unknown version",
+      corrupt: (lines) => [
+        JSON.stringify({ type: "header", version: 9 }),
+        ...lines.slice(1),
+      ],
+      marker: '"version":9',
+    },
+  ];
+
+  for (const { label, corrupt, marker } of quarantineCases) {
+    it(`quarantines ${label} and starts a rotated feed`, () => {
+      withTempFile((file) => {
+        const feed = new FederationFeed(file, 8);
+        feed.append(orderEvent("one"), 100);
+        feed.append(orderEvent("two"), 101);
+        const cursor = feed.page(null, 8, () => []).cursor;
+        const lines = corrupt(readFileSync(file, "utf8").trimEnd().split("\n"));
+        writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
+
+        const rotated = new FederationFeed(file, 8);
+        assert.equal(rotated.status().retainedEvents, 0);
+        assert.equal(rotated.requiresReset(cursor), true);
+        const preserved = quarantinedFiles(file);
+        assert.equal(preserved.length, 1);
+        assert.ok(
+          readFileSync(join(dirname(file), preserved[0] ?? ""), "utf8").includes(
+            marker,
+          ),
+        );
+
+        // The fresh feed serves and persists like a new one.
+        const record = rotated.append(orderEvent("three"), 102);
+        assert.equal(record.seq, 1);
+        const reloaded = new FederationFeed(file, 8);
+        assert.deepEqual(reloaded.status(), rotated.status());
+        assert.equal(reloaded.requiresReset(cursor), true);
+      });
+    });
+  }
+
+  it("drops a torn tail that parses on its own and rotates on restart", () => {
+    withTempFile((file) => {
+      const snapshot = [orderEvent("one"), orderEvent("two")];
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      feed.append(orderEvent("two"), 101);
+      feed.checkpoint(snapshot);
+      const cursor = feed.page(null, 8, () => snapshot).cursor;
+      // A crash during the next append can leave a final line that parses.
+      writeFileSync(
+        file,
+        `${readFileSync(file, "utf8")}{"type":"digest","snapshotDigest":null}`,
+        "utf8",
+      );
+
+      const restored = new FederationFeed(file, 8);
+      assert.equal(restored.status().latestSequence, 2);
+      assert.equal(quarantinedFiles(file).length, 0);
+      // A dropped tail always coincides with a rotation, so reusing its
+      // sequence number cannot strand a peer on a stale cursor.
+      const grown = [...snapshot, orderEvent("three")];
+      assert.equal(restored.reconcileSnapshot(grown), true);
+      assert.equal(restored.requiresReset(cursor), true);
+      assert.equal(new FederationFeed(file, 8).reconcileSnapshot(grown), false);
+    });
+  });
+
+  it("refuses to write once another process replaced the log file", () => {
+    withTempFile((file) => {
+      const departing = new FederationFeed(file, 8);
+      departing.append(orderEvent("one"), 100);
+      const successor = new FederationFeed(file, 8);
+      // The successor compacts, so this path now names a different file.
+      assert.equal(successor.reconcileSnapshot([orderEvent("one")]), true);
+      const successorLog = readFileSync(file, "utf8");
+
+      assert.throws(
+        () => departing.append(orderEvent("two"), 101),
+        /replaced by another order-book process/,
+      );
+      departing.checkpoint([orderEvent("two")]);
+      assert.equal(readFileSync(file, "utf8"), successorLog);
+      assert.deepEqual(new FederationFeed(file, 8).status(), successor.status());
+    });
+  });
+
+  it("records an exit checkpoint only after a clean exit of a healthy feed", () => {
+    assert.equal(
+      shouldRecordFederationCheckpoint({ exitCode: 0, feedHealthy: true }),
+      true,
+    );
+    assert.equal(
+      shouldRecordFederationCheckpoint({ exitCode: 1, feedHealthy: true }),
+      false,
+    );
+    assert.equal(
+      shouldRecordFederationCheckpoint({ exitCode: 0, feedHealthy: false }),
+      false,
+    );
+
+    withTempFile((file) => {
+      const base = [orderEvent("base")];
+      const feed = new FederationFeed(file, 8);
+      feed.reconcileSnapshot(base);
+      const cursor = feed.page(null, 8, () => base).cursor;
+      // A publish failure leaves the feed unhealthy, so the exit hook skips
+      // the checkpoint and the digest stays unknown.
+      feed.append(orderEvent("grown"), 100);
+      const restarted = new FederationFeed(file, 8);
+      assert.equal(restarted.reconcileSnapshot([...base, orderEvent("grown")]), true);
+      assert.equal(restarted.requiresReset(cursor), true);
     });
   });
 
