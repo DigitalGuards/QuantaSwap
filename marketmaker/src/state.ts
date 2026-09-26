@@ -207,7 +207,7 @@ function parseLease(raw: string): LeaseRecord | null {
   }
 }
 
-function fsyncDirectory(directory: string): void {
+export function fsyncDirectory(directory: string): void {
   const directoryDescriptor = openSync(directory, "r");
   try {
     fsyncSync(directoryDescriptor);

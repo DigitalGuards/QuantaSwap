@@ -8,7 +8,8 @@ to do it and the rules that keep you safe.
 
 Wire-level details for every endpoint mentioned here:
 [ORDERBOOK_API.md](ORDERBOOK_API.md). Protocol background:
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). The other seat, taking orders from a
+script: [TAKERS.md](TAKERS.md).
 
 ## Two ways to make markets
 

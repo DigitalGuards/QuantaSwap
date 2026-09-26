@@ -103,7 +103,7 @@ export const CANCEL_V1_FIELDS = [
   { name: "qrlHtlc", type: "string" },
 ] as const;
 
-const EMPTY_HASHLOCK = `0x${"00".repeat(32)}`;
+export const EMPTY_HASHLOCK = `0x${"00".repeat(32)}`;
 export const EMPTY_CAPABILITY_COMMITMENT = `0x${"00".repeat(32)}`;
 export const MAKER_CAPABILITY_DOMAIN = "QuantaSwap Maker capability V2\0";
 export const SHARE_CAPABILITY_DOMAIN = "QuantaSwap Share capability V2\0";
@@ -119,6 +119,8 @@ const MAX_PRELOCK_LISTING_WINDOW_S = 72 * 60 * 60;
 const MAX_RESPONDER_WINDOW_S = 2 * 60 * 60;
 const MAX_INITIATOR_WINDOW_S = 4 * 60 * 60;
 const MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S = 600;
+// Matches the browser client's prelock runway floor.
+const MIN_PRELOCK_RUNWAY_S = 9_000;
 const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const CAIP_ETH_ADDRESS_RE = /^eip155:11155111:(0x[0-9a-fA-F]{40})$/;
 // Portable V2 binds the full 64-byte QRL identity.
@@ -136,6 +138,24 @@ const PUBLIC_KEY_RE = new RegExp(
 );
 const DESCRIPTOR_RE = /^0x[0-9a-f]{6}$/;
 const CAPABILITY_RE = /^[0-9a-f]{64}$/;
+
+/** Protocol-wide V2 bounds, exported so a taker client applies exactly the
+ *  same windows the maker signer and the browser enforce. */
+export const PROTOCOL_V2_LIMITS = {
+  orderLifetimeS: ORDER_LIFETIME_S,
+  minOrderLifetimeS: MIN_ORDER_LIFETIME_S,
+  fillIntentLifetimeS: MAX_FILL_INTENT_LIFETIME_S,
+  minFillResponseS: MIN_FILL_RESPONSE_S,
+  maxFillResponseS: MAX_FILL_RESPONSE_S,
+  minResponderRunwayAfterResponseS: MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S,
+  maxResponderWindowS: MAX_RESPONDER_WINDOW_S,
+  maxInitiatorWindowS: MAX_INITIATOR_WINDOW_S,
+  maxClockSkewS: MAX_CLOCK_SKEW_S,
+  minPrelockListingWindowS: MIN_PRELOCK_LISTING_WINDOW_S,
+  maxPrelockListingWindowS: MAX_PRELOCK_LISTING_WINDOW_S,
+  /** Runway a pre-funded escrow must still carry when it is matched. */
+  minPrelockRunwayS: MIN_PRELOCK_RUNWAY_S,
+} as const;
 
 export type OrderSigningScheme = "qrl-sign-message-v2";
 
@@ -213,6 +233,12 @@ export interface FillIntentV1Terms extends FillIntentV1Body {
   qrlHtlc: string;
 }
 
+/** A taker's own signed proposal, as submitted to the book. */
+export interface SignedFillIntentV1 {
+  intent: FillIntentV1Body;
+  auth: ProtocolAuthV1;
+}
+
 export interface FillV1Body {
   orderDigest: string;
   intentDigest: string;
@@ -257,6 +283,19 @@ interface SignFillV1Options {
   respondBy: number;
   issuedAt?: number;
   fillNonce?: string;
+}
+
+interface SignFillIntentV1Options {
+  /** The maker order this proposal targets, exactly as authenticated. */
+  order: SignedOrderV1;
+  /** Digest the caller already verified; a mismatch refuses to sign. */
+  orderDigest: string;
+  takerEthAccount: string;
+  /** 32-byte walk-away secret; only its commitment is published. */
+  releaseSecret: string;
+  issuedAt?: number;
+  expiresAt?: number;
+  requestNonce?: string;
 }
 
 interface SignCancelV1Options {
@@ -950,6 +989,89 @@ export class ProtocolSigner {
     };
   }
 
+  /**
+   * Sign a taker FillIntentV2 for an already authenticated public order.
+   * The order proof is re-verified here, the expiry is clamped to the
+   * order's own window, and the release commitment is derived from the
+   * caller's secret so the walk-away path stays available.
+   */
+  signFillIntentV1(options: SignFillIntentV1Options): SignedFillIntentV1 {
+    this.assertOpen();
+    assertPortableOrderV1CanSign(this.address);
+    const order = normalizeOrderBody(options.order.order);
+    const orderAuth = options.order.auth;
+    if (order.visibility !== "public") {
+      throw new Error("headless taker supports public signed orders only");
+    }
+    const orderDigest = computeOrderDigest(order, orderAuth);
+    if (bytes32(options.orderDigest, "intent.orderDigest") !== orderDigest) {
+      throw new Error("fill intent does not match the verified order digest");
+    }
+    if (
+      !verifyOfficialV1Proof(
+        order.makerQrlAccount,
+        orderAuth,
+        buildOrderV1Payload(order, orderAuth),
+      )
+    ) {
+      throw new Error("order proof is not authenticated by its maker");
+    }
+    const issuedAt = safeUint(
+      options.issuedAt ?? Math.floor(Date.now() / 1000),
+      "intent.issuedAt",
+    );
+    if (issuedAt < orderAuth.issuedAt) {
+      throw new Error("fill intent cannot predate its order");
+    }
+    const expiresAt = Math.min(
+      safeUint(
+        options.expiresAt ?? issuedAt + MAX_FILL_INTENT_LIFETIME_S,
+        "intent.expiresAt",
+      ),
+      orderAuth.expiresAt,
+    );
+    if (
+      expiresAt <= issuedAt ||
+      expiresAt - issuedAt > MAX_FILL_INTENT_LIFETIME_S
+    ) {
+      throw new Error(
+        "fill intent must expire within 120 seconds of issuance and inside its order window",
+      );
+    }
+    const requestNonce = bytes32(
+      options.requestNonce ?? nonceHex(),
+      "intent.requestNonce",
+    );
+    const intent: FillIntentV1Body = {
+      orderDigest,
+      takerEthAccount: ethAddress(
+        options.takerEthAccount,
+        "intent.takerEthAccount",
+      ),
+      takerQrlAccount: this.address,
+      releaseCommitment: computeReleaseCommitment(
+        orderDigest,
+        requestNonce,
+        bytes32(options.releaseSecret, "intent.releaseSecret"),
+      ),
+    };
+    const unsignedAuth = { issuedAt, expiresAt, nonce: requestNonce };
+    const signature = this.signMessageDigest(
+      officialQrlDigest(buildFillIntentV1Payload(intent, unsignedAuth)),
+    );
+    return {
+      intent,
+      auth: {
+        version: "2",
+        scheme: "qrl-sign-message-v2",
+        ...unsignedAuth,
+        signature: hex(signature),
+        publicKey: this.publicKey,
+        descriptor: OFFICIAL_DESCRIPTOR,
+      },
+    };
+  }
+
   signFillV1(body: FillV1Body, options: SignFillV1Options): SignedFillV1 {
     this.assertOpen();
     assertPortableOrderV1CanSign(this.address);
@@ -1134,5 +1256,6 @@ export {
   verifyFillIntentV1 as verifyFillIntentV2,
   verifyOfficialV1Proof as verifyProtocolV2Proof,
 };
+export type SignedFillIntentV2 = SignedFillIntentV1;
 export type ProtocolAuthV2 = ProtocolAuthV1;
 export type MakerOrderAuthV2 = MakerOrderAuthV1;

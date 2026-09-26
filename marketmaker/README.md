@@ -5,6 +5,12 @@ operator-owned wallets and inventory. It uses the same public order-book and
 HTLC protocol as the browser maker. It does not grant an operator any protocol
 privilege, custody user funds, or share keys with another LP.
 
+It also ships the scripted taker (`npm run taker`), the other seat at the same
+protocol: it verifies maker orders locally, proposes signed fills, and settles
+swaps end to end without a browser. Full guide:
+[`../docs/TAKERS.md`](../docs/TAKERS.md); configuration reference:
+[`.env.taker.example`](.env.taker.example).
+
 **Testnet only.** QuantaSwap has not completed a real-value deployment review.
 Use only Sepolia ETH/tokens and private QRL v3 testnet funds until that milestone is
 explicitly closed in the project release notes.
@@ -330,7 +336,34 @@ monitoring, and encrypted backups. Sharing this image is useful. Sharing the
 original operator's `.env`, state volume, wallet files, server access, or market
 making account is not decentralization.
 
-The complete policy and endpoint reference is in [`.env.example`](.env.example).
+## Scripted taker
+
+The taker entry point is `dist/taker-cli.js` (`npm run taker -- <command>`),
+with `list`, `quote`, `take`, `resume`, `status` and `release`. It reuses this
+package's chain senders, ML-DSA-87 signing, protocol verification and process
+lease, and keeps its own `TAKER_*` configuration, key files and state file, so
+a taker and a maker never share a state path or a lease.
+
+- `list` and `quote` are read-only and need no key material.
+- `take` refuses to fund unless the maker escrow verifies at the configured
+  confirmation depth on every field, its timeout outlives the taker's deadline
+  by the configured claim margin, and an authenticated FillV2 acknowledgment is
+  already durable.
+- Recovery material, including the walk-away release secret, is persisted
+  before each network send, so `resume` continues an interrupted swap without
+  repeating a transaction. An escrow already claimed by a sponsoring maker
+  counts as a completed payout.
+- `--dry-run` prints the action each step would take and sends, signs and
+  writes nothing.
+
+The published image carries the taker as a second command in the same image,
+so `docker run ... node dist/taker-cli.js list` needs no separate build or
+release. Configuration, funding and the safety flags are documented in
+[`../docs/TAKERS.md`](../docs/TAKERS.md).
+
+The complete policy and endpoint reference is in [`.env.example`](.env.example)
+for the maker and [`.env.taker.example`](.env.taker.example) for the taker.
 Protocol invariants and API details live in
-[`../docs/LIQUIDITY_PROVIDERS.md`](../docs/LIQUIDITY_PROVIDERS.md) and
+[`../docs/LIQUIDITY_PROVIDERS.md`](../docs/LIQUIDITY_PROVIDERS.md),
+[`../docs/TAKERS.md`](../docs/TAKERS.md) and
 [`../docs/ORDERBOOK_API.md`](../docs/ORDERBOOK_API.md).
