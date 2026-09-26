@@ -55,8 +55,10 @@ export function getWalletConnectClient(): Promise<WalletConnectClient> {
       EthereumProvider.init({
         projectId,
         chains: [Number(ETH_LEG.chainIdHex)],
-        methods: ["eth_sendTransaction", "personal_sign"],
-        optionalMethods: ["wallet_switchEthereumChain", "eth_signTypedData_v4"],
+        // Only what the ETH leg uses: HTLC lock, claim, refund and ERC-20
+        // approve are all plain transactions. No message signing is requested.
+        methods: ["eth_sendTransaction"],
+        optionalMethods: ["wallet_switchEthereumChain"],
         rpcMap: {
           [Number(ETH_LEG.chainIdHex)]: new URL(ETH_LEG.rpc, window.location.origin).href,
         },

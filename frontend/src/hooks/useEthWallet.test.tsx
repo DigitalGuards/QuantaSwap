@@ -131,6 +131,38 @@ describe("WalletConnect connections", () => {
     },
   );
 
+  it("ends the WalletConnect pairing when another wallet is chosen", async () => {
+    const client = mockWalletConnect();
+    const detail = wallet();
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connectWalletConnect());
+    expect(result.current.walletName).toBe("WalletConnect");
+    await act(async () => result.current.connect(detail));
+    expect(result.current.account).toBe(accountA);
+    expect(client.disconnect).toHaveBeenCalledOnce();
+    expect(shouldRestoreWalletConnect()).toBe(false);
+  });
+
+  it("releases the chooser when a session restore hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(getWalletConnectClient).mockReturnValue(new Promise(() => undefined));
+      rememberWalletConnect(true);
+      const { result } = renderHook(useEthWallet);
+      expect(result.current.pendingId).toBe("walletconnect");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000);
+      });
+      expect(result.current.pendingId).toBeNull();
+      act(() => result.current.openPicker());
+      expect(result.current.pickerOpen).toBe(true);
+      // A slow relay is no reason to forget the approved session.
+      expect(shouldRestoreWalletConnect()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("restores an existing session without a new QR or approval request", async () => {
     const client = mockWalletConnect();
     rememberWalletConnect(true);
@@ -347,10 +379,33 @@ describe("Ethereum wallet selection", () => {
     await act(async () => result.current.connect(detail));
     detail.provider.request.mockResolvedValueOnce("0x1");
     await act(async () => result.current.ensureSepolia());
-    expect(detail.provider.request).toHaveBeenLastCalledWith({
+    expect(detail.provider.request).toHaveBeenCalledWith({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: "0xaa36a7" }],
     });
+    expect(detail.provider.request).toHaveBeenLastCalledWith({ method: "eth_chainId" });
+  });
+
+  it("accepts a numeric chain id, the shape WalletConnect returns", async () => {
+    const detail = wallet();
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connect(detail));
+    detail.provider.request.mockResolvedValueOnce(11155111);
+    await act(async () => result.current.ensureSepolia());
+    expect(detail.provider.request).not.toHaveBeenCalledWith(
+      expect.objectContaining({ method: "wallet_switchEthereumChain" }),
+    );
+  });
+
+  it("refuses when the chain is still wrong after the switch", async () => {
+    const detail = wallet();
+    const { result } = renderHook(useEthWallet);
+    await act(async () => result.current.connect(detail));
+    detail.provider.request
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(1);
+    await expect(result.current.ensureSepolia()).rejects.toThrow("Switch your wallet");
   });
 });
 

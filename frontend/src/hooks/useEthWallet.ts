@@ -47,6 +47,24 @@ function walletConnectDetail(client: WalletConnectClient): ProviderDetail {
   };
 }
 
+/** Longest wait for a remembered WalletConnect session before the chooser
+ *  is usable again. */
+const WALLETCONNECT_RESTORE_TIMEOUT_MS = 15_000;
+
+/** eth_chainId as hex string (EIP-1193) or number (WalletConnect). */
+function onEthLegChain(chainId: unknown): boolean {
+  const expected = BigInt(ETH_LEG.chainIdHex);
+  if (typeof chainId === "string") {
+    try {
+      return BigInt(chainId) === expected;
+    } catch {
+      return false;
+    }
+  }
+  if (typeof chainId === "number") return Number.isSafeInteger(chainId) && BigInt(chainId) === expected;
+  return typeof chainId === "bigint" && chainId === expected;
+}
+
 export function useEthWallet() {
   const [announced, setAnnounced] = useState<ProviderDetail[]>([]);
   const [legacy, setLegacy] = useState<ProviderDetail | null>(null);
@@ -57,6 +75,9 @@ export function useEthWallet() {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const generationRef = useRef(0);
   const busyRef = useRef(false);
+  // Generation of an in-flight session restore that holds busyRef, 0 when
+  // none does. Lets the restore always release the lock it took.
+  const restoringRef = useRef(0);
   const pendingProvidersRef = useRef(new Set<Eip1193Provider>());
   const qrlProvidersRef = useRef(new Set<Eip1193Provider>());
   const activeRef = useRef<Eip1193Provider | null>(null);
@@ -134,6 +155,7 @@ export function useEthWallet() {
     setPickerOpen(false);
     setError(null);
     busyRef.current = false;
+    restoringRef.current = 0;
     setPendingId(null);
     // A canceled approval may still resolve inside the extension. Its
     // generation stays stale while the user chooses another wallet.
@@ -147,6 +169,13 @@ export function useEthWallet() {
       detach();
       activeRef.current = detail.provider;
       rememberWalletConnect(detail.info.uuid === "walletconnect");
+      // Choosing another wallet ends any WalletConnect pairing, so a later
+      // WalletConnect choice starts a fresh QR instead of silently resuming
+      // the previous phone and account.
+      const walletConnect = walletConnectRef.current;
+      if (detail.info.uuid !== "walletconnect" && walletConnect?.session) {
+        void walletConnect.disconnect().catch(() => undefined);
+      }
       setSelected(detail);
       setAccount(next);
       setError(null);
@@ -190,27 +219,40 @@ export function useEthWallet() {
     if (!shouldRestoreWalletConnect()) return;
     const generation = ++generationRef.current;
     busyRef.current = true;
+    restoringRef.current = generation;
     setPendingId("walletconnect");
+    const restore = async () => {
+      const client = await getWalletConnectClient();
+      walletConnectRef.current = client;
+      if (generation !== generationRef.current) return;
+      if (!client.session) {
+        rememberWalletConnect(false);
+        return;
+      }
+      // Restore an approved session without opening a new pairing request.
+      const accounts = await client.request({ method: "eth_accounts" });
+      if (generation === generationRef.current) {
+        attach(walletConnectDetail(client), accounts);
+      }
+    };
+    // An unreachable relay must not lock the chooser: stop waiting after the
+    // limit and keep the remembered session for the next visit. A restore
+    // that completes later still attaches unless the user chose meanwhile.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<"timeout">((done) => {
+      timer = setTimeout(() => done("timeout"), WALLETCONNECT_RESTORE_TIMEOUT_MS);
+    });
     void (async () => {
       try {
-        const client = await getWalletConnectClient();
-        walletConnectRef.current = client;
-        if (generation !== generationRef.current) return;
-        if (!client.session) {
-          rememberWalletConnect(false);
-          return;
-        }
-        // Restore an approved session without opening a new pairing request.
-        const accounts = await client.request({ method: "eth_accounts" });
-        if (generation === generationRef.current) {
-          attach(walletConnectDetail(client), accounts);
-        }
+        await Promise.race([restore(), timeout]);
       } catch {
         if (generation === generationRef.current) rememberWalletConnect(false);
       } finally {
-        if (generation === generationRef.current) {
+        clearTimeout(timer);
+        if (restoringRef.current === generation) {
+          restoringRef.current = 0;
           busyRef.current = false;
-          setPendingId(null);
+          setPendingId((id) => (id === "walletconnect" ? null : id));
         }
       }
     })();
@@ -376,17 +418,22 @@ export function useEthWallet() {
 
   const ensureSepolia = useCallback(async (): Promise<void> => {
     if (!selected || !account) throw new Error("Ethereum wallet not connected");
-    const chainId = await selected.provider.request({ method: "eth_chainId" });
-    if (typeof chainId === "string" && chainId.toLowerCase() === ETH_LEG.chainIdHex) return;
+    const wrongChain = new Error(
+      `Switch your wallet to ${ETH_LEG.name} (chain ${ETH_LEG.chainIdHex}) and retry.`,
+    );
+    if (onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) return;
     try {
       await selected.provider.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: ETH_LEG.chainIdHex }],
       });
     } catch {
-      throw new Error(
-        `Switch your wallet to ${ETH_LEG.name} (chain ${ETH_LEG.chainIdHex}) and retry.`,
-      );
+      throw wrongChain;
+    }
+    // Some transports answer the switch without reaching the wallet, so the
+    // chain is read back before any transaction relies on it.
+    if (!onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) {
+      throw wrongChain;
     }
   }, [selected, account]);
 
