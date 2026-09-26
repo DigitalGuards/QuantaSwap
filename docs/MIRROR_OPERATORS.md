@@ -103,6 +103,52 @@ Never combine proxy trust `all` with a publicly bound container port. When a
 CDN is in front, first configure the proxy to trust only that CDN's published
 networks and derive `$remote_addr` from its authenticated edge header.
 
+### Single active writer
+
+One order book process owns its data at a time. Two processes on one state
+volume interleave a whole-file rewrite of `orders.json` with appends to
+`orders.json.federation` and destroy both files, so the book takes an exclusive
+lease at startup: `orders.json.lock` and `orders.json.federation.lock`, one
+beside each protected file, inside the state volume the container already
+writes. A second process pointed at the same data logs
+`FATAL: cannot take the single-writer lease` and exits non-zero without
+touching any file.
+
+Rules the lease follows:
+
+- A crashed holder on this host is detected by its dead process id, so a
+  replacement starts at once.
+- A holder in another container, which is another PID namespace, cannot be
+  inspected by process id. It is judged by the heartbeat it refreshes on its
+  lease files every 10 seconds, and it counts as live for 90 seconds after the
+  last refresh. After a crash or a `docker kill`, a replacement therefore
+  refuses to start for up to 90 seconds, and a restart backoff can make
+  unattended recovery take about two minutes. A clean stop releases the lease
+  and needs no wait.
+- The guarantee covers containers on one host, which share a clock and a kernel
+  boot id. A state volume shared between machines, for example over NFS, is not
+  supported.
+- The holder verifies ownership again immediately before every persisted write.
+  A proven loss stops the process with exit code 1 so its supervisor restarts
+  it, and the restart either takes the lease or fails closed against the live
+  holder. When ownership can neither be confirmed nor disproved, for example
+  because the lease file briefly cannot be read, the write is refused with
+  `503`, nothing changes on disk, and `/api/status` reports
+  `lease.ready: false` until a later check succeeds.
+- `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
+  startup rejects those paths because the suffix names the lease files.
+
+Recovery is manual only in one case: a `orders.json.lock.recovery` guard file
+left behind by a starter that died mid-recovery. The refusal names the file.
+Confirm no order book process runs on this data directory, then remove that one
+file by hand. Never remove a `.lock` file to make a start succeed without that
+check; that is exactly the second writer the lease exists to prevent.
+
+An older binary ignores these files, so leaving them in place is safe on a
+rollback. They are also safe to leave inside a state backup: a restored
+`.lock` from a dead process is recognised as stale, by its process id on the
+same host or by its expired heartbeat otherwise.
+
 ## 3. Configure federation and browser access
 
 Federation peers are public API bases selected by operator policy. The list is
@@ -480,8 +526,15 @@ Use both endpoints:
 
 - `/api/health` is local readiness. Alert immediately on non-200.
 - `/api/status` is diagnostic. Alert when top-level `status` is not `ok`, when
-  `feed.ready` is false, or when a configured peer remains `degraded` or
-  `stale` beyond your incident window.
+  `feed.ready` is false, when `lease.ready` is false, or when a configured peer
+  remains `degraded` or `stale` beyond your incident window.
+
+A `lease.ready` of false means writes are being refused while reads still
+serve. Treat a repeated occurrence as a storage fault on the state volume.
+`lease.lost` is true only while the process is already shutting down after
+another process took its data over; a restart loop with
+`FATAL: cannot take the single-writer lease` in the logs means two deployments
+point at one volume.
 
 Peer outages do not change local readiness. That prevents a remote failure from
 causing restart loops while still making incomplete discovery visible. Status
@@ -493,8 +546,11 @@ detect DNS, CDN, certificate, firewall, or reverse-proxy failures.
 
 ## 7. Back up, update, and roll back
 
-The named volume contains `orders.json` plus `orders.json.federation`. Stop the
-service and stream a consistent archive directly into GPG encryption. Replace
+The named volume contains `orders.json` plus `orders.json.federation`, and,
+while the service runs, a `.lock` file beside each of them. Stop the service and
+stream a consistent archive directly into GPG encryption. A clean stop removes
+both lease files first, so a snapshot taken this way holds only the two data
+files. Replace
 the recipient placeholder with a reviewed key fingerprint:
 
 ```bash
@@ -553,6 +609,13 @@ For an update:
 
 If startup rejects state, stop. Preserve the exact file and use the prior image
 for recovery. Never erase or replace state merely to make a new binary boot.
+
+Rolling back to an image from before the single-writer lease needs no cleanup.
+That binary never reads `orders.json.lock` or `orders.json.federation.lock` and
+leaves them untouched, and a later roll forward treats whatever it finds there
+as a stale lease. The one thing a rollback gives up is the protection itself:
+the older binary starts even when another process is already writing the same
+volume.
 
 ## 8. Add the mirror to a browser build
 
