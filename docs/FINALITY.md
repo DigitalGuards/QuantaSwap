@@ -232,11 +232,13 @@ no gas on the paying chain. Two margins apply.
   transaction timeout and tracks nothing about finality.
 
 HTLCv3 adds one consideration specific to sponsorship. If the delivery defers to
-a credit, only the recipient can withdraw it, and a recipient without gas on that
-chain cannot. A sponsor therefore has to submit the claim with
+a credit, a recipient without gas on that chain cannot withdraw it. A sponsor
+therefore submits the claim with
 `estimateGas + DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE` as documented in
-`contracts/hyperion/HTLCv3.hyp`, so a payout that can be delivered is delivered
-and the recipient is never left holding a credit it cannot reach.
+`contracts/hyperion/HTLCv3.hyp`, so a payout that can be delivered is delivered.
+If one defers anyway, the sponsor completes it with `pushCredit(token, account)`,
+which is permissionless and can only pay the credited account, so the recipient
+still spends no gas and still keeps the destination the fund owner chose.
 
 ### 3.5 Observation of credits
 

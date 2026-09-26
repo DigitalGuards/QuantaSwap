@@ -22,7 +22,9 @@ pragma hyperion >=0.0;
  *     only pay the target the fund-owner chose.
  *   - An open-recipient lock is refundable by its initiator at any time via
  *     release() UNTIL assigned; after assign() it behaves identically to a
- *     classic lock (refund only at timeout).
+ *     classic lock (refund only at timeout). release() and a nonzero recipient
+ *     are mutually exclusive by construction, so the recipient's claim
+ *     guarantee begins the moment assign() lands.
  *   - claim() closes at `timeout`, refund() opens at `timeout`, and assign()
  *     also closes at `timeout`. The windows never overlap.
  *   - A hashlock is single-use per contract instance, forever.
@@ -91,17 +93,31 @@ pragma hyperion >=0.0;
  *       always fits after the attempt fails, including after an out-of-gas
  *       child frame. The 63/64 rule alone does not guarantee that: one 64th
  *       of the gas at the call site can be far less than a cold storage
- *       write.
+ *       write. The credit path costs about 46,000 gas on the EVM target (two
+ *       cold storage writes, one log, the guard reset), so the reserve holds
+ *       roughly three times its measured cost. The QRL gas schedule has to be
+ *       measured before deployment; the headroom exists to absorb a wider
+ *       64-byte storage slot without a second deployment.
  *     - The attempt never copies return data into this frame, so a recipient
  *       or token that returns a very large blob cannot exhaust the reserve
  *       through memory expansion. The child frame pays for that copy inside
- *       its own bounded budget.
- *     - Nothing here can revert a settlement. A caller that supplies little
- *       gas shrinks the budget and pushes the payout into the credit path.
- *       That is deliberate: it conserves value, pays the same account, and
- *       costs the payee one withdrawal, where reverting would republish a
- *       secret and leave the swap Open. A settlement is never refused for
- *       lack of gas.
+ *       its own bounded budget. The two constants also make the attack
+ *       arithmetically impossible even against a frame that did copy: a child
+ *       holding DELIVERY_GAS_LIMIT can allocate and return at most about
+ *       5,000 words, whose copy would cost about 65,000 gas, under the
+ *       reserve.
+ *     - A settlement is never refused because a payout failed. A caller that
+ *       supplies little gas shrinks the budget and pushes the payout into the
+ *       credit path. That is deliberate: it conserves value, pays the same
+ *       account, and costs the payee one withdrawal, where reverting would
+ *       republish a secret and leave the swap Open. The bound is the ordinary
+ *       one: a transaction still has to carry enough gas to reach the state
+ *       write and record the credit, and no contract can defend against a
+ *       caller under-funding its own transaction.
+ *
+ *   A Claimed swap no longer implies the recipient holds the funds. Read
+ *   creditOf(token, recipient), or the presence of PayoutCredited in the same
+ *   receipt, to tell a direct payment from a deferred one.
  *
  *   Integration rule, because of the point above: submit a settlement with
  *
@@ -146,7 +162,7 @@ contract HTLCv3 {
     /// @dev Maximum gas handed to one payout attempt.
     uint256 private constant DELIVERY_GAS_LIMIT = 100000;
     /// @dev Gas kept in this frame so the credit fallback always fits.
-    uint256 private constant DELIVERY_GAS_RESERVE = 70000;
+    uint256 private constant DELIVERY_GAS_RESERVE = 150000;
 
     mapping(bytes32 => Swap) private _swaps;
 
@@ -347,6 +363,25 @@ contract HTLCv3 {
         _withdraw(token, to, _credits[token][msg.sender]);
     }
 
+    /// @notice Deliver `account`'s whole `token` credit to `account`.
+    /// @dev Permissionless, and the destination is not a parameter: the only
+    ///      address this can pay is the credited account, which is the address
+    ///      the fund owner chose. A relayer therefore gains no redirect
+    ///      authority, and a recipient with no gas on this chain stops being
+    ///      stranded behind a deferred payout, which is the case a sponsored
+    ///      claim cares about. Strict like withdraw(): a failed attempt
+    ///      reverts and leaves the credit intact.
+    function pushCredit(address token, address account) external nonReentrant {
+        uint256 amount = _credits[token][account];
+        if (amount == 0) revert NoCredit();
+
+        _credits[token][account] = 0;
+        _outstanding[token] -= amount;
+        emit PayoutWithdrawn(token, account, account, amount);
+
+        _strictPayout(token, account, amount);
+    }
+
     /// @notice The full swap record, identical in shape to HTLCv2's getSwap.
     function getSwap(bytes32 hashlock) external view returns (Swap memory) {
         return _swaps[hashlock];
@@ -423,6 +458,14 @@ contract HTLCv3 {
     ) private {
         if (_swaps[hashlock].status != Status.None) revert HashlockAlreadyUsed();
         if (hashlock == bytes32(0) || amount == 0) revert InvalidParams();
+        // The credit ledger accumulates settled amounts, and its adds are
+        // checked. Without a cap, a token that misreports its own balance
+        // could pass the exact-escrow check below with an absurd amount, park
+        // it in _outstanding through release(), and make a later claim in that
+        // token overflow and revert after the preimage was published. The cap
+        // is far above every supported asset's total supply and it takes 2^128
+        // settlements to reach the bound.
+        if (amount > type(uint128).max) revert InvalidParams();
         if (!openRecipient && (recipient == address(0) || recipient == address(this))) {
             revert InvalidParams();
         }
@@ -476,13 +519,26 @@ contract HTLCv3 {
     ///      selfDeliver frame reverts, nothing moved, and the payout becomes
     ///      a credit. On the withdrawal path it reverts the withdrawal and
     ///      the credit stays intact.
+    ///
+    ///      The reported outcome is not trusted on its own. The balance has to
+    ///      fall by exactly `amount`, the same rule the lock path applies in
+    ///      the other direction. Without it a token that answers success and
+    ///      moves nothing (an upgradeable token whose implementation has gone
+    ///      missing answers exactly that, success with empty return data)
+    ///      would leave a swap terminal with no delivery and no credit, and
+    ///      would let a withdrawal burn a credit for nothing. Putting the
+    ///      check here is safe because the settlement path runs this inside
+    ///      selfDeliver: a token whose balanceOf reverts or misreports makes
+    ///      the attempt fail, and a failed attempt is a credit.
     function _strictPayout(address token, address to, uint256 amount) private {
         if (token == address(0)) {
             (bool sent, ) = to.call{value: amount}("");
             if (!sent) revert TransferFailed();
             return;
         }
+        uint256 before = IPayoutERC20(token).balanceOf(address(this));
         _tokenCall(token, abi.encodeWithSelector(IPayoutERC20.transfer.selector, to, amount));
+        if (before - IPayoutERC20(token).balanceOf(address(this)) != amount) revert TransferFailed();
     }
 
     /// @dev Dependency-free safe ERC-20 call. Used to pull funds in while

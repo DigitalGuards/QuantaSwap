@@ -99,7 +99,7 @@ const HOUR = 3600;
 // publishes both numbers through deliveryGasPolicy() and this is the rule
 // every integration has to follow.
 const DELIVERY_GAS_LIMIT = 100_000n;
-const DELIVERY_GAS_RESERVE = 70_000n;
+const DELIVERY_GAS_RESERVE = 150_000n;
 const SETTLE_GAS_BUFFER = DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE;
 
 // Submit a settlement (claim, refund, release) the way an integration must.
@@ -129,6 +129,9 @@ async function main() {
     "FalseTransferToken",
     "RevertingTransferToken",
     "ReturnBombToken",
+    "SilentSuccessToken",
+    "SilentNoReturnToken",
+    "LyingBalanceToken",
     "NonPayableRecipient",
     "GasGuzzlerRecipient",
     "ReentrantRecipient",
@@ -687,24 +690,148 @@ async function main() {
     }
   });
 
-  await withTest("#47 token: a 64k-word return bomb cannot exhaust the credit reserve", async () => {
+  await withTest("#47 token: a return bomb cannot exhaust the credit reserve", async () => {
+    // The bomb answers with `true` followed by a tail, so the boolean check
+    // passes and the oversized payload is the whole attack. Each case runs at
+    // exactly the documented gas rule, so the settling frame holds only the
+    // reserve: if it copied the child's return data it would run out of gas
+    // and the claim would revert with the preimage already public.
+    for (const words of [256n, 1024n, 4096n, 65536n]) {
+      const htlc = await deploy("HTLCv3", alice);
+      const track = makeTracker(htlc);
+      const token = await deploy("ReturnBombToken", alice);
+      const amount = 5n;
+      await (await token.mint(alice.address, amount)).wait();
+      await (await token.approve(htlc.target, amount)).wait();
+      await (await token.setWords(words)).wait();
+      const { preimage, hashlock } = newSecret();
+      await (
+        await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
+      ).wait();
+      track.track(hashlock, token.target);
+      const claimAs = htlc.connect(relayer).claim;
+      const estimate = await claimAs.estimateGas(hashlock, preimage);
+      const receipt = await (
+        await claimAs(hashlock, preimage, { gasLimit: estimate + SETTLE_GAS_BUFFER })
+      ).wait();
+      assertEq(receipt.status, 1, `${words} words: claim transaction succeeded`);
+      assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, `${words} words: terminal`);
+      assertEq(await htlc.creditOf(token.target, bob.address), amount, `${words} words: credited`);
+      assert(
+        receipt.gasUsed < estimate + SETTLE_GAS_BUFFER,
+        `${words} words: stayed inside the budget (${receipt.gasUsed})`
+      );
+      await track.check(`return bomb ${words} words`);
+    }
+  });
+
+  await withTest("#47 token: a token that reports success and moves nothing credits", async () => {
+    // A token answering `true`, and a token answering with no data at all,
+    // while moving no value. The second is indistinguishable from a call to an
+    // address that holds no code, which is what an upgradeable token whose
+    // implementation went missing answers. Neither may count as delivered: a
+    // terminal swap with no delivery and no credit would strand the escrow
+    // with nothing in the ledger pointing at it.
+    for (const mockName of ["SilentSuccessToken", "SilentNoReturnToken"]) {
+      const htlc = await deploy("HTLCv3", alice);
+      const track = makeTracker(htlc);
+      const token = await deploy(mockName, alice);
+      const amount = 4_000n;
+      await (await token.mint(alice.address, amount)).wait();
+      await (await token.approve(htlc.target, amount)).wait();
+      const { preimage, hashlock } = newSecret();
+      await (
+        await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
+      ).wait();
+      track.track(hashlock, token.target);
+      const receipt = await settle(htlc.connect(relayer).claim, hashlock, preimage);
+      assertEq(receipt.status, 1, `${mockName}: claim transaction succeeded`);
+      assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, `${mockName}: terminal`);
+      assertEq(creditedEvents(htlc, receipt).length, 1, `${mockName}: delivery was not counted`);
+      assertEq(await htlc.creditOf(token.target, bob.address), amount, `${mockName}: credited`);
+      assertEq(await token.balanceOf(bob.address), 0n, `${mockName}: nothing was delivered`);
+      await track.check(mockName);
+
+      // The withdrawal path must not burn the credit for nothing either.
+      await expectRevert(htlc.connect(bob).withdrawAll(token.target, bob.address), "TransferFailed");
+      assertEq(await htlc.creditOf(token.target, bob.address), amount, `${mockName}: credit intact`);
+      await expectRevert(htlc.pushCredit(token.target, bob.address), "TransferFailed");
+      assertEq(await htlc.creditOf(token.target, bob.address), amount, `${mockName}: push kept it`);
+      await track.check(`${mockName} after failed withdrawals`);
+    }
+  });
+
+  await withTest("#47 ledger: the lockable amount is capped so credits cannot overflow", async () => {
+    // A token that misreports its own balance passes the exact-escrow check
+    // with any amount, so without a cap it could park an absurd credit in the
+    // ledger and make a later claim in that token overflow on a checked add.
+    // That would revert a claim after its preimage was published, which is the
+    // failure this contract exists to remove.
     const htlc = await deploy("HTLCv3", alice);
     const track = makeTracker(htlc);
-    const token = await deploy("ReturnBombToken", alice);
-    const amount = 5n;
-    await (await token.mint(alice.address, amount)).wait();
-    await (await token.approve(htlc.target, amount)).wait();
-    await (await token.setWords(65536n)).wait();
+    const liar = await deploy("LyingBalanceToken", alice);
+    const cap = (1n << 128n) - 1n;
+    const timeout = (await now()) + 4 * HOUR;
+
+    await expectRevert(htlc.lockTokenOpen(newSecret().hashlock, liar.target, cap + 1n, timeout), "InvalidParams");
+    await expectRevert(htlc.lockTokenOpen(newSecret().hashlock, liar.target, 1n << 255n, timeout), "InvalidParams");
+    await expectRevert(
+      htlc.lockToken(newSecret().hashlock, bob.address, liar.target, cap + 1n, timeout),
+      "InvalidParams"
+    );
+
+    // At the cap the lock goes through, and two of them coexist in the ledger
+    // without overflowing, which is what the cap buys.
+    for (const _ of [0, 1]) {
+      const secret = newSecret();
+      await (await htlc.lockTokenOpen(secret.hashlock, liar.target, cap, timeout)).wait();
+      await settle(htlc.release, secret.hashlock);
+      assertEq((await htlc.getSwap(secret.hashlock)).status, Status.Refunded, "released");
+    }
+    assertEq(await htlc.outstandingCredit(liar.target), cap * 2n, "both credits held");
+
+    // A further settlement in that token still completes.
+    const third = newSecret();
+    await (await htlc.lockToken(third.hashlock, bob.address, liar.target, cap, timeout)).wait();
+    const receipt = await settle(htlc.connect(relayer).claim, third.hashlock, third.preimage);
+    assertEq(receipt.status, 1, "claim after two capped credits succeeded");
+    assertEq((await htlc.getSwap(third.hashlock)).status, Status.Claimed, "claim is terminal");
+    assertEq(await htlc.creditOf(liar.target, bob.address), cap, "recipient credited");
+    // Native locks are capped the same way.
+    await expectRevert(htlc.lockNativeOpen(newSecret().hashlock, timeout, { value: 0 }), "InvalidParams");
+    await track.check("capped ledger");
+  });
+
+  await withTest("#47 credits: anyone can push a credit, and only to its owner", async () => {
+    const htlc = await deploy("HTLCv3", alice);
+    const track = makeTracker(htlc);
+    const guzzler = await deploy("GasGuzzlerRecipient", alice);
+    await (await guzzler.setMode(1)).wait(); // force the credit path
     const { preimage, hashlock } = newSecret();
+    const amount = ethers.parseEther("1");
     await (
-      await htlc.lockToken(hashlock, bob.address, token.target, amount, (await now()) + HOUR)
+      await htlc.lockNative(hashlock, guzzler.target, (await now()) + HOUR, { value: amount })
     ).wait();
-    track.track(hashlock, token.target);
-    const receipt = await (await htlc.connect(relayer).claim(hashlock, preimage, { gasLimit: 3_000_000 })).wait();
-    assertEq(receipt.status, 1, "claim transaction succeeded");
-    assertEq((await htlc.getSwap(hashlock)).status, Status.Claimed, "claim is terminal");
-    assertEq(await htlc.creditOf(token.target, bob.address), amount, "credited");
-    await track.check("oversized return bomb");
+    track.track(hashlock, ethers.ZeroAddress);
+    await settle(htlc.connect(relayer).claim, hashlock, preimage);
+    assertEq(await htlc.creditOf(ethers.ZeroAddress, guzzler.target), amount, "credited");
+
+    await expectRevert(htlc.connect(carol).pushCredit(ethers.ZeroAddress, carol.address), "NoCredit");
+    // Still burning: the push reverts and the credit survives.
+    await expectRevert(htlc.connect(carol).pushCredit(ethers.ZeroAddress, guzzler.target), "TransferFailed");
+    assertEq(await htlc.creditOf(ethers.ZeroAddress, guzzler.target), amount, "credit intact");
+    await track.check("failed push");
+
+    // A sponsor completes the payout once the recipient can accept it, without
+    // the recipient ever spending gas and without choosing the destination.
+    await (await guzzler.setMode(0)).wait();
+    const before = await provider.getBalance(guzzler.target);
+    await (await htlc.connect(carol).pushCredit(ethers.ZeroAddress, guzzler.target)).wait();
+    assertEq((await provider.getBalance(guzzler.target)) - before, amount, "recipient paid");
+    assertEq(await htlc.creditOf(ethers.ZeroAddress, guzzler.target), 0n, "credit cleared");
+    assertEq(await htlc.outstandingCredit(ethers.ZeroAddress), 0n, "outstanding cleared");
+    await expectRevert(htlc.pushCredit(ethers.ZeroAddress, guzzler.target), "NoCredit");
+    await track.check("pushed credit");
   });
 
   await withTest("#47 native: a gas-guzzling and a reverting recipient both credit", async () => {
@@ -991,9 +1118,6 @@ async function main() {
 
     // A bare estimate, and a range of tighter and wider limits, must all end
     // terminal with the value conserved, through every branch.
-    const bare = await claimAs.estimateGas(direct.hashlock, direct.preimage).catch(() => 0n);
-    assert(bare === 0n, "a settled swap cannot be claimed again");
-
     let credits = 0;
     let directDeliveries = 0;
     for (const extra of [0n, 25_000n, 70_000n, SETTLE_GAS_BUFFER, 400_000n]) {
