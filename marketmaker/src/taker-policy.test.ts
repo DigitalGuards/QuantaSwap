@@ -109,6 +109,7 @@ function input(overrides: Partial<TakerDecideInput> = {}): TakerDecideInput {
     bookStatus: "locking",
     released: false,
     cancelled: false,
+    prelocked: false,
     fill: {
       hashlock: HASHLOCK,
       initiatorTimeout: T1,
@@ -201,8 +202,19 @@ describe("maker escrow verification", () => {
       PLANS.initiator,
       T2,
       600,
+      true,
     );
     assert.equal(check.state, "awaiting-assign");
+  });
+
+  it("refuses an unset recipient on an order that was not pre-funded", () => {
+    const check = checkMakerLock(
+      makerLock({ recipient: NATIVE_TOKEN }),
+      PLANS.initiator,
+      T2,
+      600,
+    );
+    assert.equal(check.state, "mismatch");
   });
 
   it("refuses to treat an unreadable snapshot as verified", () => {
@@ -394,6 +406,18 @@ describe("decideTaker funding gates", () => {
     );
     assert.equal(verdict.decision, "abort");
   });
+
+  it("gives up on a squatted leg even after a lock send was attempted", () => {
+    // The HTLC consumes a hashlock once, so our own lock reverted and
+    // nothing of ours can be at stake under it.
+    const verdict = decideTaker(
+      input({
+        rState: ourLock({ initiator: `0x${"7".repeat(128)}` }),
+        record: record({ lockSentAt: NOW - 300 }),
+      }),
+    );
+    assert.equal(verdict.decision, "abort");
+  });
 });
 
 describe("decideTaker settlement", () => {
@@ -504,6 +528,7 @@ describe("decideTaker settlement", () => {
       }),
     );
     assert.notEqual(verdict.decision, "claim");
+    assert.match(verdict.reason, /claim window/);
   });
 
   it("finishes after our refund and the maker's", () => {
@@ -638,10 +663,20 @@ describe("take bounds", () => {
     );
   });
 
-  it("refuses an order whose proof expires too soon", () => {
-    assert.match(
-      takeBoundsIssue({ ...base, orderExpiresAt: NOW + 60 }) ?? "",
-      /expires too soon/,
+  it("refuses an order whose proof expires too soon, naming the knob", () => {
+    const issue = takeBoundsIssue({ ...base, orderExpiresAt: NOW + 60 }) ?? "";
+    assert.match(issue, /60s left/);
+    assert.match(issue, /TAKER_MIN_ORDER_RUNWAY_S/);
+  });
+
+  it("accepts a short lived quote that still leaves the floor", () => {
+    assert.equal(
+      takeBoundsIssue({
+        ...base,
+        minOrderRunwayS: 90,
+        orderExpiresAt: NOW + 240,
+      }),
+      null,
     );
   });
 

@@ -150,6 +150,13 @@ export class FakeHtlcChain {
     );
   }
 
+  /** Test-only: rewrite a stored record, for RPC responses a hostile or
+   *  confused endpoint could return. */
+  overwrite(hashlock: string, swap: FakeSwap): void {
+    this.swaps.set(hashlock.toLowerCase(), { ...swap });
+    this.snapshot();
+  }
+
   refund(from: string, hashlock: string): void {
     const key = hashlock.toLowerCase();
     const swap = this.swaps.get(key);
@@ -201,6 +208,9 @@ function encodeEthSwapResult(swap: FakeSwap): string {
 export interface FakeEndpoint {
   url: string;
   close(): Promise<void>;
+  /** Stop holding the event loop open, so a test can prove that only the
+   *  code under test keeps the process alive. */
+  unref(): void;
 }
 
 async function listen(server: Server): Promise<string> {
@@ -289,6 +299,9 @@ export async function startFakeChainRpc(
       new Promise<void>((resolve) => {
         server.close(() => resolve());
       }),
+    unref: () => {
+      server.unref();
+    },
   };
 }
 
@@ -506,6 +519,11 @@ export class FakeBookServer {
     });
     this.server = server;
     this.url = `${await listen(server)}/api`;
+  }
+
+  /** See FakeEndpoint.unref. */
+  unref(): void {
+    this.server?.unref();
   }
 
   async close(): Promise<void> {

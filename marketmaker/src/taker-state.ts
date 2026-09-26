@@ -29,6 +29,7 @@ import {
   computeFillDigest,
   computeFillIntentDigest,
   computeOrderDigest,
+  computeReleaseCommitment,
   deriveOrderV1Id,
   verifyProtocolV2Proof,
   type CanonicalOrderV1Body,
@@ -83,6 +84,27 @@ export interface TakerIntentRecord {
   releasedAt: number | null;
 }
 
+/** A settled take, kept for the operator after its record is retired. No
+ *  secrets: the preimage and the release secret are deliberately absent. */
+export interface TakerHistoryEntry {
+  orderId: string;
+  direction: Direction;
+  asset: AssetSymbol;
+  /** Base units we escrowed and received. */
+  paid: string;
+  received: string;
+  outcome: TakerOutcome;
+  hashlock: string | null;
+  lockTx: string | null;
+  claimTx: string | null;
+  refundTx: string | null;
+  startedAt: number;
+  settledAt: number;
+}
+
+/** Settled takes retained for `status`. Old entries fall off the end. */
+export const MAX_HISTORY_ENTRIES = 50;
+
 export interface TakerSwapRecord {
   orderId: string;
   /** Exact chains and HTLCs this take belongs to. */
@@ -108,6 +130,11 @@ export interface TakerSwapRecord {
   lockSentAt: number | null;
   claimSentAt: number | null;
   refundSentAt: number | null;
+  /** Transaction hashes of our own sends, for the operator and the history.
+   *  Recorded after the send, so they are reporting data. */
+  lockTx: string | null;
+  claimTx: string | null;
+  refundTx: string | null;
   outcome: TakerOutcome | null;
   createdAt: number;
   updatedAt: number;
@@ -118,6 +145,7 @@ interface TakerStateEnvelope {
   role: "taker";
   deployment: DeploymentIdentity;
   swaps: TakerSwapRecord[];
+  history: TakerHistoryEntry[];
 }
 
 export class TakerStateFilePoisonedError extends Error {}
@@ -151,6 +179,12 @@ function uint(value: unknown, field: string): number {
 
 function nullableUint(value: unknown, field: string): number | null {
   return value === null || value === undefined ? null : uint(value, field);
+}
+
+/** A transaction hash is reporting data, so its width is chain specific. */
+function nullableHash(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) return null;
+  return text(value, /^0x[0-9a-f]{1,256}$/, field);
 }
 
 function flag(value: unknown, field: string): boolean {
@@ -277,6 +311,57 @@ function parseOutcome(value: unknown, field: string): TakerOutcome | null {
   return value;
 }
 
+export function parseHistoryEntry(
+  raw: unknown,
+  field: string,
+): TakerHistoryEntry {
+  const row = object(raw, field);
+  const known = [
+    "orderId",
+    "direction",
+    "asset",
+    "paid",
+    "received",
+    "outcome",
+    "hashlock",
+    "lockTx",
+    "claimTx",
+    "refundTx",
+    "startedAt",
+    "settledAt",
+  ];
+  if (Object.keys(row).some((key) => !known.includes(key))) {
+    throw new Error(`${field} has unsupported fields`);
+  }
+  const direction = row["direction"];
+  if (direction !== "eth->qrl" && direction !== "qrl->eth") {
+    throw new Error(`${field}.direction is malformed`);
+  }
+  const asset = row["asset"];
+  if (typeof asset !== "string" || !isAssetSymbol(asset)) {
+    throw new Error(`${field}.asset is malformed`);
+  }
+  const outcome = parseOutcome(row["outcome"], `${field}.outcome`);
+  if (outcome === null) throw new Error(`${field}.outcome is malformed`);
+  return {
+    orderId: text(row["orderId"], ORDER_ID_RE, `${field}.orderId`),
+    direction,
+    asset,
+    paid: text(row["paid"], AMOUNT_RE, `${field}.paid`),
+    received: text(row["received"], AMOUNT_RE, `${field}.received`),
+    outcome,
+    hashlock:
+      row["hashlock"] === null || row["hashlock"] === undefined
+        ? null
+        : text(row["hashlock"], BYTES32_RE, `${field}.hashlock`),
+    lockTx: nullableHash(row["lockTx"], `${field}.lockTx`),
+    claimTx: nullableHash(row["claimTx"], `${field}.claimTx`),
+    refundTx: nullableHash(row["refundTx"], `${field}.refundTx`),
+    startedAt: uint(row["startedAt"], `${field}.startedAt`),
+    settledAt: uint(row["settledAt"], `${field}.settledAt`),
+  };
+}
+
 /** Parse and cryptographically re-verify one persisted take. */
 export function parseTakerSwapRecord(
   raw: unknown,
@@ -303,6 +388,9 @@ export function parseTakerSwapRecord(
     "lockSentAt",
     "claimSentAt",
     "refundSentAt",
+    "lockTx",
+    "claimTx",
+    "refundTx",
     "outcome",
     "createdAt",
     "updatedAt",
@@ -332,6 +420,17 @@ export function parseTakerSwapRecord(
     parseIntentRecord(value, `${field}.intents[${index}]`),
   );
   for (const record of intents) {
+    if (
+      computeReleaseCommitment(
+        orderDigest,
+        record.auth.nonce,
+        record.releaseSecret,
+      ) !== record.intent.releaseCommitment
+    ) {
+      throw new Error(
+        `${field}.intents holds a release secret that does not open its own commitment`,
+      );
+    }
     if (
       record.intent.orderDigest !== orderDigest ||
       !verifyOwnIntent({ intent: record.intent, auth: record.auth }, orderDigest, orderAuth, {
@@ -480,6 +579,9 @@ export function parseTakerSwapRecord(
     lockSentAt: nullableUint(row["lockSentAt"], `${field}.lockSentAt`),
     claimSentAt: nullableUint(row["claimSentAt"], `${field}.claimSentAt`),
     refundSentAt: nullableUint(row["refundSentAt"], `${field}.refundSentAt`),
+    lockTx: nullableHash(row["lockTx"], `${field}.lockTx`),
+    claimTx: nullableHash(row["claimTx"], `${field}.claimTx`),
+    refundTx: nullableHash(row["refundTx"], `${field}.refundTx`),
     outcome: parseOutcome(row["outcome"], `${field}.outcome`),
     createdAt: uint(row["createdAt"], `${field}.createdAt`),
     updatedAt: uint(row["updatedAt"], `${field}.updatedAt`),
@@ -512,9 +614,35 @@ export function newTakerSwapRecord(args: {
     lockSentAt: null,
     claimSentAt: null,
     refundSentAt: null,
+    lockTx: null,
+    claimTx: null,
+    refundTx: null,
     outcome: null,
     createdAt: args.nowS,
     updatedAt: args.nowS,
+  };
+}
+
+/** Build the history entry for a take that reached a terminal outcome. */
+export function historyEntryFor(
+  record: TakerSwapRecord,
+  outcome: TakerOutcome,
+  settledAt: number,
+): TakerHistoryEntry {
+  return {
+    orderId: record.orderId,
+    direction: record.direction,
+    asset: record.asset,
+    // The taker always escrows toAmount and receives fromAmount.
+    paid: record.order.toAmount,
+    received: record.order.fromAmount,
+    outcome,
+    hashlock: record.fill?.fill.hashlock ?? null,
+    lockTx: record.lockTx,
+    claimTx: record.claimTx,
+    refundTx: record.refundTx,
+    startedAt: record.createdAt,
+    settledAt,
   };
 }
 
@@ -581,6 +709,7 @@ export interface TakerIdentity {
 
 export class TakerStateFile {
   private swaps = new Map<string, TakerSwapRecord>();
+  private settled: TakerHistoryEntry[] = [];
   private poisoned: Error | null = null;
 
   constructor(
@@ -620,7 +749,8 @@ export class TakerStateFile {
     if (
       envelope["version"] !== 1 ||
       envelope["role"] !== "taker" ||
-      !Array.isArray(envelope["swaps"])
+      !Array.isArray(envelope["swaps"]) ||
+      (envelope["history"] !== undefined && !Array.isArray(envelope["history"]))
     ) {
       throw recoveryError(
         this.file,
@@ -680,11 +810,43 @@ export class TakerStateFile {
       this.assertIdentity(record);
       this.swaps.set(record.orderId, record);
     }
+    // History is reporting data with no proofs in it, so a malformed entry
+    // is refused like everything else but carries no recovery meaning.
+    for (const [index, value] of (envelope["history"] ?? []).entries()) {
+      this.settled.push(parseHistoryEntry(value, `history ${index}`));
+    }
+    this.settled = this.settled.slice(-MAX_HISTORY_ENTRIES);
   }
 
   all(): TakerSwapRecord[] {
     this.assertHealthy();
     return [...this.swaps.values()].map((record) => structuredClone(record));
+  }
+
+  /** Settled takes, oldest first. */
+  history(): TakerHistoryEntry[] {
+    this.assertHealthy();
+    return this.settled.map((entry) => structuredClone(entry));
+  }
+
+  /** Retire a record and keep its outcome for the operator, in one write. */
+  settle(orderId: string, entry: TakerHistoryEntry, keepRecord: boolean): void {
+    this.assertHealthy();
+    const previousSwaps = new Map(this.swaps);
+    const previousHistory = this.settled;
+    this.settled = [...this.settled, structuredClone(entry)].slice(
+      -MAX_HISTORY_ENTRIES,
+    );
+    if (!keepRecord) this.swaps.delete(orderId);
+    try {
+      this.persist();
+    } catch (err) {
+      if (this.poisoned === null) {
+        this.swaps = previousSwaps;
+        this.settled = previousHistory;
+      }
+      throw err;
+    }
   }
 
   get(orderId: string): TakerSwapRecord | null {
@@ -770,6 +932,7 @@ export class TakerStateFile {
       role: "taker",
       deployment: this.deployment,
       swaps: [...this.swaps.values()],
+      history: this.settled,
     };
     let fileDescriptor: number | undefined;
     let renamed = false;

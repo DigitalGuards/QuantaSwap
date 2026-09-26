@@ -344,15 +344,22 @@ package's chain senders, ML-DSA-87 signing, protocol verification and process
 lease, and keeps its own `TAKER_*` configuration, key files and state file, so
 a taker and a maker never share a state path or a lease.
 
-- `list` and `quote` are read-only and need no key material.
+- `list`, `quote` and `status` are read-only and take no state lease, so
+  `status` works while a take is running; `list` and `quote` need no keys.
 - `take` refuses to fund unless the maker escrow verifies at the configured
   confirmation depth on every field, its timeout outlives the taker's deadline
   by the configured claim margin, and an authenticated FillV2 acknowledgment is
   already durable.
 - Recovery material, including the walk-away release secret, is persisted
   before each network send, so `resume` continues an interrupted swap without
-  repeating a transaction. An escrow already claimed by a sponsoring maker
-  counts as a completed payout.
+  repeating a transaction. `resume` drives every unsettled take to an outcome,
+  with `--once` for a single cron-style pass. An escrow already claimed by a
+  sponsoring maker counts as a completed payout when it paid the agreed
+  recipient.
+- A transient failure is logged and retried after the poll interval; only a
+  long run of consecutive failures stops a command, leaving the record for a
+  supervised `resume`. Settled takes stay in a local history that `status`
+  prints, with outcomes and transaction hashes and no secrets.
 - `--dry-run` prints the action each step would take and sends, signs and
   writes nothing.
 

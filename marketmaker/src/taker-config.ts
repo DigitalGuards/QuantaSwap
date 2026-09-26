@@ -37,7 +37,13 @@ export interface TakerReadConfig {
   claimSafetyS: number;
   /** Refuse to fund this close to our own responder deadline. */
   lockRunwayS: number;
-  /** Runway an order proof must still have before we propose against it. */
+  /** Runway an order proof must still carry before we propose against it.
+   *  A maker answers a proposal with a FillV2 whose response window is at
+   *  least 60 seconds and must sit inside the order's own validity, so a
+   *  proposal against a proof with less than that left can never be filled.
+   *  The default adds a maker tick on top of that 60 second floor. Live
+   *  quotes are short: the first-party staging maker signs 300 second
+   *  proofs, so a larger floor refuses the whole book. */
   minOrderRunwayS: number;
   /** Native balance kept free for gas on the Ethereum leg. */
   ethGasReserveWei: bigint;
@@ -73,7 +79,7 @@ export function loadTakerReadConfig(): TakerReadConfig {
     resendAfterS: envInt("TAKER_RESEND_AFTER_S", 240),
     claimSafetyS: envInt("TAKER_CLAIM_SAFETY_S", 1_800),
     lockRunwayS: envInt("TAKER_LOCK_RUNWAY_S", 900),
-    minOrderRunwayS: envInt("TAKER_MIN_ORDER_RUNWAY_S", 900),
+    minOrderRunwayS: envInt("TAKER_MIN_ORDER_RUNWAY_S", 90),
     ethGasReserveWei: envWei("TAKER_ETH_GAS_RESERVE_WEI", 2n * 10n ** 15n),
     qrlGasReserveWei: envWei("TAKER_QRL_GAS_RESERVE_WEI", 10n ** 18n),
     stateFile: env(
@@ -83,10 +89,43 @@ export function loadTakerReadConfig(): TakerReadConfig {
   };
 }
 
+/** Margin below an escrow's own deadline where a claim can no longer be
+ *  expected to mine, so submitting one only burns the retry slot. */
+export function claimSubmitMarginS(cfg: {
+  txTimeoutMs: number;
+}): number {
+  return Math.ceil(cfg.txTimeoutMs / 1000) + 60;
+}
+
+/**
+ * The claim margin the taker demands from a maker escrow has to exceed the
+ * margin where its own claim stops being submittable, or the claim window
+ * is empty by construction and the swap can only settle unevenly. Refuse
+ * to start on that configuration, so it surfaces before a swap does.
+ */
+export function assertClaimWindowIsUsable(cfg: TakerReadConfig): void {
+  const submitMargin = claimSubmitMarginS(cfg);
+  if (cfg.claimSafetyS <= submitMargin) {
+    throw new Error(
+      `TAKER_CLAIM_SAFETY_S (${cfg.claimSafetyS}s) must exceed the transaction submission margin of ${submitMargin}s ` +
+        `(TAKER_TX_TIMEOUT_MS / 1000 plus 60), or a verified escrow leaves no window this client could claim in. ` +
+        `Raise TAKER_CLAIM_SAFETY_S or lower TAKER_TX_TIMEOUT_MS`,
+    );
+  }
+}
+
+export function loadTakerReadConfigChecked(): TakerReadConfig {
+  const cfg = loadTakerReadConfig();
+  assertClaimWindowIsUsable(cfg);
+  return cfg;
+}
+
 export function loadTakerConfig(): TakerConfig {
-  return {
+  const cfg = {
     ...loadTakerReadConfig(),
     ethPrivateKey: readRequiredSecret("TAKER_ETH_PRIVATE_KEY"),
     qrlHexseed: readRequiredSecret("TAKER_QRL_HEXSEED"),
   };
+  assertClaimWindowIsUsable(cfg);
+  return cfg;
 }

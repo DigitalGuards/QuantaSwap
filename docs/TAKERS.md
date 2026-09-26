@@ -140,17 +140,34 @@ needs no keys. Exit status is 1 when the order cannot be taken.
 node dist/taker-cli.js take <orderId> --max-in 250 --min-out 0.02 --yes
 ```
 
-Runs the whole swap. It verifies the order, checks the limits and your funding
-balances, records the take, proposes, waits for the maker's FillV2, verifies
-the maker escrow at depth, funds your leg, claims when the preimage appears,
-and refunds if the maker abandons the swap. Exit status is 0 on a completed
-claim, 1 when the take ended without funding, and 2 on an uneven settlement
-that needs attention. A `--once` pass that leaves the take in flight exits 0;
-`status` then shows where it stands and `resume` continues it.
+Runs the whole swap. It verifies the order, pins the exact terms you were
+shown by digest, checks the limits and your funding balances, records the
+take, proposes, waits for the maker's FillV2, verifies the maker escrow at
+depth, funds your leg, claims when the preimage appears, and refunds if the
+maker abandons the swap. It keeps going across passes until the swap reaches
+an outcome, so leave it running.
 
-Limits are whole units of the asset on that leg: `--max-in 250` means at most
-250 QRL when you pay the QRL leg, and `--min-out 0.02` means at least
-0.02 ETH when you receive the Ethereum leg.
+Exit status:
+
+| Code | Meaning |
+|---|---|
+| 0 | claimed: the swap completed and you were paid |
+| 1 | ended without funding (a bound, a refusal, a cancellation, an abort) |
+| 2 | uneven settlement: one leg claimed and the other refunded, needs an operator |
+| 3 | still in flight, for example after `--once`: run `taker resume` |
+| 4 | refunded: your escrow came back to you |
+| 5 | released: you walked away before funding |
+
+A transient failure never ends a run: the pass is logged and retried after the
+poll interval, and only a long run of consecutive failures stops the command,
+with the record left intact for `resume`. Run `resume` under a supervisor as
+the backstop.
+
+Limits are whole units of the asset on that leg, scaled by that leg's own
+decimals: `--max-in 250` means at most 250 QRL when you pay the QRL leg, and
+`--min-out 0.02` means at least 0.02 ETH when you receive the Ethereum leg.
+A limit at or below zero is refused, since it would remove the bound it was
+meant to add.
 
 ### `resume` and `status`
 
@@ -159,10 +176,15 @@ node dist/taker-cli.js status
 node dist/taker-cli.js resume
 ```
 
-`status` lists every recorded take with its phase, hashlock and deadline.
-`resume` advances each unsettled take one pass, which is what a cron job or a
-supervisor restart should call after a crash. Both read the same durable state
-file the swap loop writes.
+`status` lists every take in flight with its phase, hashlock and deadline,
+then the settled ones from the local history (outcome, amounts, transaction
+hashes, when they settled). It takes no lease and writes nothing, so it works
+while a take is running.
+
+`resume` drives every unsettled take to an outcome, which is what a supervisor
+should run after a crash. `resume --once` makes a single pass over each take
+instead, for cron-style operation. Both read the same durable state file the
+swap loop writes.
 
 ### `release <orderId>`
 
@@ -178,7 +200,7 @@ governs, and the refund path applies.
 
 | Flag | Effect |
 |---|---|
-| `--dry-run` | Prints the action each step would take and sends nothing, signs nothing and writes no state. Available on `take`, `resume` and `release`. |
+| `--dry-run` | Prints the action each step would take and sends nothing, signs nothing and writes no state. It also takes no lease, so it leaves no lock file behind. Available on `take`, `resume` and `release`. |
 | `--yes` | Skips the interactive confirmation before the first funding decision. Required for non-interactive runs, which otherwise refuse to start. |
 | `--max-in <amount>` | Refuses the take when the order asks for more than this on the leg you pay. |
 | `--min-out <amount>` | Refuses the take when the order pays less than this on the leg you receive. |
@@ -192,6 +214,23 @@ visible at the head before reaching `TAKER_CONFIRMATIONS` depth, when your own
 deadline is within `TAKER_LOCK_RUNWAY_S`, and when the order, the proposal or
 the fill was released, cancelled or contradicted by conflicting maker
 messages.
+
+Two configuration rules follow from that. `TAKER_CLAIM_SAFETY_S` must exceed
+`TAKER_TX_TIMEOUT_MS / 1000` plus 60 seconds, which is the margin where a
+claim can no longer be expected to mine; the taker refuses to start otherwise,
+because a verified escrow would leave no window it could claim in.
+`TAKER_MIN_ORDER_RUNWAY_S` bounds how fresh an order proof must be before this
+client proposes against it: a maker answers with a response window of at least
+60 seconds that has to fit inside the order's own validity, so the default of
+90 seconds covers that floor plus a maker tick. Live quotes are short, around
+300 seconds on the first-party staging book, so a much larger floor refuses
+the whole book.
+
+One leftover to know about on a token leg: a take approves the exact escrow
+amount before locking. If the take is then refused or aborted between the
+approval and the escrow, that allowance stays on the token contract. Only the
+HTLC can spend it, and only for an escrow you fund, so nothing is lost; set it
+to zero yourself if you want a clean allowance.
 
 ## State, recovery and single ownership
 

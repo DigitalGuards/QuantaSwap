@@ -4,7 +4,6 @@
 
 import { parseUnits } from "ethers";
 import { pathToFileURL } from "node:url";
-import { assetInfo, type AssetSymbol } from "./assets.js";
 import { EthLeg, QrlLeg } from "./chains.js";
 import {
   assertPortableDeployment,
@@ -21,9 +20,8 @@ import {
   type TakerReadConfig,
 } from "./taker-config.js";
 import { TakerBookClient } from "./taker-orderbook.js";
-import { initiatorLeg, responderLeg } from "./taker-policy.js";
 import { TakerEngine, type TakeBounds } from "./taker.js";
-import { TakerStateFile } from "./taker-state.js";
+import { TakerStateFile, type TakerOutcome } from "./taker-state.js";
 
 const USAGE = `QuantaSwap scripted taker
 
@@ -38,8 +36,37 @@ Usage:
 Amounts for --max-in and --min-out are whole units of the asset on that
 leg (QRL on the QRL leg, ETH or the token symbol on the Ethereum leg).
 
+Exit status: 0 claimed, 1 ended without funding, 2 uneven settlement,
+3 still in flight (run resume), 4 refunded, 5 released.
+
 Configuration comes from TAKER_* environment variables; see
-../docs/TAKERS.md and .env.example. list and quote need no keys.`;
+../docs/TAKERS.md and .env.taker.example. list and quote need no keys.`;
+
+export const EXIT_CLAIMED = 0;
+export const EXIT_UNFUNDED = 1;
+export const EXIT_UNEVEN = 2;
+export const EXIT_IN_FLIGHT = 3;
+export const EXIT_REFUNDED = 4;
+export const EXIT_RELEASED = 5;
+
+/** One outcome, one status code, so a supervisor can act on it. */
+export function takeExitCode(outcome: TakerOutcome | null): number {
+  switch (outcome) {
+    case null:
+      return EXIT_IN_FLIGHT;
+    case "claimed":
+      return EXIT_CLAIMED;
+    case "uneven":
+      return EXIT_UNEVEN;
+    case "refunded":
+      return EXIT_REFUNDED;
+    case "released":
+      return EXIT_RELEASED;
+    case "aborted":
+    default:
+      return EXIT_UNFUNDED;
+  }
+}
 
 interface ParsedArgs {
   command: string;
@@ -85,12 +112,6 @@ function flagValue(args: ParsedArgs, name: string): string | null {
   return value;
 }
 
-/** Decimals of the leg an amount limit applies to. --max-in bounds what we
- *  escrow (the responder leg); --min-out bounds what we receive. */
-function legDecimals(leg: LegKey, asset: AssetSymbol): number {
-  return leg === "qrl" ? 18 : assetInfo(asset).decimals;
-}
-
 function bookFor(cfg: TakerReadConfig): TakerBookClient {
   return new TakerBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
 }
@@ -126,9 +147,16 @@ interface SigningSession {
  *  and the durable state file. The lease is released by close(). */
 async function signingSession(
   cfg: TakerConfig,
-  options: { dryRun?: boolean; verifyChains?: boolean } = {},
+  options: {
+    dryRun?: boolean;
+    verifyChains?: boolean;
+    /** A read-only session takes no lease and writes nothing, so `status`
+     *  works while a take runs and a dry run leaves no lock file behind. */
+    readOnly?: boolean;
+  } = {},
 ): Promise<SigningSession> {
   const dryRun = options.dryRun === true;
+  const readOnly = options.readOnly === true || dryRun;
   const deployment = makeDeploymentIdentity(cfg);
   assertPortableDeployment(deployment);
   const eth = new EthLeg(cfg);
@@ -140,21 +168,30 @@ async function signingSession(
       "the protocol signer address does not match the QRL transaction signer",
     );
   }
-  const lease = StateProcessLease.acquire(cfg.stateFile, {
-    deploymentFingerprint: deployment.configFingerprint,
-    ethAccount: eth.address.toLowerCase(),
-    qrlAccount: signer.address.toLowerCase(),
-  });
+  const lease = readOnly
+    ? null
+    : StateProcessLease.acquire(cfg.stateFile, {
+        deploymentFingerprint: deployment.configFingerprint,
+        ethAccount: eth.address.toLowerCase(),
+        qrlAccount: signer.address.toLowerCase(),
+      });
+  const identity = { ethAccount: eth.address, qrlAccount: signer.address };
   let state: TakerStateFile;
   try {
     state = new TakerStateFile(
       cfg.stateFile,
       deployment,
-      () => lease.assertOwned(),
-      { ethAccount: eth.address, qrlAccount: signer.address },
+      lease === null
+        ? () => {
+            throw new Error(
+              "this session is read-only and holds no state lease, so it must not write state",
+            );
+          }
+        : () => lease.assertOwned(),
+      identity,
     );
   } catch (error) {
-    lease.close();
+    lease?.close();
     signer.close();
     throw error;
   }
@@ -169,7 +206,7 @@ async function signingSession(
       ]);
       assertRuntimeChainIds(deployment, ethChainId, qrlChainId);
     } catch (error) {
-      lease.close();
+      lease?.close();
       signer.close();
       throw error;
     }
@@ -186,27 +223,40 @@ async function signingSession(
     cfg,
     close: () => {
       signer.close();
-      lease.close();
+      lease?.close();
     },
   };
 }
 
-function boundsFor(
+/** Parse a limit in whole units of the leg it applies to. A limit at or
+ *  below zero would silently remove the bound it was meant to add. */
+function limit(
   args: ParsedArgs,
-  direction: "eth->qrl" | "qrl->eth",
-  asset: AssetSymbol,
+  name: "max-in" | "min-out",
+  decimals: number,
+): bigint | null {
+  const raw = flagValue(args, name);
+  if (raw === null) return null;
+  let value: bigint;
+  try {
+    value = parseUnits(raw, decimals);
+  } catch {
+    throw new Error(`--${name} must be a decimal amount, for example 1.5`);
+  }
+  if (value <= 0n) throw new Error(`--${name} must be greater than zero`);
+  return value;
+}
+
+/** Limits are scaled by the decimals of the verified order's own legs. */
+export function boundsFor(
+  args: ParsedArgs,
+  quote: { pay: { decimals: number }; receive: { decimals: number } },
 ): TakeBounds {
-  const payLeg = responderLeg(direction);
-  const receiveLeg = initiatorLeg(direction);
-  const maxIn = flagValue(args, "max-in");
-  const minOut = flagValue(args, "min-out");
+  const maxIn = limit(args, "max-in", quote.pay.decimals);
+  const minOut = limit(args, "min-out", quote.receive.decimals);
   return {
-    ...(maxIn === null
-      ? {}
-      : { maxIn: parseUnits(maxIn, legDecimals(payLeg, asset)) }),
-    ...(minOut === null
-      ? {}
-      : { minOut: parseUnits(minOut, legDecimals(receiveLeg, asset)) }),
+    ...(maxIn === null ? {} : { maxIn }),
+    ...(minOut === null ? {} : { minOut }),
   };
 }
 
@@ -250,10 +300,7 @@ async function commandQuote(args: ParsedArgs): Promise<number> {
   const cfg = loadTakerReadConfig();
   const engine = readOnlyEngine(cfg);
   const preview = await engine.quote(orderId);
-  const quote = await engine.quote(
-    orderId,
-    boundsFor(args, preview.direction, preview.asset),
-  );
+  const quote = await engine.quote(orderId, boundsFor(args, preview));
   if (args.flags.has("json")) {
     console.log(JSON.stringify(quote, jsonReplacer, 2));
     return quote.issue === null ? 0 : 1;
@@ -296,26 +343,38 @@ async function commandTake(args: ParsedArgs): Promise<number> {
   const session = await signingSession(cfg, { dryRun });
   try {
     const preview = await session.engine.quote(orderId);
-    const bounds = boundsFor(args, preview.direction, preview.asset);
+    const bounds = boundsFor(args, preview);
     console.log(
       `Taking order ${orderId}: lock ${preview.pay.display}, receive ${preview.receive.display}.`,
     );
+    if (preview.issue !== null) {
+      throw new Error(`refusing to take this order: ${preview.issue}`);
+    }
     if (!args.flags.has("yes") && !dryRun) {
       const confirmed = await confirm(
         "This escrows real testnet funds. Continue? [y/N] ",
       );
       if (!confirmed) {
         console.log("Cancelled; nothing was signed or sent.");
-        return 1;
+        return EXIT_UNFUNDED;
       }
     }
-    const record = await session.engine.begin(orderId, bounds);
+    // The consented terms are pinned by digest, so a book that swapped the
+    // order under this id between the quote and the take is refused.
+    const record = await session.engine.begin(
+      orderId,
+      bounds,
+      preview.orderDigest,
+    );
     const { outcome } = await session.engine.run(record, {
       ...(args.flags.has("once") || dryRun ? { maxPasses: 1 } : {}),
     });
-    if (outcome === "claimed") return 0;
-    if (outcome === null) return 0;
-    return outcome === "uneven" ? 2 : 1;
+    if (outcome === null) {
+      console.log(
+        "This take is still in flight. Run `taker status` to see where it stands and `taker resume` to continue it.",
+      );
+    }
+    return takeExitCode(outcome);
   } finally {
     session.close();
   }
@@ -328,7 +387,7 @@ async function commandResume(args: ParsedArgs): Promise<number> {
   });
   try {
     const verdicts = await session.engine.resume({
-      ...(args.flags.has("once") ? { maxPasses: 1 } : {}),
+      ...(args.flags.has("once") ? { once: true } : {}),
     });
     if (verdicts.length === 0) console.log("No in-flight takes to resume.");
     for (const verdict of verdicts) {
@@ -345,14 +404,28 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
   const session = await signingSession(cfg, {
     dryRun: true,
     verifyChains: false,
+    readOnly: true,
   });
   try {
     const lines = session.engine.status();
     if (args.flags.has("json")) {
-      console.log(JSON.stringify(lines, jsonReplacer, 2));
+      console.log(
+        JSON.stringify(
+          { inFlight: lines, settled: session.engine.history() },
+          jsonReplacer,
+          2,
+        ),
+      );
       return 0;
     }
-    if (lines.length === 0) console.log("No recorded takes.");
+    const history = session.engine.history();
+    if (lines.length === 0) {
+      console.log(
+        history.length === 0
+          ? "No takes recorded yet."
+          : "No takes in flight.",
+      );
+    }
     for (const line of lines) {
       console.log(
         [
@@ -369,6 +442,24 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
           .filter((part) => part !== "")
           .join("  "),
       );
+    }
+    if (history.length > 0) {
+      console.log(`Settled (${history.length} kept):`);
+      for (const entry of history) {
+        console.log(
+          [
+            `  ${entry.orderId.slice(0, 12)}`,
+            entry.outcome,
+            `paid ${entry.paid}`,
+            `received ${entry.received}`,
+            new Date(entry.settledAt * 1000).toISOString(),
+            entry.claimTx === null ? "" : `claim ${entry.claimTx}`,
+            entry.refundTx === null ? "" : `refund ${entry.refundTx}`,
+          ]
+            .filter((part) => part !== "")
+            .join("  "),
+        );
+      }
     }
     return 0;
   } finally {
@@ -409,7 +500,7 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
 
-async function confirm(prompt: string): Promise<boolean> {
+export async function confirm(prompt: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
     throw new Error(
       "refusing to take without a confirmation: pass --yes for non-interactive runs",

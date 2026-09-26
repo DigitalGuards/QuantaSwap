@@ -20,8 +20,10 @@ import {
 } from "./protocol-signing.js";
 import { V2_TEST_EXTENDED_SEED } from "./protocol-v2-test-helper.js";
 import {
+  MAX_HISTORY_ENTRIES,
   MAX_RETAINED_INTENTS,
   TakerStateFile,
+  historyEntryFor,
   newTakerSwapRecord,
   type TakerSwapRecord,
 } from "./taker-state.js";
@@ -387,6 +389,85 @@ describe("taker state durability", () => {
     assert.throws(
       () => new TakerStateFile(file, DEPLOYMENT),
       /proposal for other accounts/,
+    );
+  });
+
+  it("keeps a settled take in its history and retires the record", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = withFill(withIntent(recordFor(order), order), order);
+    const state = new TakerStateFile(file, DEPLOYMENT);
+    state.upsert({ ...record, lockTx: "0xabc", claimTx: "0xdef" });
+    state.settle(
+      record.orderId,
+      historyEntryFor(
+        { ...record, lockTx: "0xabc", claimTx: "0xdef" },
+        "claimed",
+        NOW + 60,
+      ),
+      false,
+    );
+    assert.deepEqual(state.all(), []);
+    const reopened = reopen(file);
+    assert.deepEqual(reopened.all(), []);
+    const history = reopened.history();
+    assert.equal(history.length, 1);
+    assert.equal(history[0]?.outcome, "claimed");
+    assert.equal(history[0]?.orderId, record.orderId);
+    assert.equal(history[0]?.claimTx, "0xdef");
+    assert.equal(history[0]?.received, order.order.fromAmount);
+    assert.equal(history[0]?.paid, order.order.toAmount);
+  });
+
+  it("keeps an uneven settlement and its record", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = withFill(withIntent(recordFor(order), order), order);
+    const state = new TakerStateFile(file, DEPLOYMENT);
+    state.upsert(record);
+    state.settle(
+      record.orderId,
+      historyEntryFor(record, "uneven", NOW + 60),
+      true,
+    );
+    assert.equal(state.all().length, 1);
+    assert.equal(state.history()[0]?.outcome, "uneven");
+  });
+
+  it("caps the history it retains", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = recordFor(order);
+    const state = new TakerStateFile(file, DEPLOYMENT);
+    for (let index = 0; index < MAX_HISTORY_ENTRIES + 5; index += 1) {
+      state.settle(
+        record.orderId,
+        historyEntryFor(record, "aborted", NOW + index),
+        false,
+      );
+    }
+    assert.equal(state.history().length, MAX_HISTORY_ENTRIES);
+    assert.equal(
+      state.history()[MAX_HISTORY_ENTRIES - 1]?.settledAt,
+      NOW + MAX_HISTORY_ENTRIES + 4,
+    );
+  });
+
+  it("refuses a release secret that does not open its own commitment", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withIntent(recordFor(order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: { intents: { releaseSecret: string }[] }[];
+    };
+    const intent = envelope.swaps[0]?.intents[0];
+    if (intent !== undefined) intent.releaseSecret = `0x${"7".repeat(64)}`;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /does not open its own commitment/,
     );
   });
 

@@ -24,6 +24,7 @@ import {
   erc20BalanceOf,
   getConfirmedSwapState,
   getSwapState,
+  sameAddr,
   submitPreflightedClaim,
   SwapStatus,
   type LegKey,
@@ -40,7 +41,7 @@ import {
   computeFillIntentDigest,
   ProtocolSigner,
 } from "./protocol-signing.js";
-import type { TakerReadConfig } from "./taker-config.js";
+import { claimSubmitMarginS, type TakerReadConfig } from "./taker-config.js";
 import type { TakerBookClient } from "./taker-orderbook.js";
 import {
   decideTaker,
@@ -62,6 +63,7 @@ import {
   type VerifiedTakerOrder,
 } from "./taker-proofs.js";
 import {
+  historyEntryFor,
   latestIntent,
   MAX_RETAINED_INTENTS,
   newTakerSwapRecord,
@@ -119,6 +121,8 @@ export interface LegView {
 
 export interface OrderQuote {
   id: string;
+  /** Digest of the exact signed terms this quote describes. */
+  orderDigest: string;
   direction: Direction;
   asset: AssetSymbol;
   /** What the taker escrows. */
@@ -136,6 +140,20 @@ export interface OrderQuote {
   issue: string | null;
 }
 
+export interface TakerHistoryLine {
+  orderId: string;
+  direction: Direction;
+  asset: AssetSymbol;
+  paid: string;
+  received: string;
+  outcome: TakerOutcome;
+  hashlock: string | null;
+  lockTx: string | null;
+  claimTx: string | null;
+  refundTx: string | null;
+  settledAt: number;
+}
+
 export interface TakerStatusLine {
   orderId: string;
   direction: Direction;
@@ -149,6 +167,22 @@ export interface TakerStatusLine {
 }
 
 const short = (value: string): string => value.slice(0, 10);
+
+/** Consecutive failed passes that turn a flaky environment into a stop. */
+const MAX_STEP_FAILURES = 10;
+
+/**
+ * The wait between passes. Its timer is deliberately NOT unref'd: while a
+ * take waits for the counterparty there is nothing else holding the event
+ * loop (the state lease heartbeat is unref'd, and idle HTTP sockets close
+ * on their own), so an unref'd timer here lets Node exit mid-swap and
+ * report success. Exported so a test can assert the timer is ref'd.
+ */
+export function defaultSleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 /** A record whose payout accounts differ from the loaded keys would have
  *  this process fund a swap that pays someone else. */
@@ -214,12 +248,7 @@ export class TakerEngine {
         console.log(`[taker ${new Date().toISOString()}]`, ...args);
       });
     this.secret = deps.secret ?? (() => `0x${randomBytes(32).toString("hex")}`);
-    this.sleep =
-      deps.sleep ??
-      ((ms: number) =>
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, ms).unref();
-        }));
+    this.sleep = deps.sleep ?? defaultSleep;
     this.dryRun = deps.dryRun ?? false;
   }
 
@@ -292,6 +321,7 @@ export class TakerEngine {
     const pay = legView(rLeg, verified.asset, verified.toAmount);
     return {
       id: verified.id,
+      orderDigest: verified.orderDigest,
       direction: verified.direction,
       asset: verified.asset,
       pay,
@@ -348,7 +378,12 @@ export class TakerEngine {
    * balances, and persist a record before anything is signed. Returns the
    * durable record the swap loop drives.
    */
-  async begin(orderId: string, bounds: TakeBounds = {}): Promise<TakerSwapRecord> {
+  async begin(
+    orderId: string,
+    bounds: TakeBounds = {},
+    /** Digest the operator consented to; a changed order is refused. */
+    expectedOrderDigest?: string,
+  ): Promise<TakerSwapRecord> {
     const signing = this.signing();
     const existing = signing.state.get(orderId);
     if (existing !== null && existing.outcome === null) {
@@ -371,6 +406,14 @@ export class TakerEngine {
     if (row.status !== "open") {
       throw new Error(
         `order ${short(orderId)} has status ${row.status}; a take needs an open order`,
+      );
+    }
+    if (
+      expectedOrderDigest !== undefined &&
+      expectedOrderDigest !== verified.orderDigest
+    ) {
+      throw new Error(
+        `order ${short(orderId)} changed its signed terms since it was quoted; quote it again before taking it`,
       );
     }
     const plans = this.planFor(verified, {
@@ -560,6 +603,7 @@ export class TakerEngine {
               responderTimeout: fill.fill.responderTimeout,
               respondBy: fill.auth.expiresAt,
             },
+      prelocked: record.order.prelock !== undefined,
       plans,
       iState,
       iConfirmed,
@@ -574,7 +618,7 @@ export class TakerEngine {
       resendAfterS: this.deps.cfg.resendAfterS,
       claimSafetyS: this.deps.cfg.claimSafetyS,
       lockRunwayS: this.deps.cfg.lockRunwayS,
-      claimSubmitMarginS: Math.ceil(this.deps.cfg.txTimeoutMs / 1000) + 60,
+      claimSubmitMarginS: claimSubmitMarginS(this.deps.cfg),
     });
 
     record = await this.execute(record, verdict, plans, {
@@ -634,8 +678,15 @@ export class TakerEngine {
       if (!(error instanceof FundingBlockedError)) throw error;
       // A permanent refusal, so nothing will ever be funded here. Nothing
       // of ours is on chain at this point: the acknowledgment that
-      // authorizes funding is exactly what did not happen.
+      // authorizes funding is exactly what did not happen. Reveal the
+      // walk-away secret first, so the maker learns this take is dead
+      // before the secret is discarded with the record.
       if (record.lockSentAt !== null) throw error;
+      this.log(`order ${short(record.orderId)}: ${error.message}`);
+      const submitted = latestIntent(record);
+      if (submitted !== null && submitted.submittedAt !== null) {
+        return this.release(record);
+      }
       return this.settle(record, "aborted", error.message);
     }
     if (verified === null) return record;
@@ -867,7 +918,7 @@ export class TakerEngine {
       this.log(
         `order ${short(record.orderId)}: escrowed ${record.asset} on the eth leg, tx ${hash}`,
       );
-      return stored;
+      return signing.state.upsert({ ...stored, lockTx: hash, updatedAt: this.nowS() });
     }
     const stored = signing.state.upsert({
       ...record,
@@ -881,7 +932,7 @@ export class TakerEngine {
     this.log(
       `order ${short(record.orderId)}: escrowed ${legView(plan.leg, record.asset, plan.amount).display} on the ${plan.leg} leg, tx ${hash}`,
     );
-    return stored;
+    return signing.state.upsert({ ...stored, lockTx: hash, updatedAt: this.nowS() });
   }
 
   /** Claim the maker escrow with the public preimage. A claim that lost a
@@ -926,14 +977,24 @@ export class TakerEngine {
       this.log(
         `order ${short(record.orderId)}: claimed ${legView(leg, record.asset, plans.initiator.amount).display} on the ${leg} leg, tx ${hash}`,
       );
-      return stored;
+      return signing.state.upsert({
+        ...stored,
+        claimTx: hash,
+        updatedAt: this.nowS(),
+      });
     } catch (error) {
       const current = await this.legStateOrNull(
         this.deps.legRpc[leg],
         hashlock,
         false,
       );
-      if (current?.status === SwapStatus.Claimed) {
+      // A sponsored claim only counts as our payout when it paid the
+      // recipient we agreed on: a Claimed record with any other recipient
+      // belongs to someone else's swap on the same hashlock.
+      if (
+        current?.status === SwapStatus.Claimed &&
+        sameAddr(current.recipient, plans.initiator.recipient)
+      ) {
         this.log(
           `order ${short(record.orderId)}: escrow already claimed for us, likely a sponsored claim; treating as settled`,
         );
@@ -968,7 +1029,11 @@ export class TakerEngine {
     this.log(
       `order ${short(record.orderId)}: refunded our ${leg} escrow, tx ${hash}`,
     );
-    return stored;
+    return signing.state.upsert({
+      ...stored,
+      refundTx: hash,
+      updatedAt: this.nowS(),
+    });
   }
 
   /** Reveal the committed walk-away secret so the maker stops waiting. */
@@ -1015,8 +1080,12 @@ export class TakerEngine {
     return stored;
   }
 
-  /** Record a terminal outcome. Settled records are dropped; an uneven
-   *  settlement is kept so an operator still sees it in `status`. */
+  /**
+   * Record a terminal outcome. The record is retired and its outcome is
+   * appended to the local history, so `status` can still report the take
+   * after the recovery material is gone. An uneven settlement keeps its
+   * record too, because it needs an operator.
+   */
   private settle(
     record: TakerSwapRecord,
     outcome: TakerOutcome,
@@ -1025,29 +1094,63 @@ export class TakerEngine {
     const signing = this.signing();
     this.log(`order ${short(record.orderId)}: ${outcome} (${reason})`);
     if (this.dryRun) return { ...record, outcome };
-    if (outcome === "uneven") {
-      return signing.state.upsert({
-        ...record,
-        outcome,
-        updatedAt: this.nowS(),
-      });
-    }
-    signing.state.delete(record.orderId);
-    return { ...record, outcome };
+    const settledAt = this.nowS();
+    const settled = { ...record, outcome, updatedAt: settledAt };
+    if (outcome === "uneven") signing.state.upsert(settled);
+    signing.state.settle(
+      record.orderId,
+      historyEntryFor(settled, outcome, settledAt),
+      outcome === "uneven",
+    );
+    return settled;
   }
 
-  /** Drive one take to a terminal outcome. */
+  /**
+   * Drive one take to a terminal outcome. A transient failure after funding
+   * must never end the process: each pass is isolated, logged, and retried
+   * after the poll interval, until a run of consecutive failures shows the
+   * environment is broken, and no longer merely flaky.
+   */
   async run(
     record: TakerSwapRecord,
-    options: { maxPasses?: number; abandon?: () => boolean } = {},
+    options: {
+      maxPasses?: number;
+      abandon?: () => boolean;
+      maxConsecutiveFailures?: number;
+    } = {},
   ): Promise<TakerRunResult> {
     const maxPasses = options.maxPasses ?? Number.POSITIVE_INFINITY;
+    const failureBudget = options.maxConsecutiveFailures ?? MAX_STEP_FAILURES;
     let current = record;
     let last: TakerVerdict | null = null;
+    let failures = 0;
     for (let pass = 0; pass < maxPasses; pass += 1) {
       const abandon = options.abandon?.() === true;
-      const { record: next, verdict } = await this.step(current, { abandon });
-      current = next;
+      let verdict: TakerVerdict;
+      try {
+        const result = await this.step(current, { abandon });
+        current = result.record;
+        verdict = result.verdict;
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        this.log(
+          `order ${short(current.orderId)} pass failed (${failures}/${failureBudget}):`,
+          error instanceof Error ? error.message : error,
+        );
+        if (failures >= failureBudget) {
+          throw new Error(
+            `order ${short(current.orderId)} failed ${failures} passes in a row; stopping. ` +
+              `The record is intact: fix the endpoints and run resume, ideally under a supervisor`,
+          );
+        }
+        if (maxPasses === 1 || this.dryRun) {
+          throw error;
+        }
+        await this.sleep(this.deps.cfg.pollMs);
+        continue;
+
+      }
       last = verdict;
       if (
         verdict.decision === "finish" ||
@@ -1059,35 +1162,100 @@ export class TakerEngine {
       if (this.dryRun) {
         return { record: current, outcome: null, verdict };
       }
-      await this.sleep(this.deps.cfg.pollMs);
+      // No wait on the last pass: a single-pass caller (resume) returns
+      // straight away and does its own pacing.
+      if (pass + 1 < maxPasses) await this.sleep(this.deps.cfg.pollMs);
     }
     return { record: current, outcome: current.outcome, verdict: last };
   }
 
-  /** Advance every unsettled take once, and report what each one did. */
-  async resume(options: { maxPasses?: number } = {}): Promise<TakerVerdict[]> {
+  /**
+   * Advance every unsettled take. By default this keeps going until each
+   * one settles, so a supervised `resume` is a complete backstop after a
+   * crash; `once` makes a single pass over each, for cron-style operation.
+   */
+  async resume(
+    options: { once?: boolean; maxRounds?: number } = {},
+  ): Promise<TakerVerdict[]> {
     const signing = this.signing();
-    const verdicts: TakerVerdict[] = [];
-    for (const record of signing.state.all()) {
-      if (record.outcome !== null) continue;
-      try {
-        const { verdict } = await this.run(record, {
-          maxPasses: options.maxPasses ?? 1,
-        });
-        if (verdict !== null) verdicts.push(verdict);
-      } catch (error) {
-        this.log(
-          `order ${short(record.orderId)} deferred:`,
-          error instanceof Error ? error.message : error,
-        );
+    const maxRounds = options.maxRounds ?? Number.POSITIVE_INFINITY;
+    const verdicts = new Map<string, TakerVerdict>();
+    const failures = new Map<string, number>();
+    for (let round = 0; round < maxRounds; round += 1) {
+      const pending = signing.state
+        .all()
+        .filter((record) => record.outcome === null);
+      if (pending.length === 0) break;
+      let settledThisRound = 0;
+      for (const record of pending) {
+        try {
+          const { verdict } = await this.run(record, { maxPasses: 1 });
+          if (verdict !== null) verdicts.set(record.orderId, verdict);
+          failures.set(record.orderId, 0);
+          if (
+            verdict !== null &&
+            (verdict.decision === "finish" ||
+              verdict.decision === "abort" ||
+              verdict.decision === "release")
+          ) {
+            settledThisRound += 1;
+          }
+        } catch (error) {
+          const count = (failures.get(record.orderId) ?? 0) + 1;
+          failures.set(record.orderId, count);
+          this.log(
+            `order ${short(record.orderId)} deferred (${count}/${MAX_STEP_FAILURES}):`,
+            error instanceof Error ? error.message : error,
+          );
+          if (count >= MAX_STEP_FAILURES) {
+            this.log(
+              `order ${short(record.orderId)} failed ${count} passes in a row; leaving it for the next resume`,
+            );
+            failures.set(record.orderId, 0);
+            settledThisRound += 1; // stop spinning on this one
+          }
+        }
       }
+      if (options.once === true) break;
+      if (this.dryRun) break;
+      if (settledThisRound === pending.length) continue;
+      await this.sleep(this.deps.cfg.pollMs);
     }
-    return verdicts;
+    return [...verdicts.values()];
   }
 
   /** One persisted take, or null when nothing is recorded for that id. */
   record(orderId: string): TakerSwapRecord | null {
     return this.signing().state.get(orderId);
+  }
+
+  /** Takes that already settled, newest first. */
+  history(): TakerHistoryLine[] {
+    return this.signing()
+      .state.history()
+      .slice()
+      .reverse()
+      .map((entry) => ({
+        orderId: entry.orderId,
+        direction: entry.direction,
+        asset: entry.asset,
+        paid: legView(
+          responderLeg(entry.direction),
+          entry.asset,
+          BigInt(entry.paid),
+        ).display,
+        received: legView(
+          initiatorLeg(entry.direction),
+          entry.asset,
+          BigInt(entry.received),
+        ).display,
+        outcome: entry.outcome,
+        hashlock: entry.hashlock,
+        lockTx: entry.lockTx,
+        claimTx: entry.claimTx,
+        refundTx: entry.refundTx,
+        settledAt: entry.settledAt,
+      }));
   }
 
   status(): TakerStatusLine[] {
@@ -1112,9 +1280,11 @@ export class TakerEngine {
             : record.fillAcknowledged
               ? record.lockSentAt === null
                 ? "verifying the maker escrow"
-                : record.claimSentAt === null
-                  ? "escrowed, waiting for the reveal"
-                  : "claiming"
+                : record.lockTx === null && record.approveSentAt !== null
+                  ? "approving the token allowance"
+                  : record.claimSentAt === null
+                    ? "escrowed, waiting for the reveal"
+                    : "claiming"
               : pending?.submittedAt === null || pending === null
                 ? "no live proposal"
                 : "proposed, waiting for FillV2",

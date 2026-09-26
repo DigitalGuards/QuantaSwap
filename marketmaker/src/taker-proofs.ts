@@ -578,6 +578,9 @@ export function verifyMakerOrder(
     ) {
       return null;
     }
+    // Conflicting terminal messages from one maker are equivocation
+    // evidence: the row is quarantined, so nothing here may be acted on.
+    if (row.equivocated || row.conflictDigests.length > 0) return null;
     // The headless taker only fills public liquidity: a private row needs
     // a share capability this client deliberately never handles.
     if (

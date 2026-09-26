@@ -153,12 +153,16 @@ export function checkMakerLock(
   plan: TakerLegPlan,
   responderTimeout: number,
   claimMarginS: number,
+  /** Only a pre-funded escrow legitimately exists before its recipient. */
+  prelocked = false,
 ): MakerLockCheck {
   if (confirmed === null) return { state: "absent" };
   if (confirmed.status === SwapStatus.None) return { state: "absent" };
   if (confirmed.status !== SwapStatus.Open) return { state: "settled" };
   if (sameAddr(confirmed.recipient, legZeroAddress(plan.leg))) {
-    return { state: "awaiting-assign" };
+    return prelocked
+      ? { state: "awaiting-assign" }
+      : { state: "mismatch", issue: "its recipient is unset" };
   }
   // lockNative() and lockToken() share one record, so an escrow with the
   // right recipient and amount but the wrong token pays out a worthless
@@ -247,6 +251,8 @@ export interface TakerDecideInput {
   released: boolean;
   /** An authenticated maker CancelV2 ended this order. */
   cancelled: boolean;
+  /** The order escrowed up front, so its recipient is assigned at match. */
+  prelocked: boolean;
   /** Terms from the authenticated FillV2; null while none exists. */
   fill: {
     hashlock: string;
@@ -305,6 +311,7 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     x.plans.initiator,
     x.fill?.responderTimeout ?? 0,
     x.claimSafetyS,
+    x.prelocked,
   );
   const ownLock = checkOwnLock(
     x.rState,
@@ -386,6 +393,21 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     return verdict("claim", "the preimage is public; claiming our payout");
   }
 
+  // M2 makes this unreachable through configuration, so reaching it means
+  // the escrow's own deadline arrived while we were waiting. Say so plainly
+  // with a specific reason for the wait.
+  if (
+    revealedPreimage !== null &&
+    x.iState !== null &&
+    x.iState.status === SwapStatus.Open &&
+    nowS >= x.iState.timeout - x.claimSubmitMarginS
+  ) {
+    return verdict(
+      "wait",
+      "the claim window on the maker escrow closed before a claim could be submitted",
+    );
+  }
+
   if (terminal(x.iState) && terminal(x.rState)) {
     return verdict("finish", "both legs settled");
   }
@@ -411,10 +433,11 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     return verdict("refund", "our escrow passed its timeout unclaimed");
   }
 
+  // The HTLC consumes a hashlock once, so an escrow on our leg that we did
+  // not fund means our own lock can never exist: nothing of ours is at
+  // stake, whether or not a lock send was attempted.
   if (ownLock.state === "foreign") {
-    return exposed
-      ? verdict("wait", ownLock.issue)
-      : verdict("abort", ownLock.issue);
+    return verdict("abort", ownLock.issue);
   }
 
   // Fund our leg only against a maker escrow verified at depth, with a
@@ -529,8 +552,9 @@ export function takeBoundsIssue(x: TakeBoundsInput): string | null {
   if (x.minOut !== null && x.receiveAmount < x.minOut) {
     return `the order pays ${show(x.receiveAmount, x.receive)}, below the --min-out floor of ${show(x.minOut, x.receive)}`;
   }
-  if (x.orderExpiresAt - x.nowS < x.minOrderRunwayS) {
-    return "the order proof expires too soon to swap safely";
+  const runway = x.orderExpiresAt - x.nowS;
+  if (runway < x.minOrderRunwayS) {
+    return `the order proof has ${runway}s left, under the ${x.minOrderRunwayS}s floor (TAKER_MIN_ORDER_RUNWAY_S)`;
   }
   if (x.payBalance !== null && x.payBalance < x.payAmount) {
     return "the funding account holds less than this order asks for";

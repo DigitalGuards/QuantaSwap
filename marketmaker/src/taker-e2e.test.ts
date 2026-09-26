@@ -372,6 +372,86 @@ describe("scripted taker end to end", () => {
     }
   });
 
+  it("refuses a claimed escrow that paid someone else", async () => {
+    // A hostile or confused endpoint can report a Claimed record under our
+    // hashlock. It only counts as our payout when it paid our recipient.
+    let hijack: (() => void) | null = null;
+    const h = await harness({
+      direction: "eth->qrl",
+      takerSenderFactory: (leg, chain, address) => {
+        const sender = new FakeLegSender(address, chain);
+        if (leg !== "eth") return sender;
+        const original = sender.send.bind(sender);
+        sender.send = async (data: string, value: bigint, to?: string) => {
+          if (hijack !== null) {
+            hijack();
+            throw new Error("claim reverted");
+          }
+          return original(data, value, to);
+        };
+        return sender;
+      },
+    });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      hijack = () => {
+        h.chains.eth.overwrite(h.maker.hashlock, {
+          initiator: MAKER_ETH,
+          recipient: `0x${"e".repeat(40)}`,
+          token: `0x${"0".repeat(40)}`,
+          amount: 1n,
+          timeout: h.now + 3600,
+          status: SwapStatus.Claimed,
+          preimage: h.maker.preimage,
+        });
+      };
+      await assert.rejects(h.engine.step(record), /claim/);
+      // The record survives, so a later pass can still try.
+      assert.equal(h.state.all().length, 1);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("drives an in-flight take to settlement through resume", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      const record = await begin(h);
+      await h.engine.step(record);
+      h.maker.selectAndFill();
+      // resume alone completes the swap: one round per pass, and the maker
+      // acts between rounds exactly as a live counterparty would.
+      const rounds = [
+        async () => undefined,
+        async () => makerLocks(h),
+        async () => makerClaims(h),
+        async () => undefined,
+        async () => undefined,
+      ];
+      for (const act of rounds) {
+        await act();
+        await h.engine.resume({ once: true });
+      }
+      assert.deepEqual(
+        h.state.all().filter((entry) => entry.outcome === null),
+        [],
+      );
+      const history = h.state.history();
+      assert.equal(history.length, 1);
+      assert.equal(history[0]?.outcome, "claimed");
+      assert.notEqual(history[0]?.claimTx, null);
+      assert.notEqual(history[0]?.lockTx, null);
+    } finally {
+      await h.close();
+    }
+  });
+
   it("refuses to fund a maker escrow with the wrong amount", async () => {
     const h = await harness({ direction: "eth->qrl" });
     try {
@@ -621,7 +701,7 @@ describe("scripted taker end to end", () => {
         sleep: async () => undefined,
       });
       await makerClaims(h);
-      const verdicts = await resumed.resume({ maxPasses: 1 });
+      const verdicts = await resumed.resume({ once: true });
       assert.equal(verdicts.length, 1);
       assert.equal(verdicts[0]?.decision, "claim");
       assert.equal(
@@ -705,11 +785,14 @@ describe("scripted taker end to end", () => {
     }
   });
 
-  it("refuses an order whose proof expires too soon to swap", async () => {
+  it("refuses an order whose proof expires under the runway floor", async () => {
     const h = await harness({ direction: "eth->qrl" });
     try {
       const orderId = h.maker.publishOrder(600);
-      await assert.rejects(h.engine.begin(orderId), /expires too soon/);
+      await assert.rejects(
+        h.engine.begin(orderId),
+        /TAKER_MIN_ORDER_RUNWAY_S/,
+      );
     } finally {
       await h.close();
     }

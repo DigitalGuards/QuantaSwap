@@ -312,6 +312,27 @@ describe("maker order verification", () => {
     );
   });
 
+  it("refuses a row carrying equivocation evidence", () => {
+    const order = signOrder();
+    assert.equal(
+      verifyMakerOrder(
+        parseBookOrderRow({ ...openRow(order), equivocated: true }),
+        { now: NOW },
+      ),
+      null,
+    );
+    assert.equal(
+      verifyMakerOrder(
+        parseBookOrderRow({
+          ...openRow(order),
+          conflictDigests: [`0x${"ab".repeat(32)}`],
+        }),
+        { now: NOW },
+      ),
+      null,
+    );
+  });
+
   it("refuses a legacy unsigned row", () => {
     const order = signOrder();
     const { makerAuth: _auth, orderDigest: _digest, ...rest } = openRow(order);
