@@ -96,14 +96,31 @@ file; both Node packages require the sibling `config/protocol-v2.json` at runtim
 
 ## Prerequisites
 
-- Docker Engine with Compose v2;
+- Docker Engine with Compose 2.24 or newer;
 - Node.js 20 or newer for the one-time key bootstrap;
 - reachable order-book, Ethereum RPC, and QRL RPC endpoints;
-- independent testnet capital for both legs and gas.
+- independent testnet capital for both legs and gas (see "Funding" below);
+- for release verification: cosign 3.0 or newer and GitHub CLI 2.49 or newer.
 
 Use RPC endpoints you trust. Claim simulation necessarily discloses a preimage
 to the configured RPC immediately before broadcast. The order book remains a
 coordination service and must never be trusted as proof of on-chain state.
+
+### Funding
+
+With the defaults (ETH pair only, two rungs per direction, 0.02 ETH rung-0
+size, rung n sized n+1 times), quoting the full ladder in both directions needs
+about 0.11 Sepolia ETH (0.06 listed plus the 0.05 gas reserve) and the QRL
+value of 0.06 ETH plus the 5 QRL reserve (roughly 260 QRL at 4,200 QRL/ETH). A
+smaller trial profile such as `MM_ORDERS_PER_DIRECTION=1` with
+`MM_ETH_ORDER_WEI=5000000000000000` (0.005 ETH) needs about 0.055 ETH and
+26 QRL. The maker logs one line per pair and direction when inventory or gas
+keeps a rung unlisted, and another when quoting resumes.
+
+Testnet sources: QRL from the [zondscan faucet](https://zondscan.com/faucet)
+(100 QRL per address per 24 hours, so the default ladder takes about three
+days of claims; start with the trial profile), Sepolia ETH from any public
+Sepolia faucet, and Sepolia USDC from [faucet.circle.com](https://faucet.circle.com).
 
 ## Verified image releases
 
@@ -116,7 +133,9 @@ attaches an SBOM and maximum-mode build provenance, creates a GitHub artifact
 attestation, and signs the immutable image digest with Sigstore keyless signing.
 
 For production-like testing, pin the digest printed in the successful release
-workflow rather than relying on a mutable tag:
+workflow. Releases are signed with cosign 3 and carry OCI 1.1 referrer
+bundles: cosign 2.x reports `no signatures found`, and `gh attestation` needs
+GitHub CLI 2.49 or newer.
 
 ```bash
 docker pull ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
@@ -129,9 +148,24 @@ gh attestation verify \
   --repo DigitalGuards/QuantaSwap
 ```
 
-The local Compose file builds from source by default. An operator who selects a
-published image should replace its `build` entry only after reviewing the
-release digest, signature identity, attestation, SBOM, and migration notes.
+The local Compose file builds from source by default. After reviewing the
+release digest, signature identity, attestation, SBOM, and migration notes,
+run the published image with the release overlay, which drops the local build:
+
+```bash
+LP_IMAGE=ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest> \
+  docker compose -f compose.yaml -f compose.release.yaml up -d
+```
+
+### Compose variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LP_IMAGE` | (required by `compose.release.yaml`) | Verified release image, pinned by digest |
+| `LP_KIT_VERSION` | `local` | Tag for a locally built image |
+| `LP_COMPOSE_PROJECT` | `quantaswap-lp` | Compose project name; set per instance |
+| `LP_STATE_VOLUME` | `quantaswap-lp-state` | Named volume holding recovery state; one per instance |
+| `LP_HEALTH_PORT` | `8092` | Host loopback port for `/health` |
 
 ## First boot
 
@@ -153,7 +187,9 @@ It refuses to overwrite either file. Back them up before funding the addresses.
 Edit `.env` and review every endpoint, chain id, HTLC address, asset, reserve,
 order size, price source, and timeout. The example points to the current public
 testnet services, but an independent operator should use RPC infrastructure it
-controls or independently trusts.
+controls or independently trusts. `MM_ORDERBOOK_URL` defaults to the public
+book at `https://quantaswap.io/api`; for a dry run, point it at the staging book
+`https://dev.quantaswap.io/api` first.
 
 Fund the printed addresses with testnet inventory and gas, then start:
 
@@ -170,15 +206,61 @@ verification and a clean completed tick. Docker marks the container unhealthy
 after repeated failed checks, but Compose does not restart it merely for being
 unhealthy. Inspect the logs and recovery state before intervening.
 
+### Single active process
+
 Run one active process for each state volume and wallet pair. The maker creates
 a mode-0600 `state.json.lock` lease before it reads recovery state. It records
 the deployment and account identity digest, Linux boot id, PID, process start
-time, and a random lease id. A live holder makes a second process fail closed;
-a stale main lease from a crash or reboot is atomically replaced while a
-separate recovery guard is held. A stale recovery guard causes fail-safe
+time, PID namespace, and a random lease id. A live holder makes a second process
+fail closed; a stale main lease from a crash or reboot is atomically replaced
+while a separate recovery guard is held. A stale recovery guard causes fail-safe
 refusal for manual inspection. Shutdown removes only the lease id it acquired,
 so it cannot delete a newer holder's file. Use distinct volumes and keys for
 distinct LP instances.
+
+A holder in another PID namespace, which is what a second container on the same
+state volume looks like, is judged by the lease heartbeat alone. Its PID and
+process start time carry no meaning outside its own namespace. The running maker
+refreshes the lease file's timestamp every 10 s, and every observer treats the
+lease as live for 90 s after the last refresh. That gives three properties:
+
+- a second container on one state volume fails closed while the first one runs,
+  with a refusal that names the situation;
+- after a container crashes, is killed, or the host reboots, its replacement
+  waits for the heartbeat to expire and then takes the lease over
+  automatically. Startup refuses during that window, so keep a restart policy on
+  the container or supervisor. With Compose `restart: unless-stopped`, the
+  restart backoff adds to the 90 s heartbeat lifetime, so unattended recovery
+  takes up to roughly two minutes;
+- a maker that loses the lease refuses every further state write, logs which
+  case occurred, and exits non-zero so its supervisor restarts it. It also stops
+  writing when a beat cannot read or stamp the lease file for long enough that a
+  peer would see its heartbeat expire. A single unreadable moment only defers
+  the one write it blocked, and the next tick retries it.
+
+One consequence of exiting on a lock file that stayed unreadable: shutdown
+cannot prove the file is still its own, so it leaves the file in place. The
+restart then waits out the 90 s heartbeat lifetime before it can take the lease
+over. Fix the underlying storage problem, or remove the file by hand after
+confirming no maker runs on that volume.
+
+This covers containers on **one host**, which share a clock and a kernel boot id.
+A state volume shared between machines is not supported: the heartbeat comparison
+is only as good as the two clocks agreeing, and no part of this design
+coordinates across hosts. Give each machine its own volume and keys.
+
+A lease record written before this change carries no PID namespace and keeps the
+original PID-based semantics, which is correct for a single-host deployment.
+Restart such a maker once so it writes the current record format.
+
+**Manual recovery of a stale guard.** Startup refuses with
+`state lease recovery guard ... is stale` when `state.json.lock.recovery`
+outlived the starter that created it, which a hard kill during acquisition can
+cause. Confirm no market maker process runs on that state volume (`docker
+compose ps`, and check any other supervisor sharing the volume), then remove
+`state.json.lock.recovery` by hand and start the maker again. Orphaned
+`state.json.lock.next.*` staging files are swept automatically once they are
+older than the heartbeat lifetime.
 
 ## State and recovery
 

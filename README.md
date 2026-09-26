@@ -2,8 +2,8 @@
 
 Trust-minimized cross-chain swaps between Ethereum and QRL. Domain:
 [quantaswap.io](https://quantaswap.io). Isolated development build:
-[dev.quantaswap.io](https://dev.quantaswap.io) (testnet, no market maker,
-`noindex`).
+[dev.quantaswap.io](https://dev.quantaswap.io) (testnet staging book with a
+small first-party market maker, `noindex`).
 
 Part of the MyQRLWallet ecosystem (MyQRLWallet, QuantaPool, zondscan, QNS). Open source under GPL-3.0.
 

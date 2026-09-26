@@ -120,6 +120,9 @@ export interface ManagedOrder {
   takerQrlAccount: string | null;
   lockSentAt: number | null;
   claimSentAt: number | null;
+  /** Last attempt to claim our own initiator lock on the taker's behalf
+   *  after the preimage went public; null on older records. */
+  sponsorSentAt: number | null;
   refundSentAt: number | null;
   createdAt: number;
 }
@@ -131,6 +134,7 @@ export type Decision =
   | "announce" // taker arrived: generate/reuse secret, announce hashlock
   | "lock" // escrow our initiator leg
   | "claim" // taker's lock verified at depth: claim it (reveals secret)
+  | "sponsor" // secret public: claim our lock for the taker, paying the gas
   | "refund" // our lock is open past its timeout
   | "finish" // both sides settled; stop tracking
   | "abort"; // order evaporated before any funds moved; forget it
@@ -161,6 +165,17 @@ export interface DecideInput {
   /** Seconds to wait after announcing before locking (grace for instant
    *  taker walk-aways). */
   lockGraceS: number;
+  /** Submit the taker's final claim ourselves once the secret is public. */
+  sponsorClaims: boolean;
+  /** Our address on the initiator leg; a sponsored claim only ever
+   *  targets a lock we funded. */
+  ourInitiator: string;
+  /** The taker's address on our initiator leg (the payout target we
+   *  locked for); null when unknown. */
+  takerOnInitiatorLeg: string | null;
+  /** Skip sponsoring this close to the lock's timeout. Must cover a full
+   *  transaction wait, since claim() reverts at the timeout. */
+  sponsorMarginS: number;
 }
 
 const retryOk = (
@@ -257,6 +272,28 @@ export function decide(x: DecideInput): Decision {
     retryOk(managed.claimSentAt, nowS, x.resendAfterS)
   ) {
     return "claim";
+  }
+
+  // Once our claim of the responder leg is visible at depth, the preimage
+  // is public and anyone may claim our initiator lock: claim() pays only
+  // the recipient fixed at lock time, so doing it ourselves moves nothing
+  // the taker is not already owed. It spares the taker gas on the chain
+  // they receive on, which a newcomer from the other chain may not hold.
+  // The lock must be exactly the one we funded for this taker: the
+  // hashlock is public before we lock, so a third party could have taken
+  // it with their own dust swap.
+  if (
+    x.sponsorClaims &&
+    x.iState.status === SwapStatus.Open &&
+    sameAddr(x.iState.initiator, x.ourInitiator) &&
+    x.takerOnInitiatorLeg !== null &&
+    sameAddr(x.iState.recipient, x.takerOnInitiatorLeg) &&
+    x.rConfirmed !== null &&
+    x.rConfirmed.status === SwapStatus.Claimed &&
+    nowS < x.iState.timeout - x.sponsorMarginS &&
+    retryOk(managed.sponsorSentAt, nowS, x.resendAfterS)
+  ) {
+    return "sponsor";
   }
 
   // Escrow our leg after announcing, unless the responder window is
@@ -367,6 +404,24 @@ export interface RefillInput {
 /** Repost only while under the listing target (rungs times listings per
  *  rung), under the in-flight exposure cap, holding inventory beyond the
  *  reserve, and holding native gas headroom on the ETH leg. */
+/** Inventory or gas below what the next listing needs. */
+export function fundsShort(x: RefillInput): boolean {
+  return (
+    x.balanceWei < x.reserveWei + x.orderWei ||
+    x.gasBalanceWei < x.gasReserveWei
+  );
+}
+
+/** True when inventory or gas, and nothing else, keeps a rung unlisted:
+ *  the ladder wants another listing and capacity allows it. */
+export function inventoryShort(x: RefillInput): boolean {
+  return (
+    x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&
+    x.inflightCount < x.maxInflight &&
+    fundsShort(x)
+  );
+}
+
 export function shouldPost(x: RefillInput): boolean {
   return (
     x.myOpenCount < x.ordersPerDirection * x.ordersPerLevel &&

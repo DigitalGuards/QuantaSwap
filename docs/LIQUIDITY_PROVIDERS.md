@@ -101,10 +101,20 @@ yours.
    re-reads at `head - N`), and verify recipient, amount, token address and
    timeout against your own registry, never against book data. Only then
    claim the taker's leg, which publishes the secret.
-8. **Or refund**: if the taker never locks (or locks wrong), do nothing until
+8. **Sponsor the taker's claim (recommended)**: once your claim is visible at
+   your confirmation depth, the secret is public and anyone may claim your
+   own lock for the taker. `claim()` pays only the recipient fixed at lock
+   time, so submitting it yourself moves nothing the taker is not already
+   owed, and it spares a taker who arrived from the other chain from holding
+   gas where they receive. The reference maker does this by default
+   (`MM_SPONSOR_CLAIMS=true`) with the same simulate-then-send path as its own
+   claim, only for the exact lock it funded for that taker, and stops one
+   transaction timeout plus 60 s before the lock's timeout. A failed attempt
+   is logged and retried after `MM_RESEND_AFTER_S`.
+9. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
-9. **Cancel or repost**: before selecting an intent, a maker may sign and
+10. **Cancel or repost**: before selecting an intent, a maker may sign and
    persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
    cancelled listing is terminal. Authenticate the exact CancelV2 and digest
    in the response before deleting local state. Sign a fresh OrderV2 to stay in
@@ -189,9 +199,18 @@ risk:
 - **One active process per state and key set**: the reference maker acquires an
   exclusive mode-0600 `state.json.lock` lease before reading state. The lease
   binds the deployment fingerprint and both operator accounts, identifies the
-  Linux boot plus process start time, refuses a live second process, and safely
-  recovers a stale file after a crash or reboot. Distinct LP instances still
-  need distinct state volumes and keys.
+  Linux boot, process start time and PID namespace, refuses a live second
+  process, and safely recovers a stale file after a crash or reboot. A holder in
+  another PID namespace, which is how a second container on the same state volume
+  appears, is judged by the lease heartbeat: the holder refreshes it every 10 s
+  and it stays live for 90 s after the last refresh, so a crashed container's
+  replacement takes over automatically once that lifetime passes. Startup refuses
+  during that window, and with a container restart policy the backoff puts
+  unattended recovery at up to roughly two minutes. A maker that loses its lease
+  refuses every further state write and exits non-zero. This covers containers on
+  one host, which share a clock and a kernel boot id; a state volume shared
+  between machines is unsupported. Distinct LP instances still need distinct
+  state volumes and keys.
 - **Authenticated book responses**: the reference maker checks exact signed
   order, fill, cancel, selected intent, semantic digests, terminal state, and
   conflict absence before funding or deleting state. Preserve this gate in
@@ -219,5 +238,8 @@ risk:
 - **Operator independence**: each LP needs distinct keys, capital, host, RPC
   trust choices, policy, monitoring and encrypted backups. Do not clone the
   original operator's secret files, state volume or server access.
-- **Testnet only for now**: real-value production waits on QRL v2 mainnet.
-  Current contract addresses and faucet notes: [DEPLOYMENTS.md](DEPLOYMENTS.md).
+- **Testnet only for now**: real-value production waits on QRL 2.0 mainnet.
+  Current contract addresses: [DEPLOYMENTS.md](DEPLOYMENTS.md). Testnet QRL:
+  the [zondscan faucet](https://zondscan.com/faucet) (100 QRL per address per
+  24 hours). Funding figures for the reference kit:
+  [marketmaker/README.md](../marketmaker/README.md#funding).
