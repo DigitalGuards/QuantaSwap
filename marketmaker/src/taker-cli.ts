@@ -147,8 +147,11 @@ async function signingSession(
   });
   let state: TakerStateFile;
   try {
-    state = new TakerStateFile(cfg.stateFile, deployment, () =>
-      lease.assertOwned(),
+    state = new TakerStateFile(
+      cfg.stateFile,
+      deployment,
+      () => lease.assertOwned(),
+      { ethAccount: eth.address, qrlAccount: signer.address },
     );
   } catch (error) {
     lease.close();
@@ -384,6 +387,11 @@ async function commandRelease(args: ParsedArgs): Promise<number> {
     const record = session.engine.record(orderId);
     if (record === null) {
       throw new Error(`no recorded take for order ${orderId}`);
+    }
+    if (record.lockSentAt !== null) {
+      throw new Error(
+        `order ${orderId} already has an escrow send behind it; the chain governs it now. Use resume to settle or refund it`,
+      );
     }
     const { record: current, verdict } = await session.engine.step(record, {
       abandon: true,

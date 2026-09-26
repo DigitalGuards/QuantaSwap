@@ -273,6 +273,9 @@ export interface TakerDecideInput {
   claimSafetyS: number;
   /** Refuse a new escrow this close to our own responder deadline. */
   lockRunwayS: number;
+  /** Stop submitting a claim this close to the escrow's own deadline: a
+   *  claim that cannot mine in time only burns the retry slot. */
+  claimSubmitMarginS: number;
 }
 
 export interface TakerVerdict {
@@ -377,7 +380,7 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     revealedPreimage !== null &&
     x.iState !== null &&
     x.iState.status === SwapStatus.Open &&
-    nowS < x.iState.timeout &&
+    nowS < x.iState.timeout - x.claimSubmitMarginS &&
     retryOk(record.claimSentAt, nowS, x.resendAfterS)
   ) {
     return verdict("claim", "the preimage is public; claiming our payout");
@@ -385,6 +388,17 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
 
   if (terminal(x.iState) && terminal(x.rState)) {
     return verdict("finish", "both legs settled");
+  }
+
+  // Our leg is settled and the maker escrow can no longer pay us, so
+  // nothing of ours is actionable and there is nothing left to watch.
+  if (
+    terminal(x.rState) &&
+    x.iState !== null &&
+    x.iState.status === SwapStatus.Open &&
+    nowS >= x.iState.timeout
+  ) {
+    return verdict("finish", "our leg settled and the maker escrow expired");
   }
 
   // Our own escrow past its on-chain deadline with no claim: reclaim it.
@@ -485,6 +499,9 @@ export interface TakeBoundsInput {
   minOut: bigint | null;
   /** Spendable balance on the leg we pay from. */
   payBalance: bigint | null;
+  /** True when the escrow asset is that leg's native coin, so one balance
+   *  has to cover both the escrow and its gas. */
+  nativePayLeg: boolean;
   /** Native balance on the leg that pays gas for our escrow. */
   gasBalance: bigint | null;
   gasReserve: bigint;
@@ -517,6 +534,13 @@ export function takeBoundsIssue(x: TakeBoundsInput): string | null {
   }
   if (x.payBalance !== null && x.payBalance < x.payAmount) {
     return "the funding account holds less than this order asks for";
+  }
+  if (
+    x.nativePayLeg &&
+    x.payBalance !== null &&
+    x.payBalance < x.payAmount + x.gasReserve
+  ) {
+    return "the funding account cannot cover this order and its gas reserve";
   }
   if (x.gasBalance !== null && x.gasBalance < x.gasReserve) {
     return "the funding account holds too little native balance for gas";

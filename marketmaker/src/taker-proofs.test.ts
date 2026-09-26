@@ -6,7 +6,11 @@ import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { after, describe, it } from "node:test";
 import {
+  MAKER_CAPABILITY_DOMAIN,
+  EMPTY_CAPABILITY_COMMITMENT,
   ProtocolSigner,
+  buildOrderV1Payload,
+  capabilityCommitment,
   computeFillDigest,
   computeFillIntentDigest,
   computeOrderDigest,
@@ -15,7 +19,10 @@ import {
   type SignedFillV1,
   type SignedOrderV1,
 } from "./protocol-signing.js";
-import { V2_TEST_EXTENDED_SEED } from "./protocol-v2-test-helper.js";
+import {
+  V2_TEST_EXTENDED_SEED,
+  signProtocolV2Auth,
+} from "./protocol-v2-test-helper.js";
 import {
   FundingBlockedError,
   parseBookOrderRow,
@@ -58,6 +65,60 @@ function signOrder(overrides: { issuedAt?: number; expiresAt?: number } = {}): S
       expiresAt: overrides.expiresAt ?? issuedAt + 3600,
     },
   );
+}
+
+const PRELOCK_HASHLOCK = `0x${"5a".repeat(32)}`;
+
+/** Sign an order body the reference signer would refuse, which is what a
+ *  maker running its own client can publish. */
+function signRawOrder(args: {
+  prelock: { hashlock: string; initiatorTimeout: number };
+  issuedAt: number;
+  expiresAt: number;
+}): SignedOrderV1 {
+  const order = {
+    direction: "eth->qrl" as const,
+    asset: "ETH" as const,
+    fromAmount: FROM_AMOUNT,
+    toAmount: TO_AMOUNT,
+    makerEthAccount: MAKER_ETH,
+    makerQrlAccount: maker.address,
+    visibility: "public" as const,
+    prelock: args.prelock,
+  };
+  const unsigned = {
+    issuedAt: args.issuedAt,
+    expiresAt: args.expiresAt,
+    nonce: `0x${randomBytes(32).toString("hex")}`,
+    makerTokenCommitment: capabilityCommitment(
+      MAKER_CAPABILITY_DOMAIN,
+      randomBytes(32).toString("hex"),
+    ),
+    shareTokenCommitment: EMPTY_CAPABILITY_COMMITMENT,
+  };
+  const auth = signProtocolV2Auth(
+    buildOrderV1Payload(order, unsigned),
+    "qrl-sign-message-v2",
+    unsigned,
+  );
+  return {
+    order,
+    auth: {
+      ...auth,
+      makerTokenCommitment: unsigned.makerTokenCommitment,
+      shareTokenCommitment: unsigned.shareTokenCommitment,
+    },
+  };
+}
+
+function prelockedRow(order: SignedOrderV1): Record<string, unknown> {
+  const prelock = order.order.prelock;
+  return {
+    ...openRow(order),
+    prelocked: true,
+    hashlock: prelock?.hashlock ?? null,
+    initiatorTimeout: prelock?.initiatorTimeout ?? null,
+  };
 }
 
 function openRow(order: SignedOrderV1): Record<string, unknown> {
@@ -267,6 +328,145 @@ describe("maker order verification", () => {
       allowedTakerEth: TAKER_ETH,
     });
     assert.equal(verifyMakerOrder(row, { now: NOW }), null);
+  });
+});
+
+describe("pre-funded orders", () => {
+  it("verifies a listing whose escrow window is inside the protocol bounds", () => {
+    const issuedAt = NOW - 60;
+    const order = maker.signOrderV1(
+      {
+        direction: "eth->qrl",
+        asset: "ETH",
+        fromAmount: FROM_AMOUNT,
+        toAmount: TO_AMOUNT,
+        makerEthAccount: MAKER_ETH,
+        makerQrlAccount: maker.address,
+        prelock: {
+          hashlock: PRELOCK_HASHLOCK,
+          initiatorTimeout: issuedAt + 4 * 3600,
+        },
+      },
+      { makerToken: randomBytes(32).toString("hex"), issuedAt },
+    );
+    const verified = verifyMakerOrder(parseBookOrderRow(prelockedRow(order)), {
+      now: NOW,
+    });
+    assert.notEqual(verified, null);
+    assert.equal(verified?.prelocked, true);
+  });
+
+  it("refuses a listing whose escrow window is too short", () => {
+    const issuedAt = NOW - 60;
+    const order = signRawOrder({
+      prelock: { hashlock: PRELOCK_HASHLOCK, initiatorTimeout: issuedAt + 3600 },
+      issuedAt,
+      expiresAt: issuedAt + 1800,
+    });
+    assert.equal(
+      verifyMakerOrder(parseBookOrderRow(prelockedRow(order)), { now: NOW }),
+      null,
+    );
+  });
+
+  it("refuses a listing whose escrow window is too long", () => {
+    const issuedAt = NOW - 60;
+    const order = signRawOrder({
+      prelock: {
+        hashlock: PRELOCK_HASHLOCK,
+        initiatorTimeout: issuedAt + 96 * 3600,
+      },
+      issuedAt,
+      expiresAt: issuedAt + 3600,
+    });
+    assert.equal(
+      verifyMakerOrder(parseBookOrderRow(prelockedRow(order)), { now: NOW }),
+      null,
+    );
+  });
+
+  it("refuses a listing whose proof outlives its escrow", () => {
+    const issuedAt = NOW - 60;
+    const order = signRawOrder({
+      prelock: {
+        hashlock: PRELOCK_HASHLOCK,
+        initiatorTimeout: issuedAt + 4 * 3600,
+      },
+      issuedAt,
+      expiresAt: issuedAt + 5 * 3600,
+    });
+    assert.equal(
+      verifyMakerOrder(parseBookOrderRow(prelockedRow(order)), { now: NOW }),
+      null,
+    );
+  });
+
+  it("blocks funding a late fill that leaves too little escrow runway", () => {
+    const issuedAt = NOW - 60;
+    const initiatorTimeout = issuedAt + 4 * 3600;
+    const order = maker.signOrderV1(
+      {
+        direction: "eth->qrl",
+        asset: "ETH",
+        fromAmount: FROM_AMOUNT,
+        toAmount: TO_AMOUNT,
+        makerEthAccount: MAKER_ETH,
+        makerQrlAccount: maker.address,
+        prelock: { hashlock: PRELOCK_HASHLOCK, initiatorTimeout },
+      },
+      { makerToken: randomBytes(32).toString("hex"), issuedAt },
+    );
+    // The maker waits until its own escrow is nearly spent, which leaves the
+    // taker a fraction of the runway the protocol requires.
+    const fillIssuedAt = initiatorTimeout - 3600;
+    const { signed: intent } = signIntent(order, fillIssuedAt);
+    const fill = maker.signFillV1(
+      {
+        orderDigest: computeOrderDigest(order.order, order.auth),
+        intentDigest: computeFillIntentDigest(intent.intent, intent.auth),
+        takerEthAccount: intent.intent.takerEthAccount,
+        takerQrlAccount: intent.intent.takerQrlAccount,
+        releaseCommitment: intent.intent.releaseCommitment,
+        hashlock: PRELOCK_HASHLOCK,
+        initiatorTimeout,
+        responderTimeout: fillIssuedAt + 1800,
+      },
+      {
+        order,
+        selectedIntent: {
+          intentDigest: computeFillIntentDigest(intent.intent, intent.auth),
+          intent: intent.intent,
+          auth: intent.auth,
+        },
+        issuedAt: fillIssuedAt,
+        respondBy: fillIssuedAt + 300,
+      },
+    );
+    const row = {
+      ...prelockedRow(order),
+      status: "locking",
+      takerEthAccount: fill.fill.takerEthAccount,
+      takerQrlAccount: fill.fill.takerQrlAccount,
+      responderTimeout: fill.fill.responderTimeout,
+      fill: fill.fill,
+      fillAuth: fill.auth,
+      fillDigest: computeFillDigest(fill.fill, order.auth, fill.auth),
+      selectedIntent: {
+        intentDigest: computeFillIntentDigest(intent.intent, intent.auth),
+        intent: intent.intent,
+        auth: intent.auth,
+        receivedAt: fillIssuedAt,
+      },
+    };
+    assert.throws(
+      () =>
+        verifyMakerFill(
+          parseBookOrderRow(row),
+          recoveryFor(intent, order),
+          { now: fillIssuedAt + 10 },
+        ),
+      FundingBlockedError,
+    );
   });
 });
 

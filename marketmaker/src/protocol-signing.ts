@@ -119,6 +119,8 @@ const MAX_PRELOCK_LISTING_WINDOW_S = 72 * 60 * 60;
 const MAX_RESPONDER_WINDOW_S = 2 * 60 * 60;
 const MAX_INITIATOR_WINDOW_S = 4 * 60 * 60;
 const MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S = 600;
+// Matches the browser client's prelock runway floor.
+const MIN_PRELOCK_RUNWAY_S = 9_000;
 const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const CAIP_ETH_ADDRESS_RE = /^eip155:11155111:(0x[0-9a-fA-F]{40})$/;
 // Portable V2 binds the full 64-byte QRL identity.
@@ -151,6 +153,8 @@ export const PROTOCOL_V2_LIMITS = {
   maxClockSkewS: MAX_CLOCK_SKEW_S,
   minPrelockListingWindowS: MIN_PRELOCK_LISTING_WINDOW_S,
   maxPrelockListingWindowS: MAX_PRELOCK_LISTING_WINDOW_S,
+  /** Runway a pre-funded escrow must still carry when it is matched. */
+  minPrelockRunwayS: MIN_PRELOCK_RUNWAY_S,
 } as const;
 
 export type OrderSigningScheme = "qrl-sign-message-v2";

@@ -203,9 +203,11 @@ the file is read: a record this build cannot authenticate stops the run, and
 nothing on disk is reinterpreted.
 
 One active process per state file. The taker takes the same exclusive lease the
-maker uses (`<state file>.lock`), bound to the deployment fingerprint and the
-operator accounts, so a second process on the same file fails closed while the
-first one runs. Give each instance its own file and keys.
+maker uses (`<state file>.lock`), so a second process on the same file fails
+closed while the first one runs. A record is also bound to the accounts that
+created it, so a process holding different keys refuses the file outright and
+never funds a swap that pays someone else. Give each instance its own file and
+keys.
 
 Never delete the state file, replace it, or change the chain and HTLC identity
 while a take may be open, locked, claimable or refundable. Settle first, with

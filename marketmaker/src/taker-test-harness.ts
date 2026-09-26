@@ -436,12 +436,23 @@ export class FakeLegSender implements LegSender {
       return;
     }
     if (parsed.name === "lockToken") {
+      // The HTLC pulls the tokens, so an escrow without an allowance and a
+      // balance reverts here exactly as it would on chain.
+      const amount = parsed.args[3] as bigint;
+      const owner = this.address.toLowerCase();
+      const key = `${owner}:${this.chain.htlc.toLowerCase()}`;
+      const allowance = this.chain.allowances.get(key) ?? 0n;
+      if (allowance < amount) throw new Error("ERC20InsufficientAllowance");
+      const balance = this.chain.balances.get(owner) ?? 0n;
+      if (balance < amount) throw new Error("ERC20InsufficientBalance");
+      this.chain.allowances.set(key, allowance - amount);
+      this.chain.balances.set(owner, balance - amount);
       this.chain.lock({
         from: this.address,
         hashlock: parsed.args[0] as string,
         recipient: parsed.args[1] as string,
         token: parsed.args[2] as string,
-        amount: parsed.args[3] as bigint,
+        amount,
         timeout: Number(parsed.args[4] as bigint),
       });
       return;

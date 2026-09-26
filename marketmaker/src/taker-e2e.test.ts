@@ -300,11 +300,17 @@ describe("scripted taker end to end", () => {
       record = funded.record;
       assert.equal(funded.verdict.decision, "lock");
       const token = assetInfo("USDC").tokenAddress ?? "";
+      // One approval, sent to the token, and the escrow consumed all of it:
+      // together that pins the approval to the exact escrow amount.
+      const approvals = h.takerSenders.eth.sent.filter(
+        (tx) => tx.to?.toLowerCase() === token.toLowerCase(),
+      );
+      assert.equal(approvals.length, 1);
       assert.equal(
         h.chains.eth.allowances.get(
           `${TAKER_ETH.toLowerCase()}:${h.cfg.ethHtlc.toLowerCase()}`,
         ),
-        5n * 10n ** 6n,
+        0n,
       );
       const escrow = h.chains.eth.getSwap(h.maker.hashlock, "latest");
       assert.equal(escrow.amount, 5n * 10n ** 6n);
@@ -569,11 +575,18 @@ describe("scripted taker end to end", () => {
       const verdict = await h.engine.step(record);
       record = verdict.record;
       assert.equal(verdict.verdict.decision, "propose");
-      // The proposal and its secret were persisted before the send, so a
-      // retry reuses them, and no new commitment is minted.
+      // The proposal, its secret and its submission marker were persisted
+      // before the send, so the next pass waits the slot out.
       assert.equal(record.intents.length, 1);
-      assert.equal(record.intents[0]?.submittedAt, null);
+      assert.notEqual(record.intents[0]?.submittedAt, null);
       assert.equal(h.state.get(record.orderId)?.intents.length, 1);
+      const again = await h.engine.step(record);
+      assert.equal(again.verdict.decision, "wait");
+      assert.equal(again.record.intents.length, 1);
+      assert.equal(
+        again.record.intents[0]?.releaseSecret,
+        record.intents[0]?.releaseSecret,
+      );
     } finally {
       await h.close();
     }

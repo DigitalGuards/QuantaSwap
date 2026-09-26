@@ -32,7 +32,8 @@ export interface TakerReadConfig {
   pollMs: number;
   /** Re-send a transaction if its effect is not on chain after this long. */
   resendAfterS: number;
-  /** Margin a counterparty timeout must leave before we act on it. */
+  /** Margin the maker escrow's timeout must leave beyond our own deadline
+   *  before we fund. Defaults to the browser taker's 30 minutes. */
   claimSafetyS: number;
   /** Refuse to fund this close to our own responder deadline. */
   lockRunwayS: number;
@@ -70,7 +71,7 @@ export function loadTakerReadConfig(): TakerReadConfig {
     txTimeoutMs: envInt("TAKER_TX_TIMEOUT_MS", 180_000),
     pollMs: envInt("TAKER_POLL_MS", 5_000),
     resendAfterS: envInt("TAKER_RESEND_AFTER_S", 240),
-    claimSafetyS: envInt("TAKER_CLAIM_SAFETY_S", 600),
+    claimSafetyS: envInt("TAKER_CLAIM_SAFETY_S", 1_800),
     lockRunwayS: envInt("TAKER_LOCK_RUNWAY_S", 900),
     minOrderRunwayS: envInt("TAKER_MIN_ORDER_RUNWAY_S", 900),
     ethGasReserveWei: envWei("TAKER_ETH_GAS_RESERVE_WEI", 2n * 10n ** 15n),

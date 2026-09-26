@@ -25,9 +25,12 @@ import {
 } from "./deployment.js";
 import type { Direction } from "./policy.js";
 import {
+  buildFillV1Payload,
+  computeFillDigest,
   computeFillIntentDigest,
   computeOrderDigest,
   deriveOrderV1Id,
+  verifyProtocolV2Proof,
   type CanonicalOrderV1Body,
   type FillIntentV1Body,
   type MakerOrderAuthV1,
@@ -38,6 +41,7 @@ import {
 } from "./protocol-signing.js";
 import { fsyncDirectory } from "./state.js";
 import {
+  fillBindingIsValid,
   parseFillBody,
   parseFillIntentBody,
   parseMakerOrderAuth,
@@ -372,6 +376,79 @@ export function parseTakerSwapRecord(
   if (fill !== undefined && selectedIntentDigest === null) {
     throw new Error(`${field}.fill has no selected proposal`);
   }
+  const fillDigest =
+    row["fillDigest"] === undefined || row["fillDigest"] === null
+      ? undefined
+      : text(row["fillDigest"], BYTES32_RE, `${field}.fillDigest`);
+  const takerEthAccount = text(
+    row["takerEthAccount"],
+    ETH_ADDRESS_RE,
+    `${field}.takerEthAccount`,
+  );
+  const takerQrlAccount = text(
+    row["takerQrlAccount"],
+    QRL_ADDRESS_RE,
+    `${field}.takerQrlAccount`,
+  );
+  // A proposal signed for other accounts belongs to another taker, so it
+  // could have this process fund a swap that pays someone else.
+  for (const entry of intents) {
+    if (
+      entry.intent.takerEthAccount !== takerEthAccount ||
+      entry.intent.takerQrlAccount !== takerQrlAccount
+    ) {
+      throw new Error(`${field}.intents holds a proposal for other accounts`);
+    }
+  }
+  const fillAcknowledged = flag(
+    row["fillAcknowledged"],
+    `${field}.fillAcknowledged`,
+  );
+  if (fillAcknowledged && fill === undefined) {
+    throw new Error(`${field}.fillAcknowledged has no FillV2 behind it`);
+  }
+  // The FillV2 is what authorizes funding, so it is re-authenticated here
+  // exactly as it was when it first arrived: signature, bindings to the
+  // selected proposal, every window bound, and its semantic digest.
+  if (fill !== undefined) {
+    const selected = intents.find(
+      (entry) => entry.intentDigest === selectedIntentDigest,
+    );
+    if (selected === undefined) {
+      throw new Error(`${field}.fill names no retained proposal`);
+    }
+    const prelock = order.prelock;
+    if (
+      !fillBindingIsValid({
+        fill: fill.fill,
+        auth: fill.auth,
+        orderAuth,
+        recovery: {
+          orderDigest,
+          intent: { intent: selected.intent, auth: selected.auth },
+          intentDigest: selected.intentDigest,
+        },
+        ...(prelock === undefined ? {} : { prelock }),
+      }) ||
+      !verifyProtocolV2Proof(
+        order.makerQrlAccount,
+        fill.auth,
+        buildFillV1Payload(fill.fill, orderAuth, fill.auth),
+      )
+    ) {
+      throw new Error(
+        `${field}.fill does not authenticate the selected proposal`,
+      );
+    }
+    const expectedFillDigest = computeFillDigest(
+      fill.fill,
+      orderAuth,
+      fill.auth,
+    );
+    if (fillDigest !== undefined && fillDigest !== expectedFillDigest) {
+      throw new Error(`${field}.fillDigest does not follow from its fill`);
+    }
+  }
   const asset = row["asset"];
   if (typeof asset !== "string" || !isAssetSymbol(asset) || asset !== order.asset) {
     throw new Error(`${field}.asset is malformed`);
@@ -391,29 +468,13 @@ export function parseTakerSwapRecord(
     orderAuth,
     asset,
     direction,
-    takerEthAccount: text(
-      row["takerEthAccount"],
-      ETH_ADDRESS_RE,
-      `${field}.takerEthAccount`,
-    ),
-    takerQrlAccount: text(
-      row["takerQrlAccount"],
-      QRL_ADDRESS_RE,
-      `${field}.takerQrlAccount`,
-    ),
+    takerEthAccount,
+    takerQrlAccount,
     intents,
     selectedIntentDigest,
     ...(fill === undefined ? {} : { fill }),
-    ...(row["fillDigest"] === undefined || row["fillDigest"] === null
-      ? {}
-      : {
-          fillDigest: text(
-            row["fillDigest"],
-            BYTES32_RE,
-            `${field}.fillDigest`,
-          ),
-        }),
-    fillAcknowledged: flag(row["fillAcknowledged"], `${field}.fillAcknowledged`),
+    ...(fillDigest === undefined ? {} : { fillDigest }),
+    fillAcknowledged,
     releaseObserved: flag(row["releaseObserved"], `${field}.releaseObserved`),
     approveSentAt: nullableUint(row["approveSentAt"], `${field}.approveSentAt`),
     lockSentAt: nullableUint(row["lockSentAt"], `${field}.lockSentAt`),
@@ -512,6 +573,12 @@ export function recordOrderRow(record: TakerSwapRecord): BookOrderRow {
   };
 }
 
+/** The accounts a state file's records must belong to. */
+export interface TakerIdentity {
+  ethAccount: string;
+  qrlAccount: string;
+}
+
 export class TakerStateFile {
   private swaps = new Map<string, TakerSwapRecord>();
   private poisoned: Error | null = null;
@@ -521,6 +588,13 @@ export class TakerStateFile {
     private readonly deployment: DeploymentIdentity,
     /** Ownership gate for every write, normally the process lease. */
     private readonly assertOwned: () => void = () => {},
+    /**
+     * The keys this process loaded. A record for other accounts is refused:
+     * its recipient fields would decide who gets paid while this process
+     * funds the swap, so a shared state file must never be driven by the
+     * wrong identity.
+     */
+    private readonly identity?: TakerIdentity,
     private readonly syncDirectory: (directory: string) => void = fsyncDirectory,
   ) {
     let raw: string | null = null;
@@ -603,6 +677,7 @@ export class TakerStateFile {
           `swap ${record.orderId} holds an order proof that no longer verifies`,
         );
       }
+      this.assertIdentity(record);
       this.swaps.set(record.orderId, record);
     }
   }
@@ -633,6 +708,7 @@ export class TakerStateFile {
         `swap ${record.orderId} retains more proposals than the protocol allows`,
       );
     }
+    this.assertIdentity(record);
     const previous = this.swaps.get(record.orderId);
     const stored = structuredClone(record);
     this.swaps.set(record.orderId, stored);
@@ -663,6 +739,20 @@ export class TakerStateFile {
 
   private assertHealthy(): void {
     if (this.poisoned !== null) throw this.poisoned;
+  }
+
+  private assertIdentity(record: TakerSwapRecord): void {
+    const identity = this.identity;
+    if (identity === undefined) return;
+    if (
+      record.takerEthAccount !== identity.ethAccount.toLowerCase() ||
+      record.takerQrlAccount !== identity.qrlAccount
+    ) {
+      throw recoveryError(
+        this.file,
+        `swap ${record.orderId} belongs to other taker accounts, so the keys this process loaded must not drive it`,
+      );
+    }
   }
 
   private persist(): void {

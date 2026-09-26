@@ -150,6 +150,24 @@ export interface TakerStatusLine {
 
 const short = (value: string): string => value.slice(0, 10);
 
+/** A record whose payout accounts differ from the loaded keys would have
+ *  this process fund a swap that pays someone else. */
+function recordBelongsToOtherAccounts(
+  record: TakerSwapRecord,
+  ethAccount: string,
+  qrlAccount: string,
+): boolean {
+  return (
+    record.takerEthAccount !== ethAccount.toLowerCase() ||
+    record.takerQrlAccount !== qrlAccount
+  );
+}
+
+/** True when the escrow asset on this leg is the chain's native coin. */
+function isNativeLeg(leg: LegKey, asset: AssetSymbol): boolean {
+  return leg === "qrl" || assetInfo(asset).tokenAddress === null;
+}
+
 function legSymbol(leg: LegKey, asset: AssetSymbol): string {
   return leg === "qrl" ? "QRL" : asset;
 }
@@ -294,6 +312,7 @@ export class TakerEngine {
         payBalance: null,
         gasBalance: null,
         gasReserve: 0n,
+        nativePayLeg: isNativeLeg(pay.leg, verified.asset),
         orderExpiresAt: verified.expiresAt,
         nowS: now,
         minOrderRunwayS: this.deps.cfg.minOrderRunwayS,
@@ -371,6 +390,7 @@ export class TakerEngine {
       payBalance: balances.pay,
       gasBalance: balances.gas,
       gasReserve: this.gasReserve(plans.responder.leg),
+      nativePayLeg: isNativeLeg(plans.responder.leg, verified.asset),
       orderExpiresAt: verified.expiresAt,
       nowS: now,
       minOrderRunwayS: this.deps.cfg.minOrderRunwayS,
@@ -452,7 +472,14 @@ export class TakerEngine {
     input: TakerSwapRecord,
     options: { abandon?: boolean } = {},
   ): Promise<{ record: TakerSwapRecord; verdict: TakerVerdict }> {
-    this.signing();
+    const signing = this.signing();
+    if (
+      recordBelongsToOtherAccounts(input, signing.eth.address, signing.signer.address)
+    ) {
+      throw new Error(
+        `swap ${short(input.orderId)} belongs to other taker accounts; refusing to act on it with these keys`,
+      );
+    }
     let record = input;
     let row: BookOrderRow | null = null;
     let bookGone = false;
@@ -547,6 +574,7 @@ export class TakerEngine {
       resendAfterS: this.deps.cfg.resendAfterS,
       claimSafetyS: this.deps.cfg.claimSafetyS,
       lockRunwayS: this.deps.cfg.lockRunwayS,
+      claimSubmitMarginS: Math.ceil(this.deps.cfg.txTimeoutMs / 1000) + 60,
     });
 
     record = await this.execute(record, verdict, plans, {
@@ -733,24 +761,35 @@ export class TakerEngine {
         intent: signed.intent,
         auth: signed.auth,
         releaseSecret,
-        submittedAt: null,
+        // Marked as submitted before the send. A response this client never
+        // saw must not look like "never sent": that would mint a second
+        // proposal the book refuses and leave the accepted one unmarked.
+        submittedAt: now,
         releasedAt: null,
       },
     ];
-    // Keep only what the book itself can hold. The new proposal and the
-    // selected one are never dropped: their release secrets are the
-    // walk-away path, and the oldest others go first.
+    // Keep only what the book itself can hold. A proposal is never dropped
+    // while it could still be filled or released: its release secret is the
+    // walk-away path. Expired, released and unselected ones go first.
     const mustKeep = new Set(
-      record.selectedIntentDigest === null
-        ? [intentDigest]
-        : [intentDigest, record.selectedIntentDigest],
+      retained
+        .filter(
+          (intent) =>
+            intent.intentDigest === intentDigest ||
+            intent.intentDigest === record.selectedIntentDigest ||
+            (intent.releasedAt === null && intent.auth.expiresAt > now),
+        )
+        .map((intent) => intent.intentDigest),
     );
     const room = Math.max(0, MAX_RETAINED_INTENTS - mustKeep.size);
+    const others = retained.filter(
+      (intent) => !mustKeep.has(intent.intentDigest),
+    );
     const trimmed = [
-      ...retained.filter((intent) => !mustKeep.has(intent.intentDigest)).slice(-room),
+      ...(room === 0 ? [] : others.slice(-room)),
       ...retained.filter((intent) => mustKeep.has(intent.intentDigest)),
     ];
-    let stored = signing.state.upsert({
+    const stored = signing.state.upsert({
       ...record,
       intents: trimmed,
       updatedAt: now,
@@ -766,15 +805,6 @@ export class TakerEngine {
       }
       throw error;
     }
-    stored = signing.state.upsert({
-      ...stored,
-      intents: stored.intents.map((intent) =>
-        intent.intentDigest === intentDigest
-          ? { ...intent, submittedAt: now }
-          : intent,
-      ),
-      updatedAt: now,
-    });
     this.log(
       `order ${short(record.orderId)}: proposed FillIntentV2 ${short(intentDigest)}, valid for ${
         signed.auth.expiresAt - signed.auth.issuedAt
@@ -875,17 +905,23 @@ export class TakerEngine {
     }
     const now = this.nowS();
     const claimData = encodeClaim(leg, hashlock, preimage);
-    const stored = signing.state.upsert({
-      ...record,
-      claimSentAt: now,
-      updatedAt: now,
-    });
+    // The attempt marker is written inside the submit callback, so a failed
+    // preflight (which never broadcasts) does not spend the retry slot on
+    // our own payout leg.
+    let stored = record;
     try {
       const hash = await submitPreflightedClaim(
         this.deps.legRpc[leg],
         this.ourAddress(leg),
         claimData,
-        () => this.sender(leg).send(claimData, 0n),
+        async () => {
+          stored = signing.state.upsert({
+            ...record,
+            claimSentAt: now,
+            updatedAt: now,
+          });
+          return this.sender(leg).send(claimData, 0n);
+        },
       );
       this.log(
         `order ${short(record.orderId)}: claimed ${legView(leg, record.asset, plans.initiator.amount).display} on the ${leg} leg, tx ${hash}`,

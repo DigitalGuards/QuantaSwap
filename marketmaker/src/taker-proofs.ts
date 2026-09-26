@@ -589,8 +589,19 @@ export function verifyMakerOrder(
       return null;
     }
     if (row.id !== deriveOrderV1Id(row.makerQrlAccount, auth.nonce)) return null;
-    if (row.prelocked && (row.hashlock === null || row.initiatorTimeout === null)) {
-      return null;
+    if (row.prelocked) {
+      // A pre-funded listing anchors its escrow at create time, so its
+      // window is bounded on both sides and the proof cannot outlive the
+      // escrow it points at.
+      if (row.hashlock === null || row.initiatorTimeout === null) return null;
+      const listingWindow = row.initiatorTimeout - auth.issuedAt;
+      if (
+        listingWindow < PROTOCOL_V2_LIMITS.minPrelockListingWindowS ||
+        listingWindow > PROTOCOL_V2_LIMITS.maxPrelockListingWindowS ||
+        auth.expiresAt > row.initiatorTimeout
+      ) {
+        return null;
+      }
     }
     const order = orderBodyFromRow(row);
     const orderDigest = computeOrderDigest(order, auth);
@@ -803,21 +814,27 @@ export function verifyMakerFill(
   return { signed: { fill: row.fill, auth: row.fillAuth }, fillDigest };
 }
 
-/** Timeout, window and binding rules a FillV2 must satisfy. Identical to
- *  the browser taker's and to what the maker signer itself enforces. */
-function fillTermsAreValid(
-  row: BookOrderRow,
-  fill: FillV1Body,
-  auth: ProtocolAuthV1,
-  recovery: TakerRecovery,
-  now: number,
-): boolean {
+export interface FillBindingInput {
+  fill: FillV1Body;
+  auth: ProtocolAuthV1;
+  orderAuth: MakerOrderAuthV1;
+  recovery: TakerRecovery;
+  /** The signed prelock this fill must echo, when the order carries one. */
+  prelock?: { hashlock: string; initiatorTimeout: number };
+}
+
+/**
+ * Timeout, window and binding rules a FillV2 must satisfy, with no
+ * dependence on the current clock, so the live path and the state-file
+ * hydration path apply exactly one rule set. Identical to the browser
+ * taker's and to what the maker signer itself enforces.
+ */
+export function fillBindingIsValid(x: FillBindingInput): boolean {
   const limits = PROTOCOL_V2_LIMITS;
+  const { fill, auth, orderAuth, recovery } = x;
   const responseWindow = auth.expiresAt - auth.issuedAt;
   const initiatorWindow = fill.initiatorTimeout - auth.issuedAt;
   const responderWindow = fill.responderTimeout - auth.issuedAt;
-  const orderAuth = row.makerAuth;
-  if (orderAuth === undefined) return false;
   return (
     fill.hashlock !== EMPTY_HASHLOCK &&
     fill.orderDigest === recovery.orderDigest &&
@@ -827,7 +844,6 @@ function fillTermsAreValid(
     fill.releaseCommitment === recovery.intent.intent.releaseCommitment &&
     responseWindow >= limits.minFillResponseS &&
     responseWindow <= limits.maxFillResponseS &&
-    auth.issuedAt <= now + limits.maxClockSkewS &&
     auth.expiresAt <= orderAuth.expiresAt &&
     auth.issuedAt >= recovery.intent.auth.issuedAt &&
     auth.issuedAt < recovery.intent.auth.expiresAt &&
@@ -837,10 +853,41 @@ function fillTermsAreValid(
       limits.minResponderRunwayAfterResponseS &&
     initiatorWindow >= responderWindow &&
     responderWindow <= Math.floor(initiatorWindow / 2) &&
-    (row.prelocked || initiatorWindow <= limits.maxInitiatorWindowS) &&
-    (!row.prelocked ||
-      (fill.hashlock === row.hashlock &&
-        fill.initiatorTimeout === row.initiatorTimeout))
+    (x.prelock !== undefined || initiatorWindow <= limits.maxInitiatorWindowS) &&
+    (x.prelock === undefined ||
+      (fill.hashlock === x.prelock.hashlock &&
+        fill.initiatorTimeout === x.prelock.initiatorTimeout &&
+        initiatorWindow >= limits.minPrelockRunwayS))
+  );
+}
+
+/** The live gates on top of the binding rules: clock skew and, for a
+ *  pre-funded escrow, the runway it must still carry right now. */
+function fillTermsAreValid(
+  row: BookOrderRow,
+  fill: FillV1Body,
+  auth: ProtocolAuthV1,
+  recovery: TakerRecovery,
+  now: number,
+): boolean {
+  const orderAuth = row.makerAuth;
+  if (orderAuth === undefined) return false;
+  const prelock =
+    row.prelocked && row.hashlock !== null && row.initiatorTimeout !== null
+      ? { hashlock: row.hashlock, initiatorTimeout: row.initiatorTimeout }
+      : undefined;
+  if (row.prelocked && prelock === undefined) return false;
+  return (
+    auth.issuedAt <= now + PROTOCOL_V2_LIMITS.maxClockSkewS &&
+    (prelock === undefined ||
+      fill.initiatorTimeout - now >= PROTOCOL_V2_LIMITS.minPrelockRunwayS) &&
+    fillBindingIsValid({
+      fill,
+      auth,
+      orderAuth,
+      recovery,
+      ...(prelock === undefined ? {} : { prelock }),
+    })
   );
 }
 

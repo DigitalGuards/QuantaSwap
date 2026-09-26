@@ -12,6 +12,7 @@ import { makeDeploymentIdentity } from "./deployment.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import {
   ProtocolSigner,
+  computeFillDigest,
   computeFillIntentDigest,
   computeOrderDigest,
   deriveOrderV1Id,
@@ -103,6 +104,49 @@ function withIntent(record: TakerSwapRecord, order: SignedOrderV1, issuedAt = NO
       },
     ],
   };
+}
+
+function withFill(
+  record: TakerSwapRecord,
+  order: SignedOrderV1,
+  issuedAt = NOW + 5,
+): TakerSwapRecord {
+  const selected = record.intents[record.intents.length - 1];
+  assert.notEqual(selected, undefined);
+  if (selected === undefined) return record;
+  const fill = maker.signFillV1(
+    {
+      orderDigest: record.orderDigest,
+      intentDigest: selected.intentDigest,
+      takerEthAccount: selected.intent.takerEthAccount,
+      takerQrlAccount: selected.intent.takerQrlAccount,
+      releaseCommitment: selected.intent.releaseCommitment,
+      hashlock: `0x${"12".repeat(32)}`,
+      initiatorTimeout: issuedAt + 7200,
+      responderTimeout: issuedAt + 3600,
+    },
+    {
+      order,
+      selectedIntent: {
+        intentDigest: selected.intentDigest,
+        intent: selected.intent,
+        auth: selected.auth,
+      },
+      issuedAt,
+      respondBy: issuedAt + 300,
+    },
+  );
+  return {
+    ...record,
+    selectedIntentDigest: selected.intentDigest,
+    fill,
+    fillDigest: computeFillDigest(fill.fill, order.auth, fill.auth),
+    fillAcknowledged: true,
+  };
+}
+
+function reopen(file: string, identity?: { ethAccount: string; qrlAccount: string }) {
+  return new TakerStateFile(file, DEPLOYMENT, undefined, identity);
 }
 
 describe("taker state durability", () => {
@@ -214,6 +258,135 @@ describe("taker state durability", () => {
     assert.throws(
       () => new TakerStateFile(file, DEPLOYMENT).upsert(record),
       /more proposals than the protocol allows/,
+    );
+  });
+
+  it("round trips an authenticated maker fill", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = withFill(withIntent(recordFor(order), order), order);
+    new TakerStateFile(file, DEPLOYMENT).upsert(record);
+    const recovered = reopen(file).get(record.orderId);
+    assert.equal(recovered?.fillAcknowledged, true);
+    assert.equal(recovered?.fill?.fill.hashlock, `0x${"12".repeat(32)}`);
+  });
+
+  it("refuses a fill whose signature was edited on disk", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withFill(withIntent(recordFor(order), order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: { fill: { auth: { nonce: string } } }[];
+    };
+    const fill = envelope.swaps[0]?.fill;
+    if (fill !== undefined) fill.auth.nonce = `0x${"ee".repeat(32)}`;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /does not authenticate the selected proposal/,
+    );
+  });
+
+  it("refuses a fill whose timeouts were edited on disk", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withFill(withIntent(recordFor(order), order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: { fill: { fill: { responderTimeout: number } } }[];
+    };
+    const fill = envelope.swaps[0]?.fill;
+    if (fill !== undefined) fill.fill.responderTimeout = NOW + 60;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /does not authenticate the selected proposal/,
+    );
+  });
+
+  it("refuses a fill digest that does not follow from its fill", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withFill(withIntent(recordFor(order), order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: Record<string, unknown>[];
+    };
+    const swap = envelope.swaps[0];
+    if (swap !== undefined) swap["fillDigest"] = `0x${"cd".repeat(32)}`;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /fillDigest does not follow/,
+    );
+  });
+
+  it("refuses a funding acknowledgment with no fill behind it", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withIntent(recordFor(order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: Record<string, unknown>[];
+    };
+    const swap = envelope.swaps[0];
+    if (swap !== undefined) swap["fillAcknowledged"] = true;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /no FillV2 behind it/,
+    );
+  });
+
+  it("refuses a record whose accounts are not the loaded keys", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = recordFor(order);
+    new TakerStateFile(file, DEPLOYMENT).upsert(record);
+    assert.throws(
+      () =>
+        reopen(file, {
+          ethAccount: `0x${"9".repeat(40)}`,
+          qrlAccount: taker.address,
+        }),
+      /other taker accounts/,
+    );
+    assert.throws(
+      () =>
+        reopen(file, {
+          ethAccount: TAKER_ETH,
+          qrlAccount: maker.address,
+        }),
+      /other taker accounts/,
+    );
+    assert.notEqual(
+      reopen(file, { ethAccount: TAKER_ETH, qrlAccount: taker.address }).get(
+        record.orderId,
+      ),
+      null,
+    );
+  });
+
+  it("refuses a proposal signed for other accounts", () => {
+    const file = tempFile();
+    const order = signOrder();
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withIntent(recordFor(order), order),
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: { takerEthAccount: string }[];
+    };
+    const swap = envelope.swaps[0];
+    if (swap !== undefined) swap.takerEthAccount = `0x${"9".repeat(40)}`;
+    writeFileSync(file, JSON.stringify(envelope));
+    assert.throws(
+      () => new TakerStateFile(file, DEPLOYMENT),
+      /proposal for other accounts/,
     );
   });
 

@@ -126,6 +126,7 @@ function input(overrides: Partial<TakerDecideInput> = {}): TakerDecideInput {
     resendAfterS: 240,
     claimSafetyS: 600,
     lockRunwayS: 900,
+    claimSubmitMarginS: 240,
     ...overrides,
   };
 }
@@ -481,6 +482,30 @@ describe("decideTaker settlement", () => {
     assert.notEqual(verdict.decision, "refund");
   });
 
+  it("stops watching once our leg settled and the maker escrow expired", () => {
+    const verdict = decideTaker(
+      input({
+        nowS: T1 + 1,
+        iState: makerLock(),
+        iConfirmed: makerLock(),
+        rState: ourLock({ status: SwapStatus.Refunded }),
+        record: record({ lockSentAt: NOW - 300, refundSentAt: T2 }),
+      }),
+    );
+    assert.equal(verdict.decision, "finish");
+  });
+
+  it("stops claiming inside the transaction margin of the deadline", () => {
+    const verdict = decideTaker(
+      input({
+        nowS: T1 - 10,
+        rState: ourLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+        record: record({ lockSentAt: NOW - 300 }),
+      }),
+    );
+    assert.notEqual(verdict.decision, "claim");
+  });
+
   it("finishes after our refund and the maker's", () => {
     const verdict = decideTaker(
       input({
@@ -587,6 +612,7 @@ describe("take bounds", () => {
     maxIn: null,
     minOut: null,
     payBalance: PAY,
+    nativePayLeg: false,
     gasBalance: 10n ** 18n,
     gasReserve: 10n ** 15n,
     orderExpiresAt: NOW + 3600,
@@ -623,6 +649,21 @@ describe("take bounds", () => {
     assert.match(
       takeBoundsIssue({ ...base, payBalance: PAY - 1n }) ?? "",
       /holds less/,
+    );
+  });
+
+  it("refuses a native take that cannot cover its own gas reserve", () => {
+    assert.match(
+      takeBoundsIssue({ ...base, nativePayLeg: true, payBalance: PAY }) ?? "",
+      /gas reserve/,
+    );
+    assert.equal(
+      takeBoundsIssue({
+        ...base,
+        nativePayLeg: true,
+        payBalance: PAY + base.gasReserve,
+      }),
+      null,
     );
   });
 
