@@ -1326,9 +1326,13 @@ async function main() {
       await (await token.disarm()).wait();
       await track.check(`revert bomb ${size} bytes`);
     }
+    // The copy itself is expected and stays: the high-level call in _settle
+    // discards the value and the generated code still copies the bytes, on both
+    // targets. What changed is that the bytes are now always a custom error.
+    assertEq(baseline.copies, 1, "the settling frame copies the attempt's revert payload");
     console.log(
       `       revert bomb: settling frame ${baseline.afterChild} baseline, ${worst} worst, ` +
-        `reserve ${DELIVERY_GAS_RESERVE}`
+        `reserve ${DELIVERY_GAS_RESERVE}, parent RETURNDATACOPY ${baseline.copies}`
     );
     assert(
       worst * 2n < DELIVERY_GAS_RESERVE,
