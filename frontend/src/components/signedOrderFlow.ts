@@ -138,7 +138,16 @@ export function sameSignedIntent(
   );
 }
 
-/** Choose from signed time and digest so every honest mirror reaches one result. */
+/** First-come priority: signed issuance clamped to arrival at the maker's
+ *  book. The taker chooses issuedAt, so backdating it cannot jump a
+ *  proposal that arrived earlier; a book that under-reports receivedAt
+ *  only falls back to issuance order. */
+export function intentPriority(candidate: FillIntentView): number {
+  return Math.max(candidate.auth.issuedAt, candidate.receivedAt);
+}
+
+/** Choose the first-come valid proposal; ties fall back to signed
+ *  issuance, then the semantic digest. */
 export function selectEarliestFillIntent(
   order: OrderView,
   candidates: readonly FillIntentView[],
@@ -160,6 +169,7 @@ export function selectEarliestFillIntent(
   });
   valid.sort(
     (left, right) =>
+      intentPriority(left) - intentPriority(right) ||
       left.auth.issuedAt - right.auth.issuedAt ||
       left.intentDigest.localeCompare(right.intentDigest),
   );

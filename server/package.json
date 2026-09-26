@@ -1,6 +1,6 @@
 {
   "name": "quantaswap-orderbook",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "QuantaSwap order book: coordination-only matching service for protocol-mode HTLC swaps",
   "license": "GPL-3.0",
@@ -21,8 +21,13 @@
   "dependencies": {
     "@noble/hashes": "2.2.0",
     "@qrlwallet/connect": "5.0.0",
-    "@theqrl/mldsa87": "2.1.4",
+    "@theqrl/mldsa87": "2.2.0",
     "ethers": "6.17.0",
     "socks-proxy-agent": "10.1.0"
+  },
+  "overrides": {
+    "@theqrl/mldsa87": "$@theqrl/mldsa87",
+    "@theqrl/wallet.js": "6.3.0",
+    "@theqrl/qrl-cryptography": "0.3.3"
   }
 }

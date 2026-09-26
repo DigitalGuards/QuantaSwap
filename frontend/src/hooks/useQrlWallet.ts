@@ -15,6 +15,9 @@ import {
   getAppStoreUrl,
   type ConnectionStatus,
 } from "@qrlwallet/connect";
+// The dependency-free subpath: the package index also pulls in the DOM
+// pairing modal, which this hook never needs.
+import { groupMyQrlWallet } from "@qrlwallet/connect-ui/wallets";
 import {
   bindAuthorizedMessageSigner,
   getAuthorizedQrlAccount,
@@ -48,13 +51,35 @@ interface Eip6963Detail {
   provider: QrlProvider;
 }
 
-export interface DiscoveredQrlWallet {
+/**
+ * The single MyQRLWallet row. MyQRLWallet announces once per transport (the
+ * browser extension and the connect SDK's relay entry), so the two
+ * announcements are folded into one row. `uuid` is the announcement a click
+ * on the row body uses, `secondaryUuid` the one the extra action uses.
+ */
+export interface MyQrlWalletRow {
+  kind: "myqrlwallet";
+  uuid: string;
+  name: string;
+  icon: string;
+  /** Plain secondary line: "Browser extension" or "Phone, web or desktop". */
+  primaryLabel: string;
+  /** Relay announcement for the extra action; null when the row has one path. */
+  secondaryUuid: string | null;
+  secondaryLabel: string | null;
+}
+
+/** Any other QRL-capable wallet, listed on its own. */
+export interface OtherQrlWalletRow {
+  kind: "wallet";
   uuid: string;
   name: string;
   icon: string;
   rdns: string;
-  kind: QrlTransport;
 }
+
+/** A row shown in the QRL-leg picker. */
+export type DiscoveredQrlWallet = MyQrlWalletRow | OtherQrlWalletRow;
 
 export function useQrlWallet() {
   const sdkRef = useRef<QRLConnect | null>(null);
@@ -193,13 +218,27 @@ export function useQrlWallet() {
       if (detailMapRef.current.has(info.uuid)) return;
       detailMapRef.current.set(info.uuid, detail);
       setWallets(
-        Array.from(detailMapRef.current.values()).map((d) => ({
-          uuid: d.info.uuid,
-          name: d.info.name,
-          icon: d.info.icon,
-          rdns: d.info.rdns,
-          kind: d.info.rdns === QRL_CONNECT_RDNS ? "relay" : "extension",
-        })),
+        groupMyQrlWallet(detailMapRef.current.values()).map(
+          (entry): DiscoveredQrlWallet =>
+            entry.kind === "myqrlwallet"
+              ? {
+                  kind: "myqrlwallet",
+                  uuid: entry.uuid,
+                  name: entry.name,
+                  icon: entry.icon,
+                  primaryLabel: entry.primaryLabel,
+                  secondaryUuid:
+                    entry.secondary === "relay" ? (entry.relay?.info.uuid ?? null) : null,
+                  secondaryLabel: entry.secondaryLabel,
+                }
+              : {
+                  kind: "wallet",
+                  uuid: entry.uuid,
+                  name: entry.name,
+                  icon: entry.icon,
+                  rdns: entry.rdns,
+                },
+        ),
       );
     };
     window.addEventListener("eip6963:announceProvider", onAnnounce);

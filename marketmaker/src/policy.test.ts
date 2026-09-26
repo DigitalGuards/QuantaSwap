@@ -15,6 +15,8 @@ import {
   canContinueWithoutBook,
   decide,
   earliestValidFillIntent,
+  fundsShort,
+  inventoryShort,
   levelQuote,
   shouldPost,
   type DecideInput,
@@ -56,6 +58,7 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     takerQrlAccount: `Q${"d".repeat(128)}`,
     lockSentAt: null,
     claimSentAt: null,
+    sponsorSentAt: null,
     refundSentAt: null,
     createdAt: NOW - 120,
     ...overrides,
@@ -104,6 +107,13 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     resendAfterS: 240,
     claimSafetyS: 600,
     lockGraceS: 0,
+    // Shipping default. The fixture legs share one initiator/recipient
+    // pair, so point the sponsor identity at it: every lifecycle test then
+    // runs with the sponsor branch reachable.
+    sponsorClaims: true,
+    ourInitiator: TAKER_ETH,
+    takerOnInitiatorLeg: `0x${MY_QRL.slice(1)}`,
+    sponsorMarginS: 240,
     ...overrides,
   };
 }
@@ -139,31 +149,71 @@ function fillIntent(
 describe("portable fill intent selection", () => {
   const orderDigest = `0x${"a".repeat(64)}`;
 
-  it("selects by signed issue time regardless of mirror-local receive order", () => {
-    const later = fillIntent("2", NOW + 1, {
-      auth: { ...fillIntent("2", NOW + 1).auth, issuedAt: NOW - 5 },
+  it("selects the proposal that reached the book first", () => {
+    const first = fillIntent("2", NOW - 8, {
+      auth: { ...fillIntent("2", NOW - 8).auth, issuedAt: NOW - 9 },
     });
-    const earliest = fillIntent("1", NOW + 2, {
-      auth: { ...fillIntent("1", NOW + 2).auth, issuedAt: NOW - 10 },
+    const second = fillIntent("1", NOW - 3, {
+      auth: { ...fillIntent("1", NOW - 3).auth, issuedAt: NOW - 4 },
     });
     assert.equal(
-      earliestValidFillIntent([later, earliest], orderDigest, NOW, () => true)
+      earliestValidFillIntent([second, first], orderDigest, NOW, () => true)
         ?.intentDigest,
-      earliest.intentDigest,
+      first.intentDigest,
     );
   });
 
-  it("uses the semantic digest as the cross-mirror tie breaker", () => {
-    const highDigestReceivedFirst = fillIntent("2", NOW);
-    const lowDigestReceivedLater = fillIntent("1", NOW + 20);
+  it("gives a backdated issuance no priority over an earlier arrival", () => {
+    const honest = fillIntent("2", NOW - 20, {
+      auth: { ...fillIntent("2", NOW - 20).auth, issuedAt: NOW - 25 },
+    });
+    const backdated = fillIntent("1", NOW - 5, {
+      auth: { ...fillIntent("1", NOW - 5).auth, issuedAt: NOW - 110 },
+    });
     assert.equal(
-      earliestValidFillIntent(
-        [highDigestReceivedFirst, lowDigestReceivedLater],
-        orderDigest,
-        NOW,
-        () => true,
-      )?.intentDigest,
-      lowDigestReceivedLater.intentDigest,
+      earliestValidFillIntent([backdated, honest], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      honest.intentDigest,
+    );
+  });
+
+  it("ranks a slow wallet approval by its arrival", () => {
+    // Issued before a 60 s approval prompt, received after it: queued
+    // behind a proposal that arrived during the prompt.
+    const slow = fillIntent("1", NOW - 5, {
+      auth: { ...fillIntent("1", NOW - 5).auth, issuedAt: NOW - 65 },
+    });
+    const fast = fillIntent("2", NOW - 30, {
+      auth: { ...fillIntent("2", NOW - 30).auth, issuedAt: NOW - 32 },
+    });
+    assert.equal(
+      earliestValidFillIntent([slow, fast], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      fast.intentDigest,
+    );
+  });
+
+  it("falls back to issuance when a book under-reports arrival", () => {
+    const early = fillIntent("2", 0, {
+      auth: { ...fillIntent("2", 0).auth, issuedAt: NOW - 10 },
+    });
+    const late = fillIntent("1", 0, {
+      auth: { ...fillIntent("1", 0).auth, issuedAt: NOW - 5 },
+    });
+    assert.equal(
+      earliestValidFillIntent([late, early], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      early.intentDigest,
+    );
+  });
+
+  it("uses the semantic digest when arrival and issuance tie", () => {
+    const high = fillIntent("2", NOW);
+    const low = fillIntent("1", NOW);
+    assert.equal(
+      earliestValidFillIntent([high, low], orderDigest, NOW, () => true)
+        ?.intentDigest,
+      low.intentDigest,
     );
   });
 
@@ -551,6 +601,64 @@ describe("refund and settlement", () => {
   });
 });
 
+describe("sponsored taker claim", () => {
+  const MARGIN = 240;
+  const ourLock = (overrides: Partial<LegState> = {}): LegState =>
+    leg(SwapStatus.Open, { timeout: T1, ...overrides });
+  const revealed = (overrides: Partial<DecideInput> = {}): DecideInput =>
+    input({
+      iState: ourLock(),
+      rState: leg(SwapStatus.Claimed),
+      rConfirmed: leg(SwapStatus.Claimed),
+      nowS: NOW + 100,
+      sponsorMarginS: MARGIN,
+      ...overrides,
+    });
+
+  it("claims our lock for the taker once our reveal is at depth", () => {
+    assert.equal(decide(revealed()), "sponsor");
+  });
+
+  it("waits while our reveal is not yet at confirmation depth", () => {
+    assert.equal(decide(revealed({ rConfirmed: leg(SwapStatus.Open) })), "wait");
+    assert.equal(decide(revealed({ rConfirmed: null })), "wait");
+  });
+
+  it("stays off when the operator disables it", () => {
+    assert.equal(decide(revealed({ sponsorClaims: false })), "wait");
+  });
+
+  it("never sponsors inside the margin before our timeout", () => {
+    assert.equal(decide(revealed({ nowS: T1 - MARGIN })), "wait");
+    assert.equal(decide(revealed({ nowS: T1 - MARGIN - 1 })), "sponsor");
+    assert.equal(decide(revealed({ nowS: T1 })), "refund");
+  });
+
+  it("only sponsors the lock we funded for this taker", () => {
+    const someoneElses = ourLock({ initiator: SCAM_TOKEN });
+    const paysSomeoneElse = ourLock({ recipient: SCAM_TOKEN });
+    const unassigned = ourLock({ recipient: `0x${"0".repeat(40)}` });
+    assert.equal(decide(revealed({ iState: someoneElses })), "wait");
+    assert.equal(decide(revealed({ iState: paysSomeoneElse })), "wait");
+    assert.equal(decide(revealed({ iState: unassigned })), "wait");
+    assert.equal(decide(revealed({ takerOnInitiatorLeg: null })), "wait");
+  });
+
+  it("spaces retries by the resend interval", () => {
+    const recent = managed({ sponsorSentAt: NOW + 100 - 10 });
+    const stale = managed({ sponsorSentAt: NOW + 100 - 241 });
+    assert.equal(decide(revealed({ managed: recent })), "wait");
+    assert.equal(decide(revealed({ managed: stale })), "sponsor");
+  });
+
+  it("settles once the taker's leg is claimed by anyone", () => {
+    assert.equal(
+      decide(revealed({ iState: ourLock({ status: SwapStatus.Claimed }) })),
+      "finish",
+    );
+  });
+});
+
 describe("price ladder", () => {
   const base = {
     baseUnits: 2n * 10n ** 16n, // 0.02 ETH
@@ -656,6 +764,28 @@ describe("refill policy", () => {
 
   it("stops when inventory would dip into the reserve", () => {
     assert.equal(shouldPost({ ...base, balanceWei: 6n * 10n ** 16n }), false);
+  });
+
+  it("reports inventory short only when funds are the blocker", () => {
+    assert.equal(inventoryShort(base), false);
+    assert.equal(inventoryShort({ ...base, balanceWei: 6n * 10n ** 16n }), true);
+    assert.equal(inventoryShort({ ...base, gasBalanceWei: 10n ** 16n }), true);
+    // Full ladder or maxed in-flight: nothing is wanted, so nothing is short.
+    assert.equal(
+      inventoryShort({ ...base, balanceWei: 0n, myOpenCount: 2 }),
+      false,
+    );
+    assert.equal(
+      inventoryShort({ ...base, balanceWei: 0n, inflightCount: 2 }),
+      false,
+    );
+  });
+
+  it("keeps funds short when capacity alone clears the gate", () => {
+    // A maxed in-flight cap must not read as "funded again".
+    const busyAndBroke = { ...base, balanceWei: 0n, inflightCount: 2 };
+    assert.equal(fundsShort(busyAndBroke), true);
+    assert.equal(fundsShort(base), false);
   });
 });
 

@@ -6,6 +6,7 @@ import { Check } from "lucide-react";
 import { ETH_ASSETS, legByKey } from "@/config";
 import type { LegKey } from "@/config";
 import {
+  SwapStatus,
   buildAssignData,
   buildClaimData,
   buildLockNativeData,
@@ -368,7 +369,16 @@ export function SwapFlow({
         revealedPreimage !== null &&
         preimage === revealedPreimage;
       if (!legacyPublicSecretRecovery) requireBoundTerms();
-      await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n);
+      try {
+        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n);
+      } catch (err) {
+        // Anyone may submit a claim once the secret is public, and it can
+        // only pay the recipient fixed at lock time; market makers do this
+        // for takers. A claim that lost that race already paid out.
+        const current = await getLegState(leg, hashlock).catch(() => null);
+        if (current?.status === SwapStatus.Claimed) return;
+        throw err;
+      }
     });
 
   const refundLeg = (leg: LegKey) =>
@@ -449,7 +459,7 @@ export function SwapFlow({
     },
     "claim-initiator": {
       title: `Claim ${iPlan.symbol} with the revealed secret`,
-      desc: `${who(steps[3].own)} read${steps[3].own ? "" : "s"} the now-public preimage from the other chain and claim${steps[3].own ? "" : "s"} the initiator leg. No trust required at any point.`,
+      desc: `${who(steps[3].own)} read${steps[3].own ? "" : "s"} the now-public preimage from the other chain and claim${steps[3].own ? "" : "s"} the initiator leg. No trust required at any point.${steps[3].own && swap.role === "taker" ? " Your maker may submit this claim for you at its own gas cost; it can only pay your address." : ""}`,
       label: `Claim ${iPlan.symbol}`,
       action: () => revealedPreimage && claimLeg(iLeg, revealedPreimage),
       pendingText: null,

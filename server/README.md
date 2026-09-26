@@ -98,6 +98,37 @@ bound yields at most 1,472 reset records inside the 256-order total retention
 bound. Receivers also reject snapshots above their 6,144-record defensive
 ceiling. Peer responses must be `application/json`, and redirects are rejected.
 
+The feed file is an append-only log of JSON lines: one header, then one line
+per event. An append writes its whole buffer, fsyncs it, and truncates the file
+back to its previous length if any step fails, so no partial line survives. The
+log is compacted into the retained ring once it holds a quarter more lines than
+the ring. A torn final line left by a crash is dropped on the next start. Any
+other unreadable log is moved aside as `<file>.corrupt-<timestamp>`, logged, and
+replaced by a fresh feed under a new identity, which every peer answers with a
+reset snapshot; the retained proofs in `orders.json` rebuild the feed. A
+zero-length file loads as an empty feed. A log removed under a running process
+is logged and rewritten from the retained ring. A compaction that keeps failing
+logs one line per failure streak, keeps appends durable, and reports the feed
+degraded in `GET /status` while `GET /health` stays ready. The first
+start of this version migrates a version 2 feed file in place, and earlier
+images cannot read the result, so roll back by restoring the state snapshot
+taken before the update.
+
+Exactly one order-book process may run per data directory. The feed log is
+append-only and single-writer: the process remembers the log file it opened and
+refuses to append to, or checkpoint into, a file another process put in its
+place. The local mirror then fails its storage check, and two feeds never
+interleave. Restart with a full stop before the replacement start, never with an
+overlapping reload.
+
+That check catches a replaced file only. Two processes started on the same data
+directory with no replacement between them append to the same inode, which is
+invisible to a device and inode comparison, and the rollback that truncates a
+failed append back to its previous length assumes it is the only writer.
+`orders.json` carries the same exposure and always has. The fix is to port the
+market maker's state lease to the order book, so a second process refuses to
+start while a lease is held.
+
 Two workers pull up to 16 configured peers. The request timeout is one total
 deadline for every page, parse, and application step for a peer. Incremental
 pages checkpoint their cursor after successful application. Exact envelopes,
@@ -373,8 +404,14 @@ operational data. Encrypt backups and restrict access.
 
 The two files use separate atomic writes. Before serving after a restart, the
 mirror reconciles every retained public proof from `orders.json` into the feed,
-closing a crash window between the two writes. A later feed persistence failure
-starts fatal shutdown rather than accepting mutations peers cannot discover.
+closing a crash window between the two writes. A clean shutdown records a
+digest of the retained public proofs, so an unchanged mirror keeps its feed
+identity and peers continue incrementally. The digest is unknown after a crash,
+after a storage failure, and after an overlapping restart where the departing
+process no longer owns the log, and the next start then rotates the feed
+identity so every peer takes a reset snapshot. A feed persistence failure
+starts fatal shutdown, so the mirror never accepts mutations peers cannot
+discover.
 
 Admission is bounded at 200 open orders, 40 per maker pair, and 50 per local
 source IP. Retained recovery state is bounded at 256 orders globally, 64 per

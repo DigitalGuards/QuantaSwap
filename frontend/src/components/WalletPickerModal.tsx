@@ -11,8 +11,12 @@ interface Props {
 
 /**
  * EIP-6963 picker for the QRL leg. Lists the QRL-capable wallets the hook
- * discovered (the QRL browser extension and MyQRLWallet via the connect
- * relay); a click runs the matching connect path. Ported from QuantaPool.
+ * discovered; a click runs the matching connect path. Ported from QuantaPool.
+ *
+ * MyQRLWallet announces once per transport (browser extension and connect
+ * relay), so the hook folds the pair into a single row. Clicking that row
+ * uses the extension when it is installed, and the "Use phone or desktop app"
+ * button under it always starts relay pairing.
  */
 export function WalletPickerModal({ open, wallets, onSelect, onClose }: Props) {
   if (!open) return null;
@@ -46,21 +50,42 @@ export function WalletPickerModal({ open, wallets, onSelect, onClose }: Props) {
               web wallet.
             </p>
           ) : (
-            wallets.map((w) => (
-              <button
-                key={w.uuid}
-                onClick={() => onSelect(w.uuid)}
-                className="flex w-full cursor-pointer items-center gap-3 rounded-md border border-input bg-foreground/[0.03] px-3 py-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/10"
-              >
-                {w.icon ? (
-                  <img src={w.icon} alt="" className="h-8 w-8 rounded-md" />
-                ) : (
-                  <span className="h-8 w-8 rounded-md bg-muted" />
-                )}
-                <span className="flex-1 font-medium">{w.name}</span>
-                <span className="font-data text-xs text-muted-foreground">{w.rdns}</span>
-              </button>
-            ))
+            wallets.map((w) => {
+              // The merged MyQRLWallet row offers relay pairing as a second,
+              // separately focusable button when the extension holds the
+              // primary click.
+              const relayUuid = w.kind === "myqrlwallet" ? w.secondaryUuid : null;
+              const relayLabel = w.kind === "myqrlwallet" ? w.secondaryLabel : null;
+              return (
+                <div key={w.uuid} className="space-y-1">
+                  <button
+                    onClick={() => onSelect(w.uuid)}
+                    className="flex w-full cursor-pointer items-center gap-3 rounded-md border border-input bg-foreground/[0.03] px-3 py-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/10"
+                  >
+                    {w.icon ? (
+                      <img src={w.icon} alt="" className="h-8 w-8 shrink-0 rounded-md" />
+                    ) : (
+                      <span className="h-8 w-8 shrink-0 rounded-md bg-muted" />
+                    )}
+                    <span className="flex-1 font-medium">{w.name}</span>
+                    {w.kind === "myqrlwallet" ? (
+                      <span className="text-xs text-muted-foreground">{w.primaryLabel}</span>
+                    ) : (
+                      <span className="font-data text-xs text-muted-foreground">{w.rdns}</span>
+                    )}
+                  </button>
+                  {relayUuid && relayLabel ? (
+                    <button
+                      onClick={() => onSelect(relayUuid)}
+                      aria-label={`${relayLabel} to connect ${w.name}`}
+                      className="cursor-pointer rounded-sm pl-11 text-left text-xs text-primary underline underline-offset-4 hover:text-primary/80"
+                    >
+                      {relayLabel}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })
           )}
         </CardContent>
       </Card>

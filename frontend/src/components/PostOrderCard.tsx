@@ -713,7 +713,7 @@ export function PostOrderCard({
             const next = e.target.value.replace(",", ".");
             if (next === "" || /^\d*\.?\d*$/.test(next)) setValue(next);
           }}
-          className="font-data h-12 pr-20 text-lg"
+          className="font-numeric h-12 pr-20 text-lg"
         />
         {side === "eth" ? (
           assetPicker
@@ -864,7 +864,7 @@ export function PostOrderCard({
           </div>
           <div className="flex justify-between">
             <span className="text-muted-foreground">Timelocks</span>
-            <span className="font-data">
+            <span className="font-numeric">
               {prefund ? "48h escrow / 1h taker leg" : "2h your leg / 1h taker leg"}
             </span>
           </div>

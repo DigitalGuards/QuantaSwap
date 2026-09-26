@@ -45,6 +45,8 @@ import {
   decide,
   earliestValidFillIntent,
   levelQuote,
+  fundsShort,
+  inventoryShort,
   shouldPost,
   type BookStatus,
   type Direction,
@@ -56,7 +58,13 @@ import {
   deriveOrderV1Id,
   verifyFillIntentV1,
 } from "./protocol-signing.js";
-import { StateFile, StateFilePoisonedError, StateProcessLease } from "./state.js";
+import {
+  StateFile,
+  StateFilePoisonedError,
+  StateLeaseLostError,
+  StateLeaseUnverifiableError,
+  StateProcessLease,
+} from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
 import { AdmissionBackoff, canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
 
@@ -71,9 +79,15 @@ const stateLease = StateProcessLease.acquire(cfg.stateFile, {
   ethAccount: eth.address.toLowerCase(),
   qrlAccount: protocolSigner.address.toLowerCase(),
 });
+// Set the moment this process stops owning the state lease. Every loop reads
+// it, so no further work is attempted while shutdown runs.
+let leaseLost = false;
+stateLease.startHeartbeat((reason) => void exitOnLostLease(reason));
 let state: StateFile;
 try {
-  state = new StateFile(cfg.stateFile, deployment);
+  state = new StateFile(cfg.stateFile, deployment, undefined, () =>
+    stateLease.assertOwned(),
+  );
 } catch (error) {
   stateLease.close();
   protocolSigner.close();
@@ -102,6 +116,14 @@ const log = (...args: unknown[]) => console.log(`[mm ${new Date().toISOString()}
 const CANCEL_REASON_OPERATOR = 1;
 const FILL_RESPONSE_TARGET_S = 5 * 60;
 const admissionBackoff = new AdmissionBackoff();
+// Pair directions currently too thin to quote, so the operator gets one
+// log line per change instead of a silent empty ladder.
+const underfunded = new Set<string>();
+const fmtUnits = (value: bigint, decimals: number): string => {
+  const scale = 10n ** BigInt(decimals);
+  const fraction = ((value % scale) * 10_000n) / scale;
+  return `${value / scale}.${fraction.toString().padStart(4, "0")}`;
+};
 
 const feed = new PriceFeed({
   url: COINGECKO_URL,
@@ -572,6 +594,10 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
     lockGraceS: cfg.lockGraceS,
+    sponsorClaims: cfg.sponsorClaims,
+    ourInitiator: myAddress(iLeg),
+    takerOnInitiatorLeg: iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount,
+    sponsorMarginS: Math.ceil(cfg.txTimeoutMs / 1000) + 60,
   });
 
   switch (decision) {
@@ -704,6 +730,33 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       break;
     }
 
+    case "sponsor": {
+      if (managed.hashlock === null || managed.preimage === null) break;
+      // The preimage is already public; this pays the taker their leg at
+      // our gas cost. Same simulate-then-send path as our own claim. It is
+      // an optional courtesy on a swap we were already paid for, so the
+      // attempt is recorded up front (spacing retries by resendAfterS) and
+      // a failure, such as the taker having claimed first, is only logged.
+      managed.sponsorSentAt = nowS();
+      state.upsert(managed);
+      const claimData = encodeClaim(iLeg, managed.hashlock, managed.preimage);
+      try {
+        const hash = await submitPreflightedClaim(
+          legRpc[iLeg],
+          myAddress(iLeg),
+          claimData,
+          () => sender(iLeg).send(claimData, 0n),
+        );
+        log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
+      } catch (err) {
+        log(
+          `order ${short(managed.id)} sponsored claim skipped:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+      break;
+    }
+
     case "refund": {
       if (managed.hashlock === null) break;
       managed.refundSentAt = nowS();
@@ -741,7 +794,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
-  if (cfg.drain || !admissionBackoff.canAttempt(nowS())) return;
+  if (cfg.drain || leaseLost || stopping || !admissionBackoff.canAttempt(nowS()))
+    return;
   const managed = state.all();
   const inflight = managed.filter((m) => {
     const v = views.get(m.id);
@@ -776,6 +830,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
     if (mid === null) continue;
 
     for (const direction of ["eth->qrl", "qrl->eth"] as const) {
+      // Each rung posts a signed listing, so stop the moment this process is
+      // no longer the writer for this state file.
+      if (leaseLost || stopping) return;
       const fromLeg = initiatorLeg(direction);
       // Refill the lowest under-stocked rung of the pair's price ladder
       // (one per tick, per pair and direction, so a taken level reappears
@@ -824,7 +881,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
           : cfg.qrlReserveWei;
       const [gasBalanceWei, gasReserveWei] =
         info.tokenAddress !== null ? [balances.eth, cfg.ethReserveWei] : [balanceWei, reserveWei];
-      const post = shouldPost({
+      const refillInput = {
         direction,
         myOpenCount,
         ordersPerDirection: policy.ordersPerDirection,
@@ -836,8 +893,32 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         orderWei: BigInt(quote.fromAmount),
         gasBalanceWei,
         gasReserveWei,
-      });
-      if (!post) continue;
+      };
+      const shortKey = `${asset} ${direction}`;
+      if (inventoryShort(refillInput)) {
+        if (!underfunded.has(shortKey)) {
+          underfunded.add(shortKey);
+          const fromSymbol = direction === "eth->qrl" ? asset : "QRL";
+          const fromDecimals = direction === "eth->qrl" ? info.decimals : 18;
+          const needed = reserveWei + BigInt(quote.fromAmount);
+          const reasons: string[] = [];
+          if (balanceWei < needed) {
+            reasons.push(
+              `${fromSymbol} ${fmtUnits(balanceWei, fromDecimals)} below ${fmtUnits(needed, fromDecimals)} ` +
+                `(rung ${level} listing plus reserve)`,
+            );
+          }
+          if (info.tokenAddress !== null && gasBalanceWei < gasReserveWei) {
+            reasons.push(
+              `ETH gas ${fmtUnits(gasBalanceWei, 18)} below reserve ${fmtUnits(gasReserveWei, 18)}`,
+            );
+          }
+          log(`${shortKey} not quoting: ${reasons.join("; ")}; fund the wallet or lower the order size`);
+        }
+      } else if (!fundsShort(refillInput) && underfunded.delete(shortKey)) {
+        log(`${shortKey} funded again; quoting resumes`);
+      }
+      if (!shouldPost(refillInput)) continue;
       if (state.retainedAdmissionCount(nowS()) >= LOCAL_RETAINED_ORDER_BUDGET) return;
 
       const makerToken = randomBytes(32).toString("hex");
@@ -881,6 +962,7 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         takerQrlAccount: null,
         lockSentAt: null,
         claimSentAt: null,
+        sponsorSentAt: null,
         refundSentAt: null,
         createdAt: nowS(),
       };
@@ -902,7 +984,7 @@ let tickTimer: ReturnType<typeof setInterval> | undefined;
 let healthServer: Server | undefined;
 
 async function tick(): Promise<void> {
-  if (running || stopping) return;
+  if (running || stopping || leaseLost) return;
   running = true;
   const startingOrderCount = state.all().length;
   health.markTickStarted(startingOrderCount);
@@ -911,11 +993,27 @@ async function tick(): Promise<void> {
     await feed.maybeRefresh(nowS());
     const views = new Map<string, OrderView | null>();
     for (const managed of state.all()) {
+      if (leaseLost) break;
       try {
         views.set(managed.id, await advance(managed));
       } catch (err) {
-        if (err instanceof StateFilePoisonedError) throw err;
+        // A poisoned state file and a lost lease both mean no further write
+        // can land, so they end the whole tick. Counting them per order would
+        // keep the loop running against a state file it cannot touch.
+        if (
+          err instanceof StateFilePoisonedError ||
+          err instanceof StateLeaseLostError
+        ) {
+          throw err;
+        }
         errorCount += 1;
+        if (err instanceof StateLeaseUnverifiableError) {
+          // Ownership could not be proven for this one write, so nothing was
+          // persisted and nothing was sent. The lease is still held and the
+          // next tick retries this order.
+          log(`order ${short(managed.id)} deferred:`, err.message);
+          continue;
+        }
         log(`order ${short(managed.id)} tick error:`, err instanceof Error ? err.message : err);
       }
     }
@@ -925,6 +1023,9 @@ async function tick(): Promise<void> {
     log("tick error:", err instanceof Error ? err.message : err);
     if (err instanceof StateFilePoisonedError) {
       void stop("state durability failure", 1);
+    }
+    if (err instanceof StateLeaseLostError) {
+      void exitOnLostLease(err.message);
     }
   } finally {
     let orderCount = startingOrderCount;
@@ -992,6 +1093,26 @@ async function main(): Promise<void> {
   log(`managing ${state.all().length} persisted order(s)`);
   await tick();
   if (!stopping) tickTimer = setInterval(() => void tick(), cfg.tickMs);
+}
+
+/**
+ * Another process now owns the state lease, so this maker was displaced and
+ * every further state write is already refused. Shut down and let the
+ * supervisor restart us: the restart either re-acquires the lease or fails
+ * closed against the live holder.
+ */
+async function exitOnLostLease(reason: string): Promise<void> {
+  if (leaseLost) return;
+  leaseLost = true;
+  log(
+    `FATAL: this maker no longer holds the state lease ${cfg.stateFile}.lock: ${reason}. ` +
+      "It stopped writing state and exits so its supervisor can restart it",
+  );
+  try {
+    await stop("state lease lost", 1);
+  } finally {
+    process.exit(1);
+  }
 }
 
 async function stop(reason: string, exitCode: number): Promise<void> {

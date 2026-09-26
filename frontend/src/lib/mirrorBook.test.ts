@@ -16,7 +16,8 @@ const auth = (signature = "valid"): MakerOrderAuthV1 => ({
   version: "2",
   scheme: "qrl-sign-message-v2",
   issuedAt: 10,
-  expiresAt: 20,
+  // Far future: fixtures model live proofs unless a test sets a lapse.
+  expiresAt: 4_000_000_000,
   nonce: `0x${"11".repeat(32)}`,
   makerTokenCommitment: `0x${"22".repeat(32)}`,
   shareTokenCommitment: `0x${"00".repeat(32)}`,
@@ -140,6 +141,46 @@ describe("mirror snapshot aggregation", () => {
       bookId: "primary",
       sources: ["primary"],
     });
+  });
+
+  it("drops a lapsed signed order without invalidating the rest of the book", () => {
+    // Books keep serving an order for a moment after its proof expires while
+    // the maker re-signs. That row alone must go; the book stays available.
+    const lapsed = row({
+      id: "order-lapsed",
+      makerAuth: { ...auth(), expiresAt: 20 },
+      orderDigest: DIGEST_A,
+    });
+    const live = row({
+      id: "order-live",
+      fromAmount: "2",
+      makerAuth: { ...auth(), expiresAt: 40 },
+      orderDigest: DIGEST_B,
+    });
+    const unsigned = row({ id: "primary-unsigned", createdAt: 2 });
+
+    const result = aggregateMirrorOrders(
+      [{ bookId: "primary", orders: [lapsed, live, unsigned] }],
+      { now: 25, verifyOrder: verify, digestOrder: digest },
+    );
+
+    expect(result.invalidBookIds).toEqual([]);
+    expect(result.orders.map((order) => order.id)).toEqual([
+      "order-live",
+      "primary-unsigned",
+    ]);
+  });
+
+  it("still invalidates a book that serves a forged unexpired proof", () => {
+    const forged = row({ makerAuth: { ...auth("forged"), expiresAt: 40 } });
+
+    const result = aggregateMirrorOrders([{ bookId: "primary", orders: [forged] }], {
+      now: 25,
+      verifyOrder: verify,
+      digestOrder: digest,
+    });
+
+    expect(result.invalidBookIds).toEqual(["primary"]);
   });
 
   it("quarantines every authentic variant when one id has two signed digests", () => {

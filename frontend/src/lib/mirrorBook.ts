@@ -297,6 +297,13 @@ function localOrder(
   };
 }
 
+function isLapsedSignedOrder(order: OrderView, now: number): boolean {
+  const auth: unknown = order.makerAuth;
+  if (typeof auth !== "object" || auth === null || Array.isArray(auth)) return false;
+  const expiresAt = (auth as { expiresAt?: unknown }).expiresAt;
+  return Number.isSafeInteger(expiresAt) && (expiresAt as number) <= now;
+}
+
 /**
  * Authenticate and combine public snapshots. Unsigned compatibility rows are
  * accepted only from primary. Private rows are always excluded. If a maker
@@ -330,6 +337,12 @@ export function aggregateMirrorOrders(
         }
         continue;
       }
+      // A signed order past its expiry is dropped on its own. Books keep
+      // listing an order for a moment after it lapses while the maker
+      // re-signs, so treating that as a bad snapshot would blank the whole
+      // book every few seconds. Forged or malformed proofs still invalidate
+      // the snapshot below.
+      if (isLapsedSignedOrder(order, now)) continue;
       if (!verifyOrder(order, now)) {
         invalidBookIds.add(snapshot.bookId);
         return false;

@@ -142,8 +142,9 @@ export function HowItWorksPage() {
           the address chosen at lock time.
         </p>
         <p>
-          That means you can receive on a chain where you hold no gas at all. A relayer, or your
-          counterparty, can pay the claim fee on your behalf and has no way to redirect the funds.
+          That means you can receive on a chain where you hold no gas at all. The reference market
+          maker submits your final claim for you as soon as the secret is public, paying the fee
+          itself, and it has no way to redirect the funds. You can always claim yourself too.
         </p>
       </Section>
 

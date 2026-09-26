@@ -17,3 +17,4 @@ server/data/
 server/backups/
 marketmaker/data/
 marketmaker/secrets/
+marketmaker/backups/

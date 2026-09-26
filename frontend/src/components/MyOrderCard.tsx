@@ -758,11 +758,11 @@ export function MyOrderCard({
         {order && fromSide && toSide && myOrder.fromAmount && myOrder.toAmount ? (
           <p className="text-sm">
             Give{" "}
-            <span className="font-data font-medium">
+            <span className="font-numeric font-medium">
               {formatUnits(BigInt(myOrder.fromAmount), fromSide.decimals)} {fromSide.symbol}
             </span>{" "}
             for{" "}
-            <span className="font-data font-medium">
+            <span className="font-numeric font-medium">
               {formatUnits(BigInt(myOrder.toAmount), toSide.decimals)} {toSide.symbol}
             </span>
           </p>
