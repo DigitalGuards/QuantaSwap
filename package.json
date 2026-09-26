@@ -23,5 +23,10 @@
     "@theqrl/web3": "1.0.3",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.4"
+  },
+  "overrides": {
+    "@theqrl/mldsa87": "2.2.0",
+    "@theqrl/wallet.js": "6.3.0",
+    "@theqrl/qrl-cryptography": "0.3.3"
   }
 }
