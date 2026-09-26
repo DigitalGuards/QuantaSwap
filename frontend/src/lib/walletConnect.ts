@@ -11,8 +11,20 @@ const STORAGE_KEY = "quantaswap:ethereum:walletconnect";
 // index.css: --primary (hsl(199 78% 55%)) and --card (hsl(222 38% 9%)).
 const QRL_BLUE = { accent: "#33ade6", surface: "#0e1320" } as const;
 
+// Public Reown project id of the official quantaswap.io deployment. It ships
+// in every bundle by design; the Reown dashboard's domain allowlist is what
+// restricts its use. A fork sets VITE_WALLETCONNECT_PROJECT_ID to its own
+// project, or to "off" to hide the option.
+const OFFICIAL_PROJECT_ID = "5ab9fe6bb5d5e4237b468f260b392e7a";
+
+function walletConnectProjectId(): string | null {
+  const configured = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID?.trim() ?? "";
+  const id = configured === "" ? OFFICIAL_PROJECT_ID : configured;
+  return /^[a-f\d]{32}$/i.test(id) ? id : null;
+}
+
 export function isWalletConnectConfigured(): boolean {
-  return /^[a-f\d]{32}$/i.test(import.meta.env.VITE_WALLETCONNECT_PROJECT_ID?.trim() ?? "");
+  return walletConnectProjectId() !== null;
 }
 
 export function rememberWalletConnect(remember: boolean): void {
@@ -34,13 +46,14 @@ export function shouldRestoreWalletConnect(): boolean {
 
 // Load Reown's wallet directory and QR UI only when this transport is selected.
 export function getWalletConnectClient(): Promise<WalletConnectClient> {
-  if (!isWalletConnectConfigured()) {
+  const projectId = walletConnectProjectId();
+  if (projectId === null) {
     return Promise.reject(new Error("WalletConnect is unavailable. Choose another wallet."));
   }
   clientPromise ??= import("@walletconnect/ethereum-provider")
     .then(({ EthereumProvider }) =>
       EthereumProvider.init({
-        projectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID.trim(),
+        projectId,
         chains: [Number(ETH_LEG.chainIdHex)],
         methods: ["eth_sendTransaction", "personal_sign"],
         optionalMethods: ["wallet_switchEthereumChain", "eth_signTypedData_v4"],

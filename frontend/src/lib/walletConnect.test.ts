@@ -52,8 +52,19 @@ describe("WalletConnect adapter", () => {
     );
   });
 
-  it.each(["", "not-a-project-id"])(
-    "stays unavailable for invalid configuration: %s",
+  it("uses the official public project id when none is configured", async () => {
+    vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", "");
+    initialize.mockResolvedValue({});
+    const { getWalletConnectClient, isWalletConnectConfigured } = await import("./walletConnect");
+    expect(isWalletConnectConfigured()).toBe(true);
+    await getWalletConnectClient();
+    expect(initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "5ab9fe6bb5d5e4237b468f260b392e7a" }),
+    );
+  });
+
+  it.each(["off", "not-a-project-id"])(
+    "stays unavailable when switched off or invalid: %s",
     async (id) => {
       vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", id);
       const { getWalletConnectClient, isWalletConnectConfigured } = await import("./walletConnect");
@@ -75,7 +86,7 @@ describe("WalletConnect adapter", () => {
     expect(shouldRestoreWalletConnect()).toBe(false);
     rememberWalletConnect(true);
     expect(shouldRestoreWalletConnect()).toBe(true);
-    vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", "");
+    vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", "off");
     expect(shouldRestoreWalletConnect()).toBe(false);
     rememberWalletConnect(false);
     vi.stubEnv("VITE_WALLETCONNECT_PROJECT_ID", "0".repeat(32));
