@@ -154,17 +154,30 @@ async function halfOpenPost(port: number, bytes = 400): Promise<Socket> {
   return socket;
 }
 
+interface StagedRequest {
+  socket: Socket;
+  /** Sends the one byte still missing, which completes the body. */
+  finish: () => void;
+  reply: Promise<{ status: number; stage: string | null; text: string }>;
+}
+
 /**
- * One POST on a socket of its own. The global fetch pools and can serialise
- * requests to one origin, which is not the concurrency these bounds are about,
- * so a test that needs N requests genuinely in flight opens N sockets.
+ * A POST on its own socket with every byte of the body but the last already
+ * sent, so the server has parsed the request and is waiting on one byte.
+ *
+ * This is how the tests below get requests genuinely in flight together. The
+ * global fetch pools and can serialise requests to one origin, and even one
+ * socket per request only overlaps when the connects and writes happen to land
+ * in the same event-loop turn, which a slower machine does not guarantee.
+ * Staging first and then writing every last byte in one synchronous loop puts
+ * the bytes in flight at the same moment, so the handlers resume together.
  */
-async function rawPost(
+async function stageRequest(
   port: number,
   path: string,
   payload: string,
   forwardedFor?: string,
-): Promise<{ status: number; stage: string | null; text: string }> {
+): Promise<StagedRequest> {
   const socket = connect(port, "127.0.0.1");
   sockets.push(socket);
   await new Promise<void>((resolve, reject) => {
@@ -180,12 +193,29 @@ async function rawPost(
         : `X-Forwarded-For: ${forwardedFor}\r\n`) +
       `Content-Length: ${String(body.byteLength)}\r\n\r\n`,
   );
-  socket.write(body);
-  const reply = await readSocket(socket);
-  socket.destroy();
-  const status = Number(/^HTTP\/1\.1 ([0-9]{3})/.exec(reply)?.[1] ?? "0");
-  const stage = /x-refusal-stage: ([a-z-]+)/i.exec(reply)?.[1] ?? null;
-  return { status, stage, text: reply };
+  socket.write(body.subarray(0, body.byteLength - 1));
+  const reply = readSocket(socket).then((text) => ({
+    status: Number(/^HTTP\/1\.1 ([0-9]{3})/.exec(text)?.[1] ?? "0"),
+    stage: /x-refusal-stage: ([a-z-]+)/i.exec(text)?.[1] ?? null,
+    text,
+  }));
+  return {
+    socket,
+    finish: () => {
+      socket.write(body.subarray(body.byteLength - 1));
+    },
+    reply,
+  };
+}
+
+/** Completes every staged body in one turn, then collects the replies. */
+async function releaseTogether(
+  staged: readonly StagedRequest[],
+): Promise<Array<{ status: number; stage: string | null; text: string }>> {
+  for (const entry of staged) entry.finish();
+  const replies = await Promise.all(staged.map((entry) => entry.reply));
+  for (const entry of staged) entry.socket.destroy();
+  return replies;
 }
 
 function readSocket(socket: Socket): Promise<string> {
@@ -209,9 +239,9 @@ describe("in-flight mutation gate", () => {
         ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
         ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
       });
-      const burst = await Promise.all(
+      const staged = await Promise.all(
         Array.from({ length: 12 }, (_value, index) =>
-          rawPost(
+          stageRequest(
             book.port,
             "/api/orders",
             makerOrder(index + 1),
@@ -219,6 +249,7 @@ describe("in-flight mutation gate", () => {
           ),
         ),
       );
+      const burst = await releaseTogether(staged);
       const created = burst.filter((reply) => reply.status === 201);
       const refused = burst.filter((reply) => reply.status === 503);
       assert.ok(created.length >= 1, "a bound of one taker slot admits work");
@@ -371,21 +402,24 @@ describe("in-flight mutation gate", () => {
 
       // One taker slot only, so a taker burst cannot take the last slot. The
       // maker's cancel goes through while that burst is being refused.
-      const burst = Array.from({ length: 10 }, (_value, index) =>
-        rawPost(
+      const staged = await Promise.all([
+        stageRequest(
           book.port,
-          "/api/orders",
-          makerOrder(index + 10),
-          `198.51.100.${String(index + 1)}`,
+          `/api/orders/${String(id)}/cancel`,
+          JSON.stringify({ token: makerToken }),
+          "192.0.2.7",
         ),
-      );
-      const cancel = rawPost(
-        book.port,
-        `/api/orders/${String(id)}/cancel`,
-        JSON.stringify({ token: makerToken }),
-        "192.0.2.7",
-      );
-      const [cancelled, ...rest] = await Promise.all([cancel, ...burst]);
+        ...Array.from({ length: 10 }, (_value, index) =>
+          stageRequest(
+            book.port,
+            "/api/orders",
+            makerOrder(index + 10),
+            `198.51.100.${String(index + 1)}`,
+          ),
+        ),
+      ]);
+      const [cancelled, ...rest] = await releaseTogether(staged);
+      if (cancelled === undefined) throw new Error("the cancel had no reply");
       assert.equal(cancelled.status, 200);
       assert.match(cancelled.text, /"status":"cancelled"/);
       assert.equal(rest.length, 10);
