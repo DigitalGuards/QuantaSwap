@@ -57,6 +57,9 @@ never strip the ledger or relabel recovery state to make a downgrade load.
   release observation;
 - an exclusive process lease bound to the state path, deployment fingerprint,
   and operator accounts;
+- automatic collection of HTLCv3 payout credits, and a permissionless push of a
+  credited taker payout under the sponsor policy, both behind the same decision
+  core, persisted send markers and retry spacing as claim and refund;
 - a localhost-only health endpoint that reports progress without addresses,
   balances, endpoint URLs, order ids, raw errors, or key material.
 
@@ -84,6 +87,31 @@ the complete `{order, auth, makerToken}` create envelope to mode-0600 state
 before transport. An exact retry receives the existing authenticated OrderV2
 and the same raw maker token it supplied again. The mirror keeps only the signed
 commitment. The raw token never enters federation or kit logs.
+
+## HTLCv3 payout credits
+
+The deployment this kit settles against is HTLCv3 (issue #47). A settlement
+whose delivery cannot go through stays terminal and leaves the amount as a
+credit owned by the payee, so `Claimed` no longer means the recipient holds the
+funds. What that changes for an operator:
+
+- **Nothing to run by hand.** Every tick reads `creditOf` for the maker on the
+  leg that pays it and for the taker on the leg it funded. Its own credit is
+  withdrawn to its own address; a credited taker payout is pushed to the taker
+  with `pushCredit`, which takes no destination and can pay nobody else. An
+  order is never retired while a credit it is responsible for is outstanding,
+  and a credit read that failed is not treated as a zero balance.
+- **`MM_SPONSOR_CLAIMS` covers the credit path too.** With sponsorship off, the
+  maker collects only its own credits and leaves the taker's to the taker.
+- **Every settlement carries the published gas buffer**
+  (`estimateGas + 250000`, from `deliveryGasPolicy()`), because a bare estimate
+  lands on the cheaper credit path and defers a payout that would have gone
+  through. The daemon reads that policy on both legs at startup and refuses to
+  run against a contract publishing anything else, which also means a
+  configuration pointing at the wrong HTLC generation fails at boot.
+- **A token can still immobilise its own credit.** A gas-burning or
+  permanently blocking token leaves the credit conserved and accounted but
+  undeliverable. See `docs/audit/HTLCV3_SCOPE.md` A16.
 
 ## QRL network compatibility gate
 
@@ -363,7 +391,7 @@ making account is not decentralization.
 ## Scripted taker
 
 The taker entry point is `dist/taker-cli.js` (`npm run taker -- <command>`),
-with `list`, `quote`, `take`, `resume`, `status` and `release`. It reuses this
+with `list`, `quote`, `take`, `resume`, `status`, `withdraw` and `release`. It reuses this
 package's chain senders, ML-DSA-87 signing, protocol verification and process
 lease, and keeps its own `TAKER_*` configuration, key files and state file, so
 a taker and a maker never share a state path or a lease.
@@ -386,6 +414,10 @@ a taker and a maker never share a state path or a lease.
   code and works through takes by nearest deadline first. Settled takes stay
   in a local history that `status` prints, with outcomes and transaction
   hashes and no secrets.
+- `status` also lists any deferred payout the contract holds for this taker or
+  for the maker, and `withdraw` moves it: our own credit to `--to` or to our own
+  address, a credit owed to the maker to the maker itself. `resume` collects our
+  own credits without being asked.
 - `--dry-run` prints the action each step would take and sends, signs and
   writes nothing.
 

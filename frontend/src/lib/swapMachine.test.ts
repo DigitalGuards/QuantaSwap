@@ -463,7 +463,7 @@ describe("step 4: claim with the revealed secret", () => {
     expect(outside.steps[3].issue).toBeNull();
   });
 
-  it("reads the margin against the lock's own timeout, not the announced one", () => {
+  it("reads the margin against the lock's own on-chain timeout", () => {
     // A maker that announced a long T1 but locked a near-term escrow.
     const legs = { eth: iOpen({ timeout: NOW + 60 }), qrl: claimed(rOpen()) };
     const m = derive("taker", legs, legs);

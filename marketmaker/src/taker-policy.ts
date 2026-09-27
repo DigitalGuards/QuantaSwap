@@ -36,7 +36,7 @@ export type TakerDecision =
   | "claim"
   /** Our escrow is open past its own on-chain timeout: reclaim it. */
   | "refund"
-  /** A settlement of ours credited us instead of delivering: collect it. */
+  /** A settlement of ours could not deliver and credited us: collect it. */
   | "withdraw"
   /** Walk away on the book before any funds moved. */
   | "release"
@@ -445,7 +445,7 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
   ) {
     return verdict(
       "withdraw",
-      "a settlement credited us instead of delivering; collecting it",
+      "a settlement could not deliver and credited us; collecting it",
     );
   }
 

@@ -449,8 +449,8 @@ export function SwapFlow({
         revealedPreimage !== null &&
         preimage === revealedPreimage;
       if (!legacyPublicSecretRecovery) requireBoundTerms();
-      // The hard claim cutoff, re-checked at broadcast rather than only when
-      // this step was composed: the escrow's own on-chain timeout is read
+      // The hard claim cutoff, re-checked at broadcast as well as when this
+      // step was composed: the escrow's own on-chain timeout is read
       // again from the chain immediately before the secret goes out, and a
       // claim inside the margin is abandoned in favour of the refund path
       // (docs/FINALITY.md section 3.3).

@@ -451,7 +451,7 @@ export async function getDeliveryGasPolicy(leg: LegRpc): Promise<DeliveryGasPoli
 /** Refuse to run against a contract whose published budget differs from the
  *  one the settlement gas rule is built from. Called before the first send
  *  of a process, so a wrong address or a wrong contract generation stops the
- *  daemon instead of quietly deferring every payout. */
+ *  daemon at boot, before a single payout can quietly defer. */
 export async function assertDeliveryGasPolicy(leg: LegRpc): Promise<void> {
   const policy = await getDeliveryGasPolicy(leg);
   if (policy.gasLimit !== DELIVERY_GAS_LIMIT || policy.gasReserve !== DELIVERY_GAS_RESERVE) {

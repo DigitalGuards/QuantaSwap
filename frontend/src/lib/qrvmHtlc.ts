@@ -11,8 +11,8 @@ const METHODS = {
   claim: ["bytes32", "bytes32"],
   refund: ["bytes32"],
   getSwap: ["bytes32"],
-  // HTLCv3 payout credits: a settlement whose delivery fails credits the
-  // payee instead of reverting, and these move the credit afterwards.
+  // HTLCv3 payout credits: a settlement whose delivery fails stays terminal
+  // and credits the payee, and these move the credit afterwards.
   withdraw: ["address", "address", "uint256"],
   withdrawAll: ["address", "address"],
   pushCredit: ["address", "address"],

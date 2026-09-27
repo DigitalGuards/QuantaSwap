@@ -811,7 +811,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     }
 
     case "withdraw": {
-      // A settlement credited us instead of delivering. The credit is ours
+      // A settlement could not deliver and credited us. The credit is ours
       // and only we can move it, so it goes straight to our own address.
       // Marker first, like every other irreversible send.
       managed.withdrawSentAt = nowS();
@@ -1157,7 +1157,7 @@ async function main(): Promise<void> {
   // Only HTLCv3 answers deliveryGasPolicy(), so this both proves the pinned
   // addresses are the interface this build settles against and pins the
   // constants the settlement gas rule adds. A wrong contract generation
-  // stops the daemon here instead of quietly deferring every payout.
+  // stops the daemon here, before a single payout can quietly defer.
   await Promise.all([
     assertDeliveryGasPolicy(legRpc.eth),
     assertDeliveryGasPolicy(legRpc.qrl),

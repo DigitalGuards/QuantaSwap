@@ -33,7 +33,7 @@ export const claimCutoffBlocked = (
 ): boolean => nowS >= timeout - marginS;
 
 export const CLAIM_CUTOFF_ISSUE =
-  "the claim window is inside its safety margin; refund this leg instead of claiming";
+  "the claim window is inside its safety margin; the refund path takes over";
 
 export type LegStates = Partial<Record<LegKey, LegState>>;
 

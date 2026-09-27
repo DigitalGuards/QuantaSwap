@@ -125,7 +125,7 @@ export interface ManagedOrder {
   sponsorSentAt: number | null;
   refundSentAt: number | null;
   /** Last attempt to collect our own deferred payout on this swap, when a
-   *  settlement credited us instead of delivering; null on older records. */
+   *  settlement could not deliver and credited us; null on older records. */
   withdrawSentAt: number | null;
   /** Last attempt to push the taker's deferred payout to the taker after a
    *  sponsored claim credited them; null on older records. */
@@ -142,7 +142,7 @@ export type Decision =
   | "claim" // taker's lock verified at depth: claim it (reveals secret)
   | "sponsor" // secret public: claim our lock for the taker, paying the gas
   | "refund" // our lock is open past its timeout
-  | "withdraw" // a settlement credited us instead of delivering: collect it
+  | "withdraw" // a settlement could not deliver and credited us: collect it
   | "push" // a sponsored claim credited the taker: deliver it to them
   | "finish" // both sides settled; stop tracking
   | "abort"; // order evaporated before any funds moved; forget it

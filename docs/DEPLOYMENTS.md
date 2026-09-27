@@ -33,10 +33,30 @@ every portable V2 order, so the three fields move as one: changing them rotates 
 signing domain, which is why `config/protocol-v2-vectors.json` carries HTLCv3-bound
 digests and why a mixed-version pair of clients cannot agree on an order.
 
-In-flight HTLCv2 swaps and open HTLCv2 orders do not migrate. Every client keys a
-swap record on the HTLC address it was created against and keeps claiming or
-refunding that address until the record is terminal; see
-[ARCHITECTURE.md](ARCHITECTURE.md) section 2.
+### What happens to open HTLCv2 orders and in-flight HTLCv2 swaps
+
+Nothing migrates, and no record is ever reinterpreted against the new address.
+Every client keys its swap state on the HTLC addresses it was created against
+and keeps claiming or refunding at those addresses until the record is
+terminal:
+
+- The browser namespaces all local swap state on both HTLC addresses, so an
+  HTLCv2 record stays in place under its own key and the HTLCv3 build simply
+  does not see it. Reopening the previous release, which carries the HTLCv2
+  profile, settles or refunds it.
+- The reference maker and the scripted taker write the deployment identity into
+  their state files and refuse to start against a file from another deployment,
+  leaving the file untouched and naming the remedy in the error: run the
+  original configuration to settle or refund those orders.
+- Open HTLCv2 orders on the book cannot be taken by an HTLCv3 client at all,
+  because the signing domain changed: an HTLCv2 order fails verification under
+  the HTLCv3 domain and the reverse. They expire on their own signed expiry.
+
+So the cutover is drain first, then flip: stop posting, let in-flight swaps
+reach a terminal state on the contract they were locked at, cancel what is
+still open, and only then change the three fields above. Anything still in
+flight at the moment of the flip is settled with the previous release, which is
+the configuration it was created under.
 
 ## Private v3 testnet release, 2026-09-21 (HTLCv2, superseded by HTLCv3 above)
 

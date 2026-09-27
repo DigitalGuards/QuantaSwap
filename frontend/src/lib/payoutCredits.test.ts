@@ -119,7 +119,7 @@ describe("credit views", () => {
     expect(creditAction(views[0]!)).toBe("withdraw");
   });
 
-  it("offers a push, never a withdraw, for a counterparty credit", () => {
+  it("offers only a push for a counterparty credit", () => {
     const amounts = new Map([[creditKey("qrl", QRL_NATIVE_TOKEN, MAKER_QRL), QRL_AMOUNT]]);
     const views = creditViews(candidates, amounts);
     expect(views).toHaveLength(1);
@@ -248,7 +248,7 @@ describe("credit and gas-policy reads", () => {
     await expect(assertDeliveryGasPolicy("eth")).rejects.toThrow(/was not built for/);
   });
 
-  it("treats an unreadable policy as unknown, not as a mismatch", async () => {
+  it("treats an unreadable policy as unknown and settles anyway", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) })),

@@ -316,18 +316,23 @@ recovery under its original deployment. It must not be reinterpreted or
 overwritten during a v3 cutover.
 
 Capability and digest interoperability vectors use the canonical fixtures in
-the server, browser, and headless-maker tests:
+[`config/protocol-v2-vectors.json`](../config/protocol-v2-vectors.json), which
+the server, browser and headless-maker tests all read. The domain binds both
+HTLC addresses, so a deployment cutover rotates every digest below: the values
+here are bound to the HTLCv3 deployment recorded in
+[DEPLOYMENTS.md](DEPLOYMENTS.md), and an order signed under the HTLCv2 domain
+cannot be verified by an HTLCv3 client or the reverse.
 
 | Value                                        | Golden vector                                                                                                                        |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | Maker capability, raw `00` repeated 32 bytes | `0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549`                                                                 |
 | Share capability, raw `11` repeated 32 bytes | `0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30`                                                                 |
-| OrderV2 semantic SHA-256 digest              | `0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4`                                                                 |
-| SDK message SHAKE256-64 digest               | `0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c` |
-| ReleaseV2 commitment                         | `0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133`                                                                 |
-| FillIntentV2 semantic digest                 | `0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5`                                                                 |
-| FillV2 semantic digest                       | `0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a`                                                                 |
-| CancelV2 semantic digest                     | `0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd`                                                                 |
+| OrderV2 semantic SHA-256 digest              | `0x94e2f4a057bc14989b967619c36f57127c8f698675f1f62730f2633fd1e21997`                                                                 |
+| SDK message SHAKE256-64 digest               | `0x2c11f4d3ca6047dd467c65329d6958dcb4feafcbf8e95da4767ace4117eea19f927e4b78ae2702a44d46078b2441e6c264f9e322b2305d5f7f0e52737f32b024` |
+| ReleaseV2 commitment                         | `0xfe273f1e69d28e5315703759ff463096aca0dc3772dd2c1e76b85643e6a2571c`                                                                 |
+| FillIntentV2 semantic digest                 | `0x2273209b1254140f94cac8f4f47e2eed7276b894c05122a7818fba6842e2e6f8`                                                                 |
+| FillV2 semantic digest                       | `0x1902ea73384c00f95ba3e373fdd3199925f758bd73fb7cf79dcdcc407004607a`                                                                 |
+| CancelV2 semantic digest                     | `0xa78d77cc128303c1f26cee568d97a0d0d1a2f788265eb9d9fa9cca4904b304f0`                                                                 |
 
 Exact input terms are pinned in
 [`server/src/order-signing.test.ts`](../server/src/order-signing.test.ts) and
