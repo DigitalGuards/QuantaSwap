@@ -4,7 +4,7 @@
 // the panel is the only place the amount is visible, so these assertions pin
 // which exit each side is offered.
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LegState } from "@/lib/htlc";
@@ -144,6 +144,21 @@ describe("deferred payout panel", () => {
     expect(screen.getByText("5.0 Quanta")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Withdraw" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Push to recipient" })).toBeTruthy();
+  });
+
+  it("names a mistyped destination before anything is signed", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    renderFlow("taker");
+    await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText(/Withdrawal destination/), {
+      target: { value: "not-an-address" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+    await waitFor(() =>
+      expect(screen.getByText(/Enter a 20-byte Ethereum address/)).toBeTruthy(),
+    );
+    // Nothing was sent: the wallet was never asked, and the credit stands.
+    expect(screen.getByText("1.0 ETH")).toBeTruthy();
   });
 
   it("says the swap is final either way", async () => {

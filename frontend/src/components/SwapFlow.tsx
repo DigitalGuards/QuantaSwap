@@ -28,6 +28,7 @@ import {
   makeSettlementSender,
   sendEthTokenLock,
 } from "@/lib/legSender";
+import { isQrlAddress } from "@/lib/qrlAddress";
 import {
   creditAction,
   creditCandidates,
@@ -489,6 +490,17 @@ export function SwapFlow({
   // holds no gas on that chain without gaining any redirect authority.
   const withdrawCredit = (view: CreditView, to: string) =>
     runAction(`credit-${creditKey(view.leg, view.token, view.account)}`, async () => {
+      // Say plainly what a mistyped destination is, before the codec throws
+      // its own message at a user who is trying to recover funds.
+      const wellFormed =
+        view.leg === "eth" ? /^0x[0-9a-fA-F]{40}$/.test(to) : isQrlAddress(to);
+      if (!wellFormed) {
+        throw new Error(
+          view.leg === "eth"
+            ? "Enter a 20-byte Ethereum address, or leave the field empty to pay your own."
+            : "Enter an uppercase Q address with 128 hexadecimal characters, or leave the field empty to pay your own.",
+        );
+      }
       await settleOnLeg(view.leg, buildWithdrawAllData(view.leg, view.token, to), 0n);
     });
 
