@@ -15,6 +15,7 @@ import {
   checkOwnLock,
   decideTaker,
   expectedToken,
+  resumeUrgency,
   initiatorLeg,
   responderLeg,
   takeBoundsIssue,
@@ -237,13 +238,13 @@ describe("own escrow classification", () => {
     assert.equal(check.state, "foreign");
   });
 
-  it("refuses our own escrow when it carries the wrong terms", () => {
+  it("marks our own escrow with the wrong terms as ours, and mismatched", () => {
     const check = checkOwnLock(
       ourLock({ amount: PAY - 1n }),
       PLANS.responder,
       TAKER_QRL,
     );
-    assert.equal(check.state, "foreign");
+    assert.equal(check.state, "ours-mismatched");
   });
 });
 
@@ -628,6 +629,86 @@ describe("resume is idempotent at every step", () => {
       assert.equal(second.decision, step.expect);
     });
   }
+});
+
+describe("resume ordering", () => {
+  const order = { orderExpiresAt: NOW + 3600, lockSentAt: null, fill: null };
+
+  it("ranks an unmatched take by its order proof expiry", () => {
+    assert.equal(resumeUrgency(order), NOW + 3600);
+  });
+
+  it("ranks a matched but unfunded take by our own deadline", () => {
+    assert.equal(
+      resumeUrgency({
+        ...order,
+        fill: { initiatorTimeout: T1, responderTimeout: T2 },
+      }),
+      T2,
+    );
+  });
+
+  it("ranks a funded take by whichever deadline comes first", () => {
+    assert.equal(
+      resumeUrgency({
+        fill: { initiatorTimeout: T1, responderTimeout: T2 },
+        orderExpiresAt: NOW + 10,
+        lockSentAt: NOW - 30,
+      }),
+      T2,
+    );
+    assert.equal(
+      resumeUrgency({
+        fill: { initiatorTimeout: T2 - 60, responderTimeout: T2 },
+        orderExpiresAt: NOW + 10,
+        lockSentAt: NOW - 30,
+      }),
+      T2 - 60,
+    );
+  });
+
+  it("puts the most urgent take first", () => {
+    const takes = [
+      { name: "later", urgency: resumeUrgency(order) },
+      {
+        name: "urgent",
+        urgency: resumeUrgency({
+          fill: { initiatorTimeout: NOW + 1200, responderTimeout: NOW + 600 },
+          orderExpiresAt: NOW + 3600,
+          lockSentAt: NOW - 30,
+        }),
+      },
+    ].sort((left, right) => left.urgency - right.urgency);
+    assert.equal(takes[0]?.name, "urgent");
+  });
+});
+
+describe("our own escrow with the wrong terms", () => {
+  const mismatched = ourLock({ amount: PAY - 1n });
+
+  it("is reported as our own escrow", () => {
+    const check = checkOwnLock(mismatched, PLANS.responder, TAKER_QRL);
+    assert.equal(check.state, "ours-mismatched");
+  });
+
+  it("keeps the take alive until its timeout", () => {
+    const verdict = decideTaker(
+      input({ rState: mismatched, record: record({ lockSentAt: NOW - 300 }) }),
+    );
+    assert.equal(verdict.decision, "wait");
+    assert.match(verdict.reason, /refund/);
+  });
+
+  it("refunds the escrow once its timeout passes", () => {
+    const verdict = decideTaker(
+      input({
+        nowS: T2 + 1,
+        rState: mismatched,
+        record: record({ lockSentAt: NOW - 300 }),
+      }),
+    );
+    assert.equal(verdict.decision, "refund");
+  });
 });
 
 describe("take bounds", () => {

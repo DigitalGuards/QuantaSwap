@@ -701,31 +701,59 @@ export function recordOrderRow(record: TakerSwapRecord): BookOrderRow {
   };
 }
 
+/** Best-effort order id for a record this build cannot parse. */
+function swapLabel(raw: unknown, index: number): string {
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+    const id = (raw as Record<string, unknown>)["orderId"];
+    if (typeof id === "string" && ORDER_ID_RE.test(id)) return id;
+  }
+  return `#${index}`;
+}
+
 /** The accounts a state file's records must belong to. */
 export interface TakerIdentity {
   ethAccount: string;
   qrlAccount: string;
 }
 
+export interface TakerStateFileOptions {
+  /** Ownership gate for every write, normally the process lease. */
+  assertOwned?: () => void;
+  /**
+   * The keys this process loaded. A record for other accounts is refused:
+   * its recipient fields would decide who gets paid while this process
+   * funds the swap, so a shared state file must never be driven by the
+   * wrong identity.
+   */
+  identity?: TakerIdentity;
+  /**
+   * Report a swap record this build cannot authenticate and keep reading
+   * the rest. Only a read-only reporting session may do this: one bad
+   * record would otherwise hide every other take from `status`. Every
+   * session that can write keeps failing closed.
+   */
+  tolerateUnverifiableSwaps?: boolean;
+  syncDirectory?: (directory: string) => void;
+}
+
 export class TakerStateFile {
   private swaps = new Map<string, TakerSwapRecord>();
   private settled: TakerHistoryEntry[] = [];
   private poisoned: Error | null = null;
+  /** Entries this build could not read, for the operator to see. */
+  readonly warnings: string[] = [];
+  private readonly assertOwned: () => void;
+  private readonly identity: TakerIdentity | undefined;
+  private readonly syncDirectory: (directory: string) => void;
 
   constructor(
     private readonly file: string,
     private readonly deployment: DeploymentIdentity,
-    /** Ownership gate for every write, normally the process lease. */
-    private readonly assertOwned: () => void = () => {},
-    /**
-     * The keys this process loaded. A record for other accounts is refused:
-     * its recipient fields would decide who gets paid while this process
-     * funds the swap, so a shared state file must never be driven by the
-     * wrong identity.
-     */
-    private readonly identity?: TakerIdentity,
-    private readonly syncDirectory: (directory: string) => void = fsyncDirectory,
+    options: TakerStateFileOptions = {},
   ) {
+    this.assertOwned = options.assertOwned ?? ((): void => {});
+    this.identity = options.identity;
+    this.syncDirectory = options.syncDirectory ?? fsyncDirectory;
     let raw: string | null = null;
     try {
       raw = readFileSync(this.file, "utf8");
@@ -780,10 +808,15 @@ export class TakerStateFile {
       try {
         record = parseTakerSwapRecord(value, `swap ${index}`);
       } catch (err) {
-        throw recoveryError(
-          this.file,
-          err instanceof Error ? err.message : `swap ${index} is malformed`,
+        const reason =
+          err instanceof Error ? err.message : `swap ${index} is malformed`;
+        if (options.tolerateUnverifiableSwaps !== true) {
+          throw recoveryError(this.file, reason);
+        }
+        this.warnings.push(
+          `swap ${swapLabel(value, index)} is unverifiable and was left out: ${reason}`,
         );
+        continue;
       }
       if (
         !sameDeployment(record.deployment, fileDeployment) ||
@@ -810,10 +843,17 @@ export class TakerStateFile {
       this.assertIdentity(record);
       this.swaps.set(record.orderId, record);
     }
-    // History is reporting data with no proofs in it, so a malformed entry
-    // is refused like everything else but carries no recovery meaning.
+    // History is reporting data with no recovery meaning, so an entry this
+    // build cannot read is dropped with a warning. Throwing here would
+    // block startup, and with it every refund the swap records still need.
     for (const [index, value] of (envelope["history"] ?? []).entries()) {
-      this.settled.push(parseHistoryEntry(value, `history ${index}`));
+      try {
+        this.settled.push(parseHistoryEntry(value, `history ${index}`));
+      } catch (err) {
+        this.warnings.push(
+          `history entry ${index} was dropped: ${err instanceof Error ? err.message : "malformed"}`,
+        );
+      }
     }
     this.settled = this.settled.slice(-MAX_HISTORY_ENTRIES);
   }

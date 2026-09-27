@@ -46,7 +46,7 @@ never strip the ledger or relabel recovery state to make a downgrade load.
 - a multi-stage image built from a digest-pinned Node base and `npm ci` lockfile;
 - a non-root, read-only runtime with all Linux capabilities dropped;
 - independent ETH and QRL wallet generation without printing either secret;
-- read-only secret mounts instead of secrets baked into the image;
+- read-only secret mounts, with no secrets baked into the image;
 - a persistent, deployment-bound state volume for swap recovery;
 - portable OrderV2 listings plus deterministic verification and selection of
   short-lived taker FillIntentV2 proofs;
@@ -358,8 +358,10 @@ a taker and a maker never share a state path or a lease.
   recipient.
 - A transient failure is logged and retried after the poll interval; only a
   long run of consecutive failures stops a command, leaving the record for a
-  supervised `resume`. Settled takes stay in a local history that `status`
-  prints, with outcomes and transaction hashes and no secrets.
+  supervised `resume`, which reports an unfinished take with its own status
+  code and works through takes by nearest deadline first. Settled takes stay
+  in a local history that `status` prints, with outcomes and transaction
+  hashes and no secrets.
 - `--dry-run` prints the action each step would take and sends, signs and
   writes nothing.
 

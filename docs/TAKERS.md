@@ -152,9 +152,9 @@ Exit status:
 | Code | Meaning |
 |---|---|
 | 0 | claimed: the swap completed and you were paid |
-| 1 | ended without funding (a bound, a refusal, a cancellation, an abort) |
+| 1 | ended without funding, and nothing was sent (a bound, a refusal, a cancellation, an abort) |
 | 2 | uneven settlement: one leg claimed and the other refunded, needs an operator |
-| 3 | still in flight, for example after `--once`: run `taker resume` |
+| 3 | still in flight: an unfinished take, including a run cut short by a failure after something was sent |
 | 4 | refunded: your escrow came back to you |
 | 5 | released: you walked away before funding |
 
@@ -162,6 +162,11 @@ A transient failure never ends a run: the pass is logged and retried after the
 poll interval, and only a long run of consecutive failures stops the command,
 with the record left intact for `resume`. Run `resume` under a supervisor as
 the backstop.
+
+When a run does stop on an error, the status is 3 for any take that has sent
+something or already holds an authenticated fill, so an open escrow is never
+reported with the status that means nothing was sent. `resume` follows the same
+rule: it returns 3 while any take is still unsettled.
 
 Limits are whole units of the asset on that leg, scaled by that leg's own
 decimals: `--max-in 250` means at most 250 QRL when you pay the QRL leg, and
@@ -182,9 +187,17 @@ hashes, when they settled). It takes no lease and writes nothing, so it works
 while a take is running.
 
 `resume` drives every unsettled take to an outcome, which is what a supervisor
-should run after a crash. `resume --once` makes a single pass over each take
-instead, for cron-style operation. Both read the same durable state file the
-swap loop writes.
+should run after a crash. It works through takes by their nearest on-chain
+deadline, closest first, and re-sorts once a round has spent a transaction
+wait, so one slow book or chain call cannot eat another take's claim window.
+`resume --once` makes a single pass over each take instead, for cron-style
+operation. Both read the same durable state file the swap loop writes.
+
+A settled take appears once, under the settled list. An uneven settlement is
+flagged there for attention and keeps its record. Any entry this build cannot
+read is reported as a warning with its order id, and the rest keep working: a
+reporting session never lets one unreadable record hide the others, while every
+session that can write still refuses the file outright.
 
 ### `release <orderId>`
 
@@ -207,6 +220,10 @@ governs, and the refund path applies.
 | `--once` | A single pass, for cron-style operation. |
 | `--json` | Machine-readable output for `list`, `quote` and `status`. |
 
+If your own escrow ends up on chain with terms that do not match the swap, for
+example after a partial failure, the take is kept: the funds are yours, and the
+record waits for that escrow's timeout so it can refund them.
+
 Independent of any flag, this client refuses to fund when the maker escrow
 mismatches in any field, when its timeout leaves less than
 `TAKER_CLAIM_SAFETY_S` beyond your own deadline, when the escrow is only
@@ -220,11 +237,15 @@ Two configuration rules follow from that. `TAKER_CLAIM_SAFETY_S` must exceed
 claim can no longer be expected to mine; the taker refuses to start otherwise,
 because a verified escrow would leave no window it could claim in.
 `TAKER_MIN_ORDER_RUNWAY_S` bounds how fresh an order proof must be before this
-client proposes against it: a maker answers with a response window of at least
-60 seconds that has to fit inside the order's own validity, so the default of
-90 seconds covers that floor plus a maker tick. Live quotes are short, around
-300 seconds on the first-party staging book, so a much larger floor refuses
-the whole book.
+client proposes against it, and the default is arithmetic. A maker answers with
+a FillV2 whose response window is at least 60 seconds, and that window has to
+end inside the order proof's own validity. So a proposal is answerable only
+while `expiresAt - now >= 60 + (the maker's own latency)`. The staging maker
+ticks about every 5 seconds, so the 90 second default leaves 60 seconds for the
+window and about 30 seconds of maker latency. Below roughly 70 seconds this
+client would sign proposals no maker could legally answer; above the live proof
+lifetime, which is 300 seconds on the first-party staging book, it refuses the
+whole book.
 
 One leftover to know about on a token leg: a take approves the exact escrow
 amount before locking. If the take is then refused or aborted between the

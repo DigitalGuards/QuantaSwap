@@ -114,12 +114,6 @@ export function assertClaimWindowIsUsable(cfg: TakerReadConfig): void {
   }
 }
 
-export function loadTakerReadConfigChecked(): TakerReadConfig {
-  const cfg = loadTakerReadConfig();
-  assertClaimWindowIsUsable(cfg);
-  return cfg;
-}
-
 export function loadTakerConfig(): TakerConfig {
   const cfg = {
     ...loadTakerReadConfig(),

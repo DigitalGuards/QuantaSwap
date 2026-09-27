@@ -195,6 +195,9 @@ export type OwnLockCheck =
   | { state: "absent" }
   /** Our escrow, matching the plan. */
   | { state: "ours" }
+  /** Our escrow, with terms that do not match the plan. Funds are ours and
+   *  still refundable at its timeout, so the record must be kept. */
+  | { state: "ours-mismatched"; issue: string }
   /** Someone else consumed this hashlock on our leg. */
   | { state: "foreign"; issue: string }
   | { state: "settled" };
@@ -226,7 +229,7 @@ export function checkOwnLock(
     state.amount !== plan.amount
   ) {
     return {
-      state: "foreign",
+      state: "ours-mismatched",
       issue: "our own escrow does not carry the agreed terms",
     };
   }
@@ -424,8 +427,9 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
   }
 
   // Our own escrow past its on-chain deadline with no claim: reclaim it.
+  // A mismatched escrow is still ours, so it refunds on the same rule.
   if (
-    ownLock.state === "ours" &&
+    (ownLock.state === "ours" || ownLock.state === "ours-mismatched") &&
     x.rState !== null &&
     nowS >= x.rState.timeout &&
     retryOk(record.refundSentAt, nowS, x.resendAfterS)
@@ -438,6 +442,15 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
   // stake, whether or not a lock send was attempted.
   if (ownLock.state === "foreign") {
     return verdict("abort", ownLock.issue);
+  }
+
+  // Our own escrow with the wrong terms: the maker will not claim it, so
+  // the record stays until its timeout lets us take the funds back.
+  if (ownLock.state === "ours-mismatched") {
+    return verdict(
+      "wait",
+      `${ownLock.issue}; waiting for its timeout to refund`,
+    );
   }
 
   // Fund our leg only against a maker escrow verified at depth, with a
@@ -510,6 +523,31 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
 
 /** Bounds a take before any proposal is signed. Pure so the CLI and the
  *  engine apply one rule set. */
+/** The record fields a resume round needs to rank one take against
+ *  another. Chain reads are the expensive part, so ranking uses the signed
+ *  deadlines only. */
+export interface ResumeUrgencyInput {
+  fill: { initiatorTimeout: number; responderTimeout: number } | null;
+  orderExpiresAt: number;
+  lockSentAt: number | null;
+}
+
+/**
+ * The next deadline a take can miss. A resume round works through takes in
+ * this order, so a slow book or a long transaction wait on one record
+ * cannot consume another record's claim window.
+ */
+export function resumeUrgency(x: ResumeUrgencyInput): number {
+  if (x.fill === null) return x.orderExpiresAt;
+  // With funds committed, the claim window on the maker escrow closes first
+  // and the refund opens at our own deadline.
+  if (x.lockSentAt !== null) {
+    return Math.min(x.fill.initiatorTimeout, x.fill.responderTimeout);
+  }
+  // Nothing committed yet: the funding window closes at our own deadline.
+  return x.fill.responderTimeout;
+}
+
 export interface TakeBoundsInput {
   /** Base units we would escrow. */
   payAmount: bigint;

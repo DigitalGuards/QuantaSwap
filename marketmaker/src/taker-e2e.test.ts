@@ -24,7 +24,12 @@ import { ProtocolSigner } from "./protocol-signing.js";
 import { V2_TEST_EXTENDED_SEED } from "./protocol-v2-test-helper.js";
 import type { TakerReadConfig } from "./taker-config.js";
 import { TakerBookClient } from "./taker-orderbook.js";
-import { TakerEngine } from "./taker.js";
+import { TakerEngine, hasSendMarker, takePhase } from "./taker.js";
+import {
+  EXIT_IN_FLIGHT,
+  EXIT_UNFUNDED,
+  takeExitCode,
+} from "./taker-cli.js";
 import { TakerStateFile, type TakerSwapRecord } from "./taker-state.js";
 import {
   FakeBookServer,
@@ -447,6 +452,144 @@ describe("scripted taker end to end", () => {
       assert.equal(history[0]?.outcome, "claimed");
       assert.notEqual(history[0]?.claimTx, null);
       assert.notEqual(history[0]?.lockTx, null);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("keeps its send markers when a pass fails after funding", async () => {
+    // A transient send failure on the payout leg after the reveal: the
+    // escrow is open, the swap is unfinished, and the record must say so.
+    let breakClaim = false;
+    const h = await harness({
+      direction: "eth->qrl",
+      takerSenderFactory: (leg, chain, address) => {
+        const sender = new FakeLegSender(address, chain);
+        if (leg !== "eth") return sender;
+        const original = sender.send.bind(sender);
+        sender.send = async (data: string, value: bigint, to?: string) => {
+          if (breakClaim) throw new Error("RPC 502");
+          return original(data, value, to);
+        };
+        return sender;
+      },
+    });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      assert.equal(hasSendMarker(record), true);
+      assert.equal(takePhase(record), "escrowed, waiting for the reveal");
+      await makerClaims(h);
+      breakClaim = true;
+      await assert.rejects(h.engine.run(record, { maxPasses: 1 }));
+      const live = h.state.get(record.orderId);
+      assert.notEqual(live, null);
+      assert.equal(live === null ? false : hasSendMarker(live), true);
+      assert.equal(live?.outcome, null);
+      // The CLI maps that to "still in flight". The code that means the
+      // take ended without funding is a different one.
+      assert.equal(takeExitCode(null), EXIT_IN_FLIGHT);
+      assert.notEqual(EXIT_IN_FLIGHT, EXIT_UNFUNDED);
+      // The attempt marker was spent, because a send whose result is unknown
+      // must not be repeated at once. The next pass waits, and once the
+      // resend interval has passed it claims again.
+      breakClaim = false;
+      const immediate = await h.engine.run(live ?? record, { maxPasses: 1 });
+      assert.equal(immediate.verdict?.decision, "wait");
+      h.advance(h.cfg.resendAfterS + 1);
+      const retried = await h.engine.run(immediate.record, { maxPasses: 1 });
+      assert.equal(retried.verdict?.decision, "claim");
+      assert.equal(
+        h.chains.eth.getSwap(h.maker.hashlock, "latest").status,
+        SwapStatus.Claimed,
+      );
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("works through the take whose deadline is nearest first", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    const stepped: string[] = [];
+    try {
+      // A funded take with a near deadline, and a fresh one with a distant
+      // order expiry. Insertion order puts the fresh one first.
+      let funded = await begin(h);
+      ({ record: funded } = await h.engine.step(funded));
+      h.maker.selectAndFill();
+      ({ record: funded } = await h.engine.step(funded));
+      await makerLocks(h);
+      ({ record: funded } = await h.engine.step(funded));
+      const second = new ScriptedMaker(
+        `0x010000${"0f".repeat(48)}`,
+        h.book,
+        {
+          direction: "eth->qrl",
+          asset: "ETH",
+          fromAmount: (10n ** 15n).toString(),
+          toAmount: (10n ** 18n).toString(),
+          makerEthAccount: `0x${"d".repeat(40)}`,
+        },
+        h.clock,
+      );
+      try {
+        // A clearly later deadline, so the ordering is unambiguous.
+        const freshId = second.publishOrder(7200);
+        await h.engine.begin(freshId);
+        const records = h.state.all();
+        assert.equal(records.length, 2);
+        const spy = Object.create(h.engine) as typeof h.engine;
+        const original = h.engine.step.bind(h.engine);
+        spy.step = async (
+          input: Parameters<typeof original>[0],
+          options?: Parameters<typeof original>[1],
+        ) => {
+          stepped.push(input.orderId);
+          return original(input, options);
+        };
+        await spy.resume({ once: true });
+        assert.equal(stepped.length, 2);
+        assert.equal(stepped[0], funded.orderId);
+      } finally {
+        second.close();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("reports an uneven settlement once, in the history", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      const fill = h.maker.fill;
+      if (fill === null) throw new Error("no fill");
+      // We miss the claim window, and the maker escrow refunds instead.
+      h.advance(fill.fill.initiatorTimeout - h.now + 1);
+      await h.makerSenders.eth.send(
+        encodeRefund("eth", fill.fill.hashlock),
+        0n,
+      );
+      h.mine();
+      const done = await h.engine.step(record);
+      assert.equal(done.verdict.decision, "finish");
+      assert.equal(done.record.outcome, "uneven");
+      // An uneven take needs an operator, so its record is kept, and it is
+      // reported once: in the history, out of the in-flight list.
+      assert.deepEqual(h.engine.status(), []);
+      const history = h.engine.history();
+      assert.equal(history.length, 1);
+      assert.equal(history[0]?.outcome, "uneven");
     } finally {
       await h.close();
     }

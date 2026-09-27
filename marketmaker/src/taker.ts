@@ -48,6 +48,7 @@ import {
   initiatorLeg,
   responderLeg,
   takeBoundsIssue,
+  resumeUrgency,
   takerLegPlans,
   type TakerDecision,
   type TakerLegPlan,
@@ -167,6 +168,33 @@ export interface TakerStatusLine {
 }
 
 const short = (value: string): string => value.slice(0, 10);
+
+/**
+ * What a take is doing, read from the send markers alone so the reported
+ * phase cannot disagree with them when a post-send write fails.
+ */
+export function takePhase(record: TakerSwapRecord): string {
+  if (record.outcome !== null) return record.outcome;
+  if (record.refundSentAt !== null) return "refunding our escrow";
+  if (record.claimSentAt !== null) return "claiming our payout";
+  if (record.lockSentAt !== null) return "escrowed, waiting for the reveal";
+  if (record.approveSentAt !== null) return "approving the token allowance";
+  if (record.fillAcknowledged) return "verifying the maker escrow";
+  const pending = latestIntent(record);
+  return pending === null || pending.submittedAt === null
+    ? "no live proposal"
+    : "proposed, waiting for FillV2";
+}
+
+/** True when a take has sent anything that can move or hold funds. */
+export function hasSendMarker(record: TakerSwapRecord): boolean {
+  return (
+    record.approveSentAt !== null ||
+    record.lockSentAt !== null ||
+    record.claimSentAt !== null ||
+    record.refundSentAt !== null
+  );
+}
 
 /** Consecutive failed passes that turn a flaky environment into a stop. */
 const MAX_STEP_FAILURES = 10;
@@ -894,13 +922,16 @@ export class TakerEngine {
         signing.eth.address,
         this.deps.cfg.ethHtlc,
       );
-      const stored = signing.state.upsert({
-        ...record,
-        approveSentAt: now,
-        lockSentAt: now,
-        updatedAt: now,
-      });
+      // Each marker is persisted immediately before the send it belongs to.
+      // A failed approval must not look like a lock attempt, or the lock
+      // decision would be suppressed for a whole resend interval.
+      let stored = record;
       if (allowance !== plan.amount) {
+        stored = signing.state.upsert({
+          ...record,
+          approveSentAt: now,
+          updatedAt: now,
+        });
         if (allowance !== 0n && assetInfo(record.asset).quirks.approvalRace) {
           // USDT-style tokens revert on a nonzero to nonzero approve.
           await signing.eth.send(encodeApprove(this.deps.cfg.ethHtlc, 0n), 0n, token);
@@ -911,6 +942,11 @@ export class TakerEngine {
           token,
         );
       }
+      stored = signing.state.upsert({
+        ...stored,
+        lockSentAt: now,
+        updatedAt: now,
+      });
       const hash = await signing.eth.send(
         encodeLockToken(hashlock, plan.recipient, token, plan.amount, plan.timeout),
         0n,
@@ -1181,13 +1217,33 @@ export class TakerEngine {
     const maxRounds = options.maxRounds ?? Number.POSITIVE_INFINITY;
     const verdicts = new Map<string, TakerVerdict>();
     const failures = new Map<string, number>();
+    /** Records this run gave up on, so they stop consuming its rounds. */
+    const parked = new Set<string>();
     for (let round = 0; round < maxRounds; round += 1) {
-      const pending = signing.state
-        .all()
-        .filter((record) => record.outcome === null);
+      const pending = this.resumeQueue(
+        signing.state
+          .all()
+          .filter(
+            (record) =>
+              record.outcome === null && !parked.has(record.orderId),
+          ),
+      );
       if (pending.length === 0) break;
-      let settledThisRound = 0;
-      for (const record of pending) {
+      let settled = 0;
+      const roundStarted = Date.now();
+      let deferredForBudget = false;
+      for (const [index, record] of pending.entries()) {
+        // A slow book or a long transaction wait must not spend another
+        // take's claim window: once the round's budget is gone, requeue and
+        // let the most urgent record go first again. The first record of a
+        // round always runs, so progress cannot stall.
+        if (
+          index > 0 &&
+          Date.now() - roundStarted > this.deps.cfg.txTimeoutMs
+        ) {
+          deferredForBudget = true;
+          break;
+        }
         try {
           const { verdict } = await this.run(record, { maxPasses: 1 });
           if (verdict !== null) verdicts.set(record.orderId, verdict);
@@ -1198,7 +1254,7 @@ export class TakerEngine {
               verdict.decision === "abort" ||
               verdict.decision === "release")
           ) {
-            settledThisRound += 1;
+            settled += 1;
           }
         } catch (error) {
           const count = (failures.get(record.orderId) ?? 0) + 1;
@@ -1211,17 +1267,43 @@ export class TakerEngine {
             this.log(
               `order ${short(record.orderId)} failed ${count} passes in a row; leaving it for the next resume`,
             );
-            failures.set(record.orderId, 0);
-            settledThisRound += 1; // stop spinning on this one
+            parked.add(record.orderId);
           }
         }
       }
       if (options.once === true) break;
       if (this.dryRun) break;
-      if (settledThisRound === pending.length) continue;
-      await this.sleep(this.deps.cfg.pollMs);
+      // Wait unless this round settled or parked everything it looked at.
+      if (settled < pending.length && !deferredForBudget) {
+        await this.sleep(this.deps.cfg.pollMs);
+      }
     }
     return [...verdicts.values()];
+  }
+
+  /** Unsettled takes in the order a round should work through them. */
+  private resumeQueue(records: TakerSwapRecord[]): TakerSwapRecord[] {
+    return records
+      .map((record) => ({
+        record,
+        urgency: resumeUrgency({
+          fill:
+            record.fill === undefined
+              ? null
+              : {
+                  initiatorTimeout: record.fill.fill.initiatorTimeout,
+                  responderTimeout: record.fill.fill.responderTimeout,
+                },
+          orderExpiresAt: record.orderAuth.expiresAt,
+          lockSentAt: record.lockSentAt,
+        }),
+      }))
+      .sort(
+        (left, right) =>
+          left.urgency - right.urgency ||
+          left.record.orderId.localeCompare(right.record.orderId),
+      )
+      .map((entry) => entry.record);
   }
 
   /** One persisted take, or null when nothing is recorded for that id. */
@@ -1258,11 +1340,19 @@ export class TakerEngine {
       }));
   }
 
+  /** Everything this state file could not read, for the operator. */
+  warnings(): string[] {
+    return [...this.signing().state.warnings];
+  }
+
+  /** Takes still in flight. A settled take appears in the history only. */
   status(): TakerStatusLine[] {
     const signing = this.signing();
-    return signing.state.all().map((record) => {
+    return signing.state
+      .all()
+      .filter((record) => record.outcome === null)
+      .map((record) => {
       const plans = this.plansForRecord(record);
-      const pending = latestIntent(record);
       return {
         orderId: record.orderId,
         direction: record.direction,
@@ -1274,20 +1364,7 @@ export class TakerEngine {
           record.asset,
           plans.initiator.amount,
         ).display,
-        phase:
-          record.outcome !== null
-            ? record.outcome
-            : record.fillAcknowledged
-              ? record.lockSentAt === null
-                ? "verifying the maker escrow"
-                : record.lockTx === null && record.approveSentAt !== null
-                  ? "approving the token allowance"
-                  : record.claimSentAt === null
-                    ? "escrowed, waiting for the reveal"
-                    : "claiming"
-              : pending?.submittedAt === null || pending === null
-                ? "no live proposal"
-                : "proposed, waiting for FillV2",
+        phase: takePhase(record),
         hashlock: record.fill?.fill.hashlock ?? null,
         responderTimeout: record.fill?.fill.responderTimeout ?? null,
         outcome: record.outcome,

@@ -148,7 +148,7 @@ function withFill(
 }
 
 function reopen(file: string, identity?: { ethAccount: string; qrlAccount: string }) {
-  return new TakerStateFile(file, DEPLOYMENT, undefined, identity);
+  return new TakerStateFile(file, DEPLOYMENT, identity === undefined ? {} : { identity });
 }
 
 describe("taker state durability", () => {
@@ -471,11 +471,62 @@ describe("taker state durability", () => {
     );
   });
 
+  it("keeps reading when one record is unverifiable, in a reporting session", () => {
+    const file = tempFile();
+    const first = signOrder();
+    const second = signOrder();
+    const state = new TakerStateFile(file, DEPLOYMENT);
+    state.upsert(recordFor(first));
+    state.upsert(recordFor(second));
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      swaps: { order: { toAmount: string } }[];
+    };
+    const broken = envelope.swaps[0];
+    if (broken !== undefined) broken.order.toAmount = "1";
+    writeFileSync(file, JSON.stringify(envelope));
+    // A session that can write still fails closed.
+    assert.throws(() => new TakerStateFile(file, DEPLOYMENT), /orderDigest/);
+    const reporting = new TakerStateFile(file, DEPLOYMENT, {
+      tolerateUnverifiableSwaps: true,
+    });
+    const kept = reporting.all();
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0]?.orderId, recordFor(second).orderId);
+    assert.equal(reporting.warnings.length, 1);
+    assert.match(reporting.warnings[0] ?? "", /unverifiable/);
+    assert.match(reporting.warnings[0] ?? "", new RegExp(recordFor(first).orderId));
+  });
+
+  it("drops an unreadable history entry and keeps the refund path", () => {
+    const file = tempFile();
+    const order = signOrder();
+    const record = recordFor(order);
+    const state = new TakerStateFile(file, DEPLOYMENT);
+    state.upsert(record);
+    state.settle(
+      record.orderId,
+      historyEntryFor(record, "claimed", NOW + 60),
+      true,
+    );
+    const envelope = JSON.parse(readFileSync(file, "utf8")) as {
+      history: Record<string, unknown>[];
+    };
+    const entry = envelope.history[0];
+    if (entry !== undefined) entry["outcome"] = "vanished";
+    writeFileSync(file, JSON.stringify(envelope));
+    const reopened = reopen(file);
+    assert.equal(reopened.history().length, 0);
+    assert.equal(reopened.all().length, 1);
+    assert.match(reopened.warnings[0] ?? "", /history entry 0 was dropped/);
+  });
+
   it("never writes without the ownership gate", () => {
     const file = tempFile();
     const order = signOrder();
-    const state = new TakerStateFile(file, DEPLOYMENT, () => {
-      throw new Error("lease lost");
+    const state = new TakerStateFile(file, DEPLOYMENT, {
+      assertOwned: () => {
+        throw new Error("lease lost");
+      },
     });
     assert.throws(() => state.upsert(recordFor(order)), /lease lost/);
     assert.throws(() => readFileSync(file, "utf8"));
@@ -485,8 +536,10 @@ describe("taker state durability", () => {
     const file = tempFile();
     const order = signOrder();
     let fail = false;
-    const state = new TakerStateFile(file, DEPLOYMENT, () => {
-      if (fail) throw new Error("lease lost");
+    const state = new TakerStateFile(file, DEPLOYMENT, {
+      assertOwned: () => {
+        if (fail) throw new Error("lease lost");
+      },
     });
     const record = state.upsert(recordFor(order));
     fail = true;

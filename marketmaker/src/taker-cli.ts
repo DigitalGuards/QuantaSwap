@@ -20,7 +20,12 @@ import {
   type TakerReadConfig,
 } from "./taker-config.js";
 import { TakerBookClient } from "./taker-orderbook.js";
-import { TakerEngine, type TakeBounds } from "./taker.js";
+import {
+  TakerEngine,
+  hasSendMarker,
+  takePhase,
+  type TakeBounds,
+} from "./taker.js";
 import { TakerStateFile, type TakerOutcome } from "./taker-state.js";
 
 const USAGE = `QuantaSwap scripted taker
@@ -178,18 +183,19 @@ async function signingSession(
   const identity = { ethAccount: eth.address, qrlAccount: signer.address };
   let state: TakerStateFile;
   try {
-    state = new TakerStateFile(
-      cfg.stateFile,
-      deployment,
-      lease === null
-        ? () => {
-            throw new Error(
-              "this session is read-only and holds no state lease, so it must not write state",
-            );
-          }
-        : () => lease.assertOwned(),
+    state = new TakerStateFile(cfg.stateFile, deployment, {
+      assertOwned:
+        lease === null
+          ? () => {
+              throw new Error(
+                "this session is read-only and holds no state lease, so it must not write state",
+              );
+            }
+          : () => lease.assertOwned(),
       identity,
-    );
+      // A reporting session must survive one unreadable record.
+      ...(readOnly ? { tolerateUnverifiableSwaps: true } : {}),
+    });
   } catch (error) {
     lease?.close();
     signer.close();
@@ -366,9 +372,26 @@ async function commandTake(args: ParsedArgs): Promise<number> {
       bounds,
       preview.orderDigest,
     );
-    const { outcome } = await session.engine.run(record, {
-      ...(args.flags.has("once") || dryRun ? { maxPasses: 1 } : {}),
-    });
+    let outcome: TakerOutcome | null;
+    try {
+      ({ outcome } = await session.engine.run(record, {
+        ...(args.flags.has("once") || dryRun ? { maxPasses: 1 } : {}),
+      }));
+    } catch (error) {
+      // A failed pass is not an outcome. If anything was sent, the take is
+      // still in flight and its escrow may be open, so it must never report
+      // the status that means "ended without funding".
+      const message = error instanceof Error ? error.message : String(error);
+      const live = session.engine.record(orderId);
+      if (live !== null && (hasSendMarker(live) || live.fillAcknowledged)) {
+        console.error(`take interrupted: ${message}`);
+        console.log(
+          `This take is still in flight (${takePhase(live)}). Run \`taker status\` to see where it stands and \`taker resume\` to continue it.`,
+        );
+        return EXIT_IN_FLIGHT;
+      }
+      throw error;
+    }
     if (outcome === null) {
       console.log(
         "This take is still in flight. Run `taker status` to see where it stands and `taker resume` to continue it.",
@@ -386,13 +409,32 @@ async function commandResume(args: ParsedArgs): Promise<number> {
     dryRun: args.flags.has("dry-run"),
   });
   try {
-    const verdicts = await session.engine.resume({
-      ...(args.flags.has("once") ? { once: true } : {}),
-    });
-    if (verdicts.length === 0) console.log("No in-flight takes to resume.");
-    for (const verdict of verdicts) {
-      console.log(`${verdict.decision}: ${verdict.reason}`);
+    printWarnings(session);
+    let failure: unknown = null;
+    try {
+      const verdicts = await session.engine.resume({
+        ...(args.flags.has("once") ? { once: true } : {}),
+      });
+      if (verdicts.length === 0) console.log("No in-flight takes to resume.");
+      for (const verdict of verdicts) {
+        console.log(`${verdict.decision}: ${verdict.reason}`);
+      }
+    } catch (error) {
+      failure = error;
+      console.error(
+        `resume interrupted: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+    // Anything left unsettled keeps the in-flight status, whether a pass
+    // threw or a take simply has not finished yet.
+    const remaining = session.engine.status();
+    if (remaining.length > 0) {
+      for (const line of remaining) {
+        console.log(`still in flight: ${line.orderId.slice(0, 12)}  ${line.phase}`);
+      }
+      return EXIT_IN_FLIGHT;
+    }
+    if (failure !== null) throw failure;
     return 0;
   } finally {
     session.close();
@@ -407,6 +449,7 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
     readOnly: true,
   });
   try {
+    printWarnings(session);
     const lines = session.engine.status();
     if (args.flags.has("json")) {
       console.log(
@@ -444,12 +487,13 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
       );
     }
     if (history.length > 0) {
-      console.log(`Settled (${history.length} kept):`);
+      console.log(`Settled (${history.length} kept, newest first):`);
       for (const entry of history) {
         console.log(
           [
             `  ${entry.orderId.slice(0, 12)}`,
             entry.outcome,
+            entry.outcome === "uneven" ? "NEEDS ATTENTION" : "",
             `paid ${entry.paid}`,
             `received ${entry.received}`,
             new Date(entry.settledAt * 1000).toISOString(),
@@ -496,6 +540,13 @@ async function commandRelease(args: ParsedArgs): Promise<number> {
 
 /** bigint values are serialized as decimal strings so --json output stays
  *  exact and machine readable. */
+/** State a session could not read. Never fatal, always visible. */
+function printWarnings(session: SigningSession): void {
+  for (const warning of session.engine.warnings()) {
+    console.error(`state warning: ${warning}`);
+  }
+}
+
 function jsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
