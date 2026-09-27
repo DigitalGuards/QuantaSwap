@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatUnits } from "ethers";
 import {
+  BASE_PATH,
   ETH_ASSETS,
   ETH_ASSET_SYMBOLS,
   QRL_LEG,
@@ -150,6 +151,10 @@ function cumulate(rows: Omit<BookRow, "cumUnits">[]): BookRow[] {
     return { ...r, cumUnits: cum };
   });
 }
+
+/** A build under a sub-path is the legacy release: it exists to finish what it
+ *  started, so it shows the book and takes nothing new. */
+const RECOVERY_ONLY = BASE_PATH !== "/";
 
 export function OrderBookPanel({
   ethAccount,
@@ -463,7 +468,11 @@ export function OrderBookPanel({
   }, [orders, pair, asset]);
 
   const canTake =
-    Boolean(ethAccount && qrlAccount) && !takeDisabled && !capBlocked && busyId === null;
+    !RECOVERY_ONLY &&
+    Boolean(ethAccount && qrlAccount) &&
+    !takeDisabled &&
+    !capBlocked &&
+    busyId === null;
   const mirrorSummary = summarizeMirrorAvailability(book?.mirrors ?? []);
   const mirrorStatusText =
     book === null
@@ -487,7 +496,7 @@ export function OrderBookPanel({
     // Selecting a row is harmless (it only opens the banner); wallet
     // and cap gating applies to the Confirm-take button, so the terms
     // stay inspectable and "Edit as my order" stays reachable.
-    const selectable = !own && !takeDisabled;
+    const selectable = !RECOVERY_ONLY && !own && !takeDisabled;
     return (
       <button
         type="button"
@@ -797,7 +806,12 @@ export function OrderBookPanel({
           {!ethAccount || !qrlAccount ? (
             <p className="text-xs text-muted-foreground">Connect both wallets to take an order.</p>
           ) : null}
-          {takeDisabled ? (
+          {RECOVERY_ONLY ? (
+            <p className="text-xs text-muted-foreground">
+              This is the previous release, kept for recovering swaps started before the HTLCv3
+              cutover. The book is shown read only; take an order in the current release.
+            </p>
+          ) : takeDisabled ? (
             <p className="text-xs text-muted-foreground">
               Finish or cancel your own order before taking another.
             </p>

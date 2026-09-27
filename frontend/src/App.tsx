@@ -54,7 +54,8 @@ export default function App() {
           role="status"
           className="border-b border-amber-400/40 bg-amber-400/10 px-4 py-2 text-center text-sm text-amber-400"
         >
-          Legacy HTLCv2 release for recovering swaps started before the cutover
+          Legacy HTLCv2 release: finish, refund or release a swap started before the HTLCv3
+          cutover. Posting and taking are off here; new swaps belong in the current release.
         </div>
       )}
 

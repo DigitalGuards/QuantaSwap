@@ -3,6 +3,7 @@ import { formatUnits, parseUnits } from "ethers";
 import type { BrowserProvider } from "ethers";
 import { ArrowDownUp, BookPlus } from "lucide-react";
 import {
+  BASE_PATH,
   ETH_ASSETS,
   ETH_ASSET_SYMBOLS,
   ETH_LEG,
@@ -129,6 +130,11 @@ async function waitForEscrow(leg: LegKey, hashlock: string): Promise<void> {
     "the escrow transaction has not confirmed yet; resume from the recovery banner once it does",
   );
 }
+
+/** The legacy build is served under a sub-path, and that is the whole signal
+ *  it needs: a build at /v2/ is there for recovery, so it must never offer to
+ *  lock new funds into the contract generation it belongs to. */
+const RECOVERY_ONLY = BASE_PATH !== "/";
 
 export function PostOrderCard({
   ethAccount,
@@ -822,6 +828,22 @@ export function PostOrderCard({
           </div>
         ) : null}
 
+        {RECOVERY_ONLY ? (
+          // The legacy release exists so funds locked before the HTLCv3
+          // cutover can be recovered. Posting here would lock new funds into
+          // the old contract, which is the one thing this build must never
+          // do, so the form is gone and only the recovery paths above remain.
+          <div className="space-y-2 rounded-md border border-border/60 bg-muted/20 p-3">
+            <p className="text-sm font-medium">Recovery only</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              This is the previous release, kept so swaps started before the HTLCv3 cutover can
+              still be finished or refunded. New orders belong in the current release. Anything
+              this build still holds for you appears above, and an in-flight swap opens from its
+              own link.
+            </p>
+          </div>
+        ) : (
+          <>
         {legBox("You give", direction === "eth->qrl" ? "eth" : "qrl", fromAmount, setFromAmount)}
         <div className="flex justify-center">
           <Button
@@ -965,6 +987,9 @@ export function PostOrderCard({
           both chains, the private v3 genesis, and this deployment's contracts. Your browser
           verifies the proof. No transaction or funds move during signing.
         </p>
+          </>
+        )}
+
       </CardContent>
     </Card>
   );
