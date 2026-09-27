@@ -20,3 +20,5 @@ server/backups/
 marketmaker/data/
 marketmaker/secrets/
 marketmaker/backups/
+# Measurement output from scripts/measure-qrl-settlement.js
+qrl-settlement-measurement.json
