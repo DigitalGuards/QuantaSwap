@@ -24,8 +24,8 @@ export const protocolV2Config = config as Record<(typeof keys)[number], string>;
 
 /** HTLC contract interface this build is written against. HTLCv3 adds the
  *  payout credit ledger (withdraw, withdrawAll, pushCredit, creditOf,
- *  deliveryGasPolicy) and settles a failed delivery as a credit instead of
- *  reverting the claim. A client compiled for v3 refuses a v2 profile,
+ *  deliveryGasPolicy), and a failed delivery leaves the amount as a credit
+ *  while the claim stands. A client compiled for v3 refuses a v2 profile,
  *  because portable wire V2 signs both HTLC addresses into every order and
  *  the settlement gas rule differs. */
 export const HTLC_INTERFACE = "v3";

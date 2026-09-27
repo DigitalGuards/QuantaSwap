@@ -70,6 +70,8 @@ type PersistedOrder = Omit<
   | "sponsorSentAt"
   | "withdrawSentAt"
   | "pushSentAt"
+  | "withdrawAttempts"
+  | "pushAttempts"
   | "asset"
   | "deployment"
   | "protocol"
@@ -80,6 +82,8 @@ type PersistedOrder = Omit<
   sponsorSentAt?: number | null;
   withdrawSentAt?: number | null;
   pushSentAt?: number | null;
+  withdrawAttempts?: number;
+  pushAttempts?: number;
   asset?: string;
   deployment?: unknown;
   protocol?: unknown;
@@ -1631,6 +1635,8 @@ export class StateFile {
         // created against a contract that could not defer a payout.
         withdrawSentAt: order.withdrawSentAt ?? null,
         pushSentAt: order.pushSentAt ?? null,
+        withdrawAttempts: order.withdrawAttempts ?? 0,
+        pushAttempts: order.pushAttempts ?? 0,
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),

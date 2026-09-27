@@ -217,13 +217,22 @@ export async function submitPreflightedClaim(
 ): Promise<string> {
   await simulateHtlcCall(leg, from, data, 0n);
   if (cutoff !== undefined) {
-    // A read failure fails the claim closed: an unknown deadline is not a
-    // safe one, and the next tick retries.
-    const state = await getSwapState(leg, cutoff.hashlock);
-    if (
-      state.status === SwapStatus.Open &&
-      claimCutoffBlocked(state.timeout, cutoff.nowS(), cutoff.marginS)
-    ) {
+    // A read failure fails the claim closed: an unknown deadline is not a safe
+    // one, and the next tick retries. The read is sanitized like the preflight
+    // above, because a hostile or misconfigured RPC can put its URL or the
+    // request body into an error, and this runs on the secret-bearing path.
+    let blocked: boolean;
+    try {
+      const state = await getSwapState(leg, cutoff.hashlock);
+      blocked =
+        state.status === SwapStatus.Open &&
+        claimCutoffBlocked(state.timeout, cutoff.nowS(), cutoff.marginS);
+    } catch {
+      throw new Error(
+        `${leg.ns} claim deadline could not be re-read; the secret was not broadcast`,
+      );
+    }
+    if (blocked) {
       throw new Error(
         `${leg.ns} claim abandoned inside the escrow's safety margin; the secret was not broadcast`,
       );
@@ -385,6 +394,97 @@ export const encodePushCredit = (leg: LegKey, token: string, account: string): s
   if (isQip55QrlAddress(account)) throw new Error(QIP55_QRVM_ABI_ERROR);
   return iface.encodeFunctionData("pushCredit", [token, qToHex(account)]);
 };
+
+/** An indexed `address` topic word: 32 bytes left-padded on Ethereum, the
+ *  64-byte address itself on QRVM-512. */
+function addressTopic(leg: LegRpc, address: string): string {
+  const hex = qToHex(address).slice(2).toLowerCase();
+  return leg.ns === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+}
+
+/** QRVM-512 log topics are 64-byte words: a 32-byte value sits in the high
+ *  half followed by 32 zero bytes. Mirrors the browser's qrvm64Topic. */
+const qrvm64Topic = (word: string): string => `${word.toLowerCase()}${"0".repeat(64)}`;
+
+const PAYOUT_CREDITED_TOPIC = (() => {
+  const frag = iface.getEvent("PayoutCredited");
+  if (frag === null) throw new Error("unknown HTLC event PayoutCredited");
+  return frag.topicHash;
+})();
+
+/**
+ * The amount `PayoutCredited` recorded for this exact swap, token and
+ * account. `creditOf` is a ledger keyed only by (token, account), shared by
+ * every swap that account ever settled, so it cannot say which swap left a
+ * balance behind. The event can: its third indexed field is the hashlock.
+ *
+ * A maker needs this to avoid two failure modes at once: pinning an order
+ * open for a credit another swap created, and giving another swap's credit to
+ * this order's counterparty. All four topics are pinned, so the query stays
+ * selective.
+ */
+export async function getCreditedForSwap(
+  leg: LegRpc,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<bigint> {
+  await assertQrlRuntime(leg);
+  const raw = await rpc(
+    leg.url,
+    `${leg.ns}_getLogs`,
+    [
+      {
+        address: leg.htlc,
+        topics: [
+          leg.ns === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
+          addressTopic(leg, token),
+          addressTopic(leg, account),
+          leg.ns === "qrl" ? qrvm64Topic(hashlock) : hashlock,
+        ],
+        fromBlock: "0x0",
+        toBlock: "latest",
+      },
+    ],
+    leg.timeoutMs,
+  );
+  if (!Array.isArray(raw)) return 0n;
+  const width = leg.ns === "qrl" ? 128 : 64;
+  let total = 0n;
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { data } = entry as { data?: unknown };
+    if (typeof data !== "string") continue;
+    if (!new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) continue;
+    total += BigInt(data);
+  }
+  return total;
+}
+
+/** What one payee still holds, and how much of it this swap left behind. */
+export interface CreditReading {
+  /** The per-(token, account) ledger balance, across every swap. */
+  global: bigint;
+  /** What this swap's settlement credited, from its PayoutCredited log. */
+  credited: bigint;
+}
+
+/**
+ * Read both halves. A withdrawal drains the shared ledger without naming a
+ * swap, so what this swap can still be said to be owed is the smaller of the
+ * two. The log query only runs when the ledger holds something, which keeps
+ * it off the normal path entirely.
+ */
+export async function readSwapCredit(
+  leg: LegRpc,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<CreditReading> {
+  const global = await getCredit(leg, token, account);
+  const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+  return { global, credited };
+}
 
 /** Undelivered payout owned by `account` in `token` on this leg. Zero
  *  whenever the payout was delivered, which is the normal case. */

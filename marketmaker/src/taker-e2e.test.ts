@@ -429,6 +429,83 @@ describe("scripted taker end to end", () => {
     }
   });
 
+  it("credits a settlement sent without the published gas buffer", async () => {
+    // The contract decides delivery from the gas the caller supplied: the
+    // payout attempt runs in a child frame with a bounded budget, so a bare
+    // estimate defers every time. Measured on the real artifact for claim,
+    // refund and release. This is the mode that catches a client dropping the
+    // buffer, so the engine has to pass it on its settlement sends.
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      h.chains.eth.deferWithoutGasBuffer = true;
+      h.chains.qrl.deferWithoutGasBuffer = true;
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      const claimed = await h.engine.step(record);
+      record = claimed.record;
+      assert.equal(claimed.verdict.decision, "claim");
+      // The engine sent its claim as a settlement, so the payout landed.
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), 0n);
+      const claimSend = h.takerSenders.eth.sent.at(-1);
+      assert.equal(claimSend?.settlement, true);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("attributes a credit to this swap and not to the shared ledger", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      ({ record } = await h.engine.step(record));
+      const owed = BigInt(h.maker.order?.order.fromAmount ?? "0");
+      // A balance from some other swap on the same ledger entry: the engine
+      // must report only what this hashlock credited, because a push here
+      // would otherwise hand another swap's money to this counterparty.
+      h.chains.eth.addForeignCredit(NATIVE_TOKEN, TAKER_ETH, owed * 4n);
+      const lines = await h.engine.credits(record);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]?.amount, owed);
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), owed * 5n);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("reports one ledger entry once across several takes", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      ({ record } = await h.engine.step(record));
+      // Two takes against the same maker on the same asset read the same
+      // (token, account) balance. Counting it twice would read as twice the
+      // money and try to move one balance twice.
+      const all = await h.engine.allCredits();
+      assert.equal(all.length, 1);
+    } finally {
+      await h.close();
+    }
+  });
+
   it("swaps qrl->eth on a token leg with an exact approval", async () => {
     const h = await harness({
       direction: "qrl->eth",

@@ -51,8 +51,9 @@ leg (QRL on the QRL leg, ETH or the token symbol on the Ethereum leg).
 withdraw collects a deferred payout: HTLCv3 keeps a settled swap terminal
 even when the payout could not be handed over, and holds the amount as a
 credit for the address it was owed to. Our own credits go to --to, or to our
-own address when that is left out. A credit owed to the maker is delivered to
-the maker itself, which takes no destination and can pay nobody else.
+own address when that is left out; --to applies only to the leg whose codec
+can encode it. A credit owed to the maker is delivered to the maker itself,
+which takes no destination and can pay nobody else.
 
 Exit status: 0 claimed, 1 ended without funding, 2 uneven settlement,
 3 still in flight (run resume), 4 refunded, 5 released.
@@ -137,6 +138,15 @@ export function destinationFitsLeg(destination: string, leg: LegKey): boolean {
     ? /^0x[0-9a-fA-F]{40}$/.test(destination)
     : isQip55QrlAddress(destination);
 }
+
+/** The ledger entry a credit line moves. Two takes that settled with the same
+ *  counterparty on the same asset share one, so it is the deduplication key
+ *  for both reporting and moving. */
+export const creditLedgerKey = (line: {
+  leg: LegKey;
+  token: string;
+  account: string;
+}): string => `${line.leg}:${line.token.toLowerCase()}:${line.account.toLowerCase()}`;
 
 function bookFor(cfg: TakerReadConfig): TakerBookClient {
   return new TakerBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
@@ -582,8 +592,15 @@ async function commandWithdraw(args: ParsedArgs): Promise<number> {
     let moved = 0;
     let found = 0;
     let failed = 0;
+    // One ledger entry is one credit. Two takes against the same maker on the
+    // same asset read the same (token, account) balance, so a per-record loop
+    // would count it twice and try to move it twice.
+    const seen = new Set<string>();
     for (const record of records) {
       for (const line of await session.engine.credits(record)) {
+        const ledgerKey = creditLedgerKey(line);
+        if (seen.has(ledgerKey)) continue;
+        seen.add(ledgerKey);
         found += 1;
         // --to names one address, and the two legs use different address
         // formats, so it applies only where it fits. A credit it cannot

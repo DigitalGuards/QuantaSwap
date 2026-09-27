@@ -19,6 +19,7 @@ import {
   NATIVE_TOKEN,
   QRL_NATIVE_TOKEN,
   assertDeliveryGasPolicy,
+  readSwapCredit,
   encodeApprove,
   encodeClaim,
   encodeLock,
@@ -30,7 +31,6 @@ import {
   erc20BalanceOf,
   getChainId,
   getConfirmedSwapState,
-  getCredit,
   getSwapState,
   submitPreflightedClaim,
   type LegKey,
@@ -45,8 +45,11 @@ import {
 } from "./orderbook.js";
 import { COINGECKO_URL, PriceFeed, needsReprice } from "./price.js";
 import {
+  MAX_CREDIT_ATTEMPTS,
   canContinueWithoutBook,
   decide,
+  pushParked,
+  withdrawParked,
   earliestValidFillIntent,
   levelQuote,
   fundsShort,
@@ -302,14 +305,24 @@ function legToken(leg: LegKey, asset: AssetSymbol): string {
   return leg === "eth" ? (assetInfo(asset).tokenAddress ?? NATIVE_TOKEN) : QRL_NATIVE_TOKEN;
 }
 
+/**
+ * The credit this swap left for `account`, in this leg's token. The ledger is
+ * keyed only by (token, account), so the amount is attributed to this order's
+ * hashlock through its PayoutCredited log and capped by what the ledger still
+ * holds. Without that attribution one order would be pinned open by another
+ * swap's credit, and a push here could hand another swap's credit to this
+ * taker.
+ */
 async function creditOrNull(
   leg: LegRpc,
   token: string,
   account: string | null,
+  hashlock: string,
 ): Promise<bigint | null> {
   if (account === null) return null;
   try {
-    return await getCredit(leg, token, account);
+    const reading = await readSwapCredit(leg, token, account, hashlock);
+    return reading.credited < reading.global ? reading.credited : reading.global;
   } catch {
     return null; // fail closed; decide() never retires a record on an unknown credit
   }
@@ -348,9 +361,14 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           legStateOrNull(legRpc[iLeg], hashlock, false),
           legStateOrNull(legRpc[rLeg], hashlock, false),
           legStateOrNull(legRpc[rLeg], hashlock, true),
-          creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg)),
-          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), myAddress(iLeg)),
-          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), takerOnInitiatorLeg),
+          creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg), hashlock),
+          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), myAddress(iLeg), hashlock),
+          creditOrNull(
+            legRpc[iLeg],
+            legToken(iLeg, managed.asset),
+            takerOnInitiatorLeg,
+            hashlock,
+          ),
         ])
       : [null, null, null, null, null, null];
 
@@ -820,15 +838,31 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       // the leg we funded after a refund or a release of our own.
       const leg = (ourResponderCredit ?? 0n) > 0n ? rLeg : iLeg;
       managed.withdrawSentAt = nowS();
+      managed.withdrawAttempts = (managed.withdrawAttempts ?? 0) + 1;
       state.upsert(managed);
       const token = legToken(leg, managed.asset);
-      const hash = await sender(leg).send(
-        encodeWithdrawAll(leg, token, myAddress(leg)),
-        0n,
-        undefined,
-        { settlement: true },
-      );
-      log(`order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`);
+      try {
+        const hash = await sender(leg).send(
+          encodeWithdrawAll(leg, token, myAddress(leg)),
+          0n,
+          undefined,
+          { settlement: true },
+        );
+        log(`order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`);
+      } catch (err) {
+        // A credit that will not move is conserved on chain. Throwing here
+        // would abort the whole tick and flip health to degraded on a
+        // condition only an operator can resolve.
+        log(
+          `order ${short(managed.id)} credit withdrawal failed (attempt ${managed.withdrawAttempts} of ${MAX_CREDIT_ATTEMPTS}):`,
+          err instanceof Error ? err.message : err,
+        );
+        if (withdrawParked(managed)) {
+          log(
+            `ATTENTION order ${short(managed.id)}: giving up on a deferred payout owed to this maker on the ${leg} leg after ${MAX_CREDIT_ATTEMPTS} attempts. The value is conserved in the HTLC credit ledger and needs an operator; the order is released so it cannot hold a listing slot.`,
+          );
+        }
+      }
       break;
     }
 
@@ -840,6 +874,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       // failure is logged and retried on the marker's own spacing.
       if (takerOnInitiatorLeg === null) break;
       managed.pushSentAt = nowS();
+      managed.pushAttempts = (managed.pushAttempts ?? 0) + 1;
       state.upsert(managed);
       const token = legToken(iLeg, managed.asset);
       try {
@@ -852,9 +887,14 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         log(`order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`);
       } catch (err) {
         log(
-          `order ${short(managed.id)} credit push skipped:`,
+          `order ${short(managed.id)} credit push skipped (attempt ${managed.pushAttempts} of ${MAX_CREDIT_ATTEMPTS}):`,
           err instanceof Error ? err.message : err,
         );
+        if (pushParked(managed)) {
+          log(
+            `ATTENTION order ${short(managed.id)}: giving up on pushing a deferred payout to the taker on the ${iLeg} leg after ${MAX_CREDIT_ATTEMPTS} attempts. The credit is conserved and the taker can still collect it themselves; this order is released.`,
+          );
+        }
       }
       break;
     }
@@ -1059,6 +1099,8 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         refundSentAt: null,
         withdrawSentAt: null,
         pushSentAt: null,
+        withdrawAttempts: 0,
+        pushAttempts: 0,
         createdAt: nowS(),
       };
       // Persist the signed listing before publish. Maker identity plus nonce
@@ -1125,7 +1167,14 @@ async function tick(): Promise<void> {
   } finally {
     let orderCount = startingOrderCount;
     try {
-      orderCount = state.all().length;
+      const live = state.all();
+      orderCount = live.length;
+      // Credits this maker stopped trying to move. Reported, never fatal: a
+      // token that refuses to pay cannot be made to, and holding the status
+      // at degraded forever would bury every other signal.
+      health.markStrandedCredits(
+        live.filter((order) => withdrawParked(order) || pushParked(order)).length,
+      );
       health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
     } catch {
       // A poisoned state file is already forcing process shutdown.

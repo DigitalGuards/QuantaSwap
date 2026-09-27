@@ -14,6 +14,7 @@ import {
   EXIT_UNFUNDED,
   boundsFor,
   confirm,
+  creditLedgerKey,
   destinationFitsLeg,
   parseArgs,
   takeExitCode,
@@ -76,6 +77,26 @@ describe("taker CLI arguments", () => {
     assert.equal(destinationFitsLeg(qrl, "eth"), false);
     assert.equal(destinationFitsLeg("nonsense", "eth"), false);
     assert.equal(destinationFitsLeg("nonsense", "qrl"), false);
+  });
+
+  it("keys a credit on the ledger entry it moves", () => {
+    // withdrawAll and pushCredit move a (token, account) balance, so two
+    // takes that settled with the same counterparty on the same asset share
+    // one credit. Counting it per record would report and move it twice.
+    const line = {
+      leg: "eth" as const,
+      token: `0x${"0".repeat(40)}`,
+      account: `0x${"AB".repeat(20)}`,
+    };
+    assert.equal(
+      creditLedgerKey(line),
+      creditLedgerKey({ ...line, account: line.account.toLowerCase() }),
+    );
+    assert.notEqual(creditLedgerKey(line), creditLedgerKey({ ...line, leg: "qrl" }));
+    assert.notEqual(
+      creditLedgerKey(line),
+      creditLedgerKey({ ...line, token: `0x${"1".repeat(40)}` }),
+    );
   });
 
   it("keeps an empty command line empty", () => {

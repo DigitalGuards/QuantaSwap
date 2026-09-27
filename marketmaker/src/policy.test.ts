@@ -13,8 +13,11 @@ import {
 } from "./htlc.js";
 import {
   canContinueWithoutBook,
+  MAX_CREDIT_ATTEMPTS,
   decide,
   earliestValidFillIntent,
+  pushParked,
+  withdrawParked,
   fundsShort,
   inventoryShort,
   levelQuote,
@@ -678,6 +681,63 @@ describe("refund and settlement", () => {
         }),
       ),
       "withdraw",
+    );
+  });
+
+  it("stops after the attempt cap and lets the order retire", () => {
+    // A taker can lock to a recipient no payout can reach, and pushCredit to
+    // it reverts forever. Without a cap that order holds a listing slot for
+    // good, which is a denial of service the taker chooses.
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const spent = managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS, withdrawSentAt: null });
+    assert.equal(withdrawParked(spent), true);
+    assert.equal(decide(input({ ...settled, managed: spent })), "finish");
+    // One attempt short, it still tries.
+    const nearly = managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS - 1, withdrawSentAt: null });
+    assert.equal(decide(input({ ...settled, managed: nearly })), "withdraw");
+  });
+
+  it("stops pushing a taker credit after the cap and still finishes", () => {
+    const sponsored = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      takerCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const spent = managed({ pushAttempts: MAX_CREDIT_ATTEMPTS, pushSentAt: null });
+    assert.equal(pushParked(spent), true);
+    assert.equal(decide(input({ ...sponsored, managed: spent })), "finish");
+    assert.equal(
+      decide(
+        input({
+          ...sponsored,
+          managed: managed({ pushAttempts: MAX_CREDIT_ATTEMPTS - 1, pushSentAt: null }),
+        }),
+      ),
+      "push",
+    );
+  });
+
+  it("a spent withdraw cap does not excuse an unpushed taker credit", () => {
+    // The two caps are independent: parking one must not retire a record the
+    // other is still working on.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Claimed),
+          rState: leg(SwapStatus.Claimed),
+          ourResponderCredit: AMOUNT,
+          takerCredit: AMOUNT,
+          managed: managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS }),
+          nowS: T1 + 10_000,
+        }),
+      ),
+      "push",
     );
   });
 

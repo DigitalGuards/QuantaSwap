@@ -13,7 +13,7 @@ import {
 import type { AddressInfo } from "node:net";
 import { Interface, id as keccakId } from "ethers";
 import type { AssetSymbol } from "./assets.js";
-import type { LegSender } from "./chains.js";
+import type { LegSender, SendOptions } from "./chains.js";
 import {
   ERC20_ABI,
   HTLC_ABI,
@@ -103,6 +103,31 @@ export class FakeHtlcChain {
   /** token => account => undelivered payout owned by that account. */
   private readonly credits = new Map<string, bigint>();
   private readonly outstanding = new Map<string, bigint>();
+  /** PayoutCredited, which is the only record that names which swap left a
+   *  credit behind: the ledger above is keyed only by token and account. */
+  private readonly creditedLogs: {
+    token: string;
+    account: string;
+    hashlock: string;
+    amount: bigint;
+  }[] = [];
+  /**
+   * When set, a settlement credits unless the sender supplied the published
+   * gas buffer. That is what the real contract does: the payout attempt runs
+   * in a child frame with a bounded budget, so a caller that sends a bare
+   * estimate defers every time. A client that drops the buffer fails here.
+   */
+  deferWithoutGasBuffer = false;
+  /** Set by the sender for the duration of one apply. */
+  suppliedGasBuffer = false;
+
+  /** Test-only: a balance on the same ledger entry from a different swap,
+   *  with no PayoutCredited log for the swap under test. */
+  addForeignCredit(token: string, account: string, amount: bigint): void {
+    this.credits.set(creditKey(token, account), this.creditOf(token, account) + amount);
+    const tokenKey = qToHex(token).toLowerCase();
+    this.outstanding.set(tokenKey, this.outstandingCredit(token) + amount);
+  }
 
   creditOf(token: string, account: string): bigint {
     return this.credits.get(creditKey(token, account)) ?? 0n;
@@ -114,9 +139,10 @@ export class FakeHtlcChain {
 
   /** The payout half of a settlement: deliver, or credit the payee. Exactly
    *  one of the two happens, so value is conserved either way. */
-  private settle(token: string, payee: string, amount: bigint): void {
+  private settle(token: string, payee: string, amount: bigint, hashlock: string): void {
     const tokenKey = qToHex(token).toLowerCase();
-    if (this.deliveryFails(payee)) {
+    if (this.deliveryFails(payee) || (this.deferWithoutGasBuffer && !this.suppliedGasBuffer)) {
+      this.creditedLogs.push({ token, account: payee, hashlock, amount });
       this.credits.set(creditKey(token, payee), this.creditOf(token, payee) + amount);
       this.outstanding.set(tokenKey, this.outstandingCredit(token) + amount);
       return;
@@ -130,6 +156,16 @@ export class FakeHtlcChain {
   /** withdraw/withdrawAll: only the credited account moves its own credit,
    *  and it names the destination. */
   moveCredit(from: string, token: string, to: string, amount?: bigint): void {
+    // The contract's order: InvalidParams on the destination, then NoCredit,
+    // then InsufficientCredit. A test that relies on a different order would
+    // pass here and fail on chain.
+    const zeroAddress = this.leg === "qrl" ? QRL_NATIVE_TOKEN : NATIVE_TOKEN;
+    if (
+      qToHex(to).toLowerCase() === qToHex(zeroAddress).toLowerCase() ||
+      qToHex(to).toLowerCase() === qToHex(this.htlc).toLowerCase()
+    ) {
+      throw new Error("InvalidParams");
+    }
     const held = this.creditOf(token, from);
     const moved = amount ?? held;
     if (moved <= 0n) throw new Error("NoCredit");
@@ -217,7 +253,7 @@ export class FakeHtlcChain {
     // unconditionally, then delivery is attempted. Nothing the payout does
     // can roll this back.
     this.swaps.set(key, { ...swap, status: SwapStatus.Claimed, preimage });
-    this.settle(swap.token, swap.recipient, swap.amount);
+    this.settle(swap.token, swap.recipient, swap.amount, key);
     this.snapshot();
   }
 
@@ -250,9 +286,71 @@ export class FakeHtlcChain {
     }
     if (this.clock() < swap.timeout) throw new Error("TimeoutPending");
     this.swaps.set(key, { ...swap, status: SwapStatus.Refunded });
-    this.settle(swap.token, swap.initiator, swap.amount);
+    this.settle(swap.token, swap.initiator, swap.amount, key);
     this.snapshot();
   }
+
+  /** Initiator-only reclaim of an unassigned open lock. Emits Refunded, and
+   *  its payout defers exactly like every other settlement. */
+  release(from: string, hashlock: string): void {
+    const key = hashlock.toLowerCase();
+    const swap = this.swaps.get(key);
+    if (swap === undefined || swap.status !== SwapStatus.Open) throw new Error("NotOpen");
+    if (qToHex(swap.initiator).toLowerCase() !== qToHex(from).toLowerCase()) {
+      throw new Error("NotInitiator");
+    }
+    const zero = this.leg === "qrl" ? QRL_NATIVE_TOKEN : NATIVE_TOKEN;
+    if (qToHex(swap.recipient).toLowerCase() !== qToHex(zero).toLowerCase()) {
+      throw new Error("AlreadyAssigned");
+    }
+    this.swaps.set(key, { ...swap, status: SwapStatus.Refunded });
+    this.settle(swap.token, swap.initiator, swap.amount, key);
+    this.snapshot();
+  }
+
+  /** PayoutCredited entries matching a pinned topic filter, in the shape an
+   *  RPC returns them. The filter is compared as topic strings, so the fake
+   *  agrees with the client only when both build them the same way. */
+  creditedLogsByTopic(
+    token?: string,
+    account?: string,
+    hashlock?: string,
+  ): { data: string; topics: string[] }[] {
+    const word = (value: bigint): string =>
+      this.leg === "qrl"
+        ? value.toString(16).padStart(128, "0")
+        : value.toString(16).padStart(64, "0");
+    const hashTopic = (value: string): string =>
+      this.leg === "qrl" ? `${value.toLowerCase()}${"0".repeat(64)}` : value.toLowerCase();
+    return this.creditedLogs
+      .map((entry) => ({
+        data: `0x${word(entry.amount)}`,
+        topics: [
+          payoutCreditedTopicFor(this.leg),
+          addressTopicFor(this.leg, entry.token),
+          addressTopicFor(this.leg, entry.account),
+          hashTopic(entry.hashlock),
+        ],
+      }))
+      .filter(
+        (log) =>
+          (token === undefined || log.topics[1] === token.toLowerCase()) &&
+          (account === undefined || log.topics[2] === account.toLowerCase()) &&
+          (hashlock === undefined || log.topics[3] === hashlock.toLowerCase()),
+      );
+  }
+}
+
+/** Topic forms the clients build, mirrored so the fake compares like for like. */
+export function payoutCreditedTopicFor(leg: LegKey): string {
+  const frag = htlcInterface.getEvent("PayoutCredited");
+  if (frag === null) throw new Error("unknown event");
+  return leg === "qrl" ? `${frag.topicHash}${"0".repeat(64)}` : frag.topicHash;
+}
+
+function addressTopicFor(leg: LegKey, address: string): string {
+  const hex = qToHex(address).slice(2).toLowerCase();
+  return leg === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
 }
 
 const qrvmWordFromAddress = (value: string): string =>
@@ -362,6 +460,20 @@ export async function startFakeChainRpc(
       }
       if (method === `${ns}_blockNumber`) {
         reply(`0x${chain.height.toString(16)}`);
+        return;
+      }
+      if (method === `${ns}_getLogs`) {
+        const filter = (request.params?.[0] ?? {}) as { topics?: unknown };
+        const topics = Array.isArray(filter.topics) ? filter.topics : [];
+        const wanted = (index: number): string | undefined =>
+          typeof topics[index] === "string" ? (topics[index] as string) : undefined;
+        // Only PayoutCredited is served, which is the only log the clients
+        // query by hashlock.
+        if (wanted(0) !== payoutCreditedTopicFor(chain.leg)) {
+          reply([]);
+          return;
+        }
+        reply(chain.creditedLogsByTopic(wanted(1), wanted(2), wanted(3)));
         return;
       }
       if (method === `${ns}_call`) {
@@ -489,7 +601,7 @@ function selectorOf(signature: string): string {
 /** A LegSender that applies calldata straight to a FakeHtlcChain, so a
  *  test exercises the engine without a node or a real signer. */
 export class FakeLegSender implements LegSender {
-  readonly sent: { data: string; value: bigint; to?: string }[] = [];
+  readonly sent: { data: string; value: bigint; to?: string; settlement?: boolean }[] = [];
   private nativeBalance: bigint;
 
   constructor(
@@ -504,12 +616,29 @@ export class FakeLegSender implements LegSender {
     return this.nativeBalance;
   }
 
-  async send(data: string, valueWei: bigint, to?: string): Promise<string> {
-    this.sent.push({ data, value: valueWei, ...(to === undefined ? {} : { to }) });
-    if (this.chain.leg === "qrl") {
-      this.applyQrvm(data, valueWei);
-    } else {
-      this.applyEth(data, valueWei, to);
+  async send(
+    data: string,
+    valueWei: bigint,
+    to?: string,
+    options: SendOptions = {},
+  ): Promise<string> {
+    this.sent.push({
+      data,
+      value: valueWei,
+      ...(to === undefined ? {} : { to }),
+      ...(options.settlement === true ? { settlement: true } : {}),
+    });
+    // The real contract decides delivery from the gas the caller supplied, so
+    // the fake is told whether the published buffer rode along.
+    this.chain.suppliedGasBuffer = options.settlement === true;
+    try {
+      if (this.chain.leg === "qrl") {
+        this.applyQrvm(data, valueWei);
+      } else {
+        this.applyEth(data, valueWei, to);
+      }
+    } finally {
+      this.chain.suppliedGasBuffer = false;
     }
     this.nativeBalance -= valueWei;
     return `0x${randomBytes(32).toString("hex")}`;
@@ -536,6 +665,10 @@ export class FakeLegSender implements LegSender {
     }
     if (selector === selectorOf("refund(bytes32)")) {
       this.chain.refund(this.address, `0x${word(0).slice(0, 64)}`);
+      return;
+    }
+    if (selector === selectorOf("release(bytes32)")) {
+      this.chain.release(this.address, `0x${word(0).slice(0, 64)}`);
       return;
     }
     if (selector === selectorOf("withdrawAll(address,address)")) {
@@ -597,6 +730,10 @@ export class FakeLegSender implements LegSender {
     }
     if (parsed.name === "refund") {
       this.chain.refund(this.address, parsed.args[0] as string);
+      return;
+    }
+    if (parsed.name === "release") {
+      this.chain.release(this.address, parsed.args[0] as string);
       return;
     }
     if (parsed.name === "withdrawAll") {

@@ -23,6 +23,12 @@ export interface HealthSnapshot {
     budget: number;
     retryAt: string | null;
   };
+  /** HTLCv3 payout credits this maker gave up moving after its per-record
+   *  attempt cap. The value is conserved on chain and needs an operator, so
+   *  it is reported as a count and never flips the status: a token that
+   *  refuses to pay anyone cannot be made to, and letting it hold the status
+   *  at degraded forever would bury every other signal. */
+  strandedCredits: number;
 }
 
 const iso = (value: number | null): string | null =>
@@ -42,6 +48,7 @@ export class MakerHealth {
   private consecutiveFailedTicks = 0;
   private retainedOrders = 0;
   private admissionRetryAt = 0;
+  private strandedCredits = 0;
 
   constructor(
     private readonly opts: {
@@ -57,6 +64,12 @@ export class MakerHealth {
 
   markRuntimeVerified(): void {
     this.runtimeVerified = true;
+  }
+
+  /** Records how many managed orders hold a credit this maker stopped trying
+   *  to move. Reported, never fatal. */
+  markStrandedCredits(count: number): void {
+    this.strandedCredits = count;
   }
 
   markQuoteAdmission(retainedOrders: number, retryAt: number): void {
@@ -118,6 +131,7 @@ export class MakerHealth {
         budget: LOCAL_RETAINED_ORDER_BUDGET,
         retryAt: this.admissionRetryAt === 0 ? null : iso(this.admissionRetryAt * 1000),
       },
+      strandedCredits: this.strandedCredits,
     };
   }
 

@@ -116,20 +116,28 @@ yours.
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
 10. **Collect a deferred payout**: HTLCv3 keeps a settled swap terminal even
-   when the payout cannot be handed over, for example because an issuer
-   blocklisted the payee or a recipient contract refuses the transfer. The
-   amount is then held as a credit for the address it was owed to, so
-   `Claimed` no longer means the recipient holds the funds. Read
-   `creditOf(token, account)` after every settlement. Your own credit comes out
-   with `withdrawAll(token, to)`, where you choose `to`, and nobody else can
-   redirect it. A credit owed to your taker on the leg you funded is finished
-   with `pushCredit(token, account)`, which is permissionless and takes no
-   destination, so it can only pay the taker: that is the credit-path half of a
-   sponsored claim, and it keeps a taker with no gas on the paying chain from
-   sitting behind a withdrawal they cannot send. The reference maker does both
-   automatically, with the same persisted send markers and retry spacing as its
-   claim and refund, and it will not retire an order while a credit it is
-   responsible for is still outstanding.
+    when the payout cannot be handed over, for example because an issuer
+    blocklisted the payee or a recipient contract refuses the transfer. The
+    amount is then held as a credit for the address it was owed to, so
+    `Claimed` no longer means the recipient holds the funds. Read
+    `creditOf(token, account)` after every settlement, and attribute it with
+    the `PayoutCredited(token, account, hashlock, amount)` log: `creditOf` is
+    one ledger per address and asset, shared by every swap that address has
+    settled, so it cannot tell you which swap a balance came from. Your own
+    credit comes out with `withdrawAll(token, to)`, where you choose `to`, and
+    nobody else can redirect it. A credit owed to your taker on the leg you
+    funded is finished with `pushCredit(token, account)`, which is
+    permissionless and takes no destination, so it can only pay the taker: that
+    is the credit-path half of a sponsored claim, and it keeps a taker with no
+    gas on the paying chain from sitting behind a withdrawal they cannot send.
+    The reference maker does both automatically, with the same persisted send
+    markers and retry spacing as its claim and refund, and it holds an order
+    open while a credit attributable to that order's hashlock is outstanding.
+    It gives up after five attempts per credit: a token that refuses to pay
+    anyone cannot be made to, and an uncapped retry would let a taker pin a
+    listing slot forever by locking to a recipient no payout can reach. A
+    parked credit is reported as `strandedCredits` in the health snapshot and
+    needs an operator.
 11. **Cancel or repost**: before selecting an intent, a maker may sign and
    persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
    cancelled listing is terminal. Authenticate the exact CancelV2 and digest

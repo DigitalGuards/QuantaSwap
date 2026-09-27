@@ -130,6 +130,12 @@ export interface ManagedOrder {
   /** Last attempt to push the taker's deferred payout to the taker after a
    *  sponsored claim credited them; null on older records. */
   pushSentAt: number | null;
+  /** How many times each credit move has been attempted. A token that
+   *  refuses to pay anyone cannot be made to, so an uncapped retry would pin
+   *  this order open forever and hold a listing slot with it; older records
+   *  default to zero. */
+  withdrawAttempts?: number;
+  pushAttempts?: number;
   createdAt: number;
 }
 
@@ -359,6 +365,7 @@ export function decide(x: DecideInput): Decision {
   // and refund.
   if (
     ((x.ourResponderCredit ?? 0n) > 0n || (x.ourInitiatorCredit ?? 0n) > 0n) &&
+    !withdrawParked(managed) &&
     retryOk(managed.withdrawSentAt, nowS, x.resendAfterS)
   ) {
     return "withdraw";
@@ -379,6 +386,7 @@ export function decide(x: DecideInput): Decision {
     pushableTakerCredit &&
     x.takerCredit !== null &&
     x.takerCredit > 0n &&
+    !pushParked(managed) &&
     retryOk(managed.pushSentAt, nowS, x.resendAfterS)
   ) {
     return "push";
@@ -394,10 +402,15 @@ export function decide(x: DecideInput): Decision {
   // waits until every credit this maker is responsible for is provably
   // gone. A read that failed is not a zero balance, and a credit inside its
   // retry spacing is still outstanding: both fail closed here.
+  // A parked credit no longer holds the record: the attempts are spent, the
+  // value is conserved on chain, and the health snapshot reports it. Holding
+  // the order open instead would keep a listing slot hostage to a token that
+  // will never pay, which is a denial of service a taker can trigger by
+  // locking to a recipient no payout can reach.
   const creditsSettled =
-    x.ourResponderCredit === 0n &&
-    x.ourInitiatorCredit === 0n &&
-    (!pushableTakerCredit || x.takerCredit === 0n);
+    (withdrawParked(managed) ||
+      (x.ourResponderCredit === 0n && x.ourInitiatorCredit === 0n)) &&
+    (!pushableTakerCredit || pushParked(managed) || x.takerCredit === 0n);
   if (terminal(x.iState) && rSettled && creditsSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
@@ -474,6 +487,20 @@ export interface RefillInput {
 /** Repost only while under the listing target (rungs times listings per
  *  rung), under the in-flight exposure cap, holding inventory beyond the
  *  reserve, and holding native gas headroom on the ETH leg. */
+/**
+ * Attempts allowed per credit before the maker stops trying. Enough to ride
+ * out a transient RPC or fee problem, few enough that a permanently
+ * unpayable credit cannot hold an order open. A parked credit is conserved on
+ * chain, reported in the health snapshot, and needs an operator.
+ */
+export const MAX_CREDIT_ATTEMPTS = 5;
+
+export const withdrawParked = (managed: ManagedOrder): boolean =>
+  (managed.withdrawAttempts ?? 0) >= MAX_CREDIT_ATTEMPTS;
+
+export const pushParked = (managed: ManagedOrder): boolean =>
+  (managed.pushAttempts ?? 0) >= MAX_CREDIT_ATTEMPTS;
+
 /** Inventory or gas below what the next listing needs. */
 export function fundsShort(x: RefillInput): boolean {
   return (

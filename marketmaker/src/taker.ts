@@ -25,8 +25,8 @@ import {
   erc20Allowance,
   erc20BalanceOf,
   getConfirmedSwapState,
-  getCredit,
   getSwapState,
+  readSwapCredit,
   sameAddr,
   submitPreflightedClaim,
   SwapStatus,
@@ -538,16 +538,28 @@ export class TakerEngine {
     });
   }
 
-  /** Our undelivered payout on `leg`, keyed on the asset that leg escrows.
-   *  Null on a read failure, which decides nothing: an unknown amount must
-   *  not read as zero, and it must not authorise a send either. */
+  /**
+   * The credit THIS take left for `account` on `leg`. The contract's ledger is
+   * keyed only by (token, account) and shared by every swap that address has
+   * settled, so the amount is attributed through this swap's PayoutCredited
+   * log and capped by what the ledger still holds. Null on a read failure,
+   * which decides nothing: an unknown amount must not read as zero, and it
+   * must not authorise a send either.
+   */
   private async creditOrNull(
     leg: LegKey,
     asset: AssetSymbol,
     account: string,
+    hashlock: string,
   ): Promise<bigint | null> {
     try {
-      return await getCredit(this.deps.legRpc[leg], expectedToken(leg, asset), account);
+      const reading = await readSwapCredit(
+        this.deps.legRpc[leg],
+        expectedToken(leg, asset),
+        account,
+        hashlock,
+      );
+      return reading.credited < reading.global ? reading.credited : reading.global;
     } catch {
       return null;
     }
@@ -560,6 +572,10 @@ export class TakerEngine {
    * funded can be delivered to them with the destinationless pushCredit.
    */
   async credits(record: TakerSwapRecord): Promise<TakerCreditLine[]> {
+    const hashlock = record.fill?.fill.hashlock;
+    // Without a fill there is no hashlock, so nothing can be attributed to
+    // this take and nothing may be offered for it.
+    if (hashlock === undefined) return [];
     const plans = this.plansForRecord(record);
     const candidates: { leg: LegKey; account: string; own: boolean }[] = [
       { leg: plans.initiator.leg, account: this.ourAddress(plans.initiator.leg), own: true },
@@ -572,7 +588,7 @@ export class TakerEngine {
     );
     const amounts = await Promise.all(
       wanted.map((candidate) =>
-        this.creditOrNull(candidate.leg, record.asset, candidate.account),
+        this.creditOrNull(candidate.leg, record.asset, candidate.account, hashlock),
       ),
     );
     const lines: TakerCreditLine[] = [];
@@ -716,8 +732,8 @@ export class TakerEngine {
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, false),
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, true),
             this.legStateOrNull(this.deps.legRpc[rLeg], hashlock, false),
-            this.creditOrNull(iLeg, record.asset, this.ourAddress(iLeg)),
-            this.creditOrNull(rLeg, record.asset, this.ourAddress(rLeg)),
+            this.creditOrNull(iLeg, record.asset, this.ourAddress(iLeg), hashlock),
+            this.creditOrNull(rLeg, record.asset, this.ourAddress(rLeg), hashlock),
           ]);
 
     const pending = latestIntent(record);
@@ -1487,12 +1503,25 @@ export class TakerEngine {
     return this.signing().state.all();
   }
 
-  /** Deferred payouts across every persisted take, for `status`. */
+  /**
+   * Deferred payouts across every persisted take, for `status`. Deduplicated
+   * on the ledger key: two takes against the same maker on the same asset
+   * read the same (token, account) entry, and reporting it twice would read
+   * as twice the money and move one balance twice.
+   */
   async allCredits(): Promise<TakerCreditLine[]> {
     const perRecord = await Promise.all(
       this.allRecords().map((record) => this.credits(record)),
     );
-    return perRecord.flat();
+    const seen = new Set<string>();
+    const lines: TakerCreditLine[] = [];
+    for (const line of perRecord.flat()) {
+      const key = `${line.leg}:${line.token.toLowerCase()}:${line.account.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(line);
+    }
+    return lines;
   }
 
   /** Takes that already settled, newest first. */
