@@ -203,13 +203,14 @@ export async function getDeliveryGasPolicy(leg: LegKey): Promise<DeliveryGasPoli
 
 const policyChecked = new Map<LegKey, Promise<void>>();
 
-/** Confirm once per leg per session that the deployed contract publishes
- *  the budget this build's settlement gas rule is built from. A mismatch
- *  fails closed: the rule would then be wrong and every deferred payout on
- *  that leg would be a surprise. A read that cannot complete is not a
- *  mismatch, so an RPC outage does not block a settlement; the pinned
- *  `htlcInterface` field in config/protocol-v2.json already refuses a
- *  profile from the wrong contract generation. */
+/** Confirm per leg that the deployed contract publishes the budget this
+ *  build's settlement gas rule is built from. A mismatch fails closed: the
+ *  rule would then be wrong and every deferred payout on that leg would be a
+ *  surprise. A read that cannot complete leaves the question open and lets
+ *  the settlement through, because the pinned `htlcInterface` field in
+ *  config/protocol-v2.json already refuses a profile from the wrong contract
+ *  generation. Only a completed check is remembered, so a settlement during
+ *  an RPC outage does not retire the guard for the rest of the session. */
 export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
   const pending = policyChecked.get(leg);
   if (pending !== undefined) return pending;
@@ -221,7 +222,9 @@ export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
         );
       }
     },
-    () => undefined,
+    () => {
+      policyChecked.delete(leg);
+    },
   );
   policyChecked.set(leg, check);
   return check;

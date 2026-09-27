@@ -16,6 +16,7 @@ import {
   type LegKey,
   type LegRpc,
 } from "./htlc.js";
+import { isQip55QrlAddress } from "./qip55.js";
 import { ProtocolSigner } from "./protocol-signing.js";
 import { StateProcessLease } from "./state.js";
 import {
@@ -127,6 +128,14 @@ function flagValue(args: ParsedArgs, name: string): string | null {
   if (value === undefined) return null;
   if (value === true) throw new Error(`--${name} needs a value`);
   return value;
+}
+
+/** A withdrawal destination has to be an address the leg's codec can encode:
+ *  20 bytes on the Ethereum leg, a QIP-55 64-byte Q address on the QRL leg. */
+export function destinationFitsLeg(destination: string, leg: LegKey): boolean {
+  return leg === "eth"
+    ? /^0x[0-9a-fA-F]{40}$/.test(destination)
+    : isQip55QrlAddress(destination);
 }
 
 function bookFor(cfg: TakerReadConfig): TakerBookClient {
@@ -571,26 +580,46 @@ async function commandWithdraw(args: ParsedArgs): Promise<number> {
       throw new Error(`no recorded take for order ${orderId}`);
     }
     let moved = 0;
+    let found = 0;
+    let failed = 0;
     for (const record of records) {
       for (const line of await session.engine.credits(record)) {
+        found += 1;
+        // --to names one address, and the two legs use different address
+        // formats, so it applies only where it fits. A credit it cannot
+        // describe is left where it is, fully collectible, and reported.
+        const scoped = line.own && destination !== null ? destination : undefined;
+        if (scoped !== undefined && !destinationFitsLeg(scoped, line.leg)) {
+          console.error(
+            `skipping ${line.display} on the ${line.leg} leg: --to is not an address that leg can pay. Run withdraw once per leg, or leave --to out to pay your own address.`,
+          );
+          failed += 1;
+          continue;
+        }
         console.log(
           line.own
-            ? `withdrawing ${line.display} on the ${line.leg} leg to ${destination ?? line.account}`
+            ? `withdrawing ${line.display} on the ${line.leg} leg to ${scoped ?? line.account}`
             : `pushing ${line.display} to ${line.account} on the ${line.leg} leg`,
         );
-        // Only the credited account can name a destination, so --to applies
-        // to our own credits and is silently irrelevant to a push.
-        await session.engine.moveCredit(
-          line,
-          line.own && destination !== null ? destination : undefined,
-        );
-        moved += 1;
+        try {
+          await session.engine.moveCredit(line, scoped);
+          moved += 1;
+        } catch (error) {
+          // One credit that will not move must never strand the others: a
+          // credit is conserved where it is and can be retried.
+          failed += 1;
+          console.error(
+            `could not move ${line.display} on the ${line.leg} leg: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
     }
-    if (moved === 0) {
+    if (found === 0) {
       console.log("No deferred payouts: every settlement delivered its funds.");
+    } else {
+      console.log(`Moved ${moved} of ${found} deferred payout(s).`);
     }
-    return 0;
+    return failed === 0 ? 0 : 1;
   } finally {
     session.close();
   }

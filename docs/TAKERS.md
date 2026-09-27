@@ -222,13 +222,19 @@ and nobody else can redirect it.
 
 - Your own credit goes to `--to`, or to your own address when that is left out.
   This is the recovery path when it is your own address the payout cannot
-  reach: name one that can be paid.
+  reach: name one that can be paid. The two legs use different address
+  formats, so one `--to` applies only to the leg that can encode it; a credit
+  on the other leg is reported and left in place, ready for a second run. Only
+  the wallet that holds a credit can name a destination for it, because
+  `withdraw` reads `msg.sender`.
 - A credit owed to the maker on the leg you funded is delivered to the maker
   itself. That call takes no destination, so it can pay nobody else, and it
   costs you only gas.
 
-With no order id it works through every recorded take. `--dry-run` prints what
-it would move and sends nothing.
+With no order id it works through every recorded take. One credit that will not
+move is reported and the rest still go, and the command exits nonzero when
+anything was left behind. `--dry-run` prints what it would move and sends
+nothing.
 
 The swap loop also does this on its own: `resume` collects your credits without
 being asked, and `withdraw` exists for the case where you want another

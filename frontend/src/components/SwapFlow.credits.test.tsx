@@ -135,6 +135,30 @@ describe("deferred payout panel", () => {
     expect(screen.getByText(/cannot send their credit anywhere else/)).toBeTruthy();
   });
 
+  it("offers a push for our own credit when another wallet is connected", async () => {
+    // withdrawAll reads msg.sender, so a wallet that does not hold the credit
+    // cannot name a destination. The push still pays the credited address.
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    render(
+      <MemoryRouter>
+        <SwapFlow
+          swap={swap("taker")}
+          ethAccount={`0x${"9".repeat(40)}`}
+          qrlAccount={TAKER_QRL}
+          browserProvider={null}
+          ensureSepolia={vi.fn()}
+          qrlRequest={vi.fn()}
+          qrlTransport={null}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Push to recipient" })).toBeTruthy();
+    expect(screen.getByText(/only the wallet holding it can choose where it goes/)).toBeTruthy();
+  });
+
   it("shows a credit on each leg with its own asset", async () => {
     credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
     credits.set(`qrl:${QRL_NATIVE_TOKEN.toLowerCase()}:${MAKER_QRL.toLowerCase()}`, QRL_AMOUNT);

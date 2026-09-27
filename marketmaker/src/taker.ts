@@ -566,16 +566,19 @@ export class TakerEngine {
       { leg: plans.responder.leg, account: this.ourAddress(plans.responder.leg), own: true },
       { leg: plans.responder.leg, account: plans.responder.recipient, own: false },
     ];
+    const wanted = candidates.filter(
+      (candidate) =>
+        candidate.own || !sameAddr(candidate.account, this.ourAddress(candidate.leg)),
+    );
+    const amounts = await Promise.all(
+      wanted.map((candidate) =>
+        this.creditOrNull(candidate.leg, record.asset, candidate.account),
+      ),
+    );
     const lines: TakerCreditLine[] = [];
-    for (const candidate of candidates) {
-      if (
-        !candidate.own &&
-        sameAddr(candidate.account, this.ourAddress(candidate.leg))
-      ) {
-        continue;
-      }
-      const amount = await this.creditOrNull(candidate.leg, record.asset, candidate.account);
-      if (amount === null || amount <= 0n) continue;
+    wanted.forEach((candidate, index) => {
+      const amount = amounts[index];
+      if (amount === undefined || amount === null || amount <= 0n) return;
       const plan = candidate.leg === plans.initiator.leg ? plans.initiator : plans.responder;
       lines.push({
         orderId: record.orderId,
@@ -586,7 +589,7 @@ export class TakerEngine {
         amount,
         display: `${formatUnits(amount, plan.decimals)} ${plan.asset}`,
       });
-    }
+    });
     return lines;
   }
 
@@ -1477,19 +1480,19 @@ export class TakerEngine {
     return this.signing().state.get(orderId);
   }
 
-  /** Every persisted take, settled or not. A credit outlives its swap, so
-   *  the withdraw path has to see records the status view retires. */
+  /** Every live persisted take, including the ones `status` reports as
+   *  settled-with-attention. A retired record is gone from here, which is
+   *  safe because `finish` only fires once every credit is provably clear. */
   allRecords(): TakerSwapRecord[] {
     return this.signing().state.all();
   }
 
   /** Deferred payouts across every persisted take, for `status`. */
   async allCredits(): Promise<TakerCreditLine[]> {
-    const lines: TakerCreditLine[] = [];
-    for (const record of this.allRecords()) {
-      lines.push(...(await this.credits(record)));
-    }
-    return lines;
+    const perRecord = await Promise.all(
+      this.allRecords().map((record) => this.credits(record)),
+    );
+    return perRecord.flat();
   }
 
   /** Takes that already settled, newest first. */

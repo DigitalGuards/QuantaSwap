@@ -24,8 +24,8 @@ import {
 } from "./htlc";
 import { encodeQrvmHtlc } from "./qrvmHtlc";
 import {
-  creditAction,
   creditCandidates,
+  creditExit,
   creditKey,
   creditViews,
 } from "./payoutCredits";
@@ -70,26 +70,24 @@ function machineFor(role: ActiveSwap["role"], legs: LegStates = {}) {
 }
 
 describe("credit candidates", () => {
-  it("watches both payees of both legs, whichever role this is", () => {
-    // The maker is the ETH-leg initiator (refund payee) and the QRL-leg
-    // recipient (claim payee); the taker is the mirror. A maker that
-    // sponsors the taker's claim has to see the taker's credit to push it.
-    const maker = creditCandidates(machineFor("maker"));
-    expect(
-      maker.map((candidate) => [candidate.leg, candidate.account, candidate.own]),
-    ).toEqual([
-      ["eth", TAKER_ETH, false],
-      ["eth", MAKER_ETH, true],
-      ["qrl", MAKER_QRL, true],
-    ]);
-    const taker = creditCandidates(machineFor("taker"));
-    expect(
-      taker.map((candidate) => [candidate.leg, candidate.account, candidate.own]),
-    ).toEqual([
-      ["eth", TAKER_ETH, true],
-      ["qrl", MAKER_QRL, false],
-      ["qrl", TAKER_QRL, true],
-    ]);
+  it("watches every payee a settlement of either leg could credit", () => {
+    // Per leg: the recipient a claim pays, and the initiator a refund or a
+    // release pays. Missing one of the four would hide a payout that never
+    // arrived, and a counterparty credit is what a push finishes.
+    const expected = [
+      ["eth", TAKER_ETH],
+      ["eth", MAKER_ETH],
+      ["qrl", MAKER_QRL],
+      ["qrl", TAKER_QRL],
+    ];
+    for (const role of ["maker", "taker"] as const) {
+      const candidates = creditCandidates(machineFor(role));
+      expect(candidates.map((candidate) => [candidate.leg, candidate.account])).toEqual(
+        expected,
+      );
+      // `own` marks this browser's own role, whichever side that is.
+      expect(candidates.filter((candidate) => candidate.own)).toHaveLength(2);
+    }
   });
 
   it("keys each candidate on the asset that leg escrows", () => {
@@ -116,7 +114,11 @@ describe("credit views", () => {
     const views = creditViews(candidates, amounts);
     expect(views).toHaveLength(1);
     expect(views[0]?.display).toBe("1.0 ETH");
-    expect(creditAction(views[0]!)).toBe("withdraw");
+    // withdraw reads msg.sender, so the exit depends on the wallet attached
+    // to that leg, and never on the address the swap was agreed with.
+    expect(creditExit(views[0]!, TAKER_ETH)).toBe("withdraw");
+    expect(creditExit(views[0]!, MAKER_ETH)).toBe("push");
+    expect(creditExit(views[0]!, null)).toBe("push");
   });
 
   it("offers only a push for a counterparty credit", () => {
@@ -124,7 +126,7 @@ describe("credit views", () => {
     const views = creditViews(candidates, amounts);
     expect(views).toHaveLength(1);
     expect(views[0]?.own).toBe(false);
-    expect(creditAction(views[0]!)).toBe("push");
+    expect(creditExit(views[0]!, TAKER_QRL)).toBe("push");
     expect(views[0]?.display).toBe("5.0 Quanta");
   });
 

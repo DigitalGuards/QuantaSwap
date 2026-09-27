@@ -30,8 +30,8 @@ import {
 } from "@/lib/legSender";
 import { isQrlAddress } from "@/lib/qrlAddress";
 import {
-  creditAction,
   creditCandidates,
+  creditExit,
   creditKey,
   creditViews,
   type CreditView,
@@ -598,6 +598,7 @@ export function SwapFlow({
     (ethAccount && !sameAddr(ethAccount, ownEth)) || (qrlAccount && !sameAddr(qrlAccount, ownQrl));
 
   const creditList = creditViews(creditCandidates(machine), credits);
+  const connectedOn = (leg: LegKey): string | null => (leg === "eth" ? ethAccount : qrlAccount);
 
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
@@ -821,7 +822,7 @@ export function SwapFlow({
                       </dd>
                     </div>
                   </dl>
-                  {creditAction(view) === "withdraw" ? (
+                  {creditExit(view, connectedOn(view.leg)) === "withdraw" ? (
                     <div className="space-y-1.5">
                       <label className="block text-xs text-muted-foreground">
                         Send it to
@@ -861,8 +862,9 @@ export function SwapFlow({
                         {busy === `credit-${key}` ? "Waiting for wallet…" : "Push to recipient"}
                       </Button>
                       <p className="text-xs text-muted-foreground">
-                        This pays their own address at your gas cost. It takes no destination, so it
-                        cannot send their credit anywhere else.
+                        {view.own
+                          ? "This credit is yours, and only the wallet holding it can choose where it goes. Connect that wallet to pick a destination, or push it now to pay that address from here."
+                          : "This pays their own address at your gas cost. It takes no destination, so it cannot send their credit anywhere else."}
                       </p>
                     </div>
                   )}

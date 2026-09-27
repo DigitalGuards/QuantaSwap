@@ -14,6 +14,7 @@ import {
   EXIT_UNFUNDED,
   boundsFor,
   confirm,
+  destinationFitsLeg,
   parseArgs,
   takeExitCode,
 } from "./taker-cli.js";
@@ -62,6 +63,19 @@ describe("taker CLI arguments", () => {
     assert.deepEqual(scoped.positional, ["abc123"]);
     assert.equal(scoped.flags.get("to"), `Q${"b".repeat(128)}`);
     assert.throws(() => parseArgs(["withdraw", "--to"]), /needs a value/);
+  });
+
+  it("applies a withdrawal destination only to the leg that can encode it", () => {
+    // The two legs use different address formats, so one --to cannot serve
+    // both. A destination the leg cannot pay leaves that credit in place.
+    const eth = `0x${"a".repeat(40)}`;
+    const qrl = `Q${"b".repeat(128)}`;
+    assert.equal(destinationFitsLeg(eth, "eth"), true);
+    assert.equal(destinationFitsLeg(eth, "qrl"), false);
+    assert.equal(destinationFitsLeg(qrl, "qrl"), true);
+    assert.equal(destinationFitsLeg(qrl, "eth"), false);
+    assert.equal(destinationFitsLeg("nonsense", "eth"), false);
+    assert.equal(destinationFitsLeg("nonsense", "qrl"), false);
   });
 
   it("keeps an empty command line empty", () => {

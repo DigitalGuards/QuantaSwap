@@ -19,7 +19,9 @@ export interface CreditCandidate {
   account: string;
   symbol: string;
   decimals: number;
-  /** The connected wallet on this leg is the credited account. */
+  /** This browser's own role is the credited account, so the panel can say
+   *  whose payout it is. Moving it still needs the wallet that holds it: see
+   *  creditExit(). */
   own: boolean;
 }
 
@@ -33,12 +35,12 @@ export const creditKey = (leg: LegKey, token: string, account: string): string =
   `${leg}:${token.toLowerCase()}:${account.toLowerCase()}`;
 
 /**
- * Every payee a settlement of this swap could have credited: each leg's
- * claim payee (the recipient fixed at lock time) and each leg's refund
- * payee (this browser's own address, since refund() pays the locker). Both
- * legs are polled whichever side this browser plays, because a maker that
- * sponsors the taker's claim needs to see a credit owed to the taker in
- * order to push it.
+ * Every payee a settlement of this swap could have credited: per leg, the
+ * recipient a claim pays and the initiator a refund or release pays. Both
+ * legs and both parties are polled whichever side this browser plays. Own
+ * payouts are the point, and a counterparty payout matters too: anyone can
+ * push a credit to the account that owns it, which is what finishes a
+ * deferred payout for a counterparty holding no gas on that chain.
  */
 export function creditCandidates(machine: SwapMachine): CreditCandidate[] {
   const candidates: CreditCandidate[] = [];
@@ -46,7 +48,8 @@ export function creditCandidates(machine: SwapMachine): CreditCandidate[] {
   const ownOn = (leg: LegKey): string => (leg === "eth" ? machine.ownEth : machine.ownQrl);
   for (const leg of [machine.iLeg, machine.rLeg]) {
     const plan = machine.legPlan[leg];
-    for (const account of [plan.recipient, ownOn(leg)]) {
+    const payees = machine.legPayees[leg];
+    for (const account of [payees.claim, payees.refund]) {
       if (account === "") continue;
       const key = creditKey(leg, plan.expectedToken, account);
       if (seen.has(key)) continue;
@@ -83,10 +86,15 @@ export function creditViews(
 }
 
 /**
- * The exit available for one credit. A credited account withdraws to any
- * destination it names; anyone else can only push the credit to the account
- * itself, which is what lets a sponsor finish a payout for a taker who
- * holds no gas on that chain, without gaining any redirect authority.
+ * The exit available for one credit from this browser. `withdraw` reads
+ * `msg.sender`, so only the wallet that holds the credit can name a
+ * destination; every other signer, including this user on a different wallet,
+ * is left with the permissionless push, which pays the credited account
+ * itself and gains nobody any redirect authority. `connected` is the wallet
+ * currently attached on that leg, or null when none is.
  */
-export const creditAction = (view: CreditView): "withdraw" | "push" =>
-  view.own ? "withdraw" : "push";
+export const creditExit = (
+  view: CreditView,
+  connected: string | null,
+): "withdraw" | "push" =>
+  connected !== null && sameAddr(connected, view.account) ? "withdraw" : "push";

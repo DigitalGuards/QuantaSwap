@@ -103,6 +103,10 @@ export interface SwapMachine {
   ownEth: string;
   ownQrl: string;
   legPlan: Record<LegKey, LegPlan>;
+  /** Every address a settlement of this leg can pay: the recipient a claim
+   *  pays and the initiator a refund or release pays. Under HTLCv3 either
+   *  can end up holding a credit, so both are worth watching. */
+  legPayees: Record<LegKey, { claim: string; refund: string }>;
 }
 
 export interface SwapMachineInput {
@@ -408,5 +412,12 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     ownEth: addrOn("eth", swap.role === "taker" ? "taker" : "maker"),
     ownQrl: addrOn("qrl", swap.role === "taker" ? "taker" : "maker"),
     legPlan,
+    // The maker funds the initiator leg and the taker funds the responder
+    // leg, so each leg's refund payee is the party that did not agree to
+    // receive on it.
+    legPayees: {
+      [iLeg]: { claim: addrOn(iLeg, "taker"), refund: addrOn(iLeg, "maker") },
+      [rLeg]: { claim: addrOn(rLeg, "maker"), refund: addrOn(rLeg, "taker") },
+    } as Record<LegKey, { claim: string; refund: string }>,
   };
 }
