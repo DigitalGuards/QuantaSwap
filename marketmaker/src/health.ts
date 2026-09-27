@@ -67,7 +67,7 @@ export class MakerHealth {
   }
 
   /** Records how many managed orders hold a credit this maker stopped trying
-   *  to move. Reported, never fatal. */
+   *  to move. It is reported and leaves the status alone. */
   markStrandedCredits(count: number): void {
     this.strandedCredits = count;
   }

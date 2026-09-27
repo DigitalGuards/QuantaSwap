@@ -2,7 +2,7 @@
 // This is a source-level guard because the bug it exists for was invisible in
 // behaviour tests: a release sent with a bare estimate still succeeds, still
 // emits Refunded, and still leaves the escrow terminal. It just credits the
-// payee instead of paying them, and the caller that cleared its record on
+// payee and leaves them to collect it, and the caller that cleared its record on
 // "Refunded" then had no handle on the funds at all.
 //
 // Measured on the real HTLCv3 artifact on anvil: for claim, refund and

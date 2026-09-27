@@ -7,6 +7,7 @@ import {
   MIN_TAKEABLE_RUNWAY_S,
   QRL_LEG,
   RESPONDER_TIMEOUT_S,
+  absoluteAppUrl,
 } from "@/config";
 import {
   clearActiveSwap,
@@ -180,7 +181,7 @@ export function MyOrderCard({
   const shareUrl =
     myOrder.shareToken === null
       ? null
-      : `${window.location.origin}/o/${myOrder.id}${shareFragment(myOrder.shareToken)}`;
+      : `${absoluteAppUrl(`o/${myOrder.id}`)}${shareFragment(myOrder.shareToken)}`;
 
   const close = useCallback(() => {
     clearMyOrder();

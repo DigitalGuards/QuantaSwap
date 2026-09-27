@@ -1169,9 +1169,9 @@ async function tick(): Promise<void> {
     try {
       const live = state.all();
       orderCount = live.length;
-      // Credits this maker stopped trying to move. Reported, never fatal: a
-      // token that refuses to pay cannot be made to, and holding the status
-      // at degraded forever would bury every other signal.
+      // Credits this maker stopped trying to move. Reported, and the status
+      // is left alone: a token that refuses to pay cannot be made to, and
+      // holding at degraded forever would bury every other signal.
       health.markStrandedCredits(
         live.filter((order) => withdrawParked(order) || pushParked(order)).length,
       );

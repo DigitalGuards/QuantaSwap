@@ -314,6 +314,20 @@ Never delete the state file, replace it, or change the chain and HTLC identity
 while a take may be open, locked, claimable or refundable. Settle first, with
 `status` reporting nothing unsettled.
 
+## Moving to a new HTLC deployment
+
+The state file records the chains and HTLC addresses its takes settle on, and
+every writing command refuses to run against a file from another deployment.
+So, in order: run `resume` until `status` reports nothing in flight, run
+`withdraw` until it reports no deferred payouts, then move the state file aside
+(or point `TAKER_STATE_FILE` at a new path) before running against the new
+profile. Keep the old file as recovery material. Every signing session reads
+`deliveryGasPolicy()` on both legs before it can send, so a command that starts
+cleanly has already confirmed the addresses.
+
+A take that was started before a cutover settles under the release that created
+it, because that is the configuration that knows its contracts.
+
 ## Container use
 
 The published LP image carries the taker as a second entry point, so no extra

@@ -52,11 +52,49 @@ terminal:
   because the signing domain changed: an HTLCv2 order fails verification under
   the HTLCv3 domain and the reverse. They expire on their own signed expiry.
 
-So the cutover is drain first, then flip: stop posting, let in-flight swaps
-reach a terminal state on the contract they were locked at, cancel what is
-still open, and only then change the three fields above. Anything still in
-flight at the moment of the flip is settled with the previous release, which is
-the configuration it was created under.
+### The cutover procedure
+
+Drain first, then flip. Per component, in order:
+
+1. **Drain the maker to zero.** Set `MM_DRAIN=true` and restart it. It cancels
+   its open listings, posts no replacements, and settles what is in flight.
+   Wait until `managedOrders` in its health snapshot reads 0 and
+   `strandedCredits` reads 0. A parked credit means a payout it could not move:
+   collect it under the current configuration before going on, because the new
+   profile will not see that record.
+2. **Stop the maker.**
+3. **Move its state file aside**, or point `MM_STATE_FILE` at a new path. A
+   state file records the deployment its records settle on, and the daemon
+   refuses to start against one from another deployment even when it is empty.
+   Keep the old file: it is the recovery material for anything that turns out
+   to be unfinished.
+4. **Deploy the order book, then the maker, then the frontend**, each carrying
+   the new `config/protocol-v2.json`. The book goes first because it is the
+   verifier: on the HTLCv3 domain it rejects HTLCv2 orders, so a mixed pair
+   cannot form.
+5. **Confirm the maker's boot check.** It reads `deliveryGasPolicy()` on both
+   legs and refuses to start if either answers anything but the budget it was
+   built for, so a clean boot is itself the check that the addresses are the
+   HTLCv3 ones.
+6. **Serve the previous release at `/v2/`** for anyone whose swap started
+   before the cutover (below), and keep it up until nothing is left to recover.
+
+The scripted taker follows the same shape with its own state file; see
+[TAKERS.md](TAKERS.md).
+
+### Recovering a swap started before the cutover
+
+Browser swap state is scoped to the origin and namespaced on both HTLC
+addresses, so an HTLCv2 record is still in local storage after the cutover,
+under its own key, and the HTLCv3 build does not read it. Building the previous
+release with `VITE_BASE_PATH=/v2/` and serving it beside the current one on the
+same origin gives those records their own release back, with no migration and
+no in-app scanner. The current build links to it from the footer, which
+`VITE_LEGACY_RELEASE_PATH` configures.
+
+Anything still in flight at the moment of the flip is therefore settled with
+the release it was created under, which is the configuration that knows its
+contracts.
 
 ## Private v3 testnet release, 2026-09-21 (HTLCv2, superseded by HTLCv3 above)
 

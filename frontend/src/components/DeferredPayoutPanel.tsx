@@ -1,6 +1,6 @@
 // A deferred HTLCv3 payout, surfaced outside the swap flow. Release and
 // refund settle escrow from the order views (a pre-funded listing is
-// reclaimed there, never through SwapFlow), and under HTLCv3 any of those
+// reclaimed in the order views, outside SwapFlow), and under HTLCv3 any of those
 // can end as a credit the payee still has to collect. Without this panel the
 // only record of that credit would be the chain.
 //

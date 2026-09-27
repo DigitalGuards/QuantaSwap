@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
+import { ROUTER_BASENAME } from "@/config";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
 import { clearActiveSwap, loadActiveSwap, saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
@@ -32,7 +33,7 @@ export default function App() {
   };
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={ROUTER_BASENAME}>
       <RouteMeta />
       <Header
         ethAccount={eth.account}

@@ -113,6 +113,25 @@ funds. What that changes for an operator:
   permanently blocking token leaves the credit conserved and accounted but
   undeliverable. See `docs/audit/HTLCV3_SCOPE.md` A16.
 
+### Moving this maker to a new HTLC deployment
+
+The state file records which deployment its records settle on, and the daemon
+refuses to start against one from another deployment, empty or not. The
+procedure, in order:
+
+1. `MM_DRAIN=true` and restart. Wait for `managedOrders` to read 0 and
+   `strandedCredits` to read 0 in the health snapshot. A parked credit is a
+   payout the maker gave up moving: collect it under the current configuration
+   first, because the new profile will not see that record.
+2. Stop the maker.
+3. Move the state file aside, or point `MM_STATE_FILE` at a new path. Keep the
+   old file: it is the recovery material if something turns out unfinished.
+4. Deploy the new profile and start. The boot check reads
+   `deliveryGasPolicy()` on both legs and refuses to run against a contract
+   that publishes anything else, so a clean boot confirms the addresses.
+
+Existing locks always settle on their original contracts. Nothing migrates.
+
 ## QRL network compatibility gate
 
 The private v3 deployment uses chain ID `3151909`, 64-byte Q-prefixed addresses,
