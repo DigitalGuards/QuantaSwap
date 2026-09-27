@@ -55,6 +55,13 @@ describe("order-book proxy trust", () => {
       clientSourceKey("2001:db8:2::5"),
     );
     assert.equal(clientSourceKey("::1"), "0:0:0:0::/64");
+    // An IPv4-mapped literal is an IPv4 source, not one more address in ::/64,
+    // which is where every one of them would otherwise be counted together.
+    assert.equal(clientSourceKey("::ffff:203.0.113.5"), "203.0.113.5");
+    assert.notEqual(
+      clientSourceKey("::ffff:203.0.113.5"),
+      clientSourceKey("::ffff:198.51.100.5"),
+    );
   });
 
   it("reduces an IPv4-mapped address to its IPv4 source", () => {

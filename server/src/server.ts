@@ -1078,8 +1078,12 @@ async function dispatch(
   }
   // The admission lane of a write is decided once here, from the path and the
   // presented maker capability, and used by both bounds so they cannot
-  // disagree about which share a request may use.
-  const lane = admissionLane(path, req);
+  // disagree about which share a request may use. Only a write needs it, so a
+  // read never pays the capability comparison: a GET on a maker path is not
+  // admitted through either bound.
+  const lane: AdmissionLane = MUTATION_METHODS.has(method)
+    ? admissionLane(path, req)
+    : "taker";
 
   // Every route below can reach a persisted write: a mutation, or the
   // opportunistic expiry sweep that a plain read performs. Proving ownership
@@ -1250,7 +1254,11 @@ async function dispatch(
       // The maker capability may ride in X-Maker-Token on these legacy routes
       // too, as it already does on the signed cancel and the fill. Presenting
       // it in the header is what lets the admission gate recognise a maker
-      // before the body is read, so the two agree on who is calling.
+      // before the body is read, so the two agree on who is calling. The
+      // header wins over a token in the body when both are present, which is
+      // what the sibling signed routes already do; the shipped maker clients
+      // send the same value in both, so an order book from before the reserved
+      // lane still authenticates them from the body.
       const headerToken = req.headers["x-maker-token"];
       const makerBody =
         typeof headerToken === "string"

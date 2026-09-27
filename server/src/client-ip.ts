@@ -70,9 +70,14 @@ function ipv6Groups(value: string): string[] | undefined {
  * connection count, the federation lanes and the store's hashed taker source.
  */
 export function clientSourceKey(ip: string): string {
-  if (isIP(ip) !== 6) return ip;
-  const groups = ipv6Groups(ip);
-  if (groups === undefined) return ip;
+  // An IPv4-mapped literal is an IPv4 source. resolveClientIp already reduces
+  // the ones it parses, and doing it here as well keeps any other caller from
+  // filing every mapped address under the same ::/64 bucket.
+  const mapped = normalizedIp(ip);
+  const value = mapped ?? ip;
+  if (isIP(value) !== 6) return value;
+  const groups = ipv6Groups(value);
+  if (groups === undefined) return value;
   return `${groups.slice(0, 4).join(":")}::/64`;
 }
 
