@@ -3,6 +3,7 @@
 
 const PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ["rate limited, slow down", "http_per_ip_rate_limit"],
+  ["too many requests in flight", "book_inflight_gate"],
   ["too many pending fill intents", "order_live_intent_cap"],
   ["too many retained fill intents", "order_retained_intent_cap"],
   ["already have fill requests in progress", "source_concurrent_cap"],
@@ -25,11 +26,22 @@ const PATTERNS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /** Reasons the book answers before the router reaches signature verification.
- *  The per-source HTTP limiter and the shutdown gate both sit in front of
- *  every handler, so those replies cost almost nothing to produce. */
+ *  The in-flight gate, the per-source HTTP limiter and the shutdown gate sit in
+ *  front of every handler, and the fill-intent route sheds the refusals it can
+ *  reach from the order row and the caller's address before it verifies, so all
+ *  of these replies cost almost nothing to produce. A proposal whose nonce the
+ *  order already retains skips that gate and is verified, so the state and
+ *  capacity codes below are a shed for every new nonce and, for a replayed one,
+ *  a full verification counted in the wrong bucket. */
 const PRE_VERIFICATION_CODES = new Set([
+  "book_inflight_gate",
   "http_per_ip_rate_limit",
   "shutting_down",
+  "order_live_intent_cap",
+  "source_concurrent_cap",
+  "source_daily_cap",
+  "order_not_open",
+  "insufficient_runway",
 ]);
 
 export function isPreVerificationShed(reason: string): boolean {

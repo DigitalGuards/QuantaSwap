@@ -1034,6 +1034,125 @@ describe("fill intent admission fairness", () => {
     });
   });
 
+  it("sheds a full order before it verifies the signature", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, () => {
+      const { store, order } = freshOrder(now, 120);
+      for (let index = 0; index < 8; index += 1) {
+        const artifacts = makeFill(now, order, 44, 66, {
+          requestNonceByte: 0x70 + index,
+          takerKeys: takerAt(index),
+          takerEth: takerEthFor(index),
+        });
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          `198.51.100.${String(index + 100)}`,
+        );
+      }
+      // An unverifiable body against a full order is answered from capacity,
+      // before any ML-DSA-87 work. The status a client sees for this request
+      // is 429 rather than 401, which is the documented consequence of
+      // shedding first.
+      const forged = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x7f,
+        takerKeys: takerAt(1),
+        takerEth: takerEthFor(31),
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            forged.intentBody,
+            { ...forged.intentAuth, signature: `0x${"00".repeat(4627)}` },
+            "198.51.100.140",
+          ),
+        (error) =>
+          error instanceof ApiError &&
+          error.status === 429 &&
+          /too many pending fill intents/.test(error.message),
+      );
+      assert.equal(store.listFillIntents(order.orderId).length, 8);
+    });
+  });
+
+  it("still answers a retained proposal idempotently on a full order", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, () => {
+      const { store, order } = freshOrder(now, 121);
+      const admitted: ReturnType<typeof makeFill>[] = [];
+      for (let index = 0; index < 8; index += 1) {
+        const artifacts = makeFill(now, order, 44, 66, {
+          requestNonceByte: 0x80 + index,
+          takerKeys: takerAt(index),
+          takerEth: takerEthFor(index),
+        });
+        admitted.push(artifacts);
+        store.submitFillIntent(
+          order.orderId,
+          artifacts.intentBody,
+          artifacts.intentAuth,
+          `198.51.100.${String(index + 150)}`,
+        );
+      }
+      const first = admitted[0];
+      if (first === undefined) throw new Error("a proposal is required");
+      // The nonce is already retained, so the request skips the capacity gate
+      // and the taker's retry gets its admitted proposal back.
+      const replayed = store.submitFillIntent(
+        order.orderId,
+        first.intentBody,
+        first.intentAuth,
+        "198.51.100.150",
+      );
+      assert.equal(
+        replayed.intentDigest,
+        verifyFillIntentV1(first.intentBody, first.intentAuth, order)
+          .intentDigest,
+      );
+      assert.equal(store.listFillIntents(order.orderId).length, 8);
+    });
+  });
+
+  it("keeps the per-account pending check behind verification", () => {
+    const now = Math.floor(Date.now() / 1000);
+    withClock(now, () => {
+      const { store, order } = freshOrder(now, 122);
+      const honest = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x90,
+        takerKeys: takerAt(0),
+        takerEth: takerEthFor(0),
+      });
+      store.submitFillIntent(
+        order.orderId,
+        honest.intentBody,
+        honest.intentAuth,
+        "198.51.100.200",
+      );
+      // The one-proposal-per-account rule keys on the signed QRL account, so
+      // it may never be reachable from an unverified body. A request that
+      // claims that account without its key fails verification, and the order
+      // is nowhere near its capacity ceiling, so nothing sheds it earlier.
+      const spoof = makeFill(now, order, 44, 66, {
+        requestNonceByte: 0x91,
+        takerKeys: takerAt(1),
+        takerEth: takerEthFor(1),
+      });
+      assert.throws(
+        () =>
+          store.submitFillIntent(
+            order.orderId,
+            { ...spoof.intentBody, takerQrlAccount: takerAt(0).address },
+            spoof.intentAuth,
+            "198.51.100.201",
+          ),
+        (error) => error instanceof ApiError && error.status === 401,
+      );
+      assert.equal(store.listFillIntents(order.orderId).length, 1);
+    });
+  });
+
   it("allows one pending proposal per signed QRL account on an order", () => {
     const now = Math.floor(Date.now() / 1000);
     withClock(now, () => {

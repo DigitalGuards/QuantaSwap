@@ -2124,6 +2124,7 @@ export class OrderStore {
     if (!usesPortableTerminalProtocol(order)) {
       throw new ApiError(409, "legacy orders use the accept endpoint");
     }
+    this.shedFillIntent(order, rawAuth, takerIp);
     const verifiedOrder = verifiedSignedOrder(order);
     const verified = verifyFillIntentV1(rawIntent, rawAuth, verifiedOrder);
     const replay = (order.fillIntents ?? []).find(
@@ -2154,6 +2155,103 @@ export class OrderStore {
       );
     }
     return this.storeFillIntent(order, verified, takerIp, false);
+  }
+
+  /**
+   * The refusals a direct proposal can earn from the order row, the clock and
+   * the caller's address alone, answered before ML-DSA-87 verification.
+   * Verification plus parsing a 15 KB signed body costs about 6 ms, and an
+   * order whose eight slots are already taken holds them for the full signed
+   * proposal lifetime, so proving signatures it must refuse anyway burned a
+   * core under load. Every refusal below reads state the request cannot
+   * influence and repeats a check that still runs after verification, so the
+   * admission policy is unchanged and no number moved.
+   *
+   * Nothing that depends on the signed content belongs here. The one pending
+   * proposal per taker QRL account in particular keys on the signed identity,
+   * and moving it in front of verification would let an unsigned body claim
+   * another taker's account and lock it out of the order.
+   *
+   * A request whose `auth.nonce` matches a proposal this order already retains
+   * skips the gate. That is exactly the set whose correct answer comes from
+   * post-verification logic: the idempotent replay of an admitted proposal, or
+   * the nonce conflict. Claiming a nonce grants nothing and costs the same
+   * verification this route always ran, and the per-source mutation limiter
+   * still bounds how often one source can ask for it.
+   */
+  private shedFillIntent(
+    order: Order,
+    rawAuth: unknown,
+    takerIp: string,
+  ): void {
+    const intents = order.fillIntents ?? [];
+    const claimedNonce =
+      typeof rawAuth === "object" && rawAuth !== null && !Array.isArray(rawAuth)
+        ? (rawAuth as Record<string, unknown>)["nonce"]
+        : undefined;
+    if (
+      typeof claimedNonce === "string" &&
+      intents.some((intent) => intent.auth.nonce === claimedNonce)
+    ) {
+      return;
+    }
+    const now = nowS();
+    if (order.status !== "open" || order.equivocated === true) {
+      throw new ApiError(409, "order is no longer open");
+    }
+    if (!this.hasRunway(order, now)) {
+      throw new ApiError(
+        409,
+        "this pre-funded order has too little time left to swap safely",
+      );
+    }
+    // A direct proposal is verified without the expired allowance, so an
+    // admissible one is always live and always counts against this ceiling.
+    if (this.liveIntentCount(intents, now) >= MAX_FILL_INTENTS_PER_ORDER) {
+      throw new ApiError(
+        429,
+        "this order already has too many pending fill intents",
+        "transient_capacity",
+      );
+    }
+    const ipHash = sha256Hex(takerIp);
+    if (
+      this.sourceLiveIntentCount(ipHash, now) >= MAX_CONCURRENT_TAKES_PER_IP
+    ) {
+      throw new ApiError(
+        429,
+        "you already have fill requests in progress; finish or let them expire",
+      );
+    }
+    if (
+      this.recentIntentAdmissions(ipHash, now).length >=
+      MAX_TAKES_PER_IP_PER_DAY
+    ) {
+      throw new ApiError(
+        429,
+        "daily fill intent limit reached; leave some liquidity for others",
+      );
+    }
+  }
+
+  private liveIntentCount(
+    intents: readonly StoredFillIntentV1[],
+    now: number,
+  ): number {
+    return intents.filter((intent) => isLiveIntent(intent, now)).length;
+  }
+
+  /** Live proposals this source holds across the whole book. */
+  private sourceLiveIntentCount(ipHash: string, now: number): number {
+    let count = 0;
+    for (const candidate of this.orders.values()) {
+      for (const intent of candidate.fillIntents ?? []) {
+        if (intent.acceptorIpHash === ipHash && isLiveIntent(intent, now)) {
+          count += 1;
+        }
+      }
+    }
+    return count;
   }
 
   importFillIntent(
@@ -2233,8 +2331,7 @@ export class OrderStore {
     const incomingLive = verified.auth.expiresAt > now;
     if (
       incomingLive &&
-      intents.filter((intent) => isLiveIntent(intent, now)).length >=
-        MAX_FILL_INTENTS_PER_ORDER
+      this.liveIntentCount(intents, now) >= MAX_FILL_INTENTS_PER_ORDER
     ) {
       throw new ApiError(
         429,
@@ -2262,16 +2359,9 @@ export class OrderStore {
       }
       // Released proposals keep their slot until signed expiry, so one
       // source cannot cycle post-and-release to fill an order alone.
-      const activeIntentCount = [...this.orders.values()].reduce(
-        (count, candidate) =>
-          count +
-          (candidate.fillIntents ?? []).filter(
-            (intent) =>
-              intent.acceptorIpHash === ipHash && isLiveIntent(intent, now),
-          ).length,
-        0,
-      );
-      if (activeIntentCount >= MAX_CONCURRENT_TAKES_PER_IP) {
+      if (
+        this.sourceLiveIntentCount(ipHash, now) >= MAX_CONCURRENT_TAKES_PER_IP
+      ) {
         throw new ApiError(
           429,
           "you already have fill requests in progress; finish or let them expire",

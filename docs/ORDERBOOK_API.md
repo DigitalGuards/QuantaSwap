@@ -818,6 +818,23 @@ identity, may hold one unreleased pending intent per order (`409` otherwise;
 release it or let it expire). Direct submissions issued more than **30 s** in the future are
 refused with `400`: sync the device clock.
 
+**Cheap refusals are answered before signature verification.** The order's
+state, its remaining runway, its live-proposal count and the caller's
+concurrent and daily source budgets need only the stored order and the request
+address, so this route answers them before it verifies the ML-DSA-87 proof.
+That keeps a full order from spending a verification on a proposal it cannot
+accept, at one visible cost: a request with an invalid signature against a full
+or closed order now reads as `429` capacity or `409` state rather than `401`.
+No admission number changed.
+
+Two rules make this safe to rely on. A request whose `auth.nonce` matches a
+proposal the order already retains skips the pre-verification gate, so an exact
+retry of an admitted proposal is still verified and still answered idempotently
+even when the order is full. And every check that reads the signed content
+stays behind verification, the one unreleased pending proposal per taker QRL
+account in particular: it keys on the signed identity, so an unverified body
+could otherwise claim another taker's account and lock it out.
+
 ### `GET /orders/:id/intents`: read pending proposals (maker)
 
 → `200 {"intents": [...]}` in first-come order: lowest
