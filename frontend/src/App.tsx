@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router";
+import { BASE_PATH, ROUTER_BASENAME } from "@/config";
 import { useEthWallet } from "@/hooks/useEthWallet";
 import { useQrlWallet } from "@/hooks/useQrlWallet";
 import { clearActiveSwap, loadActiveSwap, saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
@@ -32,7 +33,7 @@ export default function App() {
   };
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={ROUTER_BASENAME}>
       <RouteMeta />
       <Header
         ethAccount={eth.account}
@@ -44,6 +45,18 @@ export default function App() {
         onConnectQrl={qrl.connect}
         onDisconnectQrl={() => void qrl.disconnect()}
       />
+
+      {BASE_PATH === "/" ? null : (
+        // This build is kept only so swaps started before the HTLCv3 cutover
+        // can still be settled or refunded. It is served beside the current
+        // release, which is where new swaps belong.
+        <div
+          role="status"
+          className="border-b border-amber-400/40 bg-amber-400/10 px-4 py-2 text-center text-sm text-amber-400"
+        >
+          Legacy HTLCv2 release for recovering swaps started before the cutover
+        </div>
+      )}
 
       {developmentDeployment ? (
         <div
