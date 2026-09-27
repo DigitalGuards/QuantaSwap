@@ -33,6 +33,12 @@ import {
   ProcessLeaseLostError,
   ProcessLeaseUnverifiableError,
 } from "./process-lease.js";
+import {
+  admissionLane,
+  InflightWriteBound,
+  laneCeiling,
+  type AdmissionLane,
+} from "./admission.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { verifyOrderV1 } from "./order-signing.js";
 import { BoundedSseWriter } from "./stream.js";
@@ -642,9 +648,6 @@ function clientIp(req: IncomingMessage): string {
 // X-Accel-Buffering keeps nginx from buffering the stream; the periodic
 // ping keeps Cloudflare's idle timeout (~100s) away.
 
-/** Mutating requests currently admitted by the in-flight gate. */
-let inflightMutations = 0;
-
 /**
  * Per-source and global bound on bodies being read. A body read is cheap, so
  * the global bound is wide and the short read deadline does the real work. Both
@@ -676,43 +679,22 @@ const bodyReadLimiter = new FederationConcurrencyLimiter({
  * - `taker` is everything else, including the legacy unsigned create. It may
  *   use the bound minus the whole reservation.
  */
-type AdmissionLane = "maker" | "signed-create" | "taker";
-
-const SIGNED_CREATE_PATH = "/api/orders/signed";
-const MAKER_ORDER_PATH_RE =
-  /^\/api\/orders\/([^/]+)\/(?:cancel|cancel\/signed|fill|hashlock)$/;
-
 /**
- * Decides the lane from the path and the presented capability alone, so the
- * answer is available before the body is read. A request without a valid maker
- * token falls into the taker lane: keying the reserved headroom on the path
- * alone would let anyone reach it by naming a maker route.
+ * The lane a write is admitted through, decided from the path and the
+ * capability it presents. The arithmetic and the counter live in admission.ts,
+ * so the ceilings are exercised without needing several requests to overlap
+ * inside a running service.
  */
-function admissionLane(path: string, req: IncomingMessage): AdmissionLane {
-  if (path === SIGNED_CREATE_PATH) return "signed-create";
-  const match = MAKER_ORDER_PATH_RE.exec(path);
-  if (match === null) return "taker";
-  const token = req.headers["x-maker-token"];
-  if (typeof token !== "string") return "taker";
-  return store.matchesMakerCapability(match[1] ?? "", token)
-    ? "maker"
-    : "taker";
+function laneFor(path: string, req: IncomingMessage): AdmissionLane {
+  return admissionLane(path, req.headers["x-maker-token"], (orderId, token) =>
+    store.matchesMakerCapability(orderId, token),
+  );
 }
 
-/** The share of `total` this lane may use, given the reservation inside it. */
-function laneCeiling(
-  lane: AdmissionLane,
-  total: number,
-  reserved: number,
-): number {
-  if (lane === "maker") return total;
-  const shared = total - reserved;
-  // Half the reservation is the capability-authenticated floor, so a signed
-  // create can use the rest of it and no more.
-  return lane === "signed-create"
-    ? shared + Math.floor(reserved / 2)
-    : shared;
-}
+const mutationBound = new InflightWriteBound(
+  config.maxInflightMutations,
+  config.reservedMakerMutations,
+);
 
 /**
  * Runs the expensive half of a mutating request under the in-flight bound. The
@@ -727,12 +709,8 @@ async function withMutationSlot(
   lane: AdmissionLane,
   run: () => Promise<void>,
 ): Promise<void> {
-  const ceiling = laneCeiling(
-    lane,
-    config.maxInflightMutations,
-    config.reservedMakerMutations,
-  );
-  if (inflightMutations >= ceiling) {
+  const release = mutationBound.acquire(lane);
+  if (release === null) {
     sendShedJson(
       res,
       503,
@@ -741,14 +719,13 @@ async function withMutationSlot(
     );
     return;
   }
-  inflightMutations += 1;
   // Counted here, so a request the book refused at the door leaves the
   // source's mutation budget alone.
   recordRequest(ip, true);
   try {
     await run();
   } finally {
-    inflightMutations -= 1;
+    release();
   }
 }
 
@@ -1082,7 +1059,7 @@ async function dispatch(
   // read never pays the capability comparison: a GET on a maker path is not
   // admitted through either bound.
   const lane: AdmissionLane = MUTATION_METHODS.has(method)
-    ? admissionLane(path, req)
+    ? laneFor(path, req)
     : "taker";
 
   // Every route below can reach a persisted write: a mutation, or the
