@@ -1,8 +1,14 @@
 import { protocolMessageBytes } from "./protocol-v2-wire.js";
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { shake256 } from "@noble/hashes/sha3.js";
 import {
@@ -38,7 +44,11 @@ import {
   type SignedOrderTerms,
   type VerifiedOrderV1,
 } from "./order-signing.js";
-import { ApiError, OrderStore } from "./store.js";
+import {
+  ApiError,
+  OrderStore,
+  OrderStorePersistenceError,
+} from "./store.js";
 import { federationEventId, type FederationEvent } from "./federation.js";
 import { FederationPeerSync } from "./peer-sync.js";
 
@@ -389,6 +399,7 @@ describe("single-use signed order store", () => {
       "origin",
     );
     assert.equal(source.get(order.orderId).status, "locking");
+    await source.flush();
 
     const snapshot = source.federationSnapshot();
     assert.equal(
@@ -457,6 +468,7 @@ describe("single-use signed order store", () => {
       cycle = 1;
       await sync.syncAll();
       assert.equal(receiver.get(order.orderId).status, "locking");
+      await receiver.flush();
       assert.equal(
         new OrderStore(receiverFile).get(order.orderId).status,
         "locking",
@@ -467,7 +479,7 @@ describe("single-use signed order store", () => {
     }
   });
 
-  it("refuses persisted state beyond the portable public-order capacity", () => {
+  it("refuses persisted state beyond the portable public-order capacity", async () => {
     const now = Math.floor(Date.now() / 1000);
     const rows: unknown[] = [];
     for (let offset = 0; offset < 65; offset += 1) {
@@ -475,6 +487,7 @@ describe("single-use signed order store", () => {
       const source = new OrderStore(sourceFile);
       const order = makeOrder(now, { nonceByte: 80 + offset });
       source.createVerified(order, createCapabilities(order), "203.0.113.65");
+      await source.flush();
       rows.push(...(JSON.parse(readFileSync(sourceFile, "utf8")) as unknown[]));
     }
     assert.equal(rows.length, 65);
@@ -490,7 +503,7 @@ describe("single-use signed order store", () => {
     );
   });
 
-  it("caps one federation source while preserving capacity for another peer and local maker", () => {
+  it("caps one federation source while preserving capacity for another peer and local maker", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
     const store = new OrderStore(file);
@@ -500,6 +513,7 @@ describe("single-use signed order store", () => {
         "peer-a",
       );
     }
+    await store.flush();
     const restarted = new OrderStore(file);
     assert.throws(
       () =>
@@ -534,13 +548,14 @@ describe("single-use signed order store", () => {
     );
   });
 
-  it("recovers an exact public create after response loss without rotating capabilities", () => {
+  it("recovers an exact public create after response loss without rotating capabilities", async () => {
     const now = Math.floor(Date.now() / 1000);
     const order = makeOrder(now, { nonceByte: 39 });
     const capabilities = createCapabilities(order);
     const file = storeFile();
     const store = new OrderStore(file);
     const created = store.createVerified(order, capabilities, "203.0.113.39");
+    await store.flush();
     assert.equal(readFileSync(file, "utf8").includes(makerToken), false);
     const retried = store.createVerified(order, capabilities, "203.0.113.39");
     assert.equal(retried.order.id, created.order.id);
@@ -576,7 +591,7 @@ describe("single-use signed order store", () => {
     assert.equal(recovered.makerToken, makerToken);
   });
 
-  it("recovers a private create only with both committed capabilities", () => {
+  it("recovers a private create only with both committed capabilities", async () => {
     const now = Math.floor(Date.now() / 1000);
     const order = makeOrder(now, {
       nonceByte: 40,
@@ -586,6 +601,7 @@ describe("single-use signed order store", () => {
     const file = storeFile();
     const store = new OrderStore(file);
     const created = store.createVerified(order, capabilities, "203.0.113.40");
+    await store.flush();
     const persisted = readFileSync(file, "utf8");
     assert.equal(persisted.includes(makerToken), false);
     assert.equal(persisted.includes(shareToken), false);
@@ -603,7 +619,7 @@ describe("single-use signed order store", () => {
     );
   });
 
-  it("persists a terminal fill and commitment-authorized release", () => {
+  it("persists a terminal fill and commitment-authorized release", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
     const store = new OrderStore(file);
@@ -646,13 +662,14 @@ describe("single-use signed order store", () => {
       true,
     );
 
+    await store.flush();
     const hydrated = new OrderStore(file).get(order.orderId);
     assert.equal(hydrated.status, "locking");
     assert.equal(hydrated.released, true);
     assert.equal(created.order.orderDigest, hydrated.orderDigest);
   });
 
-  it("retains an early intent release through a late valid FillV1", () => {
+  it("retains an early intent release through a late valid FillV1", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
     const order = makeOrder(now, {
@@ -683,6 +700,7 @@ describe("single-use signed order store", () => {
       intentDigest: verifiedIntent.intentDigest,
       releaseSecret: artifacts.releaseSecret,
     });
+    await source.flush();
 
     const restarted = new OrderStore(file);
     const filled = restarted.fillOrder(
@@ -704,7 +722,7 @@ describe("single-use signed order store", () => {
     assert.equal(mirrored.released, true);
   });
 
-  it("quarantines contradictory terminal proofs and retains both across restart", () => {
+  it("quarantines contradictory terminal proofs and retains both across restart", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
     const store = new OrderStore(file);
@@ -739,6 +757,7 @@ describe("single-use signed order store", () => {
     assert.equal(kinds.includes("cancel-v2"), true);
     assert.equal(kinds.includes("fill-v2"), true);
 
+    await store.flush();
     const hydrated = new OrderStore(file).get(order.orderId);
     assert.equal(hydrated.equivocated, true);
     assert.deepEqual(hydrated.conflictDigests, quarantined.conflictDigests);
@@ -836,12 +855,12 @@ describe("single-use signed order store", () => {
     );
   });
 
-  it("replays public protocol events into an independent mirror", () => {
+  it("replays public protocol events into an independent mirror", async () => {
     const now = Math.floor(Date.now() / 1000);
     const source = new OrderStore(storeFile());
     const mirror = new OrderStore(storeFile());
     const events: FederationEvent[] = [];
-    source.subscribeFederation((event) => events.push(event));
+    source.subscribeFederation((batch) => events.push(...batch));
     const order = makeOrder(now, { nonceByte: 81 });
     const artifacts = makeFill(now, order);
     source.createVerified(order, createCapabilities(order));
@@ -862,6 +881,9 @@ describe("single-use signed order store", () => {
       intentDigest: artifacts.fillBody.intentDigest,
       releaseSecret: artifacts.releaseSecret,
     });
+    // Public events reach a subscriber with the group commit that makes their
+    // mutation durable, so the batches arrive once the store is flushed.
+    await source.flush();
 
     assert.deepEqual(
       events.map((event) => event.kind),
@@ -875,12 +897,13 @@ describe("single-use signed order store", () => {
     assert.equal(mirrored.fillDigest, filled.fillDigest);
   });
 
-  it("refuses pre-capability signed rows instead of treating them as another OrderV1", () => {
+  it("refuses pre-capability signed rows instead of treating them as another OrderV1", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
     const initial = new OrderStore(file);
     const order = makeOrder(now, { nonceByte: 91 });
     initial.createVerified(order, createCapabilities(order));
+    await initial.flush();
     const rows = JSON.parse(readFileSync(file, "utf8")) as Array<
       Record<string, unknown>
     >;
@@ -916,6 +939,24 @@ describe("fill intent admission fairness", () => {
     Date.now = () => clock;
     try {
       return run((seconds) => {
+        clock += seconds * 1000;
+      });
+    } finally {
+      Date.now = originalNow;
+    }
+  }
+
+  /** withClock for a body that awaits, so the faked clock survives the await
+   *  and is restored only after the body settles. */
+  async function withClockAsync<T>(
+    start: number,
+    run: (advance: (s: number) => void) => Promise<T>,
+  ): Promise<T> {
+    const originalNow = Date.now;
+    let clock = start * 1000;
+    Date.now = () => clock;
+    try {
+      return await run((seconds) => {
         clock += seconds * 1000;
       });
     } finally {
@@ -1220,9 +1261,9 @@ describe("fill intent admission fairness", () => {
     });
   });
 
-  it("reseeds the daily cap from retained proposals after a restart", () => {
+  it("reseeds the daily cap from retained proposals after a restart", async () => {
     const now = Math.floor(Date.now() / 1000);
-    withClock(now, (advance) => {
+    await withClockAsync(now, async (advance) => {
       const file = storeFile();
       const store = new OrderStore(file);
       const orders = [98, 99, 100].map((nonceByte) => {
@@ -1254,6 +1295,7 @@ describe("fill intent admission fairness", () => {
         advance(5);
         clock += 5;
       }
+      await store.flush();
       const restarted = new OrderStore(file);
       const target = orders[0];
       if (target === undefined) throw new Error("missing order");
@@ -1307,5 +1349,203 @@ describe("fill intent admission fairness", () => {
       assert.equal(ordered.length, 2);
       assert.equal(ordered[0]?.intent.takerQrlAccount, taker.address);
     });
+  });
+});
+
+describe("order store group commit", () => {
+  interface CapabilityOrder {
+    order: VerifiedOrderV1;
+    makerToken: string;
+  }
+
+  /** Distinct nonce and capability commitment per order, so several signed
+   *  creates can share one commit. */
+  const signedOrders = (now: number, count: number): CapabilityOrder[] =>
+    Array.from({ length: count }, (_value, index) => {
+      const capability = (200 + index)
+        .toString(16)
+        .padStart(2, "0")
+        .repeat(32);
+      return {
+        order: makeOrder(now, {
+          nonceByte: 200 + index,
+          makerCapability: capability,
+        }),
+        makerToken: capability,
+      };
+    });
+
+  it("covers every mutation of one turn with a single commit", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    let commits = 0;
+    const batches: number[] = [];
+    store.subscribe(() => {
+      commits += 1;
+    });
+    store.subscribeFederation((events) => batches.push(events.length));
+    const orders = signedOrders(now, 3);
+    const durable = orders.map((entry, index) => {
+      store.createVerified(
+        entry.order,
+        { makerToken: entry.makerToken },
+        `203.0.113.${String(index + 1)}`,
+      );
+      return store.flush();
+    });
+    await Promise.all(durable);
+    assert.equal(commits, 1);
+    assert.deepEqual(batches, [3]);
+    assert.equal(
+      (JSON.parse(readFileSync(file, "utf8")) as unknown[]).length,
+      3,
+    );
+  });
+
+  it("reports a mutation durable only once the file holds it", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const capability = "d1".repeat(32);
+    const order = makeOrder(now, {
+      nonceByte: 210,
+      makerCapability: capability,
+    });
+    store.createVerified(order, { makerToken: capability }, "203.0.113.10");
+    assert.equal(store.hasUncommittedState(), true);
+    assert.equal(existsSync(file), false);
+    await store.flush();
+    assert.equal(store.hasUncommittedState(), false);
+    assert.equal(
+      (JSON.parse(readFileSync(file, "utf8")) as unknown[]).length,
+      1,
+    );
+  });
+
+  it("carries a mutation made during a commit into the next commit", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const [first, second] = signedOrders(now, 2);
+    if (first === undefined || second === undefined) {
+      throw new Error("two signed orders are required");
+    }
+    let commits = 0;
+    const batches: number[] = [];
+    store.subscribeFederation((events) => batches.push(events.length));
+    let follower: Promise<void> | undefined;
+    store.subscribe(() => {
+      commits += 1;
+      if (follower !== undefined) return;
+      // A mutation applied while a commit is running is not in its snapshot,
+      // so the loop runs a second commit for it.
+      store.createVerified(
+        second.order,
+        { makerToken: second.makerToken },
+        "203.0.113.12",
+      );
+      follower = store.flush();
+    });
+    store.createVerified(
+      first.order,
+      { makerToken: first.makerToken },
+      "203.0.113.11",
+    );
+    await store.flush();
+    await follower;
+    assert.equal(commits, 2);
+    assert.deepEqual(batches, [1, 1]);
+    assert.equal(
+      (JSON.parse(readFileSync(file, "utf8")) as unknown[]).length,
+      2,
+    );
+  });
+
+  it("refuses every request in a batch whose rewrite failed", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const failures: unknown[] = [];
+    let published = 0;
+    store.subscribeFederation(() => {
+      published += 1;
+    });
+    const reported = new OrderStore(file, {
+      onPersistenceFailure: (error) => failures.push(error),
+    });
+    void reported;
+    const orders = signedOrders(now, 2);
+    rmSync(dirname(file), { recursive: true, force: true });
+    const durable = orders.map((entry, index) => {
+      store.createVerified(
+        entry.order,
+        { makerToken: entry.makerToken },
+        `203.0.113.${String(index + 20)}`,
+      );
+      return store.flush();
+    });
+    for (const promise of durable) {
+      await assert.rejects(promise, OrderStorePersistenceError);
+    }
+    // The feed never saw events for a batch that did not reach the file.
+    assert.equal(published, 0);
+    // The failure is kept, so no later mutation can be reported durable.
+    await assert.rejects(store.flush(), OrderStorePersistenceError);
+  });
+
+  it("reports an unawaited commit failure to its owner", async () => {
+    const file = storeFile();
+    const failures: unknown[] = [];
+    const store = new OrderStore(file, {
+      onPersistenceFailure: (error) => failures.push(error),
+    });
+    rmSync(dirname(file), { recursive: true, force: true });
+    store.create(
+      {
+        direction: "eth->qrl",
+        fromAmount: (10n ** 18n).toString(),
+        toAmount: (10n ** 18n).toString(),
+        makerEthAccount: `0x${"1".repeat(40)}`,
+        makerQrlAccount: `Q${"1".repeat(128)}`,
+      },
+      "203.0.113.30",
+    );
+    await assert.rejects(store.flush(), OrderStorePersistenceError);
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0] instanceof OrderStorePersistenceError);
+  });
+
+  it("refuses the batch when the feed rejects its events", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const feedFailure = new Error("feed append failed");
+    let calls = 0;
+    store.subscribeFederation(() => {
+      calls += 1;
+      throw feedFailure;
+    });
+    const orders = signedOrders(now, 2);
+    const durable = orders.map((entry, index) => {
+      store.createVerified(
+        entry.order,
+        { makerToken: entry.makerToken },
+        `203.0.113.${String(index + 40)}`,
+      );
+      return store.flush();
+    });
+    for (const promise of durable) {
+      await assert.rejects(promise, (error) => error === feedFailure);
+    }
+    assert.equal(calls, 1);
+    // The orders file took the batch, and the feed did not, so the next start
+    // reconciles it. Meanwhile nothing further is reported durable.
+    assert.equal(
+      (JSON.parse(readFileSync(file, "utf8")) as unknown[]).length,
+      2,
+    );
+    await assert.rejects(store.flush(), (error) => error === feedFailure);
+    assert.equal(calls, 1);
   });
 });

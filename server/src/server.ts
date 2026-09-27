@@ -348,6 +348,22 @@ function assertBookOwnedForWrite(): void {
 const store = new OrderStore(config.dataFile, {
   presenceTtlS: config.presenceTtlS,
   assertOwned: assertBookOwnedForWrite,
+  // A group commit that nobody awaited is the expiry sweep on a read path.
+  // Its failure still means memory moved past the file, which is the one
+  // condition this process does not continue through.
+  onPersistenceFailure: (error: unknown) => {
+    if (
+      error instanceof ProcessLeaseLostError ||
+      error instanceof ProcessLeaseUnverifiableError
+    ) {
+      // The in-write fence already stopped the process for this.
+      return;
+    }
+    console.error(
+      "[orderbook] fatal persistence failure in a commit; stopping",
+    );
+    initiateShutdown("storage failure", 1);
+  },
 });
 const federationFeed = new FederationFeed(
   config.federationDataFile,
@@ -365,16 +381,22 @@ let federationHealthy = true;
 // cannot leave an accepted mutation permanently invisible to existing peers.
 federationFeed.reconcileSnapshot(store.federationSnapshot());
 
-store.subscribeFederation((event) => {
+store.subscribeFederation((events) => {
   try {
+    // One group commit's events, appended under one durability barrier.
     // Hashing the whole snapshot on every append costs more than the append;
     // the digest is written once at exit instead.
-    federationFeed.append(event, Math.floor(Date.now() / 1000));
+    federationFeed.appendBatch(events, Math.floor(Date.now() / 1000));
     federationHealthy = true;
   } catch (error) {
     federationHealthy = false;
     console.error("[orderbook] federation event persistence failed:", error);
     initiateShutdown("federation storage failure", 1);
+    // Fails the commit, so every request in the batch is refused rather than
+    // told its mutation reached a feed that never received it.
+    throw new OrderStorePersistenceError(
+      "federation events could not be persisted safely",
+    );
   }
 });
 
@@ -388,7 +410,7 @@ const peerSync = new FederationPeerSync({
     config.federationSyncMs * 3,
     config.federationRequestTimeoutMs * 2,
   ),
-  apply: (event, peer) => {
+  apply: async (event, peer) => {
     try {
       // Applying a peer event rewrites the orders file and appends to the
       // feed, so ownership is proved before the in-memory change.
@@ -399,6 +421,9 @@ const peerSync = new FederationPeerSync({
           ? "peer-unknown"
           : config.federationPeerIds[peerIndex]!;
       store.applyFederationEvent(event, peerId);
+      // The peer cursor may only advance past an event this mirror has on
+      // disk, so the applier waits for the group commit that carries it.
+      await store.flush();
       return "applied";
     } catch (error) {
       if (error instanceof ProcessLeaseUnverifiableError) {
@@ -775,7 +800,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
   if (method === "POST" && path === "/api/orders") {
-    sendJson(res, 201, store.create(await readJsonBody(req), ip));
+    const created = store.create(await readJsonBody(req), ip);
+    await store.flush();
+    sendJson(res, 201, created);
     return;
   }
   if (method === "POST" && path === "/api/orders/signed") {
@@ -792,26 +819,26 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     ) {
       throw new ApiError(400, "signed create request has unexpected fields");
     }
-    sendJson(
-      res,
-      201,
-      store.createVerified(
-        verified,
-        {
-          makerToken: body["makerToken"],
-          ...(body["shareToken"] === undefined
-            ? {}
-            : { shareToken: body["shareToken"] }),
-        },
-        ip,
-      ),
+    const created = store.createVerified(
+      verified,
+      {
+        makerToken: body["makerToken"],
+        ...(body["shareToken"] === undefined
+          ? {}
+          : { shareToken: body["shareToken"] }),
+      },
+      ip,
     );
+    await store.flush();
+    sendJson(res, 201, created);
     return;
   }
   if (method === "POST" && path === "/api/orders/take") {
     // Take by terms: fills the best open order at the caller's bounds or
     // better. Returns the taker token alongside the order, like accept.
-    sendJson(res, 200, store.take(await readJsonBody(req), ip));
+    const taken = store.take(await readJsonBody(req), ip);
+    await store.flush();
+    sendJson(res, 200, taken);
     return;
   }
 
@@ -829,6 +856,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       body["auth"],
       typeof headerToken === "string" ? headerToken : body["token"],
     );
+    await store.flush();
     sendJson(res, 200, { order });
     return;
   }
@@ -858,6 +886,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         ip,
         typeof shareToken === "string" ? shareToken : body["shareToken"],
       );
+      await store.flush();
       sendJson(res, 201, { intent });
       return;
     }
@@ -872,6 +901,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
         body["intentAuth"],
         typeof makerToken === "string" ? makerToken : body["token"],
       );
+      await store.flush();
       sendJson(res, 200, { order });
       return;
     }
@@ -900,7 +930,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       if (action === "accept") {
         // Returns the taker token alongside the order, like create does
         // for the maker token.
-        sendJson(res, 200, store.accept(id, body, ip));
+        const accepted = store.accept(id, body, ip);
+        await store.flush();
+        sendJson(res, 200, accepted);
         return;
       }
       const order =
@@ -911,6 +943,9 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
             : action === "heartbeat"
               ? store.heartbeat(id, body)
               : store.cancel(id, body);
+      // A heartbeat changes no durable state, so this resolves at once unless
+      // the opportunistic expiry sweep left something to write.
+      await store.flush();
       sendJson(res, 200, { order });
       return;
     }
@@ -1009,6 +1044,17 @@ process.once("exit", (code) => {
         feedHealthy: federationHealthy,
       })
     ) {
+      return;
+    }
+    // An exit handler cannot wait for a group commit, and a digest may only
+    // describe state that reached the file. A clean stop drains its commits
+    // before the loop empties, so this only skips after an abrupt exit, where
+    // the unknown digest rotates the feed identity and peers take a reset
+    // snapshot, exactly as after a crash.
+    if (store.hasUncommittedState()) {
+      console.error(
+        "[orderbook] federation checkpoint skipped: a group commit was still pending",
+      );
       return;
     }
     try {

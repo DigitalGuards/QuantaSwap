@@ -478,6 +478,12 @@ function signedCreateCapabilities(
   return { makerToken, shareToken };
 }
 
+/** One awaited durability promise from a group commit. */
+interface CommitWaiter {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 export class OrderStorePersistenceError extends Error {
   override name = "OrderStorePersistenceError";
 }
@@ -1122,7 +1128,9 @@ export class OrderStore {
   private intentAdmissions = new Map<string, number[]>();
   private admissionsPrunedAt = 0;
   private listeners: Array<() => void> = [];
-  private federationListeners: Array<(event: FederationEvent) => void> = [];
+  private federationListeners: Array<
+    (events: readonly FederationEvent[]) => void
+  > = [];
   private readonly presenceTtlS: number;
   /**
    * Ownership gate for every rewrite of the orders file. The single-writer
@@ -1130,13 +1138,46 @@ export class OrderStore {
    * stops writing the file the new holder now owns.
    */
   private readonly assertOwned: () => void;
+  /**
+   * Reported when a commit that nobody awaited fails, which is the expiry
+   * sweep on a read path. A request-driven commit reaches its caller through
+   * the rejected flush promise as well.
+   */
+  private readonly onPersistenceFailure: (error: unknown) => void;
+  // --- group commit ------------------------------------------------------
+  // A mutation changes memory, marks the store dirty and returns. One commit
+  // at a time serialises the whole map, rewrites the file, fsyncs it and hands
+  // the batch's public events to the feed, so every mutation that reached this
+  // point inside one event-loop turn shares a single durability barrier.
+  /** In-memory state has moved past the last committed snapshot. */
+  private dirty = false;
+  /** A commit is scheduled or running, so no second loop may be started. */
+  private committing = false;
+  /** Public events of the mutations not yet carried into the feed. */
+  private pendingFederationEvents: FederationEvent[] = [];
+  /** Waiters whose state no snapshot covers yet. */
+  private nextCommitWaiters: CommitWaiter[] = [];
+  /** Waiters covered by the snapshot the running commit is writing. */
+  private runningCommitWaiters: CommitWaiter[] = [];
+  /**
+   * First commit failure, kept forever. Memory moved past the file and this
+   * process does not roll it back, so every later durability request is
+   * refused with the same error and no further write is attempted. The book
+   * stops on this signal and its restart reloads the file.
+   */
+  private commitFailure: unknown = null;
 
   constructor(
     private readonly dataFile: string,
-    opts: { presenceTtlS?: number; assertOwned?: () => void } = {},
+    opts: {
+      presenceTtlS?: number;
+      assertOwned?: () => void;
+      onPersistenceFailure?: (error: unknown) => void;
+    } = {},
   ) {
     this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
     this.assertOwned = opts.assertOwned ?? ((): void => {});
+    this.onPersistenceFailure = opts.onPersistenceFailure ?? ((): void => {});
     this.prepareStorage();
     this.load();
     this.seedIntentAdmissions();
@@ -1196,7 +1237,13 @@ export class OrderStore {
     this.listeners.push(fn);
   }
 
-  subscribeFederation(fn: (event: FederationEvent) => void): void {
+  /**
+   * Receives one group commit's public events, in mutation order, after the
+   * orders file is durable and before the commit is reported as durable. A
+   * listener that throws fails the commit, so the batch's callers are refused
+   * instead of being told their mutation reached the feed.
+   */
+  subscribeFederation(fn: (events: readonly FederationEvent[]) => void): void {
     this.federationListeners.push(fn);
   }
 
@@ -1204,8 +1251,105 @@ export class OrderStore {
     for (const fn of this.listeners) fn();
   }
 
+  /** Buffers a public event for the commit that makes its mutation durable. */
   private publish(event: FederationEvent): void {
-    for (const listener of this.federationListeners) listener(event);
+    this.pendingFederationEvents.push(event);
+  }
+
+  /**
+   * Resolves once every mutation applied before this call is durable, and
+   * rejects with the persistence or ownership failure that stopped the commit.
+   * A request handler awaits this before it reports success.
+   */
+  flush(): Promise<void> {
+    if (this.commitFailure !== null) return Promise.reject(this.commitFailure);
+    if (this.dirty) {
+      if (!this.committing) this.startCommitLoop();
+      return this.waitFor(this.nextCommitWaiters);
+    }
+    // Nothing changed since the running commit took its snapshot, so that
+    // snapshot already covers this caller's state.
+    if (this.committing) return this.waitFor(this.runningCommitWaiters);
+    return Promise.resolve();
+  }
+
+  /** True while memory is ahead of the file, commit scheduled or running. */
+  hasUncommittedState(): boolean {
+    return this.dirty || this.committing;
+  }
+
+  private waitFor(waiters: CommitWaiter[]): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      waiters.push({ resolve, reject });
+    });
+  }
+
+  /**
+   * Marks the store dirty and schedules the commit that makes it durable.
+   * Deferred to the end of the current event-loop turn on purpose: every
+   * mutation that completes in this turn joins one rewrite and one fsync, so a
+   * burst of takers pays one durability barrier between them. Batch latency is
+   * bounded by that one turn plus, for a mutation that arrives while a commit
+   * runs, the commit already in progress.
+   */
+  private persist(): void {
+    this.dirty = true;
+    if (this.committing || this.commitFailure !== null) return;
+    this.startCommitLoop();
+  }
+
+  private startCommitLoop(): void {
+    this.committing = true;
+    setImmediate(() => {
+      this.runCommits();
+    });
+  }
+
+  private runCommits(): void {
+    try {
+      while (this.dirty && this.commitFailure === null) {
+        this.dirty = false;
+        this.runningCommitWaiters = this.nextCommitWaiters;
+        this.nextCommitWaiters = [];
+        const events = this.pendingFederationEvents;
+        this.pendingFederationEvents = [];
+        try {
+          this.writeSnapshot();
+          // After the orders file, so a crash between the two leaves the feed
+          // short of an accepted mutation and the next start reconciles it.
+          // Before the callers are told success, so no client ever holds a
+          // receipt for a mutation the feed never saw.
+          if (events.length > 0) {
+            for (const listener of this.federationListeners) listener(events);
+          }
+        } catch (error) {
+          this.failCommit(error);
+          return;
+        }
+        const settled = this.runningCommitWaiters;
+        this.runningCommitWaiters = [];
+        for (const waiter of settled) waiter.resolve();
+        this.notify();
+      }
+    } finally {
+      this.committing = false;
+    }
+  }
+
+  /**
+   * Refuses the failed batch and every later durability request. Memory is
+   * past the file and stays there, so the callers of this batch and of the
+   * batch queued behind it are all refused, and the owner of the store stops
+   * the process on the reported failure.
+   */
+  private failCommit(error: unknown): void {
+    this.commitFailure = error;
+    const refused = [...this.runningCommitWaiters, ...this.nextCommitWaiters];
+    this.runningCommitWaiters = [];
+    this.nextCommitWaiters = [];
+    this.pendingFederationEvents = [];
+    for (const waiter of refused) waiter.reject(error);
+    this.onPersistenceFailure(error);
   }
 
   private prepareStorage(): void {
@@ -1315,7 +1459,7 @@ export class OrderStore {
     }
   }
 
-  private persist(): void {
+  private writeSnapshot(): void {
     // The only path that rewrites the orders file, so one check here blocks
     // every write a displaced process could still attempt. It throws before
     // the file is touched, so a refused write leaves the file byte-identical.
@@ -1360,7 +1504,6 @@ export class OrderStore {
         "order data could not be persisted safely",
       );
     }
-    this.notify();
   }
 
   private isSeen(order: Order, now: number): boolean {

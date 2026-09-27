@@ -136,6 +136,13 @@ Rules the lease follows:
   because the lease file briefly cannot be read, the write is refused with
   `503`, nothing changes on disk, and `/api/status` reports
   `lease.ready: false` until a later check succeeds.
+- Writes are group-committed, so one lost or unverifiable lease refuses every
+  request in the batch it was proved for, with `503` and nothing changed on
+  disk. Ownership is still proved at the start of each request, before any
+  in-memory change, so the common case is refused before a mutation exists.
+  When it is the commit that is refused, memory already holds mutations whose
+  callers were told they failed, so the process stops rather than carrying them
+  to disk in a later commit.
 - `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
   startup rejects those paths because the suffix names the lease files.
 

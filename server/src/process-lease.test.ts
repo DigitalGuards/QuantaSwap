@@ -575,26 +575,32 @@ describe("protected writes under the lease", () => {
     payload: { auth: { nonce }, order: { asset: "ETH", amount: "1" } },
   });
 
-  it("refuses an orders rewrite after a proven loss and leaves the file", () => {
+  it("refuses an orders rewrite after a proven loss and leaves the file", async () => {
     const dataFile = join(makeTemp(), "orders.json");
     const lease = track(
       ProcessLease.acquire(dataFile, DIGEST, { pidNamespace: LOCAL_NS }),
     );
+    const failures: unknown[] = [];
     const store = new OrderStore(dataFile, {
       assertOwned: () => lease.assertOwned(),
+      onPersistenceFailure: (error) => failures.push(error),
     });
     store.create(orderBody(), "203.0.113.1");
+    await store.flush();
     const persisted = readFileSync(dataFile, "utf8");
 
     writeLock(dataFile, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
-    assert.throws(
-      () => store.create(orderBody(2), "203.0.113.2"),
-      ProcessLeaseLostError,
-    );
+    // The mutation reaches memory and the group commit's in-write fence
+    // refuses it, so the caller's durability promise rejects with the loss and
+    // the file is left byte-identical.
+    store.create(orderBody(2), "203.0.113.2");
+    await assert.rejects(store.flush(), ProcessLeaseLostError);
     assert.equal(readFileSync(dataFile, "utf8"), persisted);
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0] instanceof ProcessLeaseLostError);
   });
 
-  it("defers an orders rewrite it cannot verify, then persists it", () => {
+  it("refuses an orders rewrite it cannot verify and every later commit", async () => {
     const dataFile = join(makeTemp(), "orders.json");
     const lease = track(
       ProcessLease.acquire(dataFile, DIGEST, { pidNamespace: LOCAL_NS }),
@@ -604,20 +610,23 @@ describe("protected writes under the lease", () => {
       assertOwned: () => lease.assertOwned(),
     });
     store.create(orderBody(), "203.0.113.1");
+    await store.flush();
     const persisted = readFileSync(dataFile, "utf8");
 
     rmSync(`${dataFile}.lock`);
     mkdirSync(`${dataFile}.lock`);
-    assert.throws(
-      () => store.create(orderBody(2), "203.0.113.2"),
-      ProcessLeaseUnverifiableError,
-    );
+    store.create(orderBody(2), "203.0.113.2");
+    await assert.rejects(store.flush(), ProcessLeaseUnverifiableError);
     assert.equal(readFileSync(dataFile, "utf8"), persisted);
 
+    // Memory now holds a row whose caller was refused, so a later commit must
+    // not carry it to disk. The store refuses every further durability request
+    // and the book stops instead, which makes its restart reload the file.
     rmSync(`${dataFile}.lock`, { recursive: true });
     writeFileSync(`${dataFile}.lock`, held, { mode: 0o600 });
     store.create(orderBody(3), "203.0.113.3");
-    assert.notEqual(readFileSync(dataFile, "utf8"), persisted);
+    await assert.rejects(store.flush(), ProcessLeaseUnverifiableError);
+    assert.equal(readFileSync(dataFile, "utf8"), persisted);
   });
 
   it("refuses a feed append after a proven loss and keeps the log intact", () => {
