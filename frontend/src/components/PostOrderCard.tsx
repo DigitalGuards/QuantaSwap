@@ -38,13 +38,21 @@ import {
 } from "@/lib/orderSigning";
 import { generateSecret } from "@/lib/secrets";
 import {
+  NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
   SwapStatus,
   buildLockNativeOpenData,
   buildLockTokenOpenData,
   buildReleaseData,
   getLegState,
+  readSwapCredit,
 } from "@/lib/htlc";
-import { makeLegSender, sendEthTokenLock } from "@/lib/legSender";
+import { makeLegSender, makeSettlementSender, sendEthTokenLock } from "@/lib/legSender";
+import {
+  DeferredPayoutPanel,
+  attributedCredit,
+  type DeferredPayoutTarget,
+} from "@/components/DeferredPayoutPanel";
 import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { errorMessage, isUserRejection } from "@/utils/errorMessage";
@@ -130,6 +138,29 @@ async function waitForEscrow(leg: LegKey, hashlock: string): Promise<void> {
   );
 }
 
+/** The credit ledger entry a release on this staged escrow would leave: the
+ *  escrowed asset as the key, the initiator as the payee, and the hashlock
+ *  that attributes it to this escrow and not to the shared per-address
+ *  balance. */
+export function prelockCreditTarget(
+  stage: { leg: LegKey; hashlock: string },
+  asset: EthAssetSymbol,
+  initiator: { eth: string | null; qrl: string | null },
+): DeferredPayoutTarget | null {
+  const account = stage.leg === "eth" ? initiator.eth : initiator.qrl;
+  if (account === null) return null;
+  const info = ETH_ASSETS[asset];
+  return {
+    id: `${stage.leg}:${stage.hashlock}`,
+    leg: stage.leg,
+    hashlock: stage.hashlock,
+    token: stage.leg === "eth" ? (info.address ?? NATIVE_TOKEN) : QRL_NATIVE_TOKEN,
+    account,
+    symbol: stage.leg === "eth" ? info.symbol : QRL_LEG.display,
+    decimals: stage.leg === "eth" ? info.decimals : 18,
+  };
+}
+
 export function PostOrderCard({
   ethAccount,
   qrlAccount,
@@ -181,6 +212,19 @@ export function PostOrderCard({
     () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
+  // release() is a settlement: HTLCv3 attempts the payout inside a bounded
+  // child frame, so without the published buffer the reclaim always defers
+  // into a credit. Measured on the real artifact: a bare estimate and
+  // estimate*1.3 both defer every time.
+  const settleOnLeg = useMemo(
+    () =>
+      makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+    [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
+  );
+  /** A released escrow whose payout deferred. The staging record stays until
+   *  the credit provably reaches zero, so the only handle on those funds is
+   *  never deleted while they are still in the contract. */
+  const [deferredRelease, setDeferredRelease] = useState<DeferredPayoutTarget | null>(null);
 
   // Probe the staged escrow when a recovery record is present. A settled
   // escrow (already released/refunded) is safe to auto-clear; Open means
@@ -595,14 +639,48 @@ export function PostOrderCard({
       const state = await getLegState(staged.leg, staged.hashlock);
       if (state.status === SwapStatus.Open) {
         setStageLabel("Releasing the escrow");
-        await sendOnLeg(staged.leg, buildReleaseData(staged.leg, staged.hashlock), 0n);
+        await settleOnLeg(staged.leg, buildReleaseData(staged.leg, staged.hashlock), 0n);
         for (let i = 0; i < 40; i += 1) {
           const cur = await getLegState(staged.leg, staged.hashlock).catch(() => null);
           if (cur && cur.status !== SwapStatus.Open) break;
           if (i === 39) throw new Error("release not confirmed yet; try again shortly");
           await sleep(3000);
         }
-        // Escrow provably released (funds back in the wallet): record dead.
+        // The escrow left the lock, and under HTLCv3 that does not mean it
+        // reached the wallet. Confirm the payout before retiring the only
+        // local handle on it, and surface the credit when it deferred.
+        const target = prelockCreditTarget(staged, staged.asset, {
+          eth: ethAccount,
+          qrl: qrlAccount,
+        });
+        if (target === null) {
+          clearPrelockStage();
+          setStaged(null);
+          return;
+        }
+        const reading = await readSwapCredit(
+          target.leg,
+          target.token,
+          target.account,
+          target.hashlock,
+        ).catch(() => null);
+        if (reading === null) {
+          setDeferredRelease(target);
+          throw new Error(
+            "the escrow is released, and the payout could not be confirmed from chain yet. This record is kept until it is: retry shortly.",
+          );
+        }
+        if (attributedCredit(reading) > 0n) {
+          setDeferredRelease(target);
+          throw new Error(
+            `the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this record stays until you do.${
+              reading.global > attributedCredit(reading)
+                ? " That address also holds a credit from other swaps, and collecting moves the whole balance."
+                : ""
+            }`,
+          );
+        }
+        // Payout provably delivered: record dead.
         clearPrelockStage();
         setStaged(null);
         return;
@@ -954,6 +1032,25 @@ export function PostOrderCard({
                         : "Post order"}
         </Button>
         {error ? <p className="text-sm break-words text-destructive">{error}</p> : null}
+
+        {deferredRelease !== null ? (
+          <DeferredPayoutPanel
+            targets={[deferredRelease]}
+            ethAccount={ethAccount}
+            qrlAccount={qrlAccount}
+            browserProvider={browserProvider}
+            ensureSepolia={ensureSepolia}
+            qrlRequest={qrlRequest}
+            qrlTransport={qrlTransport}
+            onCleared={() => {
+              // The credit provably reached zero, so the record it was held
+              // open for can finally go.
+              clearPrelockStage();
+              setStaged(null);
+              setDeferredRelease(null);
+            }}
+          />
+        ) : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {prefund
             ? "Pre-funding escrows your side up front; everything else still settles atomically through the HTLCs, or refunds after the timelocks."

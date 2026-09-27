@@ -53,6 +53,14 @@ the maker then walks away.
    escrow found `Claimed` counts as success.
 7. **Or refund.** If the maker never claims, your escrow refunds to you after
    its own on-chain timeout. Walking away costs only gas.
+8. **Collect a deferred payout, if there is one.** HTLCv3 keeps a settled swap
+   terminal even when the payout cannot be handed over, for example because an
+   issuer blocklisted the payee or a recipient contract refuses the transfer.
+   The amount is then held as a credit for the address it was owed to, and only
+   that address can redirect it. The client detects one after a claim or a
+   refund, collects it, and will not report the take settled while value is
+   still inside the contract. `status` lists any credit and `withdraw` moves
+   it.
 
 Every irreversible step runs through one pure decision function
 (`marketmaker/src/taker-policy.ts`) and every piece of recovery material is
@@ -183,8 +191,10 @@ node dist/taker-cli.js resume
 
 `status` lists every take in flight with its phase, hashlock and deadline,
 then the settled ones from the local history (outcome, amounts, transaction
-hashes, when they settled). It takes no lease and writes nothing, so it works
-while a take is running.
+hashes, when they settled), then any deferred payout the contract is still
+holding for you or for the maker. It takes no lease and writes nothing, so it
+works while a take is running. The credit lines are a chain read, so a failure
+there is reported without hiding the rest of the report.
 
 `resume` drives every unsettled take to an outcome, which is what a supervisor
 should run after a crash. It works through takes by their nearest on-chain
@@ -198,6 +208,37 @@ flagged there for attention and keeps its record. Any entry this build cannot
 read is reported as a warning with its order id, and the rest keep working: a
 reporting session never lets one unreadable record hide the others, while every
 session that can write still refuses the file outright.
+
+### `withdraw`
+
+```bash
+node dist/taker-cli.js withdraw
+node dist/taker-cli.js withdraw <orderId> --to 0x...
+```
+
+Moves a deferred payout. `status` shows one whenever a settlement could not
+hand over the funds: the swap is final either way, the credit is fully backed,
+and nobody else can redirect it.
+
+- Your own credit goes to `--to`, or to your own address when that is left out.
+  This is the recovery path when it is your own address the payout cannot
+  reach: name one that can be paid. The two legs use different address
+  formats, so one `--to` applies only to the leg that can encode it; a credit
+  on the other leg is reported and left in place, ready for a second run. Only
+  the wallet that holds a credit can name a destination for it, because
+  `withdraw` reads `msg.sender`.
+- A credit owed to the maker on the leg you funded is delivered to the maker
+  itself. That call takes no destination, so it can pay nobody else, and it
+  costs you only gas.
+
+With no order id it works through every recorded take. One credit that will not
+move is reported and the rest still go, and the command exits nonzero when
+anything was left behind. `--dry-run` prints what it would move and sends
+nothing.
+
+The swap loop also does this on its own: `resume` collects your credits without
+being asked, and `withdraw` exists for the case where you want another
+destination, or where you want to finish the maker's payout for them.
 
 ### `release <orderId>`
 
@@ -272,6 +313,20 @@ keys.
 Never delete the state file, replace it, or change the chain and HTLC identity
 while a take may be open, locked, claimable or refundable. Settle first, with
 `status` reporting nothing unsettled.
+
+## Moving to a new HTLC deployment
+
+The state file records the chains and HTLC addresses its takes settle on, and
+every writing command refuses to run against a file from another deployment.
+So, in order: run `resume` until `status` reports nothing in flight, run
+`withdraw` until it reports no deferred payouts, then move the state file aside
+(or point `TAKER_STATE_FILE` at a new path) before running against the new
+profile. Keep the old file as recovery material. Every signing session reads
+`deliveryGasPolicy()` on both legs before it can send, so a command that starts
+cleanly has already confirmed the addresses.
+
+A take that was started before a cutover settles under the release that created
+it, because that is the configuration that knows its contracts.
 
 ## Container use
 

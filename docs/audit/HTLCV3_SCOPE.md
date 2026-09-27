@@ -2,9 +2,11 @@
 
 Prepared for an independent review of `contracts/hyperion/HTLCv3.hyp`. HTLCv3 is
 the payout redesign required by issue #47 (`security: redesign claim payout
-before any real-value deployment`). It is not deployed anywhere. The deployed
-HTLCv2 contract (`contracts/hyperion/HTLC.hyp`) is unchanged by this work and
-keeps its own addresses; see `docs/DEPLOYMENTS.md`.
+before any real-value deployment`). It is deployed on both testnet legs and is
+what the clients settle against; the HTLCv2 contract
+(`contracts/hyperion/HTLC.hyp`) is unchanged by this work, keeps its own
+addresses, and goes on settling the records created against it. See
+`docs/DEPLOYMENTS.md`.
 
 An independent audit of this contract and a reviewed finality policy
 (`docs/FINALITY.md`) are the two conditions issue #47 sets for lifting the
@@ -29,7 +31,9 @@ real-value NO-GO.
 
 Out of scope for this review: the order book (`server/`), the browser client
 (`frontend/`), the reference market maker (`marketmaker/`), and HTLCv2 itself.
-Client integration of HTLCv3 is a separate change that has not been written yet.
+Client integration of HTLCv3 is a separate change; it carries the settlement
+gas rule of A1 and A2, reads `creditOf` because of A13, and enforces the claim
+cutoff of A14 at broadcast.
 
 ## 2. Reproducing the artifacts
 

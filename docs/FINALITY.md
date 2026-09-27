@@ -199,15 +199,25 @@ the on-chain timeout and the announced T2 in `marketmaker/src/policy.ts:261-275`
 the browser's `CLAIM_MARGIN_S` (1800 s, `frontend/src/config.ts:163`, applied to
 the taker's pre-lock check and the maker's pre-reveal check in
 `frontend/src/lib/swapMachine.ts:188-218`), and the sponsor margin
-(240 s derived, `marketmaker/src/index.ts:600`). Section 3.4 sizes all three
-from measured finality. Two gaps to close with them:
+(240 s derived, `marketmaker/src/index.ts`). Section 3.4 sizes all three from
+measured finality.
 
-- The browser's own claim step (`swapMachine.ts:335-341`) gates on
-  `nowS < iState.timeout` with no margin at all. It has to carry the same margin
-  as the pre-reveal check.
-- A margin checked when a claim is composed is not a margin at broadcast. The
-  check has to be repeated immediately before submission, next to the existing
-  claim preflight, and the preflight has to fail closed on it.
+Both structural gaps are closed, and what is left is the sizing:
+
+- **Implemented.** The browser's own claim step carries the same margin as its
+  pre-reveal check, read from the escrow's own on-chain timeout
+  (`claimCutoffBlocked` in `frontend/src/lib/swapMachine.ts`), and the step
+  reports the refusal so the user is pointed at the refund path.
+- **Implemented.** The margin is re-checked at broadcast as well as when a
+  settlement is composed. The browser claim sender takes a guard that runs
+  after the preflight simulation and immediately before submission and reads
+  the escrow's timeout again (`frontend/src/lib/legSender.ts`); the maker and
+  the scripted taker pass a `ClaimCutoff` to `submitPreflightedClaim`
+  (`marketmaker/src/htlc.ts`), which re-reads the record and fails closed. A
+  read that cannot complete fails the claim, because an unknown deadline is
+  not a safe one.
+- **Still required.** All three margins are configuration constants, not
+  values derived from measured finality. Section 3.4 sizes them.
 
 ### 3.4 Timelock ordering and margins
 
@@ -299,10 +309,11 @@ of its own.
 | Claim margin | 600 s flat | derived from measured finality |
 | Sponsor margin | 240 s derived from the tx timeout | derived from measured finality |
 | Timelock ordering | `T1 >= 2 * T2`, enforced at announce | unchanged rule, larger windows |
-| Claim cutoff margin | 600 s in the maker, 1800 s in the browser's pre-reveal check, none in its own claim step | one margin derived from measured finality, applied at broadcast (section 3.3) |
+| Claim cutoff margin | 600 s in the maker, 1800 s in the browser, applied at broadcast on every client (section 3.3) | one margin derived from measured finality |
 | Refund trigger | announced `t1` in the maker, on-chain timeout in the browser | on-chain timeout everywhere |
 | Timing policy location | code constants and maker env vars, duplicated in four files | one reviewed source both clients read |
-| Payout-failure atomicity | HTLCv2 rolls the claim back | HTLCv3 credit path, this branch |
+| Payout-failure atomicity | HTLCv3 credit path, deployed and integrated in all three clients | unchanged |
+| Credit observation | `creditOf` polled at the head by every client | the finality rule of section 3.6 applied to `PayoutCredited` and to credit reads |
 
 ## 5. Open questions
 

@@ -1,13 +1,12 @@
 # Deployments
 
-## HTLCv3 staged, 2026-09-27 (not yet used by any client)
+## HTLCv3, deployed 2026-09-27, current
 
 HTLCv3 (issue #47: payout credits, see [`docs/audit/HTLCV3_SCOPE.md`](audit/HTLCV3_SCOPE.md))
 is deployed on both legs from the qualified artifacts of source bundle
-`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. The live swap flow still uses the HTLCv2 deployment below until the
-client integration and a new protocol configuration ship. Both deployed runtimes
-matched their qualified artifacts at deploy time (EVM 5,212 bytes, QRVM-512 6,225
-bytes).
+`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. Both deployed
+runtimes matched their qualified artifacts at deploy time (EVM 5,212 bytes, QRVM-512
+6,225 bytes).
 
 | Leg | Chain ID | HTLCv3 address | Deploy transaction |
 |---|---|---|---|
@@ -17,12 +16,100 @@ bytes).
 Deploy with `HTLC_CONTRACT=HTLCv3 npm run deploy:eth` and
 `HTLC_CONTRACT=HTLCv3 npm run deploy:qrl` after `npm run compile`.
 
-## Private v3 testnet release, 2026-09-21
+### Which configuration field flips a client to HTLCv3
 
-The current deployment uses Sepolia and the private QRL v3 testnet. QRL network v3,
-the HTLCv2 open-recipient contract interface, and portable signing wire V2 are separate
-versioned interfaces. The public deployment source of truth is
-[`config/protocol-v2.json`](../config/protocol-v2.json).
+[`config/protocol-v2.json`](../config/protocol-v2.json) carries the whole cutover:
+
+| Field | HTLCv2 (history) | HTLCv3 (current) |
+|---|---|---|
+| `htlcInterface` | absent | `"v3"` |
+| `ethHtlc` | `0x4D9D3adAe3e479CA8a9e13c6E5eE4E4E7Bc4f9B5` | `0xCD5Aa74452cC29e73C6e52591b3b54D775C683e4` |
+| `qrlHtlc` | `Q71D5194Eaa...580D05405` | `QBFe6834059...ea2274437` |
+
+`htlcInterface` is the marker every client asserts at load: the browser, the order
+book, the market maker and the scripted taker all refuse to start against a profile
+whose interface is not the one they were built for. The addresses are signed into
+every portable V2 order, so the three fields move as one: changing them rotates the
+signing domain, which is why `config/protocol-v2-vectors.json` carries HTLCv3-bound
+digests and why a mixed-version pair of clients cannot agree on an order.
+
+### What happens to open HTLCv2 orders and in-flight HTLCv2 swaps
+
+Nothing migrates, and no record is ever reinterpreted against the new address.
+Every client keys its swap state on the HTLC addresses it was created against
+and keeps claiming or refunding at those addresses until the record is
+terminal:
+
+- The browser namespaces all local swap state on both HTLC addresses, so an
+  HTLCv2 record stays in place under its own key and the HTLCv3 build simply
+  does not see it. Reopening the previous release, which carries the HTLCv2
+  profile, settles or refunds it.
+- The reference maker and the scripted taker write the deployment identity into
+  their state files and refuse to start against a file from another deployment,
+  leaving the file untouched and naming the remedy in the error: run the
+  original configuration to settle or refund those orders.
+- Open HTLCv2 orders on the book cannot be taken by an HTLCv3 client at all,
+  because the signing domain changed: an HTLCv2 order fails verification under
+  the HTLCv3 domain and the reverse. They expire on their own signed expiry.
+
+### The cutover procedure
+
+Drain first, then flip. Per component, in order:
+
+1. **Drain the maker to zero.** Set `MM_DRAIN=true` and restart it. It cancels
+   its open listings, posts no replacements, and settles what is in flight.
+   Wait until `managedOrders` in its health snapshot reads 0 and
+   `strandedCredits` reads 0. A parked credit is a payout the contract refused
+   often enough, over long enough, that the maker stopped trying; it is
+   recorded in the state file, listed in the log at every start, and re-read
+   hourly. `strandedCredits` counts only this maker's own payouts, which are
+   collectable: collect each under the current configuration before going on,
+   because the new profile will not see it. `parkedCounterpartyCredits` counts
+   courtesy pushes to a taker's address that refused the payout, which only that
+   address can ever receive, so they do not gate this step; dismiss them if you
+   want them out of the report. `marketmaker/README.md` has both procedures.
+2. **Stop the maker.**
+3. **Move its state file aside**, or point `MM_STATE_FILE` at a new path. A
+   state file records the deployment its records settle on, and the daemon
+   refuses to start against one from another deployment even when it is empty.
+   Keep the old file: it is the recovery material for anything that turns out
+   to be unfinished.
+4. **Deploy the order book, then the maker, then the frontend**, each carrying
+   the new `config/protocol-v2.json`. The book goes first because it is the
+   verifier: on the HTLCv3 domain it rejects HTLCv2 orders, so a mixed pair
+   cannot form.
+5. **Confirm the maker's boot check.** It reads `deliveryGasPolicy()` on both
+   legs and refuses to start if either answers anything but the budget it was
+   built for, so a clean boot is itself the check that the addresses are the
+   HTLCv3 ones.
+6. **Serve the previous release at `/v2/`** for anyone whose swap started
+   before the cutover (below), and keep it up until nothing is left to recover.
+
+The scripted taker follows the same shape with its own state file; see
+[TAKERS.md](TAKERS.md).
+
+### Recovering a swap started before the cutover
+
+Browser swap state is scoped to the origin and namespaced on both HTLC
+addresses, so an HTLCv2 record is still in local storage after the cutover,
+under its own key, and the HTLCv3 build does not read it. Building the previous
+release with `VITE_BASE_PATH=/v2/` and serving it beside the current one on the
+same origin gives those records their own release back, with no migration and
+no in-app scanner. The current build links to it from the footer, which
+`VITE_LEGACY_RELEASE_PATH` configures.
+
+Anything still in flight at the moment of the flip is therefore settled with
+the release it was created under, which is the configuration that knows its
+contracts.
+
+## Private v3 testnet release, 2026-09-21 (HTLCv2, superseded by HTLCv3 above)
+
+This deployment used Sepolia and the private QRL v3 testnet with the HTLCv2
+open-recipient contract. QRL network v3, the HTLC contract interface, and portable
+signing wire V2 are separate versioned interfaces. The public deployment source of
+truth is [`config/protocol-v2.json`](../config/protocol-v2.json); these addresses are
+kept here as history and as the settlement target of any swap record that still names
+them.
 
 | Leg | Chain ID | HTLC address | Deploy transaction |
 |---|---|---|---|
@@ -56,8 +143,9 @@ The current reviewed Hyperion source builds into two target-bound artifacts. Eth
 EVM-256 compiler target at `build/hyperion/evm/HTLC.json`; QRL uses the QRVM-512 Q128 target at
 `build/hyperion/qrl/HTLC.json`. Both builds enable the optimizer at 200 runs and `viaIR: true`.
 
-Source-bundle note: `contracts/hyperion/` now also holds the undeployed `HTLCv3.hyp`
-(issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)). The bundle hash covers every
+Source-bundle note: `contracts/hyperion/` also holds `HTLCv3.hyp`, which the current
+clients settle against (issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)).
+Its target-bound artifacts are `build/hyperion/{evm,qrl}/HTLCv3.json`. The bundle hash covers every
 source in that directory, so it moved to
 `674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. `HTLC.hyp` itself is
 unchanged, and the two deployed runtime hashes above still reproduce byte for byte from the

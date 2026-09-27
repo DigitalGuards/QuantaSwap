@@ -60,6 +60,103 @@ interface StateEnvelope {
   deployment: DeploymentIdentity;
   orders: ManagedOrder[];
   admissions: AdmissionRecord[];
+  /** Credits this maker gave up moving. They outlive the order that created
+   *  them, because the order is retired precisely so it stops holding a
+   *  listing slot, and the money is still in the contract. */
+  strandedCredits?: StrandedCredit[];
+}
+
+/**
+ * One payout the contract refused to move often enough, over long enough, that
+ * the maker stopped trying. Everything an operator needs to collect it by hand
+ * is here, and nothing secret is: the ledger key, the swap it came from, what
+ * it was worth when it was parked, and when that happened.
+ */
+export interface StrandedCredit {
+  orderId: string;
+  leg: "eth" | "qrl";
+  token: string;
+  account: string;
+  hashlock: string;
+  /** Base units, as a decimal string, at the moment of parking. */
+  amount: string;
+  parkedAt: number;
+  /**
+   * Whose payout this is. The distinction decides whether an operator can ever
+   * clear it: a maker-owned credit is this maker's own revenue and only it can
+   * redirect it, so it is collectable and it gates the drain. A
+   * counterparty-owned one is a courtesy push to an address that refused the
+   * payout, and if that address can never receive, no action by anyone clears
+   * it. Gating the drain on that would let one hostile take block the cutover
+   * procedure forever. Records written before this field existed are treated
+   * as maker-owned, which is the conservative reading.
+   */
+  owner: "maker" | "counterparty";
+}
+
+const STRANDED_KEY = (entry: { leg: string; token: string; account: string }): string =>
+  `${entry.leg}:${entry.token.toLowerCase()}:${entry.account.toLowerCase()}`;
+
+/**
+ * Parse the parked-credit list. A malformed row is dropped, because refusing to
+ * start over a reporting record would be worse than losing it, and the next
+ * persist erases it. So the drop is described: these rows point at money in the
+ * contract, and an operator who never hears about one has no way back to it.
+ */
+function parseStrandedCredits(raw: unknown): {
+  entries: StrandedCredit[];
+  dropped: string[];
+} {
+  if (!Array.isArray(raw)) return { entries: [], dropped: [] };
+  const entries: StrandedCredit[] = [];
+  const dropped: string[] = [];
+  const describe = (row: unknown, reason: string): string => {
+    if (typeof row !== "object" || row === null) return `${reason}, unreadable shape`;
+    const fields = row as Record<string, unknown>;
+    const part = (key: string): string =>
+      typeof fields[key] === "string" ? (fields[key] as string) : "?";
+    return `${reason}, leg ${part("leg")} account ${part("account")} hashlock ${part("hashlock")}`;
+  };
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) {
+      dropped.push(describe(entry, "malformed row"));
+      continue;
+    }
+    const row = entry as Record<string, unknown>;
+    const leg = row["leg"];
+    if (leg !== "eth" && leg !== "qrl") {
+      dropped.push(describe(row, "unknown leg"));
+      continue;
+    }
+    const strings = ["orderId", "token", "account", "hashlock", "amount"] as const;
+    const missing = strings.find((key) => typeof row[key] !== "string");
+    if (missing !== undefined) {
+      dropped.push(describe(row, `missing ${missing}`));
+      continue;
+    }
+    if (typeof row["parkedAt"] !== "number" || !Number.isSafeInteger(row["parkedAt"])) {
+      dropped.push(describe(row, "invalid parkedAt"));
+      continue;
+    }
+    if (!AMOUNT_RE.test(row["amount"] as string)) {
+      dropped.push(describe(row, "invalid amount"));
+      continue;
+    }
+    const owner = row["owner"];
+    entries.push({
+      orderId: row["orderId"] as string,
+      leg,
+      token: row["token"] as string,
+      account: row["account"] as string,
+      hashlock: row["hashlock"] as string,
+      amount: row["amount"] as string,
+      parkedAt: row["parkedAt"],
+      // Records written before the field existed are maker-owned: the
+      // conservative reading, since that is the one that gates the drain.
+      owner: owner === "counterparty" ? "counterparty" : "maker",
+    });
+  }
+  return { entries, dropped };
 }
 
 type PersistedOrder = Omit<
@@ -68,6 +165,10 @@ type PersistedOrder = Omit<
   | "quotedMidMilli"
   | "announcedAt"
   | "sponsorSentAt"
+  | "withdrawSentAt"
+  | "pushSentAt"
+  | "withdrawAttempts"
+  | "pushAttempts"
   | "asset"
   | "deployment"
   | "protocol"
@@ -76,6 +177,10 @@ type PersistedOrder = Omit<
   quotedMidMilli?: string | null;
   announcedAt?: number | null;
   sponsorSentAt?: number | null;
+  withdrawSentAt?: number | null;
+  pushSentAt?: number | null;
+  withdrawAttempts?: number;
+  pushAttempts?: number;
   asset?: string;
   deployment?: unknown;
   protocol?: unknown;
@@ -1473,6 +1578,10 @@ const recoveryError = (file: string, reason: string): Error =>
 export class StateFile {
   private orders = new Map<string, ManagedOrder>();
   private admissions = new Map<string, number>();
+  private stranded = new Map<string, StrandedCredit>();
+  /** Anything hydration could not read, for the operator. Reported, never
+   *  fatal: refusing to start over a reporting record would be worse. */
+  readonly warnings: string[] = [];
   private poisoned: Error | null = null;
 
   constructor(
@@ -1546,6 +1655,15 @@ export class StateFile {
         this.admissions.set(entry.id, entry.retainUntil);
       }
     }
+    const parsedStranded = parseStrandedCredits(envelope.strandedCredits);
+    for (const entry of parsedStranded.entries) {
+      this.stranded.set(STRANDED_KEY(entry), entry);
+    }
+    this.warnings.push(
+      ...parsedStranded.dropped.map(
+        (reason) => `dropped an unreadable parked-credit record: ${reason}`,
+      ),
+    );
 
     // Records carry live preimages, so a state file this build cannot
     // interpret must stop the daemon loudly. Skipping or relabeling one
@@ -1622,6 +1740,13 @@ export class StateFile {
         quotedMidMilli: order.quotedMidMilli ?? null,
         announcedAt: order.announcedAt ?? null,
         sponsorSentAt: order.sponsorSentAt ?? null,
+        // HTLCv3 credit markers. Records written before payout credits
+        // existed default to "never attempted", which is correct: they were
+        // created against a contract that could not defer a payout.
+        withdrawSentAt: order.withdrawSentAt ?? null,
+        pushSentAt: order.pushSentAt ?? null,
+        withdrawAttempts: order.withdrawAttempts ?? 0,
+        pushAttempts: order.pushAttempts ?? 0,
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),
@@ -1638,6 +1763,69 @@ export class StateFile {
   retainedAdmissionCount(now: number): number {
     this.assertHealthy();
     return [...this.admissions.values()].filter(until => until > now).length;
+  }
+
+  /**
+   * Remember a credit the maker stopped trying to move. Keyed on the ledger
+   * entry, so two orders that park the same (leg, token, account) balance are
+   * one entry: that balance is one thing an operator collects once.
+   */
+  recordStrandedCredit(entry: StrandedCredit): void {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (this.stranded.has(key)) return;
+    this.stranded.set(key, entry);
+    this.persist();
+  }
+
+  /** Every credit still parked, of either owner. Survives the retirement of
+   *  the order that created it, which is the whole point: the order goes so it
+   *  stops holding a listing slot, and the money stays in the contract. */
+  strandedCredits(): StrandedCredit[] {
+    this.assertHealthy();
+    return [...this.stranded.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Parked credits this maker owns. Collectable, so these gate a drain. */
+  ownStrandedCredits(): StrandedCredit[] {
+    return this.strandedCredits().filter((entry) => entry.owner === "maker");
+  }
+
+  /** Parked courtesy pushes to a counterparty. If that address can never
+   *  receive, no action by anyone clears one, so these are reported and never
+   *  gate a drain; an operator dismisses them. */
+  counterpartyStrandedCredits(): StrandedCredit[] {
+    return this.strandedCredits().filter((entry) => entry.owner === "counterparty");
+  }
+
+  /**
+   * Forget a counterparty-owned parked credit on an operator's say-so. Only
+   * that kind: a maker-owned credit is this maker's own money and dismissing
+   * it would erase the only record of where it is, so it has to be collected.
+   * Returns the entry that was removed, for the caller to log.
+   */
+  dismissCounterpartyCredit(key: string): StrandedCredit | null {
+    this.assertHealthy();
+    const entry = this.stranded.get(key);
+    if (entry === undefined || entry.owner !== "counterparty") return null;
+    this.stranded.delete(key);
+    this.persist();
+    return { ...entry };
+  }
+
+  /** The key an entry is stored under, which is the ledger entry it moves. */
+  static strandedKey(entry: { leg: string; token: string; account: string }): string {
+    return STRANDED_KEY(entry);
+  }
+
+  /** Drop a parked entry once its ledger balance reads zero, whether the
+   *  operator collected it by hand or the token started cooperating. */
+  clearStrandedCredit(entry: { leg: string; token: string; account: string }): boolean {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (!this.stranded.delete(key)) return false;
+    this.persist();
+    return true;
   }
 
   private rememberAdmission(order: ManagedOrder): void {
@@ -1710,6 +1898,7 @@ export class StateFile {
       admissions: [...this.admissions.entries()]
         .filter(([, until]) => until > Math.floor(Date.now() / 1000))
         .map(([id, retainUntil]) => ({ id, retainUntil })),
+      strandedCredits: [...this.stranded.values()],
     };
     let fileDescriptor: number | undefined;
     let renamed = false;

@@ -36,6 +36,8 @@ export type TakerDecision =
   | "claim"
   /** Our escrow is open past its own on-chain timeout: reclaim it. */
   | "refund"
+  /** A settlement of ours could not deliver and credited us: collect it. */
+  | "withdraw"
   /** Walk away on the book before any funds moved. */
   | "release"
   /** Both legs settled. */
@@ -244,6 +246,7 @@ export interface TakerDecisionRecord {
   lockSentAt: number | null;
   claimSentAt: number | null;
   refundSentAt: number | null;
+  withdrawSentAt: number | null;
   releaseSentAt: number | null;
 }
 
@@ -285,6 +288,12 @@ export interface TakerDecideInput {
   /** Stop submitting a claim this close to the escrow's own deadline: a
    *  claim that cannot mine in time only burns the retry slot. */
   claimSubmitMarginS: number;
+  /** Our undelivered payout on the maker's leg, left by a claim whose
+   *  delivery failed; null on RPC failure (fail closed). */
+  initiatorCredit: bigint | null;
+  /** Our undelivered payout on our own leg, left by a refund whose delivery
+   *  failed; null on RPC failure (fail closed). */
+  responderCredit: bigint | null;
 }
 
 export interface TakerVerdict {
@@ -295,6 +304,8 @@ export interface TakerVerdict {
   ownLock: OwnLockCheck;
   /** Preimage published on-chain by the maker's claim of our leg. */
   revealedPreimage: string | null;
+  /** The leg holding a deferred payout of ours, when one does. */
+  creditLeg: LegKey | null;
 }
 
 const retryOk = (
@@ -325,12 +336,26 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     x.rState !== null && x.rState.preimage !== ZERO_BYTES32
       ? x.rState.preimage
       : null;
+  // HTLCv3 payout credits. A settlement of ours stays terminal when its
+  // delivery fails, with the amount held as a credit only we can redirect.
+  // The leg that holds one is where the withdrawal goes; an unreadable
+  // amount is not a zero balance, so it blocks reporting this take settled
+  // without ever authorising a send.
+  const creditLeg: LegKey | null =
+    (x.initiatorCredit ?? 0n) > 0n
+      ? x.plans.initiator.leg
+      : (x.responderCredit ?? 0n) > 0n
+        ? x.plans.responder.leg
+        : null;
+  const creditsSettled = x.initiatorCredit === 0n && x.responderCredit === 0n;
+
   const verdict = (decision: TakerDecision, reason: string): TakerVerdict => ({
     decision,
     reason,
     makerLock,
     ownLock,
     revealedPreimage,
+    creditLeg,
   });
 
   // Nothing of ours can be on chain while we never sent a lock and our leg
@@ -412,8 +437,22 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     );
   }
 
+  // Collect a deferred payout before anything reports this take settled: the
+  // record is the only local handle on value still inside the contract.
+  if (
+    creditLeg !== null &&
+    retryOk(record.withdrawSentAt, nowS, x.resendAfterS)
+  ) {
+    return verdict(
+      "withdraw",
+      "a settlement could not deliver and credited us; collecting it",
+    );
+  }
+
   if (terminal(x.iState) && terminal(x.rState)) {
-    return verdict("finish", "both legs settled");
+    return creditsSettled
+      ? verdict("finish", "both legs settled")
+      : verdict("wait", "waiting to collect a deferred payout on this take");
   }
 
   // Our leg is settled and the maker escrow can no longer pay us, so
@@ -424,7 +463,9 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
     x.iState.status === SwapStatus.Open &&
     nowS >= x.iState.timeout
   ) {
-    return verdict("finish", "our leg settled and the maker escrow expired");
+    return creditsSettled
+      ? verdict("finish", "our leg settled and the maker escrow expired")
+      : verdict("wait", "waiting to collect a deferred payout on this take");
   }
 
   // Our own escrow past its on-chain deadline with no claim: reclaim it.

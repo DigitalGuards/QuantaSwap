@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { GITHUB_URL } from "@/config";
+import { GITHUB_URL, LEGACY_RELEASE_PATH } from "@/config";
 
 export function Footer() {
   return (
@@ -37,6 +37,14 @@ export function Footer() {
           <Link to="/legal" className="hover:text-foreground">
             Legal
           </Link>
+          {LEGACY_RELEASE_PATH === "" ? null : (
+            // Swap records are namespaced on the HTLC addresses they were
+            // created against, so a swap started before the HTLCv3 cutover is
+            // recovered in the release that created it.
+            <a href={LEGACY_RELEASE_PATH} className="hover:text-foreground">
+              Locked funds before the HTLCv3 cutover? Open the previous release
+            </a>
+          )}
         </div>
       </div>
     </footer>

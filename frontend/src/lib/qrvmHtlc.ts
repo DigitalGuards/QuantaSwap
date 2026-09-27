@@ -1,7 +1,7 @@
 // Bounded QRVM-512 ABI codec for the static HTLC surface. Ethereum keeps
 // its separate ethers codec. Each QRVM argument occupies one 64-byte word.
 import { id } from "ethers";
-import { canonicalQip55QrlAddress } from "./qip55";
+import { canonicalQip55QrlAddress, QRVM_ZERO_ADDRESS } from "./qip55";
 
 const METHODS = {
   lockNative: ["bytes32", "address", "uint256"],
@@ -11,9 +11,26 @@ const METHODS = {
   claim: ["bytes32", "bytes32"],
   refund: ["bytes32"],
   getSwap: ["bytes32"],
+  // HTLCv3 payout credits: a settlement whose delivery fails stays terminal
+  // and credits the payee, and these move the credit afterwards.
+  withdraw: ["address", "address", "uint256"],
+  withdrawAll: ["address", "address"],
+  pushCredit: ["address", "address"],
+  creditOf: ["address", "address"],
+  outstandingCredit: ["address"],
+  deliveryGasPolicy: [],
 } as const;
 
 export type QrvmHtlcMethod = keyof typeof METHODS;
+
+/** One 64-byte address word. A Q address must carry a valid checksum; the
+ *  all-zero word is accepted because HTLCv3 keys native-coin credits and
+ *  escrow on it, and it has no checksum to verify. */
+function qrvmAddressWord(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Invalid QRVM HTLC address");
+  if (value === QRVM_ZERO_ADDRESS) return "0".repeat(128);
+  return canonicalQip55QrlAddress(value).slice(1).toLowerCase();
+}
 
 export function encodeQrvmHtlc(
   method: QrvmHtlcMethod,
@@ -29,10 +46,7 @@ export function encodeQrvmHtlc(
       }
       return value.slice(2).toLowerCase().padEnd(128, "0");
     }
-    if (type === "address") {
-      if (typeof value !== "string") throw new Error("Invalid QRVM HTLC address");
-      return canonicalQip55QrlAddress(value).slice(1).toLowerCase();
-    }
+    if (type === "address") return qrvmAddressWord(value);
     if (
       value === undefined ||
       (typeof value === "number" && !Number.isSafeInteger(value)) ||
@@ -45,6 +59,20 @@ export function encodeQrvmHtlc(
     return number.toString(16).padStart(128, "0");
   });
   return id(`${method}(${types.join(",")})`).slice(0, 10) + words.join("");
+}
+
+/** One or more 64-byte return words, each holding a uint256 in its low
+ *  half. Padding is checked so a truncating or noncanonical response can
+ *  never be read as a smaller number. */
+export function decodeQrvmUints(raw: unknown, count: number): bigint[] {
+  if (typeof raw !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${count * 128}}$`).test(raw)) {
+    throw new Error(`QRVM call must return exactly ${count} 64-byte word(s)`);
+  }
+  return Array.from({ length: count }, (_unused, index) => {
+    const word = raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
+    if (!/^0{64}/.test(word)) throw new Error("Noncanonical QRVM uint256 padding");
+    return BigInt(`0x${word}`);
+  });
 }
 
 export interface QrvmSwap {

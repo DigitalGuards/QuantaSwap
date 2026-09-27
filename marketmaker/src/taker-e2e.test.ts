@@ -12,6 +12,8 @@ import { describe, it } from "node:test";
 import { assetInfo } from "./assets.js";
 import { makeDeploymentIdentity } from "./deployment.js";
 import {
+  NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
   SwapStatus,
   encodeClaim,
   encodeLock,
@@ -283,6 +285,222 @@ describe("scripted taker end to end", () => {
       assert.equal(done.verdict.decision, "finish");
       assert.equal(done.record.outcome, "claimed");
       assert.deepEqual(h.state.all(), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  // HTLCv3 (issue #47): a settlement whose delivery fails stays terminal and
+  // leaves the amount as a credit for the payee. These runs force that path
+  // with a payee the payout cannot reach, which is attack path 1 of
+  // docs/audit/HTLCV3_SCOPE.md: a blocklisted or nonpayable recipient.
+  it("credits the taker when its claim cannot deliver, then withdraws it", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      // The taker's payout on the maker leg cannot be delivered.
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      const claimed = await h.engine.step(record);
+      record = claimed.record;
+      assert.equal(claimed.verdict.decision, "claim");
+      // The claim is terminal and the preimage is public whatever the
+      // payout did: that is the whole point of the redesign.
+      const swap = h.chains.eth.getSwap(h.maker.hashlock, "latest");
+      assert.equal(swap.status, SwapStatus.Claimed);
+      assert.equal(swap.preimage, h.maker.preimage);
+      const owed = BigInt(h.maker.order?.order.fromAmount ?? "0");
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), owed);
+      assert.equal(h.chains.eth.outstandingCredit(NATIVE_TOKEN), owed);
+      // The take is not reported settled while value is still in the
+      // contract: the record is the only local handle on it.
+      const credits = await h.engine.credits(record);
+      assert.equal(credits.length, 1);
+      assert.equal(credits[0]?.own, true);
+      assert.equal(credits[0]?.amount, owed);
+      // The blocklist lifts, and the credit comes out.
+      h.chains.eth.allowDeliveryTo(TAKER_ETH);
+      const collected = await h.engine.step(record);
+      record = collected.record;
+      assert.equal(collected.verdict.decision, "withdraw");
+      assert.equal(record.withdrawSentAt, h.now);
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), 0n);
+      assert.equal(h.chains.eth.outstandingCredit(NATIVE_TOKEN), 0n);
+      const done = await h.engine.step(record);
+      assert.equal(done.verdict.decision, "finish");
+      assert.equal(done.record.outcome, "claimed");
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("withdraws a credit to a destination the credited account names", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      ({ record } = await h.engine.step(record));
+      const [line] = await h.engine.credits(record);
+      assert.ok(line !== undefined);
+      // withdraw() reads msg.sender and takes a destination, so an alternate
+      // payout address is the recovery path when the payee's own address is
+      // the one that cannot be paid.
+      const elsewhere = `0x${"e".repeat(40)}`;
+      await h.engine.moveCredit(line, elsewhere);
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), 0n);
+      assert.deepEqual(await h.engine.credits(record), []);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("pushes a credit owed to the maker on the leg the taker funded", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      // The maker's own claim of the taker escrow cannot deliver, so the
+      // maker is credited on the leg the taker funded.
+      const makerQrl = h.maker.qrlAccount;
+      h.chains.qrl.rejectDeliveryTo(makerQrl);
+      await makerClaims(h);
+      const owed = BigInt(h.maker.order?.order.toAmount ?? "0");
+      assert.equal(h.chains.qrl.creditOf(QRL_NATIVE_TOKEN, makerQrl), owed);
+      const lines = await h.engine.credits(record);
+      const theirs = lines.find((line) => !line.own);
+      assert.ok(theirs !== undefined);
+      assert.equal(theirs.amount, owed);
+      // pushCredit takes no destination, so the taker can finish the maker's
+      // payout without being able to send it anywhere else.
+      h.chains.qrl.allowDeliveryTo(makerQrl);
+      await h.engine.moveCredit(theirs);
+      assert.equal(h.chains.qrl.creditOf(QRL_NATIVE_TOKEN, makerQrl), 0n);
+      assert.equal(h.chains.qrl.outstandingCredit(QRL_NATIVE_TOKEN), 0n);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("credits a refund whose delivery fails and reports it as owed to us", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      // The maker walks away. Past our own deadline we reclaim the escrow,
+      // and the refund defers into a credit owed to us.
+      const takerQrl = h.taker.address;
+      h.chains.qrl.rejectDeliveryTo(takerQrl);
+      h.advance((record.fill?.fill.responderTimeout ?? 0) - h.now + 1);
+      h.mine();
+      const refunded = await h.engine.step(record);
+      record = refunded.record;
+      assert.equal(refunded.verdict.decision, "refund");
+      assert.equal(
+        h.chains.qrl.getSwap(h.maker.hashlock, "latest").status,
+        SwapStatus.Refunded,
+      );
+      const owed = BigInt(h.maker.order?.order.toAmount ?? "0");
+      assert.equal(h.chains.qrl.creditOf(QRL_NATIVE_TOKEN, takerQrl), owed);
+      const credits = await h.engine.credits(record);
+      assert.equal(credits.length, 1);
+      assert.equal(credits[0]?.own, true);
+      assert.equal(credits[0]?.leg, "qrl");
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("credits a settlement sent without the published gas buffer", async () => {
+    // The contract decides delivery from the gas the caller supplied: the
+    // payout attempt runs in a child frame with a bounded budget, so a bare
+    // estimate defers every time. Measured on the real artifact for claim,
+    // refund and release. This is the mode that catches a client dropping the
+    // buffer, so the engine has to pass it on its settlement sends.
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      h.chains.eth.deferWithoutGasBuffer = true;
+      h.chains.qrl.deferWithoutGasBuffer = true;
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      const claimed = await h.engine.step(record);
+      record = claimed.record;
+      assert.equal(claimed.verdict.decision, "claim");
+      // The engine sent its claim as a settlement, so the payout landed.
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), 0n);
+      const claimSend = h.takerSenders.eth.sent.at(-1);
+      assert.equal(claimSend?.settlement, true);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("attributes a credit to this swap and not to the shared ledger", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      ({ record } = await h.engine.step(record));
+      const owed = BigInt(h.maker.order?.order.fromAmount ?? "0");
+      // A balance from some other swap on the same ledger entry: the engine
+      // must report only what this hashlock credited, because a push here
+      // would otherwise hand another swap's money to this counterparty.
+      h.chains.eth.addForeignCredit(NATIVE_TOKEN, TAKER_ETH, owed * 4n);
+      const lines = await h.engine.credits(record);
+      assert.equal(lines.length, 1);
+      assert.equal(lines[0]?.amount, owed);
+      assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), owed * 5n);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("reports one ledger entry once across several takes", async () => {
+    const h = await harness({ direction: "eth->qrl" });
+    try {
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      ({ record } = await h.engine.step(record));
+      // Two takes against the same maker on the same asset read the same
+      // (token, account) balance. Counting it twice would read as twice the
+      // money and try to move one balance twice.
+      const all = await h.engine.allCredits();
+      assert.equal(all.length, 1);
     } finally {
       await h.close();
     }

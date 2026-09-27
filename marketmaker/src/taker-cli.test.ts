@@ -14,6 +14,8 @@ import {
   EXIT_UNFUNDED,
   boundsFor,
   confirm,
+  creditLedgerKey,
+  destinationFitsLeg,
   parseArgs,
   takeExitCode,
 } from "./taker-cli.js";
@@ -49,6 +51,52 @@ describe("taker CLI arguments", () => {
     assert.equal(args.flags.get("yes"), true);
     assert.equal(args.flags.get("dry-run"), true);
     assert.equal(args.flags.has("json"), false);
+  });
+
+  it("reads the withdrawal destination as a valued flag", () => {
+    // --to carries an address, so it must consume the next token instead of
+    // being read as a boolean and swallowing the value.
+    const spaced = parseArgs(["withdraw", "--to", `0x${"a".repeat(40)}`]);
+    assert.equal(spaced.command, "withdraw");
+    assert.equal(spaced.flags.get("to"), `0x${"a".repeat(40)}`);
+    assert.deepEqual(spaced.positional, []);
+    const scoped = parseArgs(["withdraw", "abc123", `--to=Q${"b".repeat(128)}`]);
+    assert.deepEqual(scoped.positional, ["abc123"]);
+    assert.equal(scoped.flags.get("to"), `Q${"b".repeat(128)}`);
+    assert.throws(() => parseArgs(["withdraw", "--to"]), /needs a value/);
+  });
+
+  it("applies a withdrawal destination only to the leg that can encode it", () => {
+    // The two legs use different address formats, so one --to cannot serve
+    // both. A destination the leg cannot pay leaves that credit in place.
+    const eth = `0x${"a".repeat(40)}`;
+    const qrl = `Q${"b".repeat(128)}`;
+    assert.equal(destinationFitsLeg(eth, "eth"), true);
+    assert.equal(destinationFitsLeg(eth, "qrl"), false);
+    assert.equal(destinationFitsLeg(qrl, "qrl"), true);
+    assert.equal(destinationFitsLeg(qrl, "eth"), false);
+    assert.equal(destinationFitsLeg("nonsense", "eth"), false);
+    assert.equal(destinationFitsLeg("nonsense", "qrl"), false);
+  });
+
+  it("keys a credit on the ledger entry it moves", () => {
+    // withdrawAll and pushCredit move a (token, account) balance, so two
+    // takes that settled with the same counterparty on the same asset share
+    // one credit. Counting it per record would report and move it twice.
+    const line = {
+      leg: "eth" as const,
+      token: `0x${"0".repeat(40)}`,
+      account: `0x${"AB".repeat(20)}`,
+    };
+    assert.equal(
+      creditLedgerKey(line),
+      creditLedgerKey({ ...line, account: line.account.toLowerCase() }),
+    );
+    assert.notEqual(creditLedgerKey(line), creditLedgerKey({ ...line, leg: "qrl" }));
+    assert.notEqual(
+      creditLedgerKey(line),
+      creditLedgerKey({ ...line, token: `0x${"1".repeat(40)}` }),
+    );
   });
 
   it("keeps an empty command line empty", () => {

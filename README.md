@@ -82,7 +82,7 @@ Contracts are Hyperion-only; [QuantaPool](https://github.com/DigitalGuards/Quant
 
 ## Status
 
-The September 2026 release targets Sepolia (11155111) and the private QRL v3 testnet (3151909), with fresh target-bound HTLC deployments and full 64-byte QRL addresses. Deployment addresses and runtime hashes: [docs/DEPLOYMENTS.md](docs/DEPLOYMENTS.md). The shared profile is [config/protocol-v2.json](config/protocol-v2.json). Network v3, the HTLCv2 contract interface, and portable signing wire V2 are distinct versions. Previous testnet records stay separate for recovery. This is testnet software; a real-value launch requires separately reviewed mainnet readiness.
+The September 2026 release targets Sepolia (11155111) and the private QRL v3 testnet (3151909), with fresh target-bound HTLC deployments and full 64-byte QRL addresses. Deployment addresses and runtime hashes: [docs/DEPLOYMENTS.md](docs/DEPLOYMENTS.md). The shared profile is [config/protocol-v2.json](config/protocol-v2.json). Network v3, the HTLC contract interface (currently HTLCv3, with payout credits) and portable signing wire V2 are distinct versions. Previous testnet records stay separate for recovery. This is testnet software; a real-value launch requires separately reviewed mainnet readiness.
 
 | Phase | Scope | Status |
 |---|---|---|

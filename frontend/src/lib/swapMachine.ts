@@ -18,6 +18,23 @@ import { initiatorLeg, responderLeg, type ActiveSwap } from "./activeSwap";
 
 export const ZERO32 = `0x${"0".repeat(64)}`;
 
+/** The hard claim cutoff of docs/FINALITY.md section 3.3. `claim` closes at
+ *  the escrow's own timeout, so a claim broadcast inside a finality-sized
+ *  margin of it can mine after the cutoff, revert, and leave the preimage
+ *  public with the swap still Open. That is issue #47's loss shape produced
+ *  by inclusion latency, and HTLCv3 cannot remove it. The margin is a
+ *  refusal: a client inside it abandons the claim and falls back to the
+ *  refund path. Checked when a step is derived and again at broadcast,
+ *  because a margin checked at compose time is not a margin at broadcast. */
+export const claimCutoffBlocked = (
+  timeout: number,
+  nowS: number,
+  marginS: number,
+): boolean => nowS >= timeout - marginS;
+
+export const CLAIM_CUTOFF_ISSUE =
+  "the claim window is inside its safety margin; the refund path takes over";
+
 export type LegStates = Partial<Record<LegKey, LegState>>;
 
 export const sameAddr = (a: string, b: string): boolean => {
@@ -86,6 +103,10 @@ export interface SwapMachine {
   ownEth: string;
   ownQrl: string;
   legPlan: Record<LegKey, LegPlan>;
+  /** Every address a settlement of this leg can pay: the recipient a claim
+   *  pays and the initiator a refund or release pays. Under HTLCv3 either
+   *  can end up holding a credit, so both are worth watching. */
+  legPayees: Record<LegKey, { claim: string; refund: string }>;
 }
 
 export interface SwapMachineInput {
@@ -330,6 +351,9 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       // but lock a near-term one, and claim() reverts TimeoutPassed once the
       // real deadline passes, so trusting the announced value would tell the
       // taker a closed claim window is still open after the secret is public.
+      // The same margin the pre-reveal check applies is required here: a
+      // claim that mines at or after the timeout reverts with the preimage
+      // already public (FINALITY.md section 3.3, HTLCV3_SCOPE.md A14).
       // An unassigned prelocked escrow has no claim target yet (the
       // contract reverts NotAssigned), so nothing to offer either.
       canRun: Boolean(
@@ -337,9 +361,16 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
           iState &&
           iState.status === SwapStatus.Open &&
           (!prelocked || !unassigned(iState, iLeg)) &&
-          nowS < iState.timeout,
+          !claimCutoffBlocked(iState.timeout, nowS, CLAIM_MARGIN_S),
       ),
-      issue: null,
+      issue:
+        mySteps[3] &&
+        revealedPreimage &&
+        iState &&
+        iState.status === SwapStatus.Open &&
+        claimCutoffBlocked(iState.timeout, nowS, CLAIM_MARGIN_S)
+          ? CLAIM_CUTOFF_ISSUE
+          : null,
       awaitingDepth: false,
     },
   ];
@@ -381,5 +412,12 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     ownEth: addrOn("eth", swap.role === "taker" ? "taker" : "maker"),
     ownQrl: addrOn("qrl", swap.role === "taker" ? "taker" : "maker"),
     legPlan,
+    // The maker funds the initiator leg and the taker funds the responder
+    // leg, so each leg's refund payee is the party that did not agree to
+    // receive on it.
+    legPayees: {
+      [iLeg]: { claim: addrOn(iLeg, "taker"), refund: addrOn(iLeg, "maker") },
+      [rLeg]: { claim: addrOn(rLeg, "maker"), refund: addrOn(rLeg, "taker") },
+    } as Record<LegKey, { claim: string; refund: string }>,
   };
 }

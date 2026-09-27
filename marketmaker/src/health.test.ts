@@ -114,4 +114,29 @@ describe("market maker health", () => {
     const missing = await fetch(`http://127.0.0.1:${address.port}/other`);
     assert.equal(missing.status, 404);
   });
+
+  it("reports the two kinds of parked credit apart, and neither changes the status", () => {
+    // A drain waits for the maker's own credits to reach zero. A courtesy push
+    // to an address that can never receive is unclearable, so counting it with
+    // them would block the documented cutover forever, which one hostile take
+    // could arrange. Neither flips the status: an operator resolves them, and
+    // holding at degraded would bury every other signal.
+    const health = new MakerHealth({
+      deploymentFingerprint: "sha256:test",
+      assets: ["ETH"],
+      draining: false,
+      staleAfterMs: 60_000,
+    });
+    health.markRuntimeVerified();
+    health.markTickStarted(0);
+    health.markTickCompleted(0, 0);
+    assert.equal(health.snapshot().strandedCredits, 0);
+    assert.equal(health.snapshot().parkedCounterpartyCredits, 0);
+    health.markStrandedCredits(2);
+    health.markParkedCounterpartyCredits(3);
+    const snapshot = health.snapshot();
+    assert.equal(snapshot.strandedCredits, 2);
+    assert.equal(snapshot.parkedCounterpartyCredits, 3);
+    assert.equal(snapshot.status, "ok");
+  });
 });

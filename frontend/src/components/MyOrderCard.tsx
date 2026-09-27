@@ -7,6 +7,7 @@ import {
   MIN_TAKEABLE_RUNWAY_S,
   QRL_LEG,
   RESPONDER_TIMEOUT_S,
+  absoluteAppUrl,
 } from "@/config";
 import {
   clearActiveSwap,
@@ -50,8 +51,14 @@ import {
   selectEarliestFillIntent,
   withOrderSelectionLock,
 } from "@/components/signedOrderFlow";
-import { SwapStatus, buildReleaseData, getLegState } from "@/lib/htlc";
-import { makeLegSender } from "@/lib/legSender";
+import { SwapStatus, buildReleaseData, getLegState, readSwapCredit } from "@/lib/htlc";
+import { makeSettlementSender } from "@/lib/legSender";
+import {
+  DeferredPayoutPanel,
+  attributedCredit,
+  type DeferredPayoutTarget,
+} from "@/components/DeferredPayoutPanel";
+import { prelockCreditTarget } from "@/components/PostOrderCard";
 import { errorMessage } from "@/utils/errorMessage";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
@@ -159,17 +166,23 @@ export function MyOrderCard({
   const [orphaned, setOrphaned] = useState(false);
   const matching = useRef(false);
 
-  const sendOnLeg = useMemo(
-    () => makeLegSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+  // release() is a settlement under HTLCv3: without the published gas buffer
+  // the reclaim always defers into a credit.
+  const settleOnLeg = useMemo(
+    () =>
+      makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
+  /** A released escrow whose payout deferred. The order handle stays open
+   *  until the credit provably reaches zero. */
+  const [deferredRelease, setDeferredRelease] = useState<DeferredPayoutTarget | null>(null);
 
   // Private orders live behind their share link; the maker's own reads
   // carry the token too (the listing 404s without it).
   const shareUrl =
     myOrder.shareToken === null
       ? null
-      : `${window.location.origin}/o/${myOrder.id}${shareFragment(myOrder.shareToken)}`;
+      : `${absoluteAppUrl(`o/${myOrder.id}`)}${shareFragment(myOrder.shareToken)}`;
 
   const close = useCallback(() => {
     clearMyOrder();
@@ -716,12 +729,42 @@ export function MyOrderCard({
       }
       const state = await getLegState(pre.leg, pre.hashlock);
       if (state.status === SwapStatus.Open) {
-        await sendOnLeg(pre.leg, buildReleaseData(pre.leg, pre.hashlock), 0n);
+        await settleOnLeg(pre.leg, buildReleaseData(pre.leg, pre.hashlock), 0n);
         for (let i = 0; ; i += 1) {
           const cur = await getLegState(pre.leg, pre.hashlock).catch(() => null);
           if (cur && cur.status !== SwapStatus.Open) break;
           if (i >= 39) throw new Error("release broadcast but not confirmed yet; retry shortly");
           await sleep(3000);
+        }
+      }
+      // The escrow left the lock, which under HTLCv3 does not mean it reached
+      // the wallet. Keep this handle until the payout is confirmed.
+      const target = prelockCreditTarget(pre, myOrder.asset, {
+        eth: ethAccount,
+        qrl: qrlAccount,
+      });
+      if (target !== null) {
+        const reading = await readSwapCredit(
+          target.leg,
+          target.token,
+          target.account,
+          target.hashlock,
+        ).catch(() => null);
+        if (reading === null) {
+          setDeferredRelease(target);
+          throw new Error(
+            "the escrow is released, and the payout could not be confirmed from chain yet. This order stays open until it is: retry shortly.",
+          );
+        }
+        if (attributedCredit(reading) > 0n) {
+          setDeferredRelease(target);
+          throw new Error(
+            `the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this order stays until you do.${
+              reading.global > attributedCredit(reading)
+                ? " That address also holds a credit from other swaps, and collecting moves the whole balance."
+                : ""
+            }`,
+          );
         }
       }
       close();
@@ -852,6 +895,21 @@ export function MyOrderCard({
                 : "Anyone with this link can take the order; share it only with your counterparty."}
             </p>
           </div>
+        ) : null}
+        {deferredRelease !== null ? (
+          <DeferredPayoutPanel
+            targets={[deferredRelease]}
+            ethAccount={ethAccount}
+            qrlAccount={qrlAccount}
+            browserProvider={browserProvider}
+            ensureSepolia={ensureSepolia}
+            qrlRequest={qrlRequest}
+            qrlTransport={qrlTransport}
+            onCleared={() => {
+              setDeferredRelease(null);
+              close();
+            }}
+          />
         ) : null}
         {error ? (
           <div className="space-y-2">

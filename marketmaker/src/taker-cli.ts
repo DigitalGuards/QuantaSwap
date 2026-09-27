@@ -10,7 +10,13 @@ import {
   assertRuntimeChainIds,
   makeDeploymentIdentity,
 } from "./deployment.js";
-import { getChainId, type LegKey, type LegRpc } from "./htlc.js";
+import {
+  assertDeliveryGasPolicy,
+  getChainId,
+  type LegKey,
+  type LegRpc,
+} from "./htlc.js";
+import { isQip55QrlAddress } from "./qip55.js";
 import { ProtocolSigner } from "./protocol-signing.js";
 import { StateProcessLease } from "./state.js";
 import {
@@ -36,10 +42,18 @@ Usage:
   taker take <orderId> [--max-in <amount>] [--min-out <amount>] [--yes] [--dry-run] [--once]
   taker resume [--dry-run] [--once]
   taker status [--json]
+  taker withdraw [<orderId>] [--to <address>] [--dry-run]
   taker release <orderId> [--dry-run]
 
 Amounts for --max-in and --min-out are whole units of the asset on that
 leg (QRL on the QRL leg, ETH or the token symbol on the Ethereum leg).
+
+withdraw collects a deferred payout: HTLCv3 keeps a settled swap terminal
+even when the payout could not be handed over, and holds the amount as a
+credit for the address it was owed to. Our own credits go to --to, or to our
+own address when that is left out; --to applies only to the leg whose codec
+can encode it. A credit owed to the maker is delivered to the maker itself,
+which takes no destination and can pay nobody else.
 
 Exit status: 0 claimed, 1 ended without funding, 2 uneven settlement,
 3 still in flight (run resume), 4 refunded, 5 released.
@@ -82,7 +96,7 @@ interface ParsedArgs {
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const positional: string[] = [];
   const flags = new Map<string, string | true>();
-  const valued = new Set(["max-in", "min-out"]);
+  const valued = new Set(["max-in", "min-out", "to"]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index] ?? "";
     if (!token.startsWith("--")) {
@@ -116,6 +130,23 @@ function flagValue(args: ParsedArgs, name: string): string | null {
   if (value === true) throw new Error(`--${name} needs a value`);
   return value;
 }
+
+/** A withdrawal destination has to be an address the leg's codec can encode:
+ *  20 bytes on the Ethereum leg, a QIP-55 64-byte Q address on the QRL leg. */
+export function destinationFitsLeg(destination: string, leg: LegKey): boolean {
+  return leg === "eth"
+    ? /^0x[0-9a-fA-F]{40}$/.test(destination)
+    : isQip55QrlAddress(destination);
+}
+
+/** The ledger entry a credit line moves. Two takes that settled with the same
+ *  counterparty on the same asset share one, so it is the deduplication key
+ *  for both reporting and moving. */
+export const creditLedgerKey = (line: {
+  leg: LegKey;
+  token: string;
+  account: string;
+}): string => `${line.leg}:${line.token.toLowerCase()}:${line.account.toLowerCase()}`;
 
 function bookFor(cfg: TakerReadConfig): TakerBookClient {
   return new TakerBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
@@ -211,6 +242,13 @@ async function signingSession(
         getChainId(legRpc.qrl),
       ]);
       assertRuntimeChainIds(deployment, ethChainId, qrlChainId);
+      // Only HTLCv3 answers deliveryGasPolicy(), so this proves the pinned
+      // addresses are the interface this build settles against and pins the
+      // constants the settlement gas rule adds.
+      await Promise.all([
+        assertDeliveryGasPolicy(legRpc.eth),
+        assertDeliveryGasPolicy(legRpc.qrl),
+      ]);
     } catch (error) {
       lease?.close();
       signer.close();
@@ -451,15 +489,37 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
   try {
     printWarnings(session);
     const lines = session.engine.status();
+    // A deferred payout survives its swap, so credits are reported whether
+    // or not any take is still in flight.
+    const credits = await session.engine.allCredits().catch((): null => null);
     if (args.flags.has("json")) {
       console.log(
         JSON.stringify(
-          { inFlight: lines, settled: session.engine.history() },
+          {
+            inFlight: lines,
+            settled: session.engine.history(),
+            credits: credits ?? [],
+            ...(credits === null ? { creditsUnavailable: true } : {}),
+          },
           jsonReplacer,
           2,
         ),
       );
       return 0;
+    }
+    if (credits === null) {
+      console.error("deferred payouts could not be read from chain");
+    } else if (credits.length > 0) {
+      console.log(`Deferred payouts (${credits.length}), run \`taker withdraw\`:`);
+      for (const line of credits) {
+        console.log(
+          [
+            `  ${line.orderId.slice(0, 12)}`,
+            `${line.display} on the ${line.leg} leg`,
+            line.own ? "owed to you" : `owed to ${line.account.slice(0, 12)}`,
+          ].join("  "),
+        );
+      }
     }
     const history = session.engine.history();
     if (lines.length === 0) {
@@ -506,6 +566,77 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
       }
     }
     return 0;
+  } finally {
+    session.close();
+  }
+}
+
+async function commandWithdraw(args: ParsedArgs): Promise<number> {
+  const orderId = args.positional[0];
+  const destination = flagValue(args, "to");
+  const cfg = loadTakerConfig();
+  const session = await signingSession(cfg, {
+    dryRun: args.flags.has("dry-run"),
+  });
+  try {
+    printWarnings(session);
+    const records =
+      orderId === undefined
+        ? [...session.engine.allRecords()]
+        : [session.engine.record(orderId)].filter(
+            (record): record is NonNullable<typeof record> => record !== null,
+          );
+    if (orderId !== undefined && records.length === 0) {
+      throw new Error(`no recorded take for order ${orderId}`);
+    }
+    let moved = 0;
+    let found = 0;
+    let failed = 0;
+    // One ledger entry is one credit. Two takes against the same maker on the
+    // same asset read the same (token, account) balance, so a per-record loop
+    // would count it twice and try to move it twice.
+    const seen = new Set<string>();
+    for (const record of records) {
+      for (const line of await session.engine.credits(record)) {
+        const ledgerKey = creditLedgerKey(line);
+        if (seen.has(ledgerKey)) continue;
+        seen.add(ledgerKey);
+        found += 1;
+        // --to names one address, and the two legs use different address
+        // formats, so it applies only where it fits. A credit it cannot
+        // describe is left where it is, fully collectible, and reported.
+        const scoped = line.own && destination !== null ? destination : undefined;
+        if (scoped !== undefined && !destinationFitsLeg(scoped, line.leg)) {
+          console.error(
+            `skipping ${line.display} on the ${line.leg} leg: --to is not an address that leg can pay. Run withdraw once per leg, or leave --to out to pay your own address.`,
+          );
+          failed += 1;
+          continue;
+        }
+        console.log(
+          line.own
+            ? `withdrawing ${line.display} on the ${line.leg} leg to ${scoped ?? line.account}`
+            : `pushing ${line.display} to ${line.account} on the ${line.leg} leg`,
+        );
+        try {
+          await session.engine.moveCredit(line, scoped);
+          moved += 1;
+        } catch (error) {
+          // One credit that will not move must never strand the others: a
+          // credit is conserved where it is and can be retried.
+          failed += 1;
+          console.error(
+            `could not move ${line.display} on the ${line.leg} leg: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+    if (found === 0) {
+      console.log("No deferred payouts: every settlement delivered its funds.");
+    } else {
+      console.log(`Moved ${moved} of ${found} deferred payout(s).`);
+    }
+    return failed === 0 ? 0 : 1;
   } finally {
     session.close();
   }
@@ -583,6 +714,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       return commandResume(args);
     case "status":
       return commandStatus(args);
+    case "withdraw":
+      return commandWithdraw(args);
     case "release":
       return commandRelease(args);
     case "help":

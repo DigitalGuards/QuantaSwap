@@ -52,6 +52,7 @@ import {
   StateLeaseLostError,
   StateLeaseUnverifiableError,
   StateProcessLease,
+  type StrandedCredit,
 } from "./state.js";
 
 const DEPLOYMENT = makeDeploymentIdentity({
@@ -357,6 +358,148 @@ function assertRefusedWithoutMutation(
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+describe("stranded payout credits", () => {
+  const parked = {
+    orderId: "abcdef0123456789",
+    leg: "qrl" as const,
+    token: `0x${"0".repeat(128)}`,
+    account: `Q${"c".repeat(128)}`,
+    hashlock: `0x${"12".repeat(32)}`,
+    amount: "11000",
+    parkedAt: 1_800_000_000,
+    owner: "maker",
+  } satisfies StrandedCredit;
+
+  it("outlives the order that parked it, across a restart", (t) => {
+    // The order is retired precisely so it stops holding a listing slot, and
+    // the money is still in the contract. An operator is told to wait for this
+    // count to reach zero, so it cannot vanish with the order.
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      state.recordStrandedCredit(parked);
+      state.delete(state.all()[0]!.id);
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(restarted.all().length, 0);
+      assert.deepEqual(restarted.strandedCredits(), [parked]);
+    });
+  });
+
+  it("keys on the ledger entry, so one balance is one entry", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state) => {
+      state.recordStrandedCredit(parked);
+      // A second order parking the same (leg, token, account) balance: an
+      // operator collects that balance once.
+      state.recordStrandedCredit({ ...parked, orderId: "fedcba9876543210" });
+      assert.equal(state.strandedCredits().length, 1);
+      assert.equal(state.strandedCredits()[0]?.orderId, parked.orderId);
+    });
+  });
+
+  it("drops an entry once its balance reads zero", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      state.recordStrandedCredit(parked);
+      assert.equal(state.clearStrandedCredit(parked), true);
+      assert.equal(state.clearStrandedCredit(parked), false);
+      assert.deepEqual(new StateFile(file, DEPLOYMENT).strandedCredits(), []);
+    });
+  });
+
+  it("skips a malformed persisted entry, and says which one", (t) => {
+    // The next persist erases the row, so the startup warning is the only
+    // trace left of a record that points at money in the contract.
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const withBadEntry = {
+      ...envelope([portableOpenRecord(now + 300)]),
+      strandedCredits: [
+        parked,
+        { ...parked, leg: "btc" },
+        { ...parked, amount: "x" },
+        { ...parked, parkedAt: "soon" },
+        "not an object",
+      ],
+    };
+    withStateFile(withBadEntry, (state) => {
+      assert.deepEqual(state.strandedCredits(), [parked]);
+      assert.equal(state.warnings.length, 4);
+      assert.match(state.warnings[0]!, /unknown leg/);
+      assert.match(state.warnings[0]!, new RegExp(parked.hashlock));
+      assert.match(state.warnings[0]!, new RegExp(parked.account));
+      assert.match(state.warnings[1]!, /invalid amount/);
+      assert.match(state.warnings[2]!, /invalid parkedAt/);
+      assert.match(state.warnings[3]!, /unreadable shape/);
+    });
+  });
+
+  it("separates a collectable credit from one only its payee can receive", (t) => {
+    // A courtesy push to an address that can never receive is unclearable by
+    // anyone here. Counting it with the maker's own would let one hostile take
+    // block the documented drain step forever.
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const theirs: StrandedCredit = {
+      ...parked,
+      account: `Q${"d".repeat(128)}`,
+      owner: "counterparty",
+    };
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state) => {
+      state.recordStrandedCredit(parked);
+      state.recordStrandedCredit(theirs);
+      assert.deepEqual(state.ownStrandedCredits(), [parked]);
+      assert.deepEqual(state.counterpartyStrandedCredits(), [theirs]);
+    });
+  });
+
+  it("dismisses a counterparty credit and refuses to dismiss the maker's own", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const theirs: StrandedCredit = {
+      ...parked,
+      account: `Q${"d".repeat(128)}`,
+      owner: "counterparty",
+    };
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      state.recordStrandedCredit(parked);
+      state.recordStrandedCredit(theirs);
+      // The maker's own money: dismissing it would erase the only record of
+      // where it is, so it has to be collected.
+      assert.equal(StateFile.prototype.dismissCounterpartyCredit.length, 1);
+      assert.equal(state.dismissCounterpartyCredit(StateFile.strandedKey(parked)), null);
+      assert.deepEqual(state.ownStrandedCredits(), [parked]);
+      const dismissed = state.dismissCounterpartyCredit(StateFile.strandedKey(theirs));
+      assert.deepEqual(dismissed, theirs);
+      assert.deepEqual(state.counterpartyStrandedCredits(), []);
+      // And it stays dismissed across a restart.
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.deepEqual(restarted.counterpartyStrandedCredits(), []);
+      assert.deepEqual(restarted.ownStrandedCredits(), [parked]);
+      assert.equal(restarted.dismissCounterpartyCredit("no such key"), null);
+    });
+  });
+
+  it("reads a record written before the owner field as the maker's own", (t) => {
+    // The conservative reading: that is the one that gates a drain, so an old
+    // record is never quietly excluded from it.
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const { owner: _owner, ...legacy } = parked;
+    void _owner;
+    const withLegacy = {
+      ...envelope([portableOpenRecord(now + 300)]),
+      strandedCredits: [legacy],
+    };
+    withStateFile(withLegacy, (state) => {
+      assert.equal(state.warnings.length, 0);
+      assert.deepEqual(state.ownStrandedCredits(), [parked]);
+    });
+  });
+});
 
 describe("deployment-bound state hydration", () => {
   it("keeps field-level upgrade defaults inside a correctly bound deployment", () => {

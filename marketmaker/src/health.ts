@@ -23,6 +23,16 @@ export interface HealthSnapshot {
     budget: number;
     retryAt: string | null;
   };
+  /** Payout credits owed to THIS maker that it gave up moving after its
+   *  per-record cap. Collectable by the operator, so a drain waits for this to
+   *  reach zero. Reported as a count and leaving the status alone: a token that
+   *  refuses to pay anyone cannot be made to, and holding at degraded forever
+   *  would bury every other signal. */
+  strandedCredits: number;
+  /** Parked courtesy pushes owed to a counterparty. If that address can never
+   *  receive, nothing an operator does clears one, so these are reported and
+   *  never gate a drain; they are dismissed explicitly. */
+  parkedCounterpartyCredits: number;
 }
 
 const iso = (value: number | null): string | null =>
@@ -42,6 +52,8 @@ export class MakerHealth {
   private consecutiveFailedTicks = 0;
   private retainedOrders = 0;
   private admissionRetryAt = 0;
+  private strandedCredits = 0;
+  private parkedCounterpartyCredits = 0;
 
   constructor(
     private readonly opts: {
@@ -57,6 +69,18 @@ export class MakerHealth {
 
   markRuntimeVerified(): void {
     this.runtimeVerified = true;
+  }
+
+  /** Records how many managed orders hold a credit this maker stopped trying
+   *  to move. It is reported and leaves the status alone. */
+  markStrandedCredits(count: number): void {
+    this.strandedCredits = count;
+  }
+
+  /** Parked credits owed to a counterparty. Reported separately because they
+   *  may be permanently unclearable and must never gate a drain. */
+  markParkedCounterpartyCredits(count: number): void {
+    this.parkedCounterpartyCredits = count;
   }
 
   markQuoteAdmission(retainedOrders: number, retryAt: number): void {
@@ -118,6 +142,8 @@ export class MakerHealth {
         budget: LOCAL_RETAINED_ORDER_BUDGET,
         retryAt: this.admissionRetryAt === 0 ? null : iso(this.admissionRetryAt * 1000),
       },
+      strandedCredits: this.strandedCredits,
+      parkedCounterpartyCredits: this.parkedCounterpartyCredits,
     };
   }
 
