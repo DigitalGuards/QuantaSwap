@@ -118,7 +118,8 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     sponsorMarginS: 240,
     // Delivered payouts, which is the normal case: HTLCv3 only leaves a
     // credit when a settlement could not hand over the funds.
-    ourCredit: 0n,
+    ourResponderCredit: 0n,
+    ourInitiatorCredit: 0n,
     takerCredit: 0n,
     ...overrides,
   };
@@ -588,6 +589,22 @@ describe("refund and settlement", () => {
     assert.equal(decide(x), "finish");
   });
 
+  it("collects a credited refund on the leg we funded", () => {
+    // HTLCv2 stranded a refund whose delivery failed; HTLCv3 conserves it as
+    // a credit owed to the initiator on that same leg.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Refunded),
+          rState: leg(SwapStatus.None),
+          ourInitiatorCredit: AMOUNT,
+          nowS: T1 + 100,
+        }),
+      ),
+      "withdraw",
+    );
+  });
+
   it("collects our own deferred payout before retiring the record", () => {
     const settled = {
       iState: leg(SwapStatus.Claimed),
@@ -597,15 +614,15 @@ describe("refund and settlement", () => {
     // HTLCv3 reports Claimed whether the payout was delivered or credited,
     // so the credit read is the only signal. Retiring the record first would
     // delete the local handle on value still in the contract.
-    assert.equal(decide(input({ ...settled, ourCredit: AMOUNT })), "withdraw");
-    assert.equal(decide(input({ ...settled, ourCredit: 0n })), "finish");
+    assert.equal(decide(input({ ...settled, ourResponderCredit: AMOUNT })), "withdraw");
+    assert.equal(decide(input({ ...settled, ourResponderCredit: 0n })), "finish");
   });
 
   it("spaces withdrawal retries like every other irreversible send", () => {
     const settled = {
       iState: leg(SwapStatus.Claimed),
       rState: leg(SwapStatus.Claimed),
-      ourCredit: AMOUNT,
+      ourResponderCredit: AMOUNT,
       nowS: T1 + 100,
     };
     const justSent = managed({ withdrawSentAt: T1 + 100 });
@@ -655,7 +672,7 @@ describe("refund and settlement", () => {
         input({
           iState: leg(SwapStatus.Claimed),
           rState: leg(SwapStatus.Claimed),
-          ourCredit: AMOUNT,
+          ourResponderCredit: AMOUNT,
           takerCredit: AMOUNT,
           nowS: T1 + 100,
         }),
@@ -670,7 +687,7 @@ describe("refund and settlement", () => {
       rState: leg(SwapStatus.Claimed),
       nowS: T1 + 100,
     };
-    assert.equal(decide(input({ ...settled, ourCredit: null })), "wait");
+    assert.equal(decide(input({ ...settled, ourResponderCredit: null })), "wait");
     assert.equal(decide(input({ ...settled, takerCredit: null })), "wait");
     // With sponsorship off the taker credit is not ours to act on, so an
     // unreadable one does not hold the record open.
@@ -687,7 +704,7 @@ describe("refund and settlement", () => {
         input({
           iState: leg(SwapStatus.Open),
           rState: leg(SwapStatus.Claimed),
-          ourCredit: AMOUNT,
+          ourResponderCredit: AMOUNT,
           nowS: T1,
         }),
       ),

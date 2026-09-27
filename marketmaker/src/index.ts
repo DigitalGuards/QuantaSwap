@@ -342,15 +342,17 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   // settlement is invisible in getSwap, which reports Claimed either way.
   const takerOnInitiatorLeg =
     iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
-  const [iState, rState, rConfirmed, ourCredit, takerCredit] = hashlock
-    ? await Promise.all([
-        legStateOrNull(legRpc[iLeg], hashlock, false),
-        legStateOrNull(legRpc[rLeg], hashlock, false),
-        legStateOrNull(legRpc[rLeg], hashlock, true),
-        creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg)),
-        creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), takerOnInitiatorLeg),
-      ])
-    : [null, null, null, null, null];
+  const [iState, rState, rConfirmed, ourResponderCredit, ourInitiatorCredit, takerCredit] =
+    hashlock
+      ? await Promise.all([
+          legStateOrNull(legRpc[iLeg], hashlock, false),
+          legStateOrNull(legRpc[rLeg], hashlock, false),
+          legStateOrNull(legRpc[rLeg], hashlock, true),
+          creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg)),
+          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), myAddress(iLeg)),
+          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), takerOnInitiatorLeg),
+        ])
+      : [null, null, null, null, null, null];
 
   if (
     bookError !== undefined &&
@@ -626,7 +628,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     ourInitiator: myAddress(iLeg),
     takerOnInitiatorLeg,
     sponsorMarginS,
-    ourCredit,
+    ourResponderCredit,
+    ourInitiatorCredit,
     takerCredit,
   });
 
@@ -812,18 +815,20 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
     case "withdraw": {
       // A settlement could not deliver and credited us. The credit is ours
-      // and only we can move it, so it goes straight to our own address.
-      // Marker first, like every other irreversible send.
+      // and only we can move it, so it goes straight to our own address. It
+      // sits on the responder leg after a claim of the taker's escrow, and on
+      // the leg we funded after a refund or a release of our own.
+      const leg = (ourResponderCredit ?? 0n) > 0n ? rLeg : iLeg;
       managed.withdrawSentAt = nowS();
       state.upsert(managed);
-      const token = legToken(rLeg, managed.asset);
-      const hash = await sender(rLeg).send(
-        encodeWithdrawAll(rLeg, token, myAddress(rLeg)),
+      const token = legToken(leg, managed.asset);
+      const hash = await sender(leg).send(
+        encodeWithdrawAll(leg, token, myAddress(leg)),
         0n,
         undefined,
         { settlement: true },
       );
-      log(`order ${short(managed.id)} withdrew a deferred payout on the ${rLeg} leg, tx ${hash}`);
+      log(`order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`);
       break;
     }
 

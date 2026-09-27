@@ -184,10 +184,15 @@ export interface DecideInput {
   /** Skip sponsoring this close to the lock's timeout. Must cover a full
    *  transaction wait, since claim() reverts at the timeout. */
   sponsorMarginS: number;
-  /** Our own undelivered payout on this swap, in the token of the leg that
-   *  pays us. HTLCv3 leaves one behind when a settlement's delivery fails;
-   *  null on RPC failure, which decides nothing. */
-  ourCredit: bigint | null;
+  /** Our own undelivered payout on the responder leg, left by a claim of the
+   *  taker's escrow whose delivery failed. HTLCv3 leaves one behind whenever
+   *  a settlement cannot hand the funds over; null on RPC failure, which
+   *  decides nothing. */
+  ourResponderCredit: bigint | null;
+  /** Our own undelivered payout on the leg we funded, left by a refund or a
+   *  release whose delivery failed. This is HTLCv2's stranded-refund case
+   *  for a blocklisted initiator, now conserved as a credit. */
+  ourInitiatorCredit: bigint | null;
   /** The taker's undelivered payout on the leg we funded, left by a claim
    *  (ours or theirs) whose delivery failed; null on RPC failure. */
   takerCredit: bigint | null;
@@ -346,11 +351,14 @@ export function decide(x: DecideInput): Decision {
   // with pushCredit, which is permissionless, takes no destination, and can
   // only pay the taker: it is the credit-path half of a sponsored claim, and
   // it is what keeps a taker with no gas on the paying chain from sitting
-  // behind a deferred payout. Both are irreversible sends, so both carry a
-  // persisted marker and the same retry spacing as claim and refund.
+  // behind a deferred payout. Ours can sit on either leg: a claim of the
+  // taker's escrow credits us on the responder leg, and a refund or release
+  // of our own credits us on the leg we funded, which is HTLCv2's
+  // stranded-refund case for a blocklisted initiator. Both are irreversible
+  // sends, so both carry a persisted marker and the retry spacing of claim
+  // and refund.
   if (
-    x.ourCredit !== null &&
-    x.ourCredit > 0n &&
+    ((x.ourResponderCredit ?? 0n) > 0n || (x.ourInitiatorCredit ?? 0n) > 0n) &&
     retryOk(managed.withdrawSentAt, nowS, x.resendAfterS)
   ) {
     return "withdraw";
@@ -387,7 +395,9 @@ export function decide(x: DecideInput): Decision {
   // gone. A read that failed is not a zero balance, and a credit inside its
   // retry spacing is still outstanding: both fail closed here.
   const creditsSettled =
-    x.ourCredit === 0n && (!pushableTakerCredit || x.takerCredit === 0n);
+    x.ourResponderCredit === 0n &&
+    x.ourInitiatorCredit === 0n &&
+    (!pushableTakerCredit || x.takerCredit === 0n);
   if (terminal(x.iState) && rSettled && creditsSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
