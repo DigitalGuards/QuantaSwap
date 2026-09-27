@@ -99,6 +99,7 @@ function record(overrides: Partial<TakerDecisionRecord> = {}): TakerDecisionReco
     lockSentAt: null,
     claimSentAt: null,
     refundSentAt: null,
+    withdrawSentAt: null,
     releaseSentAt: null,
     ...overrides,
   };
@@ -129,6 +130,10 @@ function input(overrides: Partial<TakerDecideInput> = {}): TakerDecideInput {
     claimSafetyS: 600,
     lockRunwayS: 900,
     claimSubmitMarginS: 240,
+    // Delivered payouts, which is the normal case: HTLCv3 only leaves a
+    // credit when a settlement could not hand over the funds.
+    initiatorCredit: 0n,
+    responderCredit: 0n,
     ...overrides,
   };
 }
@@ -470,6 +475,53 @@ describe("decideTaker settlement", () => {
       }),
     );
     assert.equal(verdict.decision, "finish");
+  });
+
+  it("collects a deferred payout before reporting the take settled", () => {
+    // HTLCv3 reports Claimed whether the payout was delivered or credited,
+    // so the credit read is the only signal that value is still inside the
+    // contract, and the record is the only local handle on it.
+    const settled = {
+      iState: makerLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+      rState: ourLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+      record: record({ lockSentAt: NOW - 300, claimSentAt: NOW - 300 }),
+    };
+    const credited = decideTaker(input({ ...settled, initiatorCredit: 100n }));
+    assert.equal(credited.decision, "withdraw");
+    assert.equal(credited.creditLeg, "eth");
+    const onOurLeg = decideTaker(input({ ...settled, responderCredit: 100n }));
+    assert.equal(onOurLeg.decision, "withdraw");
+    assert.equal(onOurLeg.creditLeg, "qrl");
+  });
+
+  it("spaces withdrawal retries and never reports settled meanwhile", () => {
+    const verdict = decideTaker(
+      input({
+        iState: makerLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+        rState: ourLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+        initiatorCredit: 100n,
+        record: record({
+          lockSentAt: NOW - 300,
+          claimSentAt: NOW - 300,
+          withdrawSentAt: NOW - 10,
+        }),
+      }),
+    );
+    assert.equal(verdict.decision, "wait");
+    assert.match(verdict.reason, /deferred payout/);
+  });
+
+  it("never authorises a withdrawal for an amount it could not read", () => {
+    const verdict = decideTaker(
+      input({
+        iState: makerLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+        rState: ourLock({ status: SwapStatus.Claimed, preimage: PREIMAGE }),
+        initiatorCredit: null,
+        record: record({ lockSentAt: NOW - 300, claimSentAt: NOW - 300 }),
+      }),
+    );
+    assert.equal(verdict.decision, "wait");
+    assert.equal(verdict.creditLeg, null);
   });
 
   it("refunds our escrow after its own on-chain timeout", () => {

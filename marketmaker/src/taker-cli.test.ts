@@ -51,6 +51,19 @@ describe("taker CLI arguments", () => {
     assert.equal(args.flags.has("json"), false);
   });
 
+  it("reads the withdrawal destination as a valued flag", () => {
+    // --to carries an address, so it must consume the next token instead of
+    // being read as a boolean and swallowing the value.
+    const spaced = parseArgs(["withdraw", "--to", `0x${"a".repeat(40)}`]);
+    assert.equal(spaced.command, "withdraw");
+    assert.equal(spaced.flags.get("to"), `0x${"a".repeat(40)}`);
+    assert.deepEqual(spaced.positional, []);
+    const scoped = parseArgs(["withdraw", "abc123", `--to=Q${"b".repeat(128)}`]);
+    assert.deepEqual(scoped.positional, ["abc123"]);
+    assert.equal(scoped.flags.get("to"), `Q${"b".repeat(128)}`);
+    assert.throws(() => parseArgs(["withdraw", "--to"]), /needs a value/);
+  });
+
   it("keeps an empty command line empty", () => {
     const args = parseArgs([]);
     assert.equal(args.command, "");

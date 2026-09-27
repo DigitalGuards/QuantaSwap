@@ -19,10 +19,13 @@ import {
   encodeClaim,
   encodeLock,
   encodeLockToken,
+  encodePushCredit,
   encodeRefund,
+  encodeWithdrawAll,
   erc20Allowance,
   erc20BalanceOf,
   getConfirmedSwapState,
+  getCredit,
   getSwapState,
   sameAddr,
   submitPreflightedClaim,
@@ -45,6 +48,7 @@ import { claimSubmitMarginS, type TakerReadConfig } from "./taker-config.js";
 import type { TakerBookClient } from "./taker-orderbook.js";
 import {
   decideTaker,
+  expectedToken,
   initiatorLeg,
   responderLeg,
   takeBoundsIssue,
@@ -153,6 +157,20 @@ export interface TakerHistoryLine {
   claimTx: string | null;
   refundTx: string | null;
   settledAt: number;
+}
+
+/** One deferred HTLCv3 payout visible to this take. */
+export interface TakerCreditLine {
+  orderId: string;
+  leg: LegKey;
+  /** The asset the credit is denominated in, which is its ledger key. */
+  token: string;
+  /** The credited account. Only it can redirect its own credit. */
+  account: string;
+  /** The credit belongs to this taker. */
+  own: boolean;
+  amount: bigint;
+  display: string;
 }
 
 export interface TakerStatusLine {
@@ -520,6 +538,95 @@ export class TakerEngine {
     });
   }
 
+  /** Our undelivered payout on `leg`, keyed on the asset that leg escrows.
+   *  Null on a read failure, which decides nothing: an unknown amount must
+   *  not read as zero, and it must not authorise a send either. */
+  private async creditOrNull(
+    leg: LegKey,
+    asset: AssetSymbol,
+    account: string,
+  ): Promise<bigint | null> {
+    try {
+      return await getCredit(this.deps.legRpc[leg], expectedToken(leg, asset), account);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Deferred payouts this take can see right now, for `status` and for the
+   * `withdraw` command. Both legs and both parties are reported: our own
+   * credits are ours to collect, and a credit owed to the maker on the leg we
+   * funded can be delivered to them with the destinationless pushCredit.
+   */
+  async credits(record: TakerSwapRecord): Promise<TakerCreditLine[]> {
+    const plans = this.plansForRecord(record);
+    const candidates: { leg: LegKey; account: string; own: boolean }[] = [
+      { leg: plans.initiator.leg, account: this.ourAddress(plans.initiator.leg), own: true },
+      { leg: plans.responder.leg, account: this.ourAddress(plans.responder.leg), own: true },
+      { leg: plans.responder.leg, account: plans.responder.recipient, own: false },
+    ];
+    const lines: TakerCreditLine[] = [];
+    for (const candidate of candidates) {
+      if (
+        !candidate.own &&
+        sameAddr(candidate.account, this.ourAddress(candidate.leg))
+      ) {
+        continue;
+      }
+      const amount = await this.creditOrNull(candidate.leg, record.asset, candidate.account);
+      if (amount === null || amount <= 0n) continue;
+      const plan = candidate.leg === plans.initiator.leg ? plans.initiator : plans.responder;
+      lines.push({
+        orderId: record.orderId,
+        leg: candidate.leg,
+        token: expectedToken(candidate.leg, record.asset),
+        account: candidate.account,
+        own: candidate.own,
+        amount,
+        display: `${formatUnits(amount, plan.decimals)} ${plan.asset}`,
+      });
+    }
+    return lines;
+  }
+
+  /**
+   * Collect or deliver one deferred payout. Our own credit goes to a
+   * destination we name, defaulting to our own address, because only the
+   * credited account can redirect it. A credit owed to the maker is finished
+   * with pushCredit, which takes no destination and so can only pay them.
+   */
+  async moveCredit(
+    line: TakerCreditLine,
+    destination?: string,
+  ): Promise<string | null> {
+    const signing = this.signing();
+    const token = line.token;
+    if (this.dryRun) {
+      this.log(
+        line.own
+          ? `dry run: would withdraw ${line.display} on the ${line.leg} leg to ${destination ?? line.account}`
+          : `dry run: would push ${line.display} to ${line.account} on the ${line.leg} leg`,
+      );
+      return null;
+    }
+    const data = line.own
+      ? encodeWithdrawAll(line.leg, token, destination ?? line.account)
+      : encodePushCredit(line.leg, token, line.account);
+    const hash = await (line.leg === "eth" ? signing.eth : signing.qrl).send(
+      data,
+      0n,
+      undefined,
+      { settlement: true },
+    );
+    this.log(
+      line.own
+        ? `order ${short(line.orderId)}: withdrew ${line.display} on the ${line.leg} leg, tx ${hash}`
+        : `order ${short(line.orderId)}: pushed ${line.display} to its payee on the ${line.leg} leg, tx ${hash}`,
+    );
+    return hash;
+  }
+
   private async legStateOrNull(
     leg: LegRpc,
     hashlock: string,
@@ -586,6 +693,7 @@ export class TakerEngine {
           makerLock: { state: "absent" },
           ownLock: { state: "absent" },
           revealedPreimage: null,
+          creditLeg: null,
         },
       };
     }
@@ -595,13 +703,18 @@ export class TakerEngine {
     const hashlock = fill?.fill.hashlock ?? null;
     const iLeg = plans.initiator.leg;
     const rLeg = plans.responder.leg;
-    const [iState, iConfirmed, rState] =
+    // Payout credits are read alongside chain state: getSwap reports Claimed
+    // whether the payout was delivered or deferred, so the credit read is
+    // the only signal that value is still sitting in the contract.
+    const [iState, iConfirmed, rState, initiatorCredit, responderCredit] =
       hashlock === null
-        ? [null, null, null]
+        ? [null, null, null, null, null]
         : await Promise.all([
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, false),
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, true),
             this.legStateOrNull(this.deps.legRpc[rLeg], hashlock, false),
+            this.creditOrNull(iLeg, record.asset, this.ourAddress(iLeg)),
+            this.creditOrNull(rLeg, record.asset, this.ourAddress(rLeg)),
           ]);
 
     const pending = latestIntent(record);
@@ -617,6 +730,7 @@ export class TakerEngine {
         lockSentAt: record.lockSentAt,
         claimSentAt: record.claimSentAt,
         refundSentAt: record.refundSentAt,
+        withdrawSentAt: record.withdrawSentAt,
         releaseSentAt: pending?.releasedAt ?? null,
       },
       bookStatus: bookGone ? "gone" : (row?.status ?? "locking"),
@@ -647,6 +761,8 @@ export class TakerEngine {
       claimSafetyS: this.deps.cfg.claimSafetyS,
       lockRunwayS: this.deps.cfg.lockRunwayS,
       claimSubmitMarginS: claimSubmitMarginS(this.deps.cfg),
+      initiatorCredit,
+      responderCredit,
     });
 
     record = await this.execute(record, verdict, plans, {
@@ -767,6 +883,8 @@ export class TakerEngine {
         return this.claim(record, plans, verdict.revealedPreimage);
       case "refund":
         return this.refund(record, plans);
+      case "withdraw":
+        return this.withdraw(record, verdict.creditLeg);
       case "release":
         return this.release(record);
       case "finish":
@@ -1007,7 +1125,15 @@ export class TakerEngine {
             claimSentAt: now,
             updatedAt: now,
           });
-          return this.sender(leg).send(claimData, 0n);
+          return this.sender(leg).send(claimData, 0n, undefined, { settlement: true });
+        },
+        // The claim cutoff, re-checked against a fresh read of the escrow's
+        // own deadline immediately before the secret goes out
+        // (docs/FINALITY.md section 3.3).
+        {
+          hashlock,
+          marginS: claimSubmitMarginS(this.deps.cfg),
+          nowS: () => this.nowS(),
         },
       );
       this.log(
@@ -1061,6 +1187,8 @@ export class TakerEngine {
     const hash = await this.sender(leg).send(
       encodeRefund(leg, fill.fill.hashlock),
       0n,
+      undefined,
+      { settlement: true },
     );
     this.log(
       `order ${short(record.orderId)}: refunded our ${leg} escrow, tx ${hash}`,
@@ -1068,6 +1196,44 @@ export class TakerEngine {
     return signing.state.upsert({
       ...stored,
       refundTx: hash,
+      updatedAt: this.nowS(),
+    });
+  }
+
+  /**
+   * Collect a deferred payout of ours. It goes to our own address: only the
+   * credited account can redirect a credit, and the `withdraw` command is
+   * where an operator names another destination. The marker is persisted
+   * first, like every other irreversible send.
+   */
+  private async withdraw(
+    record: TakerSwapRecord,
+    leg: LegKey | null,
+  ): Promise<TakerSwapRecord> {
+    const signing = this.signing();
+    if (leg === null) return record;
+    if (this.dryRun) {
+      this.log(`dry run: would collect a deferred payout on the ${leg} leg`);
+      return record;
+    }
+    const now = this.nowS();
+    const stored = signing.state.upsert({
+      ...record,
+      withdrawSentAt: now,
+      updatedAt: now,
+    });
+    const hash = await this.sender(leg).send(
+      encodeWithdrawAll(leg, expectedToken(leg, record.asset), this.ourAddress(leg)),
+      0n,
+      undefined,
+      { settlement: true },
+    );
+    this.log(
+      `order ${short(record.orderId)}: collected a deferred payout on the ${leg} leg, tx ${hash}`,
+    );
+    return signing.state.upsert({
+      ...stored,
+      withdrawTx: hash,
       updatedAt: this.nowS(),
     });
   }
@@ -1309,6 +1475,21 @@ export class TakerEngine {
   /** One persisted take, or null when nothing is recorded for that id. */
   record(orderId: string): TakerSwapRecord | null {
     return this.signing().state.get(orderId);
+  }
+
+  /** Every persisted take, settled or not. A credit outlives its swap, so
+   *  the withdraw path has to see records the status view retires. */
+  allRecords(): TakerSwapRecord[] {
+    return this.signing().state.all();
+  }
+
+  /** Deferred payouts across every persisted take, for `status`. */
+  async allCredits(): Promise<TakerCreditLine[]> {
+    const lines: TakerCreditLine[] = [];
+    for (const record of this.allRecords()) {
+      lines.push(...(await this.credits(record)));
+    }
+    return lines;
   }
 
   /** Takes that already settled, newest first. */

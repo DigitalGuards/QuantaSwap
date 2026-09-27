@@ -67,14 +67,92 @@ function emptySwap(leg: LegKey): FakeSwap {
   };
 }
 
+/** HTLCv3, from contracts/hyperion/HTLCv3.hyp. */
+export const DELIVERY_GAS_LIMIT = 100_000n;
+export const DELIVERY_GAS_RESERVE = 150_000n;
+
+const creditKey = (token: string, account: string): string =>
+  `${qToHex(token).toLowerCase()}:${qToHex(account).toLowerCase()}`;
+
 /** An HTLC deployment with block history, so reads at confirmation depth
- *  mean what they mean on a real chain. */
+ *  mean what they mean on a real chain. Models HTLCv3: a settlement whose
+ *  delivery fails stays terminal and leaves the amount as a credit owned by
+ *  the payee. */
 export class FakeHtlcChain {
   private readonly swaps = new Map<string, FakeSwap>();
   private readonly history: Map<string, FakeSwap>[] = [];
   /** Token balances, only used by the ERC-20 leg. */
   readonly balances = new Map<string, bigint>();
   readonly allowances = new Map<string, bigint>();
+  /** Payees whose delivery fails: a nonpayable recipient contract, or an
+   *  issuer blocklist on that address. Settlements to them credit. Keyed on
+   *  the hexadecimal form, so a Q address and its QRVM word are one entry. */
+  private readonly rejected = new Set<string>();
+
+  rejectDeliveryTo(account: string): void {
+    this.rejected.add(qToHex(account).toLowerCase());
+  }
+
+  allowDeliveryTo(account: string): void {
+    this.rejected.delete(qToHex(account).toLowerCase());
+  }
+
+  private deliveryFails(account: string): boolean {
+    return this.rejected.has(qToHex(account).toLowerCase());
+  }
+  /** token => account => undelivered payout owned by that account. */
+  private readonly credits = new Map<string, bigint>();
+  private readonly outstanding = new Map<string, bigint>();
+
+  creditOf(token: string, account: string): bigint {
+    return this.credits.get(creditKey(token, account)) ?? 0n;
+  }
+
+  outstandingCredit(token: string): bigint {
+    return this.outstanding.get(qToHex(token).toLowerCase()) ?? 0n;
+  }
+
+  /** The payout half of a settlement: deliver, or credit the payee. Exactly
+   *  one of the two happens, so value is conserved either way. */
+  private settle(token: string, payee: string, amount: bigint): void {
+    const tokenKey = qToHex(token).toLowerCase();
+    if (this.deliveryFails(payee)) {
+      this.credits.set(creditKey(token, payee), this.creditOf(token, payee) + amount);
+      this.outstanding.set(tokenKey, this.outstandingCredit(token) + amount);
+      return;
+    }
+    if (tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() && tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()) {
+      const holder = qToHex(payee).toLowerCase();
+      this.balances.set(holder, (this.balances.get(holder) ?? 0n) + amount);
+    }
+  }
+
+  /** withdraw/withdrawAll: only the credited account moves its own credit,
+   *  and it names the destination. */
+  moveCredit(from: string, token: string, to: string, amount?: bigint): void {
+    const held = this.creditOf(token, from);
+    const moved = amount ?? held;
+    if (moved <= 0n) throw new Error("NoCredit");
+    if (held < moved) throw new Error("InsufficientCredit");
+    // Strict: a failed transfer reverts the whole withdrawal and leaves the
+    // credit intact, because a reverted withdrawal loses nothing.
+    if (this.deliveryFails(to)) throw new Error("TransferFailed");
+    this.credits.set(creditKey(token, from), held - moved);
+    const tokenKey = qToHex(token).toLowerCase();
+    this.outstanding.set(tokenKey, this.outstandingCredit(token) - moved);
+    const destination = qToHex(to).toLowerCase();
+    if (tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() && tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()) {
+      this.balances.set(destination, (this.balances.get(destination) ?? 0n) + moved);
+    }
+  }
+
+  /** pushCredit: permissionless and destinationless, so the only address it
+   *  can pay is the credited account itself. */
+  pushCredit(token: string, account: string): void {
+    const held = this.creditOf(token, account);
+    if (held <= 0n) throw new Error("NoCredit");
+    this.moveCredit(account, token, account, held);
+  }
 
   constructor(
     readonly leg: LegKey,
@@ -135,7 +213,11 @@ export class FakeHtlcChain {
     }
     if (sha256Hex(preimage) !== key) throw new Error("BadPreimage");
     if (this.clock() >= swap.timeout) throw new Error("TimeoutPassed");
+    // HTLCv3: the terminal state and the preimage are written first and
+    // unconditionally, then delivery is attempted. Nothing the payout does
+    // can roll this back.
     this.swaps.set(key, { ...swap, status: SwapStatus.Claimed, preimage });
+    this.settle(swap.token, swap.recipient, swap.amount);
     this.snapshot();
   }
 
@@ -168,6 +250,7 @@ export class FakeHtlcChain {
     }
     if (this.clock() < swap.timeout) throw new Error("TimeoutPending");
     this.swaps.set(key, { ...swap, status: SwapStatus.Refunded });
+    this.settle(swap.token, swap.initiator, swap.amount);
     this.snapshot();
   }
 }
@@ -177,6 +260,11 @@ const qrvmWordFromAddress = (value: string): string =>
 
 const qrvmWordFromUint = (value: bigint): string =>
   value.toString(16).padStart(128, "0");
+
+/** One or more 64-byte QRVM return words holding uint256 values. */
+function qrvmUintResult(values: readonly bigint[]): string {
+  return `0x${values.map(qrvmWordFromUint).join("")}`;
+}
 
 function encodeQrvmSwapResult(swap: FakeSwap): string {
   return (
@@ -325,6 +413,15 @@ function callFakeChain(
       if (!chain.canClaim(hashlock, preimage)) throw new Error("reverted");
       return "0x";
     }
+    if (selector === selectorOf("creditOf(address,address)")) {
+      return qrvmUintResult([chain.creditOf(`0x${word(0)}`, `0x${word(1)}`)]);
+    }
+    if (selector === selectorOf("outstandingCredit(address)")) {
+      return qrvmUintResult([chain.outstandingCredit(`0x${word(0)}`)]);
+    }
+    if (selector === selectorOf("deliveryGasPolicy()")) {
+      return qrvmUintResult([DELIVERY_GAS_LIMIT, DELIVERY_GAS_RESERVE]);
+    }
     throw new Error("unsupported QRVM call");
   }
   const parsed = safeParse(data);
@@ -339,6 +436,22 @@ function callFakeChain(
       throw new Error("reverted");
     }
     return "0x";
+  }
+  if (parsed.name === "creditOf") {
+    return htlcInterface.encodeFunctionResult("creditOf", [
+      chain.creditOf(parsed.args[0] as string, parsed.args[1] as string),
+    ]);
+  }
+  if (parsed.name === "outstandingCredit") {
+    return htlcInterface.encodeFunctionResult("outstandingCredit", [
+      chain.outstandingCredit(parsed.args[0] as string),
+    ]);
+  }
+  if (parsed.name === "deliveryGasPolicy") {
+    return htlcInterface.encodeFunctionResult("deliveryGasPolicy", [
+      DELIVERY_GAS_LIMIT,
+      DELIVERY_GAS_RESERVE,
+    ]);
   }
   if (parsed.name === "allowance") {
     const key = `${String(parsed.args[0]).toLowerCase()}:${String(parsed.args[1]).toLowerCase()}`;
@@ -425,6 +538,14 @@ export class FakeLegSender implements LegSender {
       this.chain.refund(this.address, `0x${word(0).slice(0, 64)}`);
       return;
     }
+    if (selector === selectorOf("withdrawAll(address,address)")) {
+      this.chain.moveCredit(this.address, `0x${word(0)}`, `0x${word(1)}`);
+      return;
+    }
+    if (selector === selectorOf("pushCredit(address,address)")) {
+      this.chain.pushCredit(`0x${word(0)}`, `0x${word(1)}`);
+      return;
+    }
     throw new Error("unsupported QRVM transaction");
   }
 
@@ -476,6 +597,27 @@ export class FakeLegSender implements LegSender {
     }
     if (parsed.name === "refund") {
       this.chain.refund(this.address, parsed.args[0] as string);
+      return;
+    }
+    if (parsed.name === "withdrawAll") {
+      this.chain.moveCredit(
+        this.address,
+        parsed.args[0] as string,
+        parsed.args[1] as string,
+      );
+      return;
+    }
+    if (parsed.name === "withdraw") {
+      this.chain.moveCredit(
+        this.address,
+        parsed.args[0] as string,
+        parsed.args[1] as string,
+        parsed.args[2] as bigint,
+      );
+      return;
+    }
+    if (parsed.name === "pushCredit") {
+      this.chain.pushCredit(parsed.args[0] as string, parsed.args[1] as string);
       return;
     }
     throw new Error("unsupported transaction");

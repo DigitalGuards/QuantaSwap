@@ -130,11 +130,18 @@ export interface TakerSwapRecord {
   lockSentAt: number | null;
   claimSentAt: number | null;
   refundSentAt: number | null;
+  /** Last attempt to collect a deferred payout on this take. HTLCv3 leaves
+   *  one when a settlement of ours could not hand the funds over. Records
+   *  written before payout credits existed default to "never attempted",
+   *  which is correct: they were created against a contract that could not
+   *  defer a payout. */
+  withdrawSentAt: number | null;
   /** Transaction hashes of our own sends, for the operator and the history.
    *  Recorded after the send, so they are reporting data. */
   lockTx: string | null;
   claimTx: string | null;
   refundTx: string | null;
+  withdrawTx: string | null;
   outcome: TakerOutcome | null;
   createdAt: number;
   updatedAt: number;
@@ -388,9 +395,11 @@ export function parseTakerSwapRecord(
     "lockSentAt",
     "claimSentAt",
     "refundSentAt",
+    "withdrawSentAt",
     "lockTx",
     "claimTx",
     "refundTx",
+    "withdrawTx",
     "outcome",
     "createdAt",
     "updatedAt",
@@ -579,9 +588,11 @@ export function parseTakerSwapRecord(
     lockSentAt: nullableUint(row["lockSentAt"], `${field}.lockSentAt`),
     claimSentAt: nullableUint(row["claimSentAt"], `${field}.claimSentAt`),
     refundSentAt: nullableUint(row["refundSentAt"], `${field}.refundSentAt`),
+    withdrawSentAt: nullableUint(row["withdrawSentAt"], `${field}.withdrawSentAt`),
     lockTx: nullableHash(row["lockTx"], `${field}.lockTx`),
     claimTx: nullableHash(row["claimTx"], `${field}.claimTx`),
     refundTx: nullableHash(row["refundTx"], `${field}.refundTx`),
+    withdrawTx: nullableHash(row["withdrawTx"], `${field}.withdrawTx`),
     outcome: parseOutcome(row["outcome"], `${field}.outcome`),
     createdAt: uint(row["createdAt"], `${field}.createdAt`),
     updatedAt: uint(row["updatedAt"], `${field}.updatedAt`),
@@ -614,9 +625,11 @@ export function newTakerSwapRecord(args: {
     lockSentAt: null,
     claimSentAt: null,
     refundSentAt: null,
+    withdrawSentAt: null,
     lockTx: null,
     claimTx: null,
     refundTx: null,
+    withdrawTx: null,
     outcome: null,
     createdAt: args.nowS,
     updatedAt: args.nowS,
