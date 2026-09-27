@@ -1631,8 +1631,10 @@ describe("order store group commit", () => {
     }
     // The feed never saw events for a batch that did not reach the file.
     assert.equal(published, 0);
-    // The failure is kept, so no later mutation can be reported durable.
+    // The failure is kept, so no later mutation can be reported durable, and
+    // the store keeps saying its memory may be ahead of the file.
     await assert.rejects(store.flush(), OrderStorePersistenceError);
+    assert.equal(store.hasUncommittedState(), true);
   });
 
   it("reports an unawaited commit failure to its owner", async () => {

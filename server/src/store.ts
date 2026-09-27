@@ -1274,9 +1274,13 @@ export class OrderStore {
     return Promise.resolve();
   }
 
-  /** True while memory is ahead of the file, commit scheduled or running. */
+  /**
+   * True whenever memory may be ahead of the file: a commit is scheduled or
+   * running, or one failed, which leaves memory permanently ahead. An exit
+   * handler uses this to decide whether a digest may describe this state.
+   */
   hasUncommittedState(): boolean {
-    return this.dirty || this.committing;
+    return this.dirty || this.committing || this.commitFailure !== null;
   }
 
   private waitFor(waiters: CommitWaiter[]): Promise<void> {
