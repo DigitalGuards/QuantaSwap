@@ -1,24 +1,24 @@
 {
   "version": "2",
-  "description": "Fixed V2 test vector: Order maker Q + 128 twos, ETH maker 0x + 40 ones, ETH to QRL, amounts 1000000000000000 and 2000000000000000, public, no prelock; issuedAt 1800000000, expiresAt 1800003600, order nonce 42 repeated, maker token ab repeated, zero share. Intent: Q + 128 threes, ETH 0x + 40 twos, nonce 43 repeated, issuedAt +10, expiresAt +130; release secret 55 repeated. Fill: nonce 44 repeated, issuedAt +20, respondBy +80, hashlock 66 repeated, T1 +3600, T2 +1800. Cancel: nonce 45 repeated, issuedAt +30, reason 1. Hex repetitions denote bytes unless specified as characters.",
+  "description": "Fixed V2 test vector: Order maker Q + 128 twos, ETH maker 0x + 40 ones, ETH to QRL, amounts 1000000000000000 and 2000000000000000, public, no prelock; issuedAt 1800000000, expiresAt 1800003600, order nonce 42 repeated, maker token ab repeated, zero share. Intent: Q + 128 threes, ETH 0x + 40 twos, nonce 43 repeated, issuedAt +10, expiresAt +130; release secret 55 repeated. Fill: nonce 44 repeated, issuedAt +20, respondBy +80, hashlock 66 repeated, T1 +3600, T2 +1800. Cancel: nonce 45 repeated, issuedAt +30, reason 1. Hex repetitions denote bytes unless specified as characters. The digests below are bound to the HTLCv3 deployment addresses in config/protocol-v2.json; the HTLCv2 addresses produced a different signing domain and are recorded in docs/DEPLOYMENTS.md as history.",
   "domain": {
     "name": "QuantaSwap",
     "version": "2",
     "ethChainId": "11155111",
-    "ethHtlc": "eip155:11155111:0x4d9d3adae3e479ca8a9e13c6e5ee4e4e7bc4f9b5",
+    "ethHtlc": "eip155:11155111:0xcd5aa74452cc29e73c6e52591b3b54d775c683e4",
     "qrlChainId": "3151909",
     "qrlGenesisHash": "0xd15407991193e6c23b733dc6bf9c628deaff8f9b6e252aa0d60030952b3e3ea4",
-    "qrlHtlc": "Q71d5194eaabf33e753b9f5ae7375c9c77f063ed0cb2908de65d0ba00354da0bf40403eb0247a536760625ca6ab9bbb58b875a72c8dcdb67feda2266580d05405"
+    "qrlHtlc": "Qbfe68340591f82a68c2258fa2ce7c02be21e5fc7bb71615b56a509db4985e863d9243b74da6335c065e257a01d40354653e551907338dbdc7a6b342ea2274437"
   },
   "expected": {
     "makerCapabilityZero": "0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549",
     "shareCapabilityOne": "0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30",
     "orderId": "680f1ac51008253a70792f659dfd37f2371ee2f3fcddf853605e8eea2711f079",
-    "orderDigest": "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4",
-    "messageDigest": "0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c",
-    "releaseCommitment": "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
-    "intentDigest": "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
-    "fillDigest": "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
-    "cancelDigest": "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd"
+    "orderDigest": "0x94e2f4a057bc14989b967619c36f57127c8f698675f1f62730f2633fd1e21997",
+    "messageDigest": "0x2c11f4d3ca6047dd467c65329d6958dcb4feafcbf8e95da4767ace4117eea19f927e4b78ae2702a44d46078b2441e6c264f9e322b2305d5f7f0e52737f32b024",
+    "releaseCommitment": "0xfe273f1e69d28e5315703759ff463096aca0dc3772dd2c1e76b85643e6a2571c",
+    "intentDigest": "0x2273209b1254140f94cac8f4f47e2eed7276b894c05122a7818fba6842e2e6f8",
+    "fillDigest": "0x1902ea73384c00f95ba3e373fdd3199925f758bd73fb7cf79dcdcc407004607a",
+    "cancelDigest": "0xa78d77cc128303c1f26cee568d97a0d0d1a2f788265eb9d9fa9cca4904b304f0"
   }
 }

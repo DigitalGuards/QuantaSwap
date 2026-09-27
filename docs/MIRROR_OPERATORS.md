@@ -103,6 +103,247 @@ Never combine proxy trust `all` with a publicly bound container port. When a
 CDN is in front, first configure the proxy to trust only that CDN's published
 networks and derive `$remote_addr` from its authenticated edge header.
 
+### Single active writer
+
+One order book process owns its data at a time. Two processes on one state
+volume interleave a whole-file rewrite of `orders.json` with appends to
+`orders.json.federation` and destroy both files, so the book takes an exclusive
+lease at startup: `orders.json.lock` and `orders.json.federation.lock`, one
+beside each protected file, inside the state volume the container already
+writes. A second process pointed at the same data logs
+`FATAL: cannot take the single-writer lease` and exits non-zero without
+touching any file.
+
+Rules the lease follows:
+
+- A crashed holder on this host is detected by its dead process id, so a
+  replacement starts at once.
+- A holder in another container, which is another PID namespace, cannot be
+  inspected by process id. It is judged by the heartbeat it refreshes on its
+  lease files every 10 seconds, and it counts as live for 90 seconds after the
+  last refresh. After a crash or a `docker kill`, a replacement refuses to start
+  and exits non-zero for up to 90 seconds; the container or supervisor restart
+  policy is what retries until the heartbeat expires, so expect refusal lines in
+  the logs during that window and unattended recovery in about two minutes with
+  a restart backoff. A clean stop releases the lease and needs no wait.
+- The guarantee covers containers on one host, which share a clock and a kernel
+  boot id. A state volume shared between machines, for example over NFS, is not
+  supported.
+- The holder verifies ownership again immediately before every persisted write.
+  A proven loss stops the process with exit code 1 so its supervisor restarts
+  it, and the restart either takes the lease or fails closed against the live
+  holder. When ownership can neither be confirmed nor disproved, for example
+  because the lease file briefly cannot be read, the write is refused with
+  `503`, nothing changes on disk, and `/api/status` reports
+  `lease.ready: false` until a later check succeeds.
+- Writes are group-committed, so one lost or unverifiable lease refuses every
+  request in the batch it was proved for, with `503` and nothing changed on
+  disk. Ownership is still proved at the start of each request, before any
+  in-memory change, so the common case is refused before a mutation exists and
+  the book keeps serving.
+- A commit runs an event-loop turn or more after that proof, so the check is
+  repeated immediately before the file is touched, and an unreadable lease is
+  re-read a small bounded number of times first. A lease that stays unreadable
+  across those attempts restarts the process, which is stricter than a refused
+  request: memory already holds mutations whose callers were told they failed,
+  so the only safe resolution is a restart that reloads the file. A repeated
+  occurrence is a storage fault on the state volume and the container or
+  supervisor restart policy is what recovers it.
+- `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
+  startup rejects those paths because the suffix names the lease files.
+
+A `orders.json.lock.recovery` guard file appears for milliseconds while a
+starter takes over a stale lease. A kill in that window leaves it behind, and
+the next start takes it over by itself once its creator is provably gone. Two
+thresholds decide that, and they differ because only one of the two cases can
+read a process id:
+
+- a guard from this host and PID namespace is judged by its creator's process
+  id, so a dead creator is taken over at once;
+- a guard from another PID namespace, which is another container, is judged by
+  its age, and the threshold is 10 minutes. A guard covers a handful of file
+  operations and is never refreshed, so no live starter produces one that old.
+  This is deliberately far longer than the 90 second lease heartbeat lifetime,
+  for the reason in the threat note below.
+
+No restart loop needs an operator for either case.
+
+One case is still manual, and its refusal names the exact file: a guard that
+keeps looking live, which means a genuinely running starter, a guard from
+another container younger than 10 minutes, or a half-written guard record.
+Confirm no order book process runs on this data directory, then remove that one
+`.lock.recovery` file by hand and leave the `.lock` files in place. Never remove
+a `.lock` lease to make a start succeed; that is exactly the second writer the
+lease exists to prevent.
+
+**Accepted residual: a guard taken over twice.** Installing a taken-over lease
+is a rename followed by a read that confirms the record, and those are two
+operations. POSIX offers no compare-and-delete on a file, and `flock` needs a
+native addon this service deliberately does not carry, so the confirming read
+narrows this window without closing it. Two starters in different containers can
+therefore both return from acquisition if, and only if, one of them stalls
+inside the guard window for longer than the 10 minute guard threshold and the
+other interleaves its own rename and confirmation exactly inside that stall. The
+consequence is bounded: both processes verify ownership again before their first
+persisted write, and each refreshes a heartbeat the other reads, so the loser
+exits non-zero at or before that write and the winner keeps the data. The 10
+minute threshold puts the precondition at the level of a machine fault, far past
+ordinary scheduling latency.
+
+Keep `ORDERBOOK_SHUTDOWN_TIMEOUT_MS` (default 10 s) below the container's
+`stop_grace_period` (15 s in the supplied Compose file). A stop that runs out of
+grace ends in `SIGKILL`, which leaves both lease files behind, and a replacement
+in a fresh container then keeps refusing until the 90 second heartbeat lifetime
+expires.
+
+An older binary ignores these files, so leaving them in place is safe on a
+rollback. They are also safe to leave inside a state backup: a restored
+`.lock` from a dead process is recognised as stale, by its process id on the
+same host or by its expired heartbeat otherwise.
+
+### Upgrading past the IPv6 source grouping
+
+Per-source budgets key on one IPv4 address or one IPv6 /64. Before that
+grouping, an IPv6 client was counted by its full address, and the store keeps
+the source of a create and of a fill intent as a salted hash of that key.
+
+Those persisted hashes are not rewritten on upgrade, so for IPv6 clients the
+value changes once: their per-source counts and their rolling daily fill-intent
+cap restart from zero at the first start on the new build, and rows already on
+disk keep their old hashes and stay valid. IPv4 clients are unaffected, because
+their key did not change. Nothing else depends on the value, and the effect is a
+single window of extra headroom for v6 clients, not a lasting one.
+
+### Concurrency bound for mutating requests
+
+The book is one process, and every mutating request verifies an ML-DSA-87 proof
+and joins a group commit, so there is a small number of them in flight past
+which extra concurrency only lengthens the queue until requests reach
+`ORDERBOOK_REQUEST_TIMEOUT_MS` (15 s by default). The service therefore bounds
+how many it admits at once:
+
+```dotenv
+ORDERBOOK_MAX_INFLIGHT_MUTATIONS=32
+```
+
+Accepted range 1 to 1024, default 32. Beyond the bound a mutating request is
+refused with `503`, `Retry-After: 1`, an `X-Refusal-Stage: pre-verification`
+header and `order book has too many requests in flight, retry shortly`, before
+the store is touched. Clients should retry after the named delay.
+
+What the bound covers and what it does not:
+
+- Gated: every mutating request, which is `POST`, `PUT`, `PATCH` and `DELETE`
+  except `heartbeat`. `GET` and `HEAD` are reads and `OPTIONS` is answered
+  before this point.
+- Not gated: `GET /api/health`, `GET /api/status`, order views, the SSE stream
+  and heartbeats, so a mutation rush no longer makes the probes unanswerable.
+  The federation feed read has its own concurrency lane and keeps it.
+- The slot is taken once the request body is in hand, so it covers verification
+  and the group commit. Reading the body is bounded separately, below.
+- A refused request leaves the source's per-minute mutation budget untouched.
+  Only an admitted one is counted.
+- It also bounds a group commit: at most this many mutations can be waiting for
+  one, so the batch latency a mutation can inherit is two commits.
+
+A share of the bound is reachable only by the maker write routes, which are
+`POST /orders/signed`, `/cancel`, `/cancel/signed`, `/fill` and `/hashlock`:
+
+```dotenv
+ORDERBOOK_RESERVED_MAKER_MUTATIONS=8
+```
+
+Default 8, and it must stay below the bound itself; startup refuses a
+reservation that would leave takers nothing. A taker rush is exactly what fills
+the bound, and a maker who cannot withdraw a stale-priced order during one is
+exposed on price.
+
+What the reservation protects against is a taker rush, and nothing more. With
+the defaults, takers share 24 slots and the remaining 8 are reachable only by a
+caller that presents a maker capability, so no volume of taker traffic can take
+them. It is not protection against a maker flooding its own lane, against many
+makers competing for it, or against an attacker who holds a real maker token for
+some order. Those are bounded by the per-source rate limit and the per-source
+body-read share, the same as any other caller.
+
+A request reaches the reserved lane by presenting the order's maker token in
+`X-Maker-Token`, checked against the stored commitment before the body is read.
+The header works on `/cancel` and `/hashlock` as well as on `/cancel/signed` and
+`/fill`, and on those two legacy routes it also authorises the request, so the
+admission decision and the authorisation agree about who is calling. A request
+to a maker path without a valid token is a taker-lane request: keying the
+reservation on the path alone would let anyone reach it by naming a maker route.
+
+A maker client that carries its capability only in the request body is admitted
+through the ordinary lane, because the book decides before it reads the body.
+The browser client and the reference market maker send the token in both places,
+and any other maker client should as well: the header reaches the lane, and the
+body is what an order book from before this reservation authenticates against.
+
+`POST /orders/signed` cannot be keyed that way, because the commitment it would
+be checked against arrives inside the request. It gets half the reservation as a
+sub-reserve of its own, so a signed-create flood cannot consume the headroom the
+capability-authenticated routes need, and a repost still has somewhere to go
+during a rush. The legacy unsigned `POST /orders` is outside the reservation
+entirely: it carries no proof at all, so it is the cheapest route to flood.
+
+The reference market maker posts one rung per pair and direction per tick, in
+sequence, so it does not need a wide lane; it needs a lane that a rush cannot
+close.
+
+Raise the bound only with evidence: the queue it allows is paid in the latency
+of every request in it. Lowering it sheds a rush earlier and also sheds
+legitimate work, including a maker repricing a deep book inside one mutation
+window. A deployment that serves a handful of makers and takers never reaches
+the default.
+
+### Body reads are bounded separately
+
+A request that promises a body and sends it slowly, or never, must not hold a
+mutation slot: a handful of those would refuse every writer for the whole
+`ORDERBOOK_REQUEST_TIMEOUT_MS` while `/api/health` still reported ready. Body
+reads therefore have their own bound, their own reservation and their own short
+deadline:
+
+```dotenv
+ORDERBOOK_MAX_INFLIGHT_BODY_READS=256
+ORDERBOOK_RESERVED_MAKER_BODY_READS=32
+ORDERBOOK_BODY_READ_TIMEOUT_MS=3000
+```
+
+Ranges 8 to 4096, 0 to below the bound, and 250 ms to 60 s. At most 2
+concurrent body reads come from one source, or 4 on the maker lane, because a
+real client has one body in flight at a time. A body that misses the deadline is
+answered `408 request body was too slow`, its remaining bytes are read and
+discarded without being buffered, and the connection closes; the service request
+timeout still closes the socket itself. Raise the deadline only for genuinely
+slow clients on a slow link.
+
+**The global body-read bound is a service-wide refusal point.** Once it is full
+every further body of that lane is answered
+`503 order book has too many request bodies in flight`, and a request whose body
+cannot be read never reaches the mutation bound at all, so without the
+reservation a flood of promised-and-unsent bodies would refuse the maker lane
+too. The reservation is what keeps that lane reachable, and the same lane rules
+apply: the maker share needs the order's capability in `X-Maker-Token`.
+
+Watch it. The refusal is distinct from the in-flight one and carries
+`X-Refusal-Stage: pre-verification`; the load harness reports it as
+`book_body_read_gate` and the read deadline as `body_read_timeout`. A steady
+stream of either from ordinary clients means the bound or the deadline is too
+tight for the paths your visitors come over. A burst of them from many sources
+at once is the flood this bound exists to absorb.
+
+**A buffering reverse proxy removes this exposure entirely.** nginx buffers
+request bodies by default (`proxy_request_buffering on`), so it forwards a
+request only once the whole body has arrived and the book never sees a
+half-open body. A mirror behind such a proxy is not exposed to this at all, and
+these bounds are then a second line only. They matter for a book that is
+reachable directly: a self-hosted mirror with no proxy in front, and the onion
+profile, where Tor connects to the service without buffering. Putting nginx or
+an equivalent buffering proxy in front is the recommended deployment either
+way.
+
 ## 3. Configure federation and browser access
 
 Federation peers are public API bases selected by operator policy. The list is
@@ -480,8 +721,20 @@ Use both endpoints:
 
 - `/api/health` is local readiness. Alert immediately on non-200.
 - `/api/status` is diagnostic. Alert when top-level `status` is not `ok`, when
-  `feed.ready` is false, or when a configured peer remains `degraded` or
-  `stale` beyond your incident window.
+  `feed.ready` is false, when `lease.ready` is false, or when a configured peer
+  remains `degraded` or `stale` beyond your incident window.
+
+Watch the `503` rate on mutating routes as well. A sustained stream of
+`order book has too many requests in flight` means demand is past
+`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`. That is a capacity signal: the book is
+shedding on purpose and its reads and probes are still being served.
+
+A `lease.ready` of false means writes are being refused while reads still
+serve. Treat a repeated occurrence as a storage fault on the state volume.
+`lease.lost` is true only while the process is already shutting down after
+another process took its data over; a restart loop with
+`FATAL: cannot take the single-writer lease` in the logs means two deployments
+point at one volume.
 
 Peer outages do not change local readiness. That prevents a remote failure from
 causing restart loops while still making incomplete discovery visible. Status
@@ -493,8 +746,11 @@ detect DNS, CDN, certificate, firewall, or reverse-proxy failures.
 
 ## 7. Back up, update, and roll back
 
-The named volume contains `orders.json` plus `orders.json.federation`. Stop the
-service and stream a consistent archive directly into GPG encryption. Replace
+The named volume contains `orders.json` plus `orders.json.federation`, and,
+while the service runs, a `.lock` file beside each of them. Stop the service and
+stream a consistent archive directly into GPG encryption. A clean stop removes
+both lease files first, so a snapshot taken this way holds only the two data
+files. Replace
 the recipient placeholder with a reviewed key fingerprint:
 
 ```bash
@@ -553,6 +809,13 @@ For an update:
 
 If startup rejects state, stop. Preserve the exact file and use the prior image
 for recovery. Never erase or replace state merely to make a new binary boot.
+
+Rolling back to an image from before the single-writer lease needs no cleanup.
+That binary never reads `orders.json.lock` or `orders.json.federation.lock` and
+leaves them untouched, and a later roll forward treats whatever it finds there
+as a stale lease. The one thing a rollback gives up is the protection itself:
+the older binary starts even when another process is already writing the same
+volume.
 
 ## 8. Add the mirror to a browser build
 

@@ -174,3 +174,49 @@ export const PRELOCK_INITIATOR_TIMEOUT_S = 48 * 3600;
 export const MIN_TAKEABLE_RUNWAY_S = 2 * RESPONDER_TIMEOUT_S + CLAIM_MARGIN_S;
 
 export const GITHUB_URL = "https://github.com/DigitalGuards/QuantaSwap";
+
+/**
+ * Path this build is served under, always with a leading and a trailing
+ * slash ("/" by default). Set VITE_BASE_PATH to serve a build beside another
+ * on one origin, which is how a previous release stays reachable after a
+ * contract cutover: local swap state is namespaced per origin, so a build at
+ * /v2/ reads the records its own deployment wrote and nothing else. Vite's
+ * `base` produces the same value at runtime, and this normalises it so the
+ * router basename and every absolute link agree with it.
+ */
+export function normalizeBasePath(raw: unknown): string {
+  if (typeof raw !== "string" || raw === "" || raw === "/") return "/";
+  const trimmed = raw.trim();
+  if (!/^\/[A-Za-z0-9][A-Za-z0-9._~-]*(\/[A-Za-z0-9._~-]+)*\/?$/.test(trimmed)) {
+    throw new Error(
+      "VITE_BASE_PATH must be an absolute path of plain path segments, for example /v2/",
+    );
+  }
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
+}
+
+export const BASE_PATH = normalizeBasePath(import.meta.env.BASE_URL);
+
+/** The router basename: BASE_PATH without its trailing slash, empty at root. */
+export const ROUTER_BASENAME = BASE_PATH === "/" ? "" : BASE_PATH.slice(0, -1);
+
+/** An absolute URL for a path inside this build, for a link someone pastes
+ *  elsewhere. `path` is app-relative and may start with a slash. */
+export const absoluteAppUrl = (path: string): string =>
+  new URL(`${BASE_PATH}${path.replace(/^\//, "")}`, window.location.origin).href;
+
+/**
+ * Where the previous release is served, when one is. Local swap state is
+ * namespaced on both HTLC addresses and scoped to the origin, so a build of
+ * the previous release at this path reads exactly the records that deployment
+ * wrote: it is the recovery route for funds locked before a contract cutover.
+ * Empty by default, and empty is what a build ships with: linking to /v2/
+ * before anything is served there points users at a 404 while they are
+ * looking for locked funds. An operator sets VITE_LEGACY_RELEASE_PATH=/v2/ at
+ * build time once that path is actually served.
+ */
+export const LEGACY_RELEASE_PATH: string = (() => {
+  const raw = import.meta.env.VITE_LEGACY_RELEASE_PATH;
+  if (typeof raw !== "string" || raw === "") return "";
+  return normalizeBasePath(raw);
+})();

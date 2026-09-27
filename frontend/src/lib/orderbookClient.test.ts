@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "./orderbook";
 import {
+  OrderBookBusyError,
   OrderbookClient,
   OrderGoneError,
   type EventSourcePort,
@@ -232,6 +233,45 @@ describe("endpoint-bound order book client", () => {
     });
   });
 
+  it("presents the maker capability in a header on every maker write", async () => {
+    const request = vi.fn<
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    >(async () => response({ order }));
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { fetch: request },
+    );
+
+    await client.cancel("order-1", "maker-token");
+    await client.cancelSigned("order-1", cancel, "maker-token");
+    await client.fill("order-1", fill, intent, "maker-token");
+    await client.announceHashlock("order-1", {
+      token: "maker-token",
+      hashlock: `0x${"bb".repeat(32)}`,
+      initiatorTimeout: 200,
+      responderTimeout: 100,
+    });
+
+    // The mirror decides whether a write may use the headroom it reserves for
+    // maker traffic from this header, before it reads the body, so a maker
+    // client that carries its token only in the body never reaches that lane.
+    expect(request.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://mirror.test/api/orders/order-1/cancel",
+      "https://mirror.test/api/orders/order-1/cancel/signed",
+      "https://mirror.test/api/orders/order-1/fill",
+      "https://mirror.test/api/orders/order-1/hashlock",
+    ]);
+    for (const call of request.mock.calls) {
+      expect(call[1]?.headers).toEqual({
+        "Content-Type": "application/json",
+        "X-Maker-Token": "maker-token",
+      });
+      // The body keeps the token too, which is what a mirror from before the
+      // reservation authenticates against.
+      expect(JSON.parse(String(call[1]?.body))["token"]).toBe("maker-token");
+    }
+  });
+
   it("keeps private maker intent reads on their origin and token header", async () => {
     const request = vi.fn<
       (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
@@ -256,6 +296,58 @@ describe("endpoint-bound order book client", () => {
       { fetch: async () => response({ error: "gone" }, 404) },
     );
     await expect(client.get("missing")).rejects.toEqual(new OrderGoneError("gone"));
+  });
+
+  it("maps a shed 503 to OrderBookBusyError with its delay", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      {
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              error: "order book has too many requests in flight, retry shortly",
+            }),
+            {
+              status: 503,
+              headers: {
+                "Content-Type": "application/json",
+                "Retry-After": "1",
+                "X-Refusal-Stage": "pre-verification",
+              },
+            },
+          ),
+      },
+    );
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OrderBookBusyError);
+    expect((failure as OrderBookBusyError).retryAfterS).toBe(1);
+    expect((failure as Error).message).toContain("too many requests in flight");
+  });
+
+  it("maps a rate-limit 429 to OrderBookBusyError without a delay", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { fetch: async () => response({ error: "rate limited, slow down" }, 429) },
+    );
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OrderBookBusyError);
+    expect((failure as OrderBookBusyError).retryAfterS).toBeUndefined();
+  });
+
+  it("keeps a service-problem 503 out of the busy class", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      {
+        fetch: async () =>
+          response({ error: "order book storage is unavailable" }, 503),
+      },
+    );
+    // No pre-verification stage, so the mirror is reporting a fault of its own
+    // and a retry on the named delay would only hammer it.
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(OrderBookBusyError);
+    expect((failure as Error).message).toContain("storage is unavailable");
   });
 
   it("bounds list snapshots and rejects malformed rows", async () => {

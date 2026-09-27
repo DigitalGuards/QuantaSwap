@@ -402,6 +402,22 @@ in memory, so every process restart obtains a fresh reset snapshot from each
 peer. Neither file is signing-key material, but the volume is still private
 operational data. Encrypt backups and restrict access.
 
+One process owns these files at a time. At startup the service takes an
+exclusive lease beside each of them, `orders.json.lock` and
+`orders.json.federation.lock`, inside the same volume. A second process on the
+same data logs `FATAL: cannot take the single-writer lease` and exits non-zero
+without touching a byte. A crashed holder on this host is recognised by its
+dead process id; a holder in another container is recognised by the heartbeat
+it refreshes every 10 seconds and counts as live for 90 seconds after the last
+refresh, so an unclean stop delays a replacement by up to that long. A clean
+stop releases the lease immediately. Ownership is proved again before every
+persisted write: a proven loss exits 1 for the supervisor to restart, and a
+lease file that cannot be read refuses that one write with `503` and shows up
+as `lease.ready: false` in `/api/status`. Operator detail, including the one
+manual recovery case, is in
+[../docs/MIRROR_OPERATORS.md](../docs/MIRROR_OPERATORS.md) under "Single active
+writer".
+
 The two files use separate atomic writes. Before serving after a restart, the
 mirror reconciles every retained public proof from `orders.json` into the feed,
 closing a crash window between the two writes. A clean shutdown records a
@@ -493,6 +509,38 @@ npm ci
 npm test
 npm start
 ```
+
+## Concurrency load test
+
+`src/loadtest/` holds a harness that starts a real book process on loopback
+with a throwaway data directory, seeds signed portable V2 orders from synthetic
+makers, and drives hundreds of synthetic takers, makers, listing pollers and
+stream subscribers at it.
+
+It is developer tooling. It compiles through its own `tsconfig.loadtest.json`
+into `dist-loadtest`, so `npm run build` leaves it out of `dist` and the runtime
+image never carries it. `npm test` does not execute it. CI typechecks it with
+`npm run typecheck:loadtest`.
+
+```bash
+nice -n 15 npm run loadtest -- --takers 200 --duration 20
+```
+
+Each scenario runs in three phases with separate metrics: preparation signs
+every proof and seeds the book, the measured window sends only what was
+prepared, and the audit verifies the invariants. Reported latency, throughput
+and book CPU cover the measured window alone.
+
+It reports per-endpoint latency percentiles, admitted and refused proposals
+split by whether the refusal paid signature verification, fairness against the
+documented proposal ordering, SSE delivery lag, externally probed
+responsiveness, and assertions against the documented admission ceilings. The
+end-of-run invariant checks cover the store against the append-only feed log
+paged like a mirror peer, exactly one stored fill under a deliberate
+double-fill race with the losing proof retained as conflict evidence, and an
+identical reload after a restart. The run exits non-zero when any assertion
+fails. Results and analysis for this deployment are in
+[`../docs/LOAD_TEST.md`](../docs/LOAD_TEST.md).
 
 The complete wire protocol remains in
 [`../docs/ORDERBOOK_API.md`](../docs/ORDERBOOK_API.md).

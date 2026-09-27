@@ -19,6 +19,29 @@ import { verifyOrderCapabilities } from "./orderSigning";
 
 export class OrderGoneError extends Error {}
 
+/**
+ * The mirror refused this request for capacity before it did any work, and said
+ * when to come back. Its own class so a caller can retry or tell the visitor to
+ * wait, where a plain Error reads like a failure the request caused.
+ */
+export class OrderBookBusyError extends Error {
+  constructor(
+    message: string,
+    /** Seconds the mirror asked the caller to wait, when it named one. */
+    readonly retryAfterS?: number,
+  ) {
+    super(message);
+    this.name = "OrderBookBusyError";
+  }
+}
+
+/** `Retry-After` in delta-seconds form, which is what the mirror sends. */
+function retryAfterSeconds(header: string | null): number | undefined {
+  if (header === null || !/^[0-9]{1,6}$/.test(header.trim())) return undefined;
+  const seconds = Number(header.trim());
+  return Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
 export interface FillIntentView extends SignedFillIntentV1 {
   intentDigest: string;
   receivedAt: number;
@@ -207,6 +230,19 @@ function parseOrderList(raw: unknown): OrderView[] {
   return raw;
 }
 
+/**
+ * The maker capability as a request header. The mirror reads it to decide,
+ * before it reads the body, whether a write may use the headroom it reserves
+ * for maker traffic, so a cancel or a fill still gets through while takers rush
+ * the book. The same token stays in the body, which is what a mirror from
+ * before that reservation authenticates against.
+ */
+function makerTokenHeader(
+  token: string | undefined,
+): Record<string, string> | undefined {
+  return token === undefined ? undefined : { "X-Maker-Token": token };
+}
+
 export class OrderbookClient {
   readonly bookId: string;
   readonly apiBase: string;
@@ -266,6 +302,21 @@ export class OrderbookClient {
       typeof errorPayload.error === "string" ? errorPayload.error : undefined;
     if (response.status === 404) {
       throw new OrderGoneError(error ?? "order not found");
+    }
+    // A refusal the mirror produced before it verified anything is a capacity
+    // answer: nothing was applied and the same request is safe to send again
+    // after the delay it named. It says so itself in X-Refusal-Stage, and a
+    // rate limit is the same kind of answer. Any other 503 is the mirror
+    // reporting a problem of its own, such as storage it cannot write or data
+    // it no longer owns, and retrying that on a timer helps nobody.
+    const shed =
+      response.headers.get("X-Refusal-Stage") === "pre-verification" ||
+      response.status === 429;
+    if (shed && (response.status === 503 || response.status === 429)) {
+      throw new OrderBookBusyError(
+        error ?? "order book is busy, retry shortly",
+        retryAfterSeconds(response.headers.get("Retry-After")),
+      );
     }
     if (!response.ok) {
       throw new Error(error ?? `order book request failed (HTTP ${response.status})`);
@@ -355,8 +406,7 @@ export class OrderbookClient {
   }
 
   async intents(id: string, makerToken?: string): Promise<FillIntentView[]> {
-    const headers =
-      makerToken === undefined ? undefined : { "X-Maker-Token": makerToken };
+    const headers = makerTokenHeader(makerToken);
     return (
       await this.api<{ intents: FillIntentView[] }>(
         "GET",
@@ -374,12 +424,17 @@ export class OrderbookClient {
     makerToken?: string,
   ): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>("POST", `/orders/${encodeURIComponent(id)}/fill`, {
-        ...signed,
-        intent: selected.intent,
-        intentAuth: selected.auth,
-        ...(makerToken === undefined ? {} : { token: makerToken }),
-      })
+      await this.api<{ order: OrderView }>(
+        "POST",
+        `/orders/${encodeURIComponent(id)}/fill`,
+        {
+          ...signed,
+          intent: selected.intent,
+          intentAuth: selected.auth,
+          ...(makerToken === undefined ? {} : { token: makerToken }),
+        },
+        makerTokenHeader(makerToken),
+      )
     ).order;
   }
 
@@ -396,6 +451,7 @@ export class OrderbookClient {
           ...signed,
           ...(makerToken === undefined ? {} : { token: makerToken }),
         },
+        makerTokenHeader(makerToken),
       )
     ).order;
   }
@@ -429,6 +485,7 @@ export class OrderbookClient {
         "POST",
         `/orders/${encodeURIComponent(id)}/hashlock`,
         body,
+        makerTokenHeader(body.token),
       )
     ).order;
   }
@@ -439,6 +496,7 @@ export class OrderbookClient {
         "POST",
         `/orders/${encodeURIComponent(id)}/cancel`,
         { token },
+        makerTokenHeader(token),
       )
     ).order;
   }

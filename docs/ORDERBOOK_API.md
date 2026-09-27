@@ -316,18 +316,23 @@ recovery under its original deployment. It must not be reinterpreted or
 overwritten during a v3 cutover.
 
 Capability and digest interoperability vectors use the canonical fixtures in
-the server, browser, and headless-maker tests:
+[`config/protocol-v2-vectors.json`](../config/protocol-v2-vectors.json), which
+the server, browser and headless-maker tests all read. The domain binds both
+HTLC addresses, so a deployment cutover rotates every digest below: the values
+here are bound to the HTLCv3 deployment recorded in
+[DEPLOYMENTS.md](DEPLOYMENTS.md), and an order signed under the HTLCv2 domain
+cannot be verified by an HTLCv3 client or the reverse.
 
 | Value                                        | Golden vector                                                                                                                        |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | Maker capability, raw `00` repeated 32 bytes | `0x59aa4f3115692702a2fac436240f220c24b278d6e8720a6bd0ddc697cbdd1549`                                                                 |
 | Share capability, raw `11` repeated 32 bytes | `0x35ce99bb9155eaf860a94bfcb1669cceca9acd5351c89e2d2a65ae2e5a4a6b30`                                                                 |
-| OrderV2 semantic SHA-256 digest              | `0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4`                                                                 |
-| SDK message SHAKE256-64 digest               | `0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c` |
-| ReleaseV2 commitment                         | `0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133`                                                                 |
-| FillIntentV2 semantic digest                 | `0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5`                                                                 |
-| FillV2 semantic digest                       | `0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a`                                                                 |
-| CancelV2 semantic digest                     | `0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd`                                                                 |
+| OrderV2 semantic SHA-256 digest              | `0x94e2f4a057bc14989b967619c36f57127c8f698675f1f62730f2633fd1e21997`                                                                 |
+| SDK message SHAKE256-64 digest               | `0x2c11f4d3ca6047dd467c65329d6958dcb4feafcbf8e95da4767ace4117eea19f927e4b78ae2702a44d46078b2441e6c264f9e322b2305d5f7f0e52737f32b024` |
+| ReleaseV2 commitment                         | `0xfe273f1e69d28e5315703759ff463096aca0dc3772dd2c1e76b85643e6a2571c`                                                                 |
+| FillIntentV2 semantic digest                 | `0x2273209b1254140f94cac8f4f47e2eed7276b894c05122a7818fba6842e2e6f8`                                                                 |
+| FillV2 semantic digest                       | `0x1902ea73384c00f95ba3e373fdd3199925f758bd73fb7cf79dcdcc407004607a`                                                                 |
+| CancelV2 semantic digest                     | `0xa78d77cc128303c1f26cee568d97a0d0d1a2f788265eb9d9fa9cca4904b304f0`                                                                 |
 
 Exact input terms are pinned in
 [`server/src/order-signing.test.ts`](../server/src/order-signing.test.ts) and
@@ -424,8 +429,12 @@ untaken escrow at any moment with `release`.
 
 ## Rate limits
 
-Per-IP, fixed one-minute windows, split by class so a burst of one cannot
-starve the other (`429 rate limited, slow down`):
+Per source, fixed one-minute windows, split by class so a burst of one cannot
+starve the other (`429 rate limited, slow down`). A source is one IPv4 address,
+or one IPv6 /64: a single assignment is a /64 or larger, so counting each IPv6
+address separately would hand one holder billions of budgets. Every per-source
+budget in this document uses that same key, the SSE connection count and the
+fill-intent caps included:
 
 | Class                    | Limit    | Notes                                          |
 | ------------------------ | -------- | ---------------------------------------------- |
@@ -446,6 +455,49 @@ sybil resistance):
   admissions still backed by retained intents. The log tracks at most 10,000
   sources and drops the oldest-tracked one past that bound (fails open, like
   the HTTP rate limiter).
+
+Concurrent mutating requests are bounded across all sources
+(`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, default 32). Past the bound a mutating
+request is refused with `503`, `Retry-After: 1` and
+`order book has too many requests in flight, retry shortly`: nothing was
+applied, so retry after the named delay. A share of the bound
+(`ORDERBOOK_RESERVED_MAKER_MUTATIONS`, default 8) is reachable only by a caller
+that presents the order's maker token in `X-Maker-Token`, on `/cancel`,
+`/cancel/signed`, `/fill` and `/hashlock`, so a taker rush cannot stop a maker
+from withdrawing or filling an order.
+
+**Makers: send the token in the header on those four routes.** The book reads
+`X-Maker-Token` before it reads the body, so a client that carries its
+capability only in the body is admitted through the ordinary lane and can be
+refused while the reserved one sits empty. Send it in both places: the header
+reaches the lane, and the body is what an order book from before this
+reservation authenticates against. Where both are present the header wins. The
+browser client and the reference market maker both do this. `POST /orders/signed` carries its
+commitment inside the request and cannot be checked that way, so it gets half
+that reservation as a sub-reserve. Everything else, the legacy unsigned
+`POST /orders` included, uses the bound minus the reservation. Reads, heartbeats, the SSE
+stream, `/api/health` and `/api/status` are not gated, so they keep answering
+while a rush is shed. A refused request does not spend the source's per-minute
+mutation budget.
+
+Request bodies are bounded separately (`ORDERBOOK_MAX_INFLIGHT_BODY_READS`,
+default 256, at most 2 per source and 4 on the maker lane, with
+`ORDERBOOK_RESERVED_MAKER_BODY_READS` of it held for that lane) and read under
+their own deadline (`ORDERBOOK_BODY_READ_TIMEOUT_MS`, default 3 s). Past the
+bound a body is refused with
+`503 order book has too many request bodies in flight`. A body that arrives too
+slowly is refused with `408 request body was too slow` and the connection
+closes. Send one request at a time per connection and the whole body promptly
+after the headers.
+
+Every refusal the book produced before it verified anything carries
+`X-Refusal-Stage: pre-verification`. That covers the two bounds above, the
+per-source rate limiter, the shutdown gate and the fill-intent refusals
+described below. It is a diagnostic, and a client needs only the status code.
+Browsers may read `Retry-After` and `X-Refusal-Stage` on these replies: the
+configured-origin CORS policy exposes both. A 503 without the header is the book
+reporting a fault of its own, such as storage it cannot write or data it no
+longer owns, and repeating the request on a timer does not help.
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
@@ -498,20 +550,29 @@ offline.
 
 ### `GET /status`
 
-Sanitized operator diagnostics. The response uses `200` while local storage and
-the feed are ready, or `503` for the same local failures as `/health`:
+Sanitized operator diagnostics. The response uses `200` while local storage,
+the feed, and the single-writer lease are all ready, and `503` otherwise. This
+is a stricter check than `/health`: a failing feed compaction and an
+unverifiable lease both degrade `/status` to `503` while `/health` stays `200`,
+because reads keep serving and a container restart would not help:
 
 ```jsonc
 {
   "schemaVersion": 1,
   "status": "ok",
   "uptimeS": 3600,
+  "lease": {
+    "ready": true,
+    "lost": false,
+    "unverifiableSince": null,
+  },
   "feed": {
     "ready": true,
     "retainedEvents": 42,
     "oldestSequence": 1,
     "latestSequence": 42,
     "lastEventAt": 1786924800000,
+    "compactionFailing": false,
   },
   "federation": {
     "enabled": true,
@@ -535,6 +596,16 @@ the feed are ready, or `503` for the same local failures as `/health`:
   },
 }
 ```
+
+`lease` reports the single-writer lease that makes one process the only writer
+of the service's data files. `ready` is false while writes are being refused:
+`lost` is true once another process provably took the data over, and this
+service is shutting down; `unverifiableSince` is the Unix millisecond time of
+the first refusal caused by a lease file that could not be read, and returns to
+`null` once a later check succeeds. Reads keep serving in both cases, and
+`/health` is unaffected. `feed.compactionFailing` is true while feed log
+compaction keeps failing; appends stay durable and the feed still serves, so
+this also degrades `/status` without changing `/health`.
 
 All `*At` fields are Unix milliseconds. Federation-wide state is `disabled`,
 `starting`, `healthy`, or `degraded`; a peer is `pending`, `syncing`, `healthy`,
@@ -799,6 +870,24 @@ identity, may hold one unreleased pending intent per order (`409` otherwise;
 release it or let it expire). Direct submissions issued more than **30 s** in the future are
 refused with `400`: sync the device clock.
 
+**Cheap refusals are answered before signature verification.** The order's
+state, its remaining runway, its live-proposal count and the caller's
+concurrent and daily source budgets need only the stored order and the request
+address, so this route answers them before it verifies the ML-DSA-87 proof.
+That keeps a full order from spending a verification on a proposal it cannot
+accept, at one visible cost: a request with an invalid signature against a full
+or closed order now reads as `429` capacity or `409` state, where it used to
+read `401`.
+No admission number changed.
+
+Two rules make this safe to rely on. A request whose `auth.nonce` matches a
+proposal the order already retains skips the pre-verification gate, so an exact
+retry of an admitted proposal is still verified and still answered idempotently
+even when the order is full. And every check that reads the signed content
+stays behind verification, the one unreleased pending proposal per taker QRL
+account in particular: it keys on the signed identity, so an unverified body
+could otherwise claim another taker's account and lock it out.
+
 ### `GET /orders/:id/intents`: read pending proposals (maker)
 
 → `200 {"intents": [...]}` in first-come order: lowest
@@ -1024,5 +1113,5 @@ signed intent/fill reference.
 | 413    | Body over 4096 bytes, or signed-protocol body over 32 KiB              |
 | 415    | POST content type is not `application/json`                            |
 | 429    | Rate limit, take caps, or per-maker/per-source open-order cap          |
-| 503    | Book full, SSE connection cap, shutdown, or unavailable storage        |
+| 503    | Book full, SSE cap, shutdown, unavailable storage, or refused write    |
 | 500    | Unhandled server error                                                 |

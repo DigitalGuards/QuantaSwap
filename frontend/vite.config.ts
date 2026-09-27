@@ -6,7 +6,21 @@ import tailwindcss from "@tailwindcss/vite";
 
 // Dev-only RPC proxies: the QRL node has no CORS headers and the page is
 // http://localhost, so both legs are reached same-origin through Vite.
+// A build can be served under a sub-path so a previous release stays
+// reachable on the same origin after a contract cutover: local swap state is
+// per origin, so /v2/ reads exactly the records its own deployment wrote.
+// Vite exposes this as import.meta.env.BASE_URL, which src/config.ts reads.
+const basePath = (() => {
+  const raw = process.env["VITE_BASE_PATH"];
+  if (raw === undefined || raw === "" || raw === "/") return "/";
+  if (!/^\/[A-Za-z0-9][A-Za-z0-9._~-]*(\/[A-Za-z0-9._~-]+)*\/?$/.test(raw)) {
+    throw new Error("VITE_BASE_PATH must be an absolute path, for example /v2/");
+  }
+  return raw.endsWith("/") ? raw : `${raw}/`;
+})();
+
 export default defineConfig({
+  base: basePath,
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: { "@": path.resolve(path.dirname(fileURLToPath(import.meta.url)), "src") },

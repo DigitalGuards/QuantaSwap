@@ -124,6 +124,28 @@ export interface ManagedOrder {
    *  after the preimage went public; null on older records. */
   sponsorSentAt: number | null;
   refundSentAt: number | null;
+  /** Last attempt to collect our own deferred payout on this swap, when a
+   *  settlement could not deliver and credited us; null on older records. */
+  withdrawSentAt: number | null;
+  /** Last attempt to push the taker's deferred payout to the taker after a
+   *  sponsored claim credited them; null on older records. */
+  pushSentAt: number | null;
+  /** How many times each credit move was REJECTED BY THE CONTRACT: a mined
+   *  revert, or an estimate that reverted with contract error data. A token
+   *  that refuses to pay anyone cannot be made to, so an uncapped retry would
+   *  pin this order open forever and hold a listing slot with it. Network
+   *  faults, node restarts and confirmation timeouts are not counted: they say
+   *  nothing about whether the credit can move, and burning the cap on them
+   *  would park a perfectly collectible payout. Older records default to
+   *  zero. */
+  withdrawAttempts?: number;
+  pushAttempts?: number;
+  /** When the contract first rejected each move, so parking can also require
+   *  a wall-clock floor: a cluster of rejections inside a few minutes is a
+   *  chain condition that may pass, and giving up on it would strand a credit
+   *  that a later block would have paid. */
+  withdrawFirstRejectedAt?: number | null;
+  pushFirstRejectedAt?: number | null;
   createdAt: number;
 }
 
@@ -136,6 +158,8 @@ export type Decision =
   | "claim" // taker's lock verified at depth: claim it (reveals secret)
   | "sponsor" // secret public: claim our lock for the taker, paying the gas
   | "refund" // our lock is open past its timeout
+  | "withdraw" // a settlement could not deliver and credited us: collect it
+  | "push" // a sponsored claim credited the taker: deliver it to them
   | "finish" // both sides settled; stop tracking
   | "abort"; // order evaporated before any funds moved; forget it
 
@@ -176,6 +200,18 @@ export interface DecideInput {
   /** Skip sponsoring this close to the lock's timeout. Must cover a full
    *  transaction wait, since claim() reverts at the timeout. */
   sponsorMarginS: number;
+  /** Our own undelivered payout on the responder leg, left by a claim of the
+   *  taker's escrow whose delivery failed. HTLCv3 leaves one behind whenever
+   *  a settlement cannot hand the funds over; null on RPC failure, which
+   *  decides nothing. */
+  ourResponderCredit: bigint | null;
+  /** Our own undelivered payout on the leg we funded, left by a refund or a
+   *  release whose delivery failed. This is HTLCv2's stranded-refund case
+   *  for a blocklisted initiator, now conserved as a credit. */
+  ourInitiatorCredit: bigint | null;
+  /** The taker's undelivered payout on the leg we funded, left by a claim
+   *  (ours or theirs) whose delivery failed; null on RPC failure. */
+  takerCredit: bigint | null;
 }
 
 const retryOk = (
@@ -323,12 +359,77 @@ export function decide(x: DecideInput): Decision {
     return "refund";
   }
 
+  // HTLCv3 payout credits. A settlement whose delivery failed is still
+  // terminal: the amount is held as a credit owned by the payee, so it has
+  // to be collected before this order is retired, or the record that names
+  // the swap is gone while value is still in the contract. Ours is revenue
+  // we withdraw to ourselves. The taker's, on the leg we funded, is finished
+  // with pushCredit, which is permissionless, takes no destination, and can
+  // only pay the taker: it is the credit-path half of a sponsored claim, and
+  // it is what keeps a taker with no gas on the paying chain from sitting
+  // behind a deferred payout. Ours can sit on either leg: a claim of the
+  // taker's escrow credits us on the responder leg, and a refund or release
+  // of our own credits us on the leg we funded, which is HTLCv2's
+  // stranded-refund case for a blocklisted initiator. Both are irreversible
+  // sends, so both carry a persisted marker and the retry spacing of claim
+  // and refund.
+  if (
+    ((x.ourResponderCredit ?? 0n) > 0n || (x.ourInitiatorCredit ?? 0n) > 0n) &&
+    !withdrawParked(managed, nowS) &&
+    retryOk(
+      managed.withdrawSentAt,
+      nowS,
+      creditRetryAfterS(managed.withdrawAttempts ?? 0, x.resendAfterS),
+    )
+  ) {
+    return "withdraw";
+  }
+
+  // A taker credit is only ours to finish when it sits on the exact lock we
+  // funded for this taker and this operator sponsors claims. The hashlock is
+  // public before we lock, so a third party could hold the record on our
+  // initiator chain; a credit there belongs to their swap.
+  const pushableTakerCredit =
+    x.sponsorClaims &&
+    x.takerOnInitiatorLeg !== null &&
+    x.iState.status === SwapStatus.Claimed &&
+    sameAddr(x.iState.initiator, x.ourInitiator) &&
+    sameAddr(x.iState.recipient, x.takerOnInitiatorLeg);
+
+  if (
+    pushableTakerCredit &&
+    x.takerCredit !== null &&
+    x.takerCredit > 0n &&
+    !pushParked(managed, nowS) &&
+    retryOk(
+      managed.pushSentAt,
+      nowS,
+      creditRetryAfterS(managed.pushAttempts ?? 0, x.resendAfterS),
+    )
+  ) {
+    return "push";
+  }
+
   // Settled: our leg terminal and the responder leg terminal or never
-  // touched past its window.
+  // touched past its window. A credit outstanding on either side reaches
+  // the branches above first, so finishing means nothing is left to collect.
   const rSettled =
     terminal(x.rState) ||
     (x.rState !== null && x.rState.status === SwapStatus.None && nowS >= t2);
-  if (terminal(x.iState) && rSettled) return "finish";
+  // Retiring the record deletes the only local handle on this swap, so it
+  // waits until every credit this maker is responsible for is provably
+  // gone. A read that failed is not a zero balance, and a credit inside its
+  // retry spacing is still outstanding: both fail closed here.
+  // A parked credit no longer holds the record: the attempts are spent, the
+  // value is conserved on chain, and the health snapshot reports it. Holding
+  // the order open instead would keep a listing slot hostage to a token that
+  // will never pay, which is a denial of service a taker can trigger by
+  // locking to a recipient no payout can reach.
+  const creditsSettled =
+    (withdrawParked(managed, nowS) ||
+      (x.ourResponderCredit === 0n && x.ourInitiatorCredit === 0n)) &&
+    (!pushableTakerCredit || pushParked(managed, nowS) || x.takerCredit === 0n);
+  if (terminal(x.iState) && rSettled && creditsSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
   if (
@@ -404,6 +505,47 @@ export interface RefillInput {
 /** Repost only while under the listing target (rungs times listings per
  *  rung), under the in-flight exposure cap, holding inventory beyond the
  *  reserve, and holding native gas headroom on the ETH leg. */
+/**
+ * Contract rejections allowed per credit before the maker stops trying. Only
+ * a rejection by the contract counts, so this measures "this credit cannot
+ * move". A network fault says nothing about the call.
+ */
+export const MAX_CREDIT_ATTEMPTS = 5;
+
+/**
+ * A credit is parked only when the contract has refused it this many times AND
+ * a full day has passed since the first refusal. Both halves are needed: the
+ * count alone parks a credit that five bad minutes could produce, and the clock
+ * alone parks one whose single early failure never repeated. Until both hold,
+ * the order stays and the retries continue.
+ */
+export const CREDIT_PARK_AFTER_S = 24 * 60 * 60;
+
+/** Spacing between attempts, doubling per rejection from the ordinary resend
+ *  interval, capped so a parked-in-waiting credit is still retried hourly. */
+export const CREDIT_RETRY_CAP_S = 60 * 60;
+
+export function creditRetryAfterS(rejections: number, resendAfterS: number): number {
+  const scaled = resendAfterS * 2 ** Math.max(0, rejections);
+  return Math.min(scaled, CREDIT_RETRY_CAP_S);
+}
+
+const parked = (
+  rejections: number | undefined,
+  firstRejectedAt: number | null | undefined,
+  nowS: number,
+): boolean =>
+  (rejections ?? 0) >= MAX_CREDIT_ATTEMPTS &&
+  firstRejectedAt !== null &&
+  firstRejectedAt !== undefined &&
+  nowS - firstRejectedAt >= CREDIT_PARK_AFTER_S;
+
+export const withdrawParked = (managed: ManagedOrder, nowS: number): boolean =>
+  parked(managed.withdrawAttempts, managed.withdrawFirstRejectedAt, nowS);
+
+export const pushParked = (managed: ManagedOrder, nowS: number): boolean =>
+  parked(managed.pushAttempts, managed.pushFirstRejectedAt, nowS);
+
 /** Inventory or gas below what the next listing needs. */
 export function fundsShort(x: RefillInput): boolean {
   return (

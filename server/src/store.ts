@@ -478,6 +478,12 @@ function signedCreateCapabilities(
   return { makerToken, shareToken };
 }
 
+/** One awaited durability promise from a group commit. */
+interface CommitWaiter {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
 export class OrderStorePersistenceError extends Error {
   override name = "OrderStorePersistenceError";
 }
@@ -1122,14 +1128,56 @@ export class OrderStore {
   private intentAdmissions = new Map<string, number[]>();
   private admissionsPrunedAt = 0;
   private listeners: Array<() => void> = [];
-  private federationListeners: Array<(event: FederationEvent) => void> = [];
+  private federationListeners: Array<
+    (events: readonly FederationEvent[]) => void
+  > = [];
   private readonly presenceTtlS: number;
+  /**
+   * Ownership gate for every rewrite of the orders file. The single-writer
+   * lease passes its assertOwned here, so a book displaced by another process
+   * stops writing the file the new holder now owns.
+   */
+  private readonly assertOwned: () => void;
+  /**
+   * Reported when a commit that nobody awaited fails, which is the expiry
+   * sweep on a read path. A request-driven commit reaches its caller through
+   * the rejected flush promise as well.
+   */
+  private readonly onPersistenceFailure: (error: unknown) => void;
+  // --- group commit ------------------------------------------------------
+  // A mutation changes memory, marks the store dirty and returns. One commit
+  // at a time serialises the whole map, rewrites the file, fsyncs it and hands
+  // the batch's public events to the feed, so every mutation that reached this
+  // point inside one event-loop turn shares a single durability barrier.
+  /** In-memory state has moved past the last committed snapshot. */
+  private dirty = false;
+  /** A commit is scheduled or running, so no second loop may be started. */
+  private committing = false;
+  /** Public events of the mutations not yet carried into the feed. */
+  private pendingFederationEvents: FederationEvent[] = [];
+  /** Waiters whose state no snapshot covers yet. */
+  private nextCommitWaiters: CommitWaiter[] = [];
+  /** Waiters covered by the snapshot the running commit is writing. */
+  private runningCommitWaiters: CommitWaiter[] = [];
+  /**
+   * First commit failure, kept forever. Memory moved past the file and this
+   * process does not roll it back, so every later durability request is
+   * refused with the same error and no further write is attempted. The book
+   * stops on this signal and its restart reloads the file.
+   */
+  private commitFailure: unknown = null;
 
   constructor(
     private readonly dataFile: string,
-    opts: { presenceTtlS?: number } = {},
+    opts: {
+      presenceTtlS?: number;
+      assertOwned?: () => void;
+      onPersistenceFailure?: (error: unknown) => void;
+    } = {},
   ) {
     this.presenceTtlS = opts.presenceTtlS ?? DEFAULT_PRESENCE_TTL_S;
+    this.assertOwned = opts.assertOwned ?? ((): void => {});
+    this.onPersistenceFailure = opts.onPersistenceFailure ?? ((): void => {});
     this.prepareStorage();
     this.load();
     this.seedIntentAdmissions();
@@ -1182,23 +1230,149 @@ export class OrderStore {
     }
   }
 
-  /** Fires after every observable change (mutation persisted, or a maker
-   *  coming back online). The server uses it to push the book to
-   *  streaming clients. */
+  /** Fires after every observable change (a group commit reached the file, or
+   *  a maker came back online). The server uses it to push the book to
+   *  streaming clients. A listener runs inside the commit loop, so it should
+   *  not throw and should not block; one that throws is logged and the commit
+   *  continues. */
   subscribe(fn: () => void): void {
     this.listeners.push(fn);
   }
 
-  subscribeFederation(fn: (event: FederationEvent) => void): void {
+  /**
+   * Receives one group commit's public events, in mutation order, after the
+   * orders file is durable and before the commit is reported as durable. A
+   * listener that throws fails the commit, so the batch's callers are refused
+   * and none is told its mutation reached the feed.
+   */
+  subscribeFederation(fn: (events: readonly FederationEvent[]) => void): void {
     this.federationListeners.push(fn);
   }
 
   private notify(): void {
-    for (const fn of this.listeners) fn();
+    for (const fn of this.listeners) {
+      try {
+        fn();
+      } catch (error) {
+        // An observer runs inside the commit loop, where there is no request
+        // left to answer with its failure. Swallowing it keeps the commit's
+        // waiters from being stranded and the in-flight slots they hold from
+        // leaking, and the line says what happened.
+        console.error(
+          "[orderbook] an order-store change observer threw:",
+          error,
+        );
+      }
+    }
   }
 
+  /** Buffers a public event for the commit that makes its mutation durable. */
   private publish(event: FederationEvent): void {
-    for (const listener of this.federationListeners) listener(event);
+    this.pendingFederationEvents.push(event);
+  }
+
+  /**
+   * Resolves once every mutation applied before this call is durable, and
+   * rejects with the persistence or ownership failure that stopped the commit.
+   * A request handler awaits this before it reports success.
+   */
+  flush(): Promise<void> {
+    if (this.commitFailure !== null) return Promise.reject(this.commitFailure);
+    if (this.dirty) {
+      if (!this.committing) this.startCommitLoop();
+      return this.waitFor(this.nextCommitWaiters);
+    }
+    // Nothing changed since the running commit took its snapshot, so that
+    // snapshot already covers this caller's state.
+    if (this.committing) return this.waitFor(this.runningCommitWaiters);
+    return Promise.resolve();
+  }
+
+  /**
+   * True whenever memory may be ahead of the file: a commit is scheduled or
+   * running, or one failed, which leaves memory permanently ahead. An exit
+   * handler uses this to decide whether a digest may describe this state.
+   */
+  hasUncommittedState(): boolean {
+    return this.dirty || this.committing || this.commitFailure !== null;
+  }
+
+  private waitFor(waiters: CommitWaiter[]): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      waiters.push({ resolve, reject });
+    });
+  }
+
+  /**
+   * Marks the store dirty and schedules the commit that makes it durable.
+   * Deferred to the end of the current event-loop turn on purpose: every
+   * mutation that completes in this turn joins one rewrite and one fsync, so a
+   * burst of takers pays one durability barrier between them. Batch latency is
+   * bounded by that one turn plus, for a mutation that arrives while a commit
+   * runs, the commit already in progress.
+   */
+  private persist(): void {
+    this.dirty = true;
+    if (this.committing || this.commitFailure !== null) return;
+    this.startCommitLoop();
+  }
+
+  private startCommitLoop(): void {
+    this.committing = true;
+    setImmediate(() => {
+      this.runCommits();
+    });
+  }
+
+  private runCommits(): void {
+    try {
+      while (this.dirty && this.commitFailure === null) {
+        this.dirty = false;
+        this.runningCommitWaiters = this.nextCommitWaiters;
+        this.nextCommitWaiters = [];
+        const events = this.pendingFederationEvents;
+        this.pendingFederationEvents = [];
+        try {
+          this.writeSnapshot();
+          // After the orders file, so a crash between the two leaves the feed
+          // short of an accepted mutation and the next start reconciles it.
+          // Before the callers are told success, so no client ever holds a
+          // receipt for a mutation the feed never saw.
+          if (events.length > 0) {
+            for (const listener of this.federationListeners) listener(events);
+          }
+        } catch (error) {
+          this.failCommit(error);
+          return;
+        }
+        // Observers run before the waiters are settled, so a flush requested
+        // from one of them lands in this batch's list and is settled below.
+        // Nothing else can run here: a commit is synchronous from the snapshot
+        // to this point.
+        this.notify();
+        const settled = this.runningCommitWaiters;
+        this.runningCommitWaiters = [];
+        for (const waiter of settled) waiter.resolve();
+      }
+    } finally {
+      this.committing = false;
+    }
+  }
+
+  /**
+   * Refuses the failed batch and every later durability request. Memory is
+   * past the file and stays there, so the callers of this batch and of the
+   * batch queued behind it are all refused, and the owner of the store stops
+   * the process on the reported failure.
+   */
+  private failCommit(error: unknown): void {
+    this.commitFailure = error;
+    const refused = [...this.runningCommitWaiters, ...this.nextCommitWaiters];
+    this.runningCommitWaiters = [];
+    this.nextCommitWaiters = [];
+    this.pendingFederationEvents = [];
+    for (const waiter of refused) waiter.reject(error);
+    this.onPersistenceFailure(error);
   }
 
   private prepareStorage(): void {
@@ -1308,7 +1482,11 @@ export class OrderStore {
     }
   }
 
-  private persist(): void {
+  private writeSnapshot(): void {
+    // The only path that rewrites the orders file, so one check here blocks
+    // every write a displaced process could still attempt. It throws before
+    // the file is touched, so a refused write leaves the file byte-identical.
+    this.assertOwned();
     const directory = dirname(this.dataFile);
     const suffix = randomBytes(8).toString("hex");
     const tmp = join(directory, `.orders.${process.pid}.${suffix}.tmp`);
@@ -1349,7 +1527,6 @@ export class OrderStore {
         "order data could not be persisted safely",
       );
     }
-    this.notify();
   }
 
   private isSeen(order: Order, now: number): boolean {
@@ -1956,20 +2133,24 @@ export class OrderStore {
     shareToken?: unknown,
   ): PublicFillIntentV1 {
     this.sweep();
+    // Everything up to the verification below is answered from the stored
+    // order and the caller's address, so each refusal is marked as reached
+    // before any signature work.
     const order = this.orders.get(id);
-    if (!order) throw new ApiError(404, "order not found");
+    if (!order) throw new ApiError(404, "order not found").shed();
     if (
       order.visibility === "private" &&
       !this.shareAuthorized(order, shareToken)
     ) {
-      throw new ApiError(404, "order not found");
+      throw new ApiError(404, "order not found").shed();
     }
     if (order.makerAuth === undefined) {
-      throw new ApiError(409, "legacy orders use the accept endpoint");
+      throw new ApiError(409, "legacy orders use the accept endpoint").shed();
     }
     if (!usesPortableTerminalProtocol(order)) {
-      throw new ApiError(409, "legacy orders use the accept endpoint");
+      throw new ApiError(409, "legacy orders use the accept endpoint").shed();
     }
+    this.shedFillIntent(order, rawAuth, takerIp);
     const verifiedOrder = verifiedSignedOrder(order);
     const verified = verifyFillIntentV1(rawIntent, rawAuth, verifiedOrder);
     const replay = (order.fillIntents ?? []).find(
@@ -2000,6 +2181,103 @@ export class OrderStore {
       );
     }
     return this.storeFillIntent(order, verified, takerIp, false);
+  }
+
+  /**
+   * The refusals a direct proposal can earn from the order row, the clock and
+   * the caller's address alone, answered before ML-DSA-87 verification.
+   * Verification plus parsing a 15 KB signed body costs about 6 ms, and an
+   * order whose eight slots are already taken holds them for the full signed
+   * proposal lifetime, so proving signatures it must refuse anyway burned a
+   * core under load. Every refusal below reads state the request cannot
+   * influence and repeats a check that still runs after verification, so the
+   * admission policy is unchanged and no number moved.
+   *
+   * Nothing that depends on the signed content belongs here. The one pending
+   * proposal per taker QRL account in particular keys on the signed identity,
+   * and moving it in front of verification would let an unsigned body claim
+   * another taker's account and lock it out of the order.
+   *
+   * A request whose `auth.nonce` matches a proposal this order already retains
+   * skips the gate. That is exactly the set whose correct answer comes from
+   * post-verification logic: the idempotent replay of an admitted proposal, or
+   * the nonce conflict. Claiming a nonce grants nothing and costs the same
+   * verification this route always ran, and the per-source mutation limiter
+   * still bounds how often one source can ask for it.
+   */
+  private shedFillIntent(
+    order: Order,
+    rawAuth: unknown,
+    takerIp: string,
+  ): void {
+    const intents = order.fillIntents ?? [];
+    const claimedNonce =
+      typeof rawAuth === "object" && rawAuth !== null && !Array.isArray(rawAuth)
+        ? (rawAuth as Record<string, unknown>)["nonce"]
+        : undefined;
+    if (
+      typeof claimedNonce === "string" &&
+      intents.some((intent) => intent.auth.nonce === claimedNonce)
+    ) {
+      return;
+    }
+    const now = nowS();
+    if (order.status !== "open" || order.equivocated === true) {
+      throw new ApiError(409, "order is no longer open").shed();
+    }
+    if (!this.hasRunway(order, now)) {
+      throw new ApiError(
+        409,
+        "this pre-funded order has too little time left to swap safely",
+      ).shed();
+    }
+    // A direct proposal is verified without the expired allowance, so an
+    // admissible one is always live and always counts against this ceiling.
+    if (this.liveIntentCount(intents, now) >= MAX_FILL_INTENTS_PER_ORDER) {
+      throw new ApiError(
+        429,
+        "this order already has too many pending fill intents",
+        "transient_capacity",
+      ).shed();
+    }
+    const ipHash = sha256Hex(takerIp);
+    if (
+      this.sourceLiveIntentCount(ipHash, now) >= MAX_CONCURRENT_TAKES_PER_IP
+    ) {
+      throw new ApiError(
+        429,
+        "you already have fill requests in progress; finish or let them expire",
+      ).shed();
+    }
+    if (
+      this.recentIntentAdmissions(ipHash, now).length >=
+      MAX_TAKES_PER_IP_PER_DAY
+    ) {
+      throw new ApiError(
+        429,
+        "daily fill intent limit reached; leave some liquidity for others",
+      ).shed();
+    }
+  }
+
+  private liveIntentCount(
+    intents: readonly StoredFillIntentV1[],
+    now: number,
+  ): number {
+    return intents.filter((intent) => isLiveIntent(intent, now)).length;
+  }
+
+  /** Live proposals this source holds across the whole book. */
+  private sourceLiveIntentCount(ipHash: string, now: number): number {
+    let count = 0;
+    for (const candidate of this.orders.values()) {
+      for (const intent of candidate.fillIntents ?? []) {
+        if (intent.acceptorIpHash === ipHash && isLiveIntent(intent, now)) {
+          count += 1;
+        }
+      }
+    }
+    return count;
   }
 
   importFillIntent(
@@ -2079,8 +2357,7 @@ export class OrderStore {
     const incomingLive = verified.auth.expiresAt > now;
     if (
       incomingLive &&
-      intents.filter((intent) => isLiveIntent(intent, now)).length >=
-        MAX_FILL_INTENTS_PER_ORDER
+      this.liveIntentCount(intents, now) >= MAX_FILL_INTENTS_PER_ORDER
     ) {
       throw new ApiError(
         429,
@@ -2108,16 +2385,9 @@ export class OrderStore {
       }
       // Released proposals keep their slot until signed expiry, so one
       // source cannot cycle post-and-release to fill an order alone.
-      const activeIntentCount = [...this.orders.values()].reduce(
-        (count, candidate) =>
-          count +
-          (candidate.fillIntents ?? []).filter(
-            (intent) =>
-              intent.acceptorIpHash === ipHash && isLiveIntent(intent, now),
-          ).length,
-        0,
-      );
-      if (activeIntentCount >= MAX_CONCURRENT_TAKES_PER_IP) {
+      if (
+        this.sourceLiveIntentCount(ipHash, now) >= MAX_CONCURRENT_TAKES_PER_IP
+      ) {
         throw new ApiError(
           429,
           "you already have fill requests in progress; finish or let them expire",
@@ -2471,8 +2741,14 @@ export class OrderStore {
     return this.pub(order);
   }
 
-  federationSnapshot(): FederationEvent[] {
-    this.sweep();
+  /**
+   * Every live public proof, for feed reconciliation and reset snapshots.
+   * `sweep: false` skips the expiry pass, so the call cannot rewrite the
+   * orders file. Read paths use it; a stale row is bounded by the caller's own
+   * retention and by the next sweep a mutation performs.
+   */
+  federationSnapshot(opts: { sweep?: boolean } = {}): FederationEvent[] {
+    if (opts.sweep !== false) this.sweep();
     const now = nowS();
     const events: FederationEvent[] = [];
     const orders = [...this.orders.values()]
@@ -2833,6 +3109,26 @@ export class OrderStore {
       );
     }
     return this.commitTake(best, body, takerIp);
+  }
+
+  /**
+   * Whether this raw token is the maker capability of that order, answered
+   * without changing anything and without throwing. The admission gate uses it
+   * to decide whether a request may use the headroom reserved for maker
+   * traffic, so it has to be cheap and it has to say no for an unknown order,
+   * a malformed token and a mismatch alike. The comparison is the same
+   * fixed-time one the authorising paths use.
+   */
+  matchesMakerCapability(id: string, token: unknown): boolean {
+    const order = this.orders.get(id);
+    if (order === undefined) return false;
+    return order.makerAuth === undefined
+      ? legacyTokenMatches(order.makerTokenHash, token)
+      : capabilityMatches(
+          order.makerTokenHash,
+          token,
+          computeMakerTokenCommitment,
+        );
   }
 
   private authorized(order: Order, body: Record<string, unknown>): void {

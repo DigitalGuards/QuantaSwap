@@ -13,8 +13,13 @@ import {
 } from "./htlc.js";
 import {
   canContinueWithoutBook,
+  CREDIT_PARK_AFTER_S,
+  MAX_CREDIT_ATTEMPTS,
+  creditRetryAfterS,
   decide,
   earliestValidFillIntent,
+  pushParked,
+  withdrawParked,
   fundsShort,
   inventoryShort,
   levelQuote,
@@ -60,6 +65,8 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     claimSentAt: null,
     sponsorSentAt: null,
     refundSentAt: null,
+    withdrawSentAt: null,
+    pushSentAt: null,
     createdAt: NOW - 120,
     ...overrides,
   };
@@ -114,6 +121,11 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     ourInitiator: TAKER_ETH,
     takerOnInitiatorLeg: `0x${MY_QRL.slice(1)}`,
     sponsorMarginS: 240,
+    // Delivered payouts, which is the normal case: HTLCv3 only leaves a
+    // credit when a settlement could not hand over the funds.
+    ourResponderCredit: 0n,
+    ourInitiatorCredit: 0n,
+    takerCredit: 0n,
     ...overrides,
   };
 }
@@ -580,6 +592,260 @@ describe("refund and settlement", () => {
       nowS: T1 + 100,
     });
     assert.equal(decide(x), "finish");
+  });
+
+  it("collects a credited refund on the leg we funded", () => {
+    // HTLCv2 stranded a refund whose delivery failed; HTLCv3 conserves it as
+    // a credit owed to the initiator on that same leg.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Refunded),
+          rState: leg(SwapStatus.None),
+          ourInitiatorCredit: AMOUNT,
+          nowS: T1 + 100,
+        }),
+      ),
+      "withdraw",
+    );
+  });
+
+  it("collects our own deferred payout before retiring the record", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    // HTLCv3 reports Claimed whether the payout was delivered or credited,
+    // so the credit read is the only signal. Retiring the record first would
+    // delete the local handle on value still in the contract.
+    assert.equal(decide(input({ ...settled, ourResponderCredit: AMOUNT })), "withdraw");
+    assert.equal(decide(input({ ...settled, ourResponderCredit: 0n })), "finish");
+  });
+
+  it("spaces withdrawal retries like every other irreversible send", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 100,
+    };
+    const justSent = managed({ withdrawSentAt: T1 + 100 });
+    assert.equal(decide(input({ ...settled, managed: justSent })), "wait");
+    assert.equal(
+      decide(input({ ...settled, managed: justSent, nowS: T1 + 100 + 241 })),
+      "withdraw",
+    );
+  });
+
+  it("pushes a credited taker payout on the leg we funded", () => {
+    const sponsored = {
+      iState: leg(SwapStatus.Claimed, {
+        initiator: TAKER_ETH,
+        recipient: `0x${MY_QRL.slice(1)}`,
+      }),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    // pushCredit is permissionless and takes no destination, so the only
+    // address it can pay is the taker: it finishes the sponsored claim
+    // without gaining any redirect authority.
+    assert.equal(decide(input({ ...sponsored, takerCredit: AMOUNT })), "push");
+    // Off under the operator's sponsor policy, exactly like the claim half.
+    assert.equal(
+      decide(input({ ...sponsored, takerCredit: AMOUNT, sponsorClaims: false })),
+      "finish",
+    );
+  });
+
+  it("never pushes a credit from a lock that is not the one we funded", () => {
+    const foreign = {
+      iState: leg(SwapStatus.Claimed, {
+        initiator: SCAM_TOKEN,
+        recipient: `0x${MY_QRL.slice(1)}`,
+      }),
+      rState: leg(SwapStatus.Claimed),
+      takerCredit: AMOUNT,
+      nowS: T1 + 100,
+    };
+    assert.equal(decide(input(foreign)), "finish");
+  });
+
+  it("collects our own credit before pushing the taker's", () => {
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Claimed),
+          rState: leg(SwapStatus.Claimed),
+          ourResponderCredit: AMOUNT,
+          takerCredit: AMOUNT,
+          nowS: T1 + 100,
+        }),
+      ),
+      "withdraw",
+    );
+  });
+
+  it("stops after the attempt cap and lets the order retire", () => {
+    // A taker can lock to a recipient no payout can reach, and pushCredit to
+    // it reverts forever. Without a cap that order holds a listing slot for
+    // good, which is a denial of service the taker chooses.
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const spent = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+      withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      withdrawSentAt: null,
+    });
+    assert.equal(withdrawParked(spent, T1 + 10_000), true);
+    assert.equal(decide(input({ ...settled, managed: spent })), "finish");
+    // One attempt short, it still tries.
+    const nearly = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS - 1,
+      withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      withdrawSentAt: null,
+    });
+    assert.equal(decide(input({ ...settled, managed: nearly })), "withdraw");
+  });
+
+  it("stops pushing a taker credit after the cap and still finishes", () => {
+    const sponsored = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      takerCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const spent = managed({
+      pushAttempts: MAX_CREDIT_ATTEMPTS,
+      pushFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      pushSentAt: null,
+    });
+    assert.equal(pushParked(spent, T1 + 10_000), true);
+    assert.equal(decide(input({ ...sponsored, managed: spent })), "finish");
+    assert.equal(
+      decide(
+        input({
+          ...sponsored,
+          managed: managed({
+            pushAttempts: MAX_CREDIT_ATTEMPTS - 1,
+            pushFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+            pushSentAt: null,
+          }),
+        }),
+      ),
+      "push",
+    );
+  });
+
+  it("needs both the rejection count and a day before parking", () => {
+    // Five rejections inside a few minutes is a chain condition that may
+    // pass. Giving up there would strand money a later block would have paid.
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const fresh = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+      withdrawFirstRejectedAt: T1 + 10_000 - 600,
+      withdrawSentAt: null,
+    });
+    assert.equal(withdrawParked(fresh, T1 + 10_000), false);
+    assert.equal(decide(input({ ...settled, managed: fresh })), "withdraw");
+    // A day later, with the same rejections behind it, it parks.
+    assert.equal(withdrawParked(fresh, T1 + 10_000 + CREDIT_PARK_AFTER_S), true);
+  });
+
+  it("never parks on a record the contract has not rejected", () => {
+    // Transient faults leave the counters alone, so a credit that has only
+    // ever failed to reach the chain is retried forever, which is correct:
+    // nothing has said it cannot move.
+    const never = managed({ withdrawAttempts: 0, withdrawFirstRejectedAt: null });
+    assert.equal(withdrawParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
+    assert.equal(pushParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
+  });
+
+  it("spaces credit retries wider with each contract rejection", () => {
+    // Doubling from the ordinary resend interval, capped so a credit waiting
+    // out its day is still retried hourly.
+    assert.equal(creditRetryAfterS(0, 240), 240);
+    assert.equal(creditRetryAfterS(1, 240), 480);
+    assert.equal(creditRetryAfterS(4, 240), 3600);
+    assert.equal(creditRetryAfterS(40, 240), 3600);
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    // Two rejections in: the ordinary 240 s interval is no longer enough.
+    const spaced = managed({
+      withdrawAttempts: 2,
+      withdrawFirstRejectedAt: T1,
+      withdrawSentAt: T1 + 10_000 - 300,
+    });
+    assert.equal(decide(input({ ...settled, managed: spaced })), "wait");
+    assert.equal(
+      decide(input({ ...settled, managed: spaced, nowS: T1 + 10_000 + 1200 })),
+      "withdraw",
+    );
+  });
+
+  it("a spent withdraw cap does not excuse an unpushed taker credit", () => {
+    // The two caps are independent: parking one must not retire a record the
+    // other is still working on.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Claimed),
+          rState: leg(SwapStatus.Claimed),
+          ourResponderCredit: AMOUNT,
+          takerCredit: AMOUNT,
+          managed: managed({
+            withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+            withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+          }),
+          nowS: T1 + 10_000,
+        }),
+      ),
+      "push",
+    );
+  });
+
+  it("refuses to retire a record while a credit read is unknown", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    assert.equal(decide(input({ ...settled, ourResponderCredit: null })), "wait");
+    assert.equal(decide(input({ ...settled, takerCredit: null })), "wait");
+    // With sponsorship off the taker credit is not ours to act on, so an
+    // unreadable one does not hold the record open.
+    assert.equal(
+      decide(input({ ...settled, takerCredit: null, sponsorClaims: false })),
+      "finish",
+    );
+  });
+
+  it("refunds a live leg before collecting a credit on the other one", () => {
+    // The refund window closes; a credit never expires.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Open),
+          rState: leg(SwapStatus.Claimed),
+          ourResponderCredit: AMOUNT,
+          nowS: T1,
+        }),
+      ),
+      "refund",
+    );
   });
 
   it("settles a refunded swap the taker never joined", () => {

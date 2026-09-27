@@ -5,7 +5,7 @@
 import { Interface } from "ethers";
 import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
 import { formatQrlAddressFingerprint, isQrlAddress, qToHex } from "./qrlAddress";
-import { decodeQrvmSwap, encodeQrvmHtlc } from "./qrvmHtlc";
+import { decodeQrvmSwap, decodeQrvmUints, encodeQrvmHtlc } from "./qrvmHtlc";
 import { assertQrlNetwork } from "./qrlNetwork";
 import {
   assertQip55ReadReady,
@@ -27,11 +27,40 @@ export const HTLC_ABI = [
   "function claim(bytes32 hashlock, bytes32 preimage)",
   "function refund(bytes32 hashlock)",
   "function getSwap(bytes32 hashlock) view returns (tuple(address initiator, address recipient, address token, uint256 amount, uint256 timeout, uint8 status, bytes32 preimage))",
+  // HTLCv3 payout credits. A settlement whose delivery fails is still
+  // terminal: the amount becomes a credit owned by the payee, which only
+  // that payee can redirect (withdraw/withdrawAll) and which anyone can
+  // deliver to the payee itself (pushCredit).
+  "function withdraw(address token, address to, uint256 amount)",
+  "function withdrawAll(address token, address to)",
+  "function pushCredit(address token, address account)",
+  "function creditOf(address token, address account) view returns (uint256)",
+  "function outstandingCredit(address token) view returns (uint256)",
+  "function deliveryGasPolicy() view returns (uint256 gasLimit, uint256 gasReserve)",
   "event Locked(bytes32 indexed hashlock, address indexed initiator, address indexed recipient, address token, uint256 amount, uint256 timeout)",
   "event Assigned(bytes32 indexed hashlock, address indexed recipient)",
   "event Claimed(bytes32 indexed hashlock, bytes32 preimage, address caller)",
   "event Refunded(bytes32 indexed hashlock)",
+  "event PayoutCredited(address indexed token, address indexed account, bytes32 indexed hashlock, uint256 amount)",
+  "event PayoutWithdrawn(address indexed token, address indexed account, address to, uint256 amount)",
 ];
+
+/** The HTLCv3 delivery budget and credit reserve, mirrored from
+ *  contracts/hyperion/HTLCv3.hyp and published on chain by
+ *  deliveryGasPolicy(). */
+export const DELIVERY_GAS_LIMIT = 100_000n;
+export const DELIVERY_GAS_RESERVE = 150_000n;
+
+/** The settlement gas rule from docs/audit/HTLCV3_SCOPE.md (A1, A2): send
+ *  claim, refund and release with `estimateGas + DELIVERY_GAS_LIMIT +
+ *  DELIVERY_GAS_RESERVE`. Gas estimation minimises gas and the credit path
+ *  is cheaper than a real transfer, so a bare estimate defers a payout that
+ *  would have gone straight through. Unused gas is refunded, so the buffer
+ *  costs only transaction-limit headroom. */
+export const SETTLEMENT_GAS_BUFFER = DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE;
+
+export const settlementGasLimit = (estimate: bigint): bigint =>
+  estimate + SETTLEMENT_GAS_BUFFER;
 
 export const htlcInterface = new Interface(HTLC_ABI);
 
@@ -127,6 +156,94 @@ export async function getLegState(
     preimage: swap.preimage,
   };
 }
+
+/** Undelivered payout owned by `account` in `token` on this leg. Zero for
+ *  every swap whose payout was delivered, which is the normal case. */
+export async function getCredit(leg: LegKey, token: string, account: string): Promise<bigint> {
+  if (leg === "qrl") {
+    assertQip55ReadReady(QRL_LEG.htlc);
+    const raw = await qrlRpc("qrl_call", [
+      { to: QRL_LEG.htlc, data: encodeQrvmHtlc("creditOf", [token, account]) },
+      "latest",
+    ]);
+    return decodeQrvmUints(raw, 1)[0] ?? 0n;
+  }
+  const data = htlcInterface.encodeFunctionData("creditOf", [token, qToHex(account)]);
+  const raw = (await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"])) as string;
+  const [value] = htlcInterface.decodeFunctionResult("creditOf", raw) as unknown as [bigint];
+  return value;
+}
+
+export interface DeliveryGasPolicy {
+  gasLimit: bigint;
+  gasReserve: bigint;
+}
+
+/** The deployed contract's own delivery budget and credit reserve. Only
+ *  HTLCv3 answers this call, so a successful read is also proof that the
+ *  configured address is the interface this build settles against. */
+export async function getDeliveryGasPolicy(leg: LegKey): Promise<DeliveryGasPolicy> {
+  if (leg === "qrl") {
+    assertQip55ReadReady(QRL_LEG.htlc);
+    const raw = await qrlRpc("qrl_call", [
+      { to: QRL_LEG.htlc, data: encodeQrvmHtlc("deliveryGasPolicy", []) },
+      "latest",
+    ]);
+    const [gasLimit, gasReserve] = decodeQrvmUints(raw, 2);
+    return { gasLimit: gasLimit ?? 0n, gasReserve: gasReserve ?? 0n };
+  }
+  const data = htlcInterface.encodeFunctionData("deliveryGasPolicy", []);
+  const raw = (await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"])) as string;
+  const [gasLimit, gasReserve] = htlcInterface.decodeFunctionResult(
+    "deliveryGasPolicy",
+    raw,
+  ) as unknown as [bigint, bigint];
+  return { gasLimit, gasReserve };
+}
+
+const policyChecked = new Map<LegKey, Promise<void>>();
+const policyUnverified = new Set<LegKey>();
+
+/** Legs whose delivery-policy read has failed and not yet succeeded. The
+ *  settlement gas rule is then unconfirmed against the deployed contract, so
+ *  the UI says so: settlements still go out with the compiled-in buffer,
+ *  which is the safe direction, and the next settlement retries the check. */
+export const unverifiedDeliveryPolicyLegs = (): LegKey[] => [...policyUnverified];
+
+/** Confirm per leg that the deployed contract publishes the budget this
+ *  build's settlement gas rule is built from. A mismatch fails closed: the
+ *  rule would then be wrong and every deferred payout on that leg would be a
+ *  surprise. A read that cannot complete leaves the question open and lets
+ *  the settlement through, because the pinned `htlcInterface` field in
+ *  config/protocol-v2.json already refuses a profile from the wrong contract
+ *  generation. Only a completed check is remembered, so a settlement during
+ *  an RPC outage does not retire the guard for the rest of the session. */
+export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
+  const pending = policyChecked.get(leg);
+  if (pending !== undefined) return pending;
+  const check = getDeliveryGasPolicy(leg).then(
+    (policy) => {
+      if (policy.gasLimit !== DELIVERY_GAS_LIMIT || policy.gasReserve !== DELIVERY_GAS_RESERVE) {
+        throw new Error(
+          `The ${leg} HTLC publishes a delivery budget this client was not built for; refusing to settle`,
+        );
+      }
+      policyUnverified.delete(leg);
+    },
+    () => {
+      policyChecked.delete(leg);
+      policyUnverified.add(leg);
+    },
+  );
+  policyChecked.set(leg, check);
+  return check;
+}
+
+/** Test seam: forget the per-session delivery-policy verdicts. */
+export const resetDeliveryGasPolicyCache = (): void => {
+  policyChecked.clear();
+  policyUnverified.clear();
+};
 
 /** Pure depth arithmetic for the confirmed snapshot: the block a lock
  *  must be visible at, `confirmations` behind the head, clamped at
@@ -236,6 +353,121 @@ export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<Swap
   return events;
 }
 
+/** An indexed `address` topic word: 32 bytes left-padded on Ethereum, the
+ *  64-byte address itself on QRVM-512. */
+function addressTopic(leg: LegKey, address: string): string {
+  const hex = qToHex(address).slice(2).toLowerCase();
+  return leg === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+}
+
+const PAYOUT_CREDITED_TOPIC = (() => {
+  const frag = htlcInterface.getEvent("PayoutCredited");
+  if (frag === null) throw new Error("unknown HTLC event PayoutCredited");
+  return frag.topicHash;
+})();
+
+/**
+ * The four pinned topics of a `PayoutCredited` filter for one swap, token and
+ * account. Exported because the widths are the whole correctness question:
+ * on QRVM-512 every topic is a 64-byte word, so a 32-byte value sits in the
+ * high half and an address fills the word, while on Ethereum a topic is 32
+ * bytes and an address is left-padded into it. A topic built the wrong way
+ * matches nothing, and a filter that matches nothing reads as a payout that
+ * was delivered.
+ */
+export function creditFilterTopics(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): [string, string, string, string] {
+  return [
+    leg === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
+    addressTopic(leg, token),
+    addressTopic(leg, account),
+    leg === "qrl" ? qrvm64Topic(hashlock) : hashlock.toLowerCase(),
+  ];
+}
+
+/** One `PayoutCredited` data word: 32 bytes on Ethereum, 64 on QRVM-512.
+ *  Null for anything else, so a malformed answer is never read as a number. */
+export function decodeCreditedAmount(leg: LegKey, data: unknown): bigint | null {
+  const width = leg === "qrl" ? 128 : 64;
+  if (typeof data !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) {
+    return null;
+  }
+  return BigInt(data);
+}
+
+/**
+ * The amount `PayoutCredited` recorded for this exact swap, in this token,
+ * for this account. `creditOf` is a per-(token, account) ledger shared by
+ * every swap that account ever settled, so it cannot answer "what did THIS
+ * swap leave behind". The event can: its third indexed field is the
+ * hashlock, which names one swap.
+ *
+ * The filter pins all four topics, so the query is selective even scanning
+ * from genesis, which is what the existing hashlock event lookup already
+ * does on both legs. Returns 0 when the payout was delivered, which is the
+ * normal case.
+ */
+export async function getCreditedForSwap(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<bigint> {
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
+  const cfg = legByKey(leg);
+  const params = [
+    {
+      address: cfg.htlc,
+      topics: creditFilterTopics(leg, token, account, hashlock),
+      fromBlock: "0x0",
+      toBlock: "latest",
+    },
+  ];
+  const raw = await (leg === "qrl"
+    ? qrlRpc("qrl_getLogs", params)
+    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
+  if (!Array.isArray(raw)) return 0n;
+  let total = 0n;
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { data } = entry as { data?: unknown };
+    const amount = decodeCreditedAmount(leg, data);
+    if (amount === null) continue;
+    total += amount;
+  }
+  return total;
+}
+
+/** What one payee still holds, and how much of it this swap left behind. */
+export interface CreditReading {
+  /** The per-(token, account) ledger balance, across every swap. */
+  global: bigint;
+  /** What this swap's settlement credited, from its PayoutCredited log. */
+  credited: bigint;
+}
+
+/**
+ * Read both halves together. A withdrawal drains the shared ledger without
+ * naming a swap, so the amount this swap can still be said to be owed is
+ * the smaller of the two: `credited` is the ceiling, `global` is what is
+ * actually left to move.
+ */
+export async function readSwapCredit(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<CreditReading> {
+  const global = await getCredit(leg, token, account);
+  // The log query only earns its cost once something is actually there.
+  const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+  return { global, credited };
+}
+
 function assertEthersAddressRecipient(recipient: string): void {
   if (isQrlAddress(recipient)) throw new Error("The Ethereum leg requires a 20-byte Ethereum recipient");
 }
@@ -336,6 +568,39 @@ export const buildReleaseData = (leg: LegKey, hashlock: string): string => {
   assertLegCalldataReady(leg);
   if (leg === "qrl") return encodeQrvmHtlc("release", [hashlock]);
   return htlcInterface.encodeFunctionData("release", [hashlock]);
+};
+
+/** Move the caller's whole credit in `token` to `to`. Only the credited
+ *  account can call this, and it chooses the destination. */
+export const buildWithdrawAllData = (leg: LegKey, token: string, to: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("withdrawAll", [token, to]);
+  assertEthersAddressRecipient(to);
+  return htlcInterface.encodeFunctionData("withdrawAll", [token, qToHex(to)]);
+};
+
+/** Move part of the caller's credit in `token` to `to`. */
+export const buildWithdrawData = (
+  leg: LegKey,
+  token: string,
+  to: string,
+  amount: bigint,
+): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("withdraw", [token, to, amount]);
+  assertEthersAddressRecipient(to);
+  return htlcInterface.encodeFunctionData("withdraw", [token, qToHex(to), amount]);
+};
+
+/** Deliver `account`'s whole credit in `token` to `account`. Permissionless
+ *  and with no destination parameter, so it can only ever pay the address
+ *  the fund owner chose: a payee with no gas on this chain can be paid by
+ *  anyone without handing anyone redirect authority. */
+export const buildPushCreditData = (leg: LegKey, token: string, account: string): string => {
+  assertLegCalldataReady(leg);
+  if (leg === "qrl") return encodeQrvmHtlc("pushCredit", [token, account]);
+  assertEthersAddressRecipient(account);
+  return htlcInterface.encodeFunctionData("pushCredit", [token, qToHex(account)]);
 };
 
 export const shortAddr = (addr: string): string =>

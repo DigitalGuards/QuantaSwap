@@ -18,20 +18,37 @@ const qrvmoneLibrary =
   process.env.QRVMONE_LIBRARY ||
   path.join(qrvmoneRoot, "build", "lib", "libqrvmone.so.0.11.0");
 
+const { assertAddressSurface } = require("./abi-guards");
+const { compileDirs } = require("./hypc");
+
+// Legacy QRVM-512 codegen truncates a wide key in a compiler-generated mapping
+// getter, so nothing that ships to the QRL target may expose one. The guard runs
+// over the compiled ABI of every contract in the bundle, on the QRL target
+// itself: a source pattern would miss a nested mapping whose inner key is the
+// address, a public struct or array holding addresses, and any declaration
+// spelled across lines.
 function requireSafeSources() {
-  for (const sourcePath of [
-    path.join(contractTestRoot, "MockTokens.hyp"),
-    path.join(contractTestnetRoot, "TestStable.hyp"),
-  ]) {
-    const source = fs.readFileSync(sourcePath, "utf8");
-    assert.doesNotMatch(
-      source,
-      /mapping\s*\(\s*address\b[^;]*\)\s+public\b/,
-      `${path.basename(sourcePath)} exposes a compiler-generated address mapping getter`
-    );
-    assert.match(source, /function\s+balanceOf\s*\(\s*address\b/);
-    assert.match(source, /function\s+allowance\s*\(\s*address\b[^)]*address\b/);
+  const artifacts = compileDirs([contractRoot, contractTestRoot, contractTestnetRoot], "qrl");
+  const names = Object.keys(artifacts).sort();
+  assert.ok(names.length > 0, "no contracts compiled for the QRL target");
+  for (const name of names) {
+    assertAddressSurface(name, artifacts[name].abi);
   }
+  // The explicit accessors that replace the generated getters have to exist.
+  for (const [name, required] of [
+    ["MockERC20", ["balanceOf(address)", "allowance(address,address)"]],
+    ["TestStable", ["balanceOf(address)", "allowance(address,address)"]],
+    ["BlocklistToken", ["blocked(address)"]],
+    ["HTLCv3", ["creditOf(address,address)", "outstandingCredit(address)"]],
+  ]) {
+    const signatures = artifacts[name].abi
+      .filter((entry) => entry.type === "function")
+      .map((entry) => `${entry.name}(${entry.inputs.map((i) => i.type).join(",")})`);
+    for (const signature of required) {
+      assert.ok(signatures.includes(signature), `${name} is missing ${signature}`);
+    }
+  }
+  console.log(`[q128] address surface pinned for ${names.length} contracts on the QRL target`);
 }
 
 function createTestTree() {
@@ -75,8 +92,16 @@ function createTestTree() {
     path.join(externalRoot, "HTLC.hyp")
   );
   fs.copyFileSync(
+    path.join(contractRoot, "HTLCv3.hyp"),
+    path.join(externalRoot, "HTLCv3.hyp")
+  );
+  fs.copyFileSync(
     path.join(semanticSourceRoot, "Q128HTLC.hyp"),
     path.join(semanticRoot, "Q128HTLC.hyp")
+  );
+  fs.copyFileSync(
+    path.join(semanticSourceRoot, "Q128HTLCv3.hyp"),
+    path.join(semanticRoot, "Q128HTLCv3.hyp")
   );
 
   return temporaryRoot;
@@ -118,7 +143,7 @@ function main() {
 
   const temporaryRoot = createTestTree();
   try {
-    for (const testName of ["Q128TokenAccessors", "Q128HTLC"]) {
+    for (const testName of ["Q128TokenAccessors", "Q128HTLC", "Q128HTLCv3"]) {
       runSemanticMode(temporaryRoot, testName, false);
       runSemanticMode(temporaryRoot, testName, true);
     }
@@ -126,7 +151,10 @@ function main() {
     fs.rmSync(temporaryRoot, { force: true, recursive: true });
   }
 
-  console.log("[q128] explicit token accessors and HTLC fields passed full-address alias regressions");
+  console.log(
+    "[q128] explicit token accessors, HTLC fields and HTLCv3 credit ledger passed " +
+      "full-address alias regressions"
+  );
 }
 
 if (require.main === module) {

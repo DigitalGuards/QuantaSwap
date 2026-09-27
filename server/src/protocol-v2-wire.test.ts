@@ -22,6 +22,7 @@ import {
   assertV2Deployment,
   type ProtocolV2Payload,
 } from "./protocol-v2-wire.js";
+import { HTLC_INTERFACE, protocolV2Config } from "./protocol-v2-config.js";
 
 const vectors = JSON.parse(
   readFileSync(
@@ -97,6 +98,21 @@ const cancel = artifact("CancelV2", {
   issuedAt: "1800000030",
   reasonCode: 1,
   ...ORDER_V2_DEPLOYMENT,
+});
+
+it("pins the HTLC interface this build settles against", () => {
+  // Portable wire V2 signs both HTLC addresses into every order, so the
+  // signing domain and the deployed contract interface move together.
+  assert.equal(HTLC_INTERFACE, "v3");
+  assert.equal(protocolV2Config.htlcInterface, "v3");
+  assert.equal(
+    ORDER_V2_DOMAIN.ethHtlc,
+    `eip155:${protocolV2Config.ethChainId}:${protocolV2Config.ethHtlc.toLowerCase()}`,
+  );
+  assert.equal(
+    ORDER_V2_DOMAIN.qrlHtlc,
+    `Q${protocolV2Config.qrlHtlc.slice(1).toLowerCase()}`,
+  );
 });
 
 it("matches the frozen canonical domain and all four V2 semantic wire vectors", () => {

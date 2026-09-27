@@ -8,7 +8,7 @@ Sepolia assets and native QRL v2 testnet QRL. The main cells are:
 - `contracts/`: Hyperion HTLC sources and artifact tests.
 - `frontend/`: React and TypeScript browser client.
 - `server/`: coordination-only orderbook and mirror feed.
-- `marketmaker/`: reproducible self-hosted LP kit.
+- `marketmaker/`: reproducible self-hosted LP kit and the scripted taker CLI.
 - `docs/`: architecture, wire protocol, deployment, and operator guidance.
 
 Read `CLAUDE.md` and `docs/ARCHITECTURE.md` before protocol changes. Treat

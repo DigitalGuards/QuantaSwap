@@ -18,11 +18,17 @@ import { cancelOpenListing } from "./drain.js";
 import {
   NATIVE_TOKEN,
   QRL_NATIVE_TOKEN,
+  assertDeliveryGasPolicy,
+  getCredit,
+  isContractRejection,
+  readSwapCredit,
   encodeApprove,
   encodeClaim,
   encodeLock,
   encodeLockToken,
+  encodePushCredit,
   encodeRefund,
+  encodeWithdrawAll,
   erc20Allowance,
   erc20BalanceOf,
   getChainId,
@@ -41,8 +47,11 @@ import {
 } from "./orderbook.js";
 import { COINGECKO_URL, PriceFeed, needsReprice } from "./price.js";
 import {
+  MAX_CREDIT_ATTEMPTS,
   canContinueWithoutBook,
   decide,
+  pushParked,
+  withdrawParked,
   earliestValidFillIntent,
   levelQuote,
   fundsShort,
@@ -291,6 +300,36 @@ async function legStateOrNull(
   }
 }
 
+/** The token a leg escrows for this order: the compiled-in registry address
+ *  on the Ethereum leg, the native sentinel on QRL. Never book-provided.
+ *  Payout credits are per token, so this is also the credit's key. */
+function legToken(leg: LegKey, asset: AssetSymbol): string {
+  return leg === "eth" ? (assetInfo(asset).tokenAddress ?? NATIVE_TOKEN) : QRL_NATIVE_TOKEN;
+}
+
+/**
+ * The credit this swap left for `account`, in this leg's token. The ledger is
+ * keyed only by (token, account), so the amount is attributed to this order's
+ * hashlock through its PayoutCredited log and capped by what the ledger still
+ * holds. Without that attribution one order would be pinned open by another
+ * swap's credit, and a push here could hand another swap's credit to this
+ * taker.
+ */
+async function creditOrNull(
+  leg: LegRpc,
+  token: string,
+  account: string | null,
+  hashlock: string,
+): Promise<bigint | null> {
+  if (account === null) return null;
+  try {
+    const reading = await readSwapCredit(leg, token, account, hashlock);
+    return reading.credited < reading.global ? reading.credited : reading.global;
+  } catch {
+    return null; // fail closed; decide() never retires a record on an unknown credit
+  }
+}
+
 async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   if (canRetireExpiredUnfundedQuote(managed, nowS())) {
     state.delete(managed.id);
@@ -314,13 +353,26 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   if (view !== null) persistAuthenticatedFillObservation(managed, view);
 
   const hashlock = managed.hashlock;
-  const [iState, rState, rConfirmed] = hashlock
-    ? await Promise.all([
-        legStateOrNull(legRpc[iLeg], hashlock, false),
-        legStateOrNull(legRpc[rLeg], hashlock, false),
-        legStateOrNull(legRpc[rLeg], hashlock, true),
-      ])
-    : [null, null, null];
+  // Payout credits are read alongside chain state: the deferred half of a
+  // settlement is invisible in getSwap, which reports Claimed either way.
+  const takerOnInitiatorLeg =
+    iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
+  const [iState, rState, rConfirmed, ourResponderCredit, ourInitiatorCredit, takerCredit] =
+    hashlock
+      ? await Promise.all([
+          legStateOrNull(legRpc[iLeg], hashlock, false),
+          legStateOrNull(legRpc[rLeg], hashlock, false),
+          legStateOrNull(legRpc[rLeg], hashlock, true),
+          creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg), hashlock),
+          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), myAddress(iLeg), hashlock),
+          creditOrNull(
+            legRpc[iLeg],
+            legToken(iLeg, managed.asset),
+            takerOnInitiatorLeg,
+            hashlock,
+          ),
+        ])
+      : [null, null, null, null, null, null];
 
   if (
     bookError !== undefined &&
@@ -574,6 +626,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     protocol?.fillProof === undefined ? bookStatus : "locking";
   const fillResponseExpired =
     protocol?.fillProof !== undefined && nowS() >= protocol.fillProof.auth.expiresAt;
+  const sponsorMarginS = Math.ceil(cfg.txTimeoutMs / 1000) + 60;
   const decision = decide({
     bookStatus: lifecycleBookStatus,
     released: Boolean(view?.released) || fillResponseExpired,
@@ -586,18 +639,18 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     // We receive the order's ETH-leg asset only when the taker locks the
     // ETH leg (direction qrl->eth); the QRL leg is always native. The
     // address comes from the compiled-in registry, never from the book.
-    expectedToken:
-      rLeg === "eth"
-        ? (assetInfo(managed.asset).tokenAddress ?? NATIVE_TOKEN)
-        : QRL_NATIVE_TOKEN,
+    expectedToken: legToken(rLeg, managed.asset),
     nowS: nowS(),
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
     lockGraceS: cfg.lockGraceS,
     sponsorClaims: cfg.sponsorClaims,
     ourInitiator: myAddress(iLeg),
-    takerOnInitiatorLeg: iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount,
-    sponsorMarginS: Math.ceil(cfg.txTimeoutMs / 1000) + 60,
+    takerOnInitiatorLeg,
+    sponsorMarginS,
+    ourResponderCredit,
+    ourInitiatorCredit,
+    takerCredit,
   });
 
   switch (decision) {
@@ -723,8 +776,13 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         async () => {
           managed.claimSentAt = nowS();
           state.upsert(managed);
-          return sender(rLeg).send(claimData, 0n);
+          return sender(rLeg).send(claimData, 0n, undefined, { settlement: true });
         },
+        // The claim cutoff, re-checked against a fresh read of the escrow's
+        // own deadline immediately before the secret goes out. A margin
+        // checked when this decision was taken is not a margin at broadcast
+        // (docs/FINALITY.md section 3.3).
+        { hashlock: managed.hashlock, marginS: cfg.claimSafetyS, nowS },
       );
       log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
       break;
@@ -745,7 +803,11 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           legRpc[iLeg],
           myAddress(iLeg),
           claimData,
-          () => sender(iLeg).send(claimData, 0n),
+          // A sponsored claim carries the settlement buffer above all: the
+          // taker holds no gas on this chain, so a payout deferred into a
+          // credit would leave them behind a withdrawal they cannot send.
+          () => sender(iLeg).send(claimData, 0n, undefined, { settlement: true }),
+          { hashlock: managed.hashlock, marginS: sponsorMarginS, nowS },
         );
         log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
       } catch (err) {
@@ -761,8 +823,126 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       if (managed.hashlock === null) break;
       managed.refundSentAt = nowS();
       state.upsert(managed);
-      const hash = await sender(iLeg).send(encodeRefund(iLeg, managed.hashlock), 0n);
+      const hash = await sender(iLeg).send(
+        encodeRefund(iLeg, managed.hashlock),
+        0n,
+        undefined,
+        { settlement: true },
+      );
       log(`order ${short(managed.id)} refunded ${iLeg} leg (taker never finished), tx ${hash}`);
+      break;
+    }
+
+    case "withdraw": {
+      // A settlement could not deliver and credited us. The credit is ours
+      // and only we can move it, so it goes straight to our own address. It
+      // sits on the responder leg after a claim of the taker's escrow, and on
+      // the leg we funded after a refund or a release of our own.
+      const leg = (ourResponderCredit ?? 0n) > 0n ? rLeg : iLeg;
+      managed.withdrawSentAt = nowS();
+      state.upsert(managed);
+      const token = legToken(leg, managed.asset);
+      try {
+        const hash = await sender(leg).send(
+          encodeWithdrawAll(leg, token, myAddress(leg)),
+          0n,
+          undefined,
+          { settlement: true },
+        );
+        log(`order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`);
+      } catch (err) {
+        // A credit that will not move is conserved on chain. Throwing here
+        // would abort the whole tick and flip health to degraded on a
+        // condition only an operator can resolve. Only the contract refusing
+        // the call counts towards giving up: a timeout or an unreachable node
+        // says nothing about whether this credit can move.
+        const rejected = isContractRejection(err);
+        if (rejected) {
+          managed.withdrawAttempts = (managed.withdrawAttempts ?? 0) + 1;
+          managed.withdrawFirstRejectedAt = managed.withdrawFirstRejectedAt ?? nowS();
+          state.upsert(managed);
+        }
+        log(
+          `order ${short(managed.id)} credit withdrawal failed (${
+            rejected
+              ? `contract rejection ${managed.withdrawAttempts ?? 0} of ${MAX_CREDIT_ATTEMPTS}`
+              : "transient, cap untouched"
+          }):`,
+          err instanceof Error ? err.message : err,
+        );
+        if (withdrawParked(managed, nowS())) {
+          log(
+            `ATTENTION order ${short(managed.id)}: giving up on a deferred payout owed to this maker on the ${leg} leg after ${MAX_CREDIT_ATTEMPTS} contract rejections over at least a day. The value is conserved in the HTLC credit ledger and needs an operator; the order is released so it cannot hold a listing slot.`,
+          );
+          state.recordStrandedCredit({
+            orderId: managed.id,
+            leg,
+            token,
+            account: myAddress(leg),
+            hashlock: managed.hashlock ?? "",
+            amount: String(
+              (leg === rLeg ? ourResponderCredit : ourInitiatorCredit) ?? 0n,
+            ),
+            parkedAt: nowS(),
+            owner: "maker",
+          });
+        }
+      }
+      break;
+    }
+
+    case "push": {
+      // The taker's payout deferred into a credit. pushCredit is
+      // permissionless and takes no destination, so this can only pay the
+      // taker: it finishes the sponsored claim without gaining any redirect
+      // authority. A courtesy on a swap we were already paid for, so a
+      // failure is logged and retried on the marker's own spacing.
+      if (takerOnInitiatorLeg === null) break;
+      managed.pushSentAt = nowS();
+      state.upsert(managed);
+      const token = legToken(iLeg, managed.asset);
+      try {
+        const hash = await sender(iLeg).send(
+          encodePushCredit(iLeg, token, takerOnInitiatorLeg),
+          0n,
+          undefined,
+          { settlement: true },
+        );
+        log(`order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`);
+      } catch (err) {
+        const rejected = isContractRejection(err);
+        if (rejected) {
+          managed.pushAttempts = (managed.pushAttempts ?? 0) + 1;
+          managed.pushFirstRejectedAt = managed.pushFirstRejectedAt ?? nowS();
+          state.upsert(managed);
+        }
+        log(
+          `order ${short(managed.id)} credit push skipped (${
+            rejected
+              ? `contract rejection ${managed.pushAttempts ?? 0} of ${MAX_CREDIT_ATTEMPTS}`
+              : "transient, cap untouched"
+          }):`,
+          err instanceof Error ? err.message : err,
+        );
+        if (pushParked(managed, nowS())) {
+          log(
+            `ATTENTION order ${short(managed.id)}: giving up on pushing a deferred payout to the taker on the ${iLeg} leg after ${MAX_CREDIT_ATTEMPTS} contract rejections over at least a day. The credit is conserved and the taker can still collect it themselves; this order is released.`,
+          );
+          state.recordStrandedCredit({
+            orderId: managed.id,
+            leg: iLeg,
+            token,
+            account: takerOnInitiatorLeg,
+            hashlock: managed.hashlock ?? "",
+            amount: String(takerCredit ?? 0n),
+            parkedAt: nowS(),
+            // The taker's own payout. If their address can never receive, no
+            // action by anyone clears this, so it is reported and it never
+            // gates a drain.
+            owner: "counterparty",
+          });
+        }
+      }
       break;
     }
 
@@ -964,6 +1144,10 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         claimSentAt: null,
         sponsorSentAt: null,
         refundSentAt: null,
+        withdrawSentAt: null,
+        pushSentAt: null,
+        withdrawAttempts: 0,
+        pushAttempts: 0,
         createdAt: nowS(),
       };
       // Persist the signed listing before publish. Maker identity plus nonce
@@ -982,6 +1166,32 @@ let running = false;
 let stopping = false;
 let tickTimer: ReturnType<typeof setInterval> | undefined;
 let healthServer: Server | undefined;
+
+/** How often a parked credit is re-read. No sends: a balance that reached
+ *  zero, by an operator's hand or by a token that started cooperating, simply
+ *  drops out of the list. */
+const STRANDED_RECHECK_MS = 60 * 60 * 1000;
+let strandedCheckedAt = 0;
+
+async function recheckStrandedCredits(): Promise<void> {
+  const parked = state.strandedCredits();
+  if (parked.length === 0) return;
+  if (Date.now() - strandedCheckedAt < STRANDED_RECHECK_MS) return;
+  strandedCheckedAt = Date.now();
+  for (const entry of parked) {
+    try {
+      const balance = await getCredit(legRpc[entry.leg], entry.token, entry.account);
+      if (balance === 0n) {
+        state.clearStrandedCredit(entry);
+        log(
+          `stranded credit from order ${short(entry.orderId)} on the ${entry.leg} leg reads zero and is cleared`,
+        );
+      }
+    } catch {
+      // A read that did not complete says nothing; the next hour retries.
+    }
+  }
+}
 
 async function tick(): Promise<void> {
   if (running || stopping || leaseLost) return;
@@ -1018,6 +1228,7 @@ async function tick(): Promise<void> {
       }
     }
     await refill(views);
+    await recheckStrandedCredits();
   } catch (err) {
     errorCount += 1;
     log("tick error:", err instanceof Error ? err.message : err);
@@ -1031,6 +1242,18 @@ async function tick(): Promise<void> {
     let orderCount = startingOrderCount;
     try {
       orderCount = state.all().length;
+      // Credits this maker stopped trying to move. Counted from the persisted
+      // list, which outlives the orders that created them, so the number an
+      // operator is told to wait for does not fall back to zero one tick after
+      // parking. Reported, and the status is left alone: a token that refuses
+      // to pay cannot be made to, and holding at degraded forever would bury
+      // every other signal.
+      // Split by owner: only a collectable credit gates a drain. A courtesy
+      // push to an address that can never receive would otherwise block the
+      // documented cutover procedure forever, which one hostile take could
+      // arrange.
+      health.markStrandedCredits(state.ownStrandedCredits().length);
+      health.markParkedCounterpartyCredits(state.counterpartyStrandedCredits().length);
       health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
     } catch {
       // A poisoned state file is already forcing process shutdown.
@@ -1064,8 +1287,45 @@ async function main(): Promise<void> {
     getChainId(legRpc.qrl),
   ]);
   assertRuntimeChainIds(deployment, ethRpcChainId, qrlRpcChainId);
+  // Only HTLCv3 answers deliveryGasPolicy(), so this both proves the pinned
+  // addresses are the interface this build settles against and pins the
+  // constants the settlement gas rule adds. A wrong contract generation
+  // stops the daemon here, before a single payout can quietly defer.
+  await Promise.all([
+    assertDeliveryGasPolicy(legRpc.eth),
+    assertDeliveryGasPolicy(legRpc.qrl),
+  ]);
   health.markRuntimeVerified();
   if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
+  // A record this state file could not read points at money in the contract,
+  // so a silent drop is the one outcome an operator must never get. The next
+  // persist erases the row, and this line is the only trace left.
+  for (const warning of state.warnings) log(`ATTENTION ${warning}`);
+  // Parked credits are money sitting in the contract with no order left to
+  // chase it, so an operator is told at every start, loudly and by name. Split
+  // by owner, because only one kind can actually be collected.
+  const ownParked = state.ownStrandedCredits();
+  const theirParked = state.counterpartyStrandedCredits();
+  if (ownParked.length > 0) {
+    log(
+      `ATTENTION ${ownParked.length} payout credit(s) owed to this maker need an operator. Collect each with withdrawAll(token, to) from the credited account; the entry clears itself within the hour once its balance reads zero, and a drain waits for it. Run \`npm run credits -- list\` with the maker stopped.`,
+    );
+    for (const entry of ownParked) {
+      log(
+        `  stranded (maker): order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
+      );
+    }
+  }
+  if (theirParked.length > 0) {
+    log(
+      `${theirParked.length} parked payout credit(s) are owed to a counterparty. Only their own address can be paid, so if it can never receive, nothing here clears them; they never gate a drain. Dismiss one with \`npm run credits -- dismiss <key>\` when you want it to stop being reported.`,
+    );
+    for (const entry of theirParked) {
+      log(
+        `  parked (counterparty): order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
+      );
+    }
+  }
   log(`maker eth=${eth.address} qrl=${qrl.address}`);
   log(
     `deployment ${deployment.configFingerprint} | ` +

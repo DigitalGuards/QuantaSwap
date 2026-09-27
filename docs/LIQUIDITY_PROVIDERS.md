@@ -8,7 +8,8 @@ to do it and the rules that keep you safe.
 
 Wire-level details for every endpoint mentioned here:
 [ORDERBOOK_API.md](ORDERBOOK_API.md). Protocol background:
-[ARCHITECTURE.md](ARCHITECTURE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md). The other seat, taking orders from a
+script: [TAKERS.md](TAKERS.md).
 
 ## Two ways to make markets
 
@@ -114,11 +115,57 @@ yours.
 9. **Or refund**: if the taker never locks (or locks wrong), do nothing until
    your initiator timeout passes, then refund. Walk-away is always safe;
    abandonment costs only time.
-10. **Cancel or repost**: before selecting an intent, a maker may sign and
+10. **Collect a deferred payout**: HTLCv3 keeps a settled swap terminal even
+    when the payout cannot be handed over, for example because an issuer
+    blocklisted the payee or a recipient contract refuses the transfer. The
+    amount is then held as a credit for the address it was owed to, so
+    `Claimed` no longer means the recipient holds the funds. Read
+    `creditOf(token, account)` after every settlement, and attribute it with
+    the `PayoutCredited(token, account, hashlock, amount)` log: `creditOf` is
+    one ledger per address and asset, shared by every swap that address has
+    settled, so it cannot tell you which swap a balance came from. Your own
+    credit comes out with `withdrawAll(token, to)`, where you choose `to`, and
+    nobody else can redirect it. A credit owed to your taker on the leg you
+    funded is finished with `pushCredit(token, account)`, which is
+    permissionless and takes no destination, so it can only pay the taker: that
+    is the credit-path half of a sponsored claim, and it keeps a taker with no
+    gas on the paying chain from sitting behind a withdrawal they cannot send.
+    The reference maker does both automatically, with the same persisted send
+    markers and retry spacing as its claim and refund, and it holds an order
+    open while a credit attributable to that order's hashlock is outstanding.
+    It gives up after five refusals by the contract, and only then if a day has
+    passed since the first: a token that refuses to pay anyone cannot be made
+    to, and an uncapped retry would let a taker pin a listing slot forever by
+    locking to a recipient no payout can reach. A network fault never counts
+    towards that, because it says nothing about whether the credit can move. A
+    parked credit owed to the maker is reported as `strandedCredits` and is
+    collectable; one owed to a taker is reported as
+    `parkedCounterpartyCredits`, can only ever be paid to that taker, and is
+    dismissed, because there is nothing to collect it into.
+11. **Cancel or repost**: before selecting an intent, a maker may sign and
    persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
    cancelled listing is terminal. Authenticate the exact CancelV2 and digest
    in the response before deleting local state. Sign a fresh OrderV2 to stay in
    the book.
+
+**Send every settlement with the published gas buffer.** HTLCv3 hands a payout
+attempt its own bounded budget and keeps a reserve so the credit fallback
+always fits, and gas estimation minimises gas, so a bare estimate lands on the
+cheaper credit path and defers a payout that would have gone straight through.
+Submit `claim`, `refund`, `release` and the credit calls with
+`estimateGas + DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE`, which is 250,000 at
+the current constants and is published on chain by `deliveryGasPolicy()`.
+Unused gas is refunded, so the buffer costs only transaction-limit headroom. It
+matters most on a sponsored claim, where the recipient cannot withdraw a credit
+for lack of gas. The reference maker and the scripted taker read
+`deliveryGasPolicy()` on both legs at startup and refuse to run against a
+contract that publishes anything else.
+
+**Never broadcast a claim inside its safety margin.** `claim` closes hard at
+the escrow's own timeout, so a claim that mines at or after it reverts with the
+preimage already public. Check the margin against a fresh read of that timeout
+immediately before submission, as well as when the decision is taken, and fall
+back to the refund path inside it. See [FINALITY.md](FINALITY.md) section 3.3.
 
 A taker can reveal the release preimage committed in FillIntentV2. It marks the
 proposal or selected fill released and means commit no further funds. It never
@@ -200,7 +247,8 @@ risk:
   exclusive mode-0600 `state.json.lock` lease before reading state. The lease
   binds the deployment fingerprint and both operator accounts, identifies the
   Linux boot, process start time and PID namespace, refuses a live second
-  process, and safely recovers a stale file after a crash or reboot. A holder in
+  process, and safely recovers a stale lease file, or a recovery guard whose
+  creator is provably gone, after a crash or reboot. A holder in
   another PID namespace, which is how a second container on the same state volume
   appears, is judged by the lease heartbeat: the holder refreshes it every 10 s
   and it stays live for 90 s after the last refresh, so a crashed container's

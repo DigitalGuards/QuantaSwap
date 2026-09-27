@@ -5,7 +5,7 @@ import { FetchRequest, JsonRpcProvider, Wallet } from "ethers";
 import * as qrlweb3 from "@theqrl/web3";
 import type { Config } from "./config.js";
 import { assertQip55ExecutionReady } from "./qip55.js";
-import { assertQrlRuntime, type LegRpc } from "./htlc.js";
+import { assertQrlRuntime, settlementGasLimit, type LegRpc } from "./htlc.js";
 
 /** Bound any promise so a hung library call cannot wedge the single-
  *  threaded tick. Used for @theqrl/web3, which takes no abort signal; the
@@ -34,6 +34,41 @@ const resolvedWeb3 = ns.Web3 ?? ns.default?.Web3;
 if (!resolvedWeb3) throw new Error("@theqrl/web3 did not expose Web3");
 const Web3: Web3Ctor = resolvedWeb3;
 
+/** The slice of configuration a leg sender needs. Both the maker Config
+ *  and the taker config satisfy it, so one sender serves both roles. */
+export type EthLegConfig = Pick<
+  Config,
+  "ethRpcUrl" | "ethPrivateKey" | "ethHtlc" | "ethChainId" | "netTimeoutMs" | "txTimeoutMs"
+>;
+
+export type QrlLegConfig = Pick<
+  Config,
+  "qrlRpcUrl" | "qrlHexseed" | "qrlHtlc" | "qrlChainId" | "netTimeoutMs" | "txTimeoutMs"
+>;
+
+/** Per-send options. `settlement` applies the HTLCv3 gas rule
+ *  (`estimateGas + 250000`) so a payout that can be delivered is not
+ *  deferred into a credit by a minimal estimate; see
+ *  docs/audit/HTLCV3_SCOPE.md A1 and A2. Every claim, refund, release and
+ *  credit move sets it; locks and approvals do not. */
+export interface SendOptions {
+  settlement?: boolean;
+}
+
+/** Transaction sender surface shared by both legs, so callers and tests
+ *  can depend on the capability, with the concrete client chosen by the
+ *  caller. */
+export interface LegSender {
+  readonly address: string;
+  balance(): Promise<bigint>;
+  send(
+    data: string,
+    valueWei: bigint,
+    to?: string,
+    options?: SendOptions,
+  ): Promise<string>;
+}
+
 interface QrlAccount {
   address: string;
 }
@@ -53,7 +88,7 @@ interface Qrlweb3 {
 const txHashHex = (h: unknown): string =>
   typeof h === "string" ? h : `0x${Buffer.from(h as Uint8Array).toString("hex")}`;
 
-export class EthLeg {
+export class EthLeg implements LegSender {
   readonly address: string;
   private readonly wallet: Wallet;
   private readonly provider: JsonRpcProvider;
@@ -61,7 +96,7 @@ export class EthLeg {
   private readonly txTimeoutMs: number;
   private readonly chainId: bigint;
 
-  constructor(cfg: Config) {
+  constructor(cfg: EthLegConfig) {
     // FetchRequest.timeout bounds every RPC request (submit, balance, etc.);
     // the ethers default is 5 minutes, far too long for the serial tick.
     const req = new FetchRequest(cfg.ethRpcUrl);
@@ -82,11 +117,35 @@ export class EthLeg {
    *  contract as `to`. Success is judged by the receipt status alone
    *  (wait() throws on a reverted tx), never by decoded return data, so
    *  no-return-value tokens (tUSDT) are safe. */
-  async send(data: string, valueWei: bigint, to = this.htlc): Promise<string> {
+  async send(
+    data: string,
+    valueWei: bigint,
+    to = this.htlc,
+    options: SendOptions = {},
+  ): Promise<string> {
     if ((await this.provider.getNetwork()).chainId !== this.chainId) {
       throw new Error("ETH RPC chain mismatch; refusing transaction");
     }
-    const tx = await this.wallet.sendTransaction({ to, data, value: valueWei, chainId: this.chainId });
+    // ethers estimates for us on an ordinary send. A settlement overrides
+    // that estimate with the HTLCv3 rule.
+    const gasLimit =
+      options.settlement === true
+        ? settlementGasLimit(
+            await this.wallet.estimateGas({
+              to,
+              data,
+              value: valueWei,
+              chainId: this.chainId,
+            }),
+          )
+        : undefined;
+    const tx = await this.wallet.sendTransaction({
+      to,
+      data,
+      value: valueWei,
+      chainId: this.chainId,
+      ...(gasLimit === undefined ? {} : { gasLimit }),
+    });
     // Bound the confirmation wait: a stuck tx throws instead of hanging the
     // tick forever, and decide() reconciles from chain state next tick.
     await tx.wait(1, this.txTimeoutMs);
@@ -94,7 +153,7 @@ export class EthLeg {
   }
 }
 
-export class QrlLeg {
+export class QrlLeg implements LegSender {
   readonly address: string;
   private readonly web3: Qrlweb3;
   private readonly htlc: string;
@@ -103,7 +162,7 @@ export class QrlLeg {
   private readonly chainId: bigint;
   private readonly rpc: LegRpc;
 
-  constructor(cfg: Config) {
+  constructor(cfg: QrlLegConfig) {
     this.web3 = new Web3(new Web3.providers.HttpProvider(cfg.qrlRpcUrl));
     const account = this.web3.qrl.accounts.seedToAccount(cfg.qrlHexseed);
     assertQip55ExecutionReady(account.address, cfg.qrlHtlc);
@@ -122,7 +181,12 @@ export class QrlLeg {
     return BigInt(await withTimeout(this.web3.qrl.getBalance(this.address), this.netTimeoutMs, "qrl getBalance"));
   }
 
-  async send(data: string, valueWei: bigint): Promise<string> {
+  async send(
+    data: string,
+    valueWei: bigint,
+    _to?: string,
+    options: SendOptions = {},
+  ): Promise<string> {
     await assertQrlRuntime(this.rpc);
     const base: Record<string, unknown> = {
       from: this.address,
@@ -133,7 +197,10 @@ export class QrlLeg {
     };
     const gasPrice = await withTimeout(this.web3.qrl.getGasPrice(), this.netTimeoutMs, "qrl getGasPrice");
     const estimated = await withTimeout(this.web3.qrl.estimateGas(base), this.netTimeoutMs, "qrl estimateGas");
-    const gas = (BigInt(estimated) * 13n) / 10n;
+    const gas =
+      options.settlement === true
+        ? settlementGasLimit(BigInt(estimated))
+        : (BigInt(estimated) * 13n) / 10n;
     await assertQrlRuntime(this.rpc);
     const receipt = await withTimeout(
       this.web3.qrl.sendTransaction({ ...base, gas, gasPrice }),

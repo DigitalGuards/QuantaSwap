@@ -14,6 +14,11 @@ export function corsHeaders(
   if (origin === undefined || !allowedOrigins.includes(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
+    // A browser cannot read either header off a cross-origin response without
+    // this. The mutating routes answer 503 with Retry-After when the book
+    // sheds, and X-Refusal-Stage says the refusal was produced before any
+    // verification, which is what makes it safe to retry.
+    "Access-Control-Expose-Headers": "Retry-After, X-Refusal-Stage",
     Vary: "Origin",
   };
 }

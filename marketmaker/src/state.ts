@@ -60,6 +60,103 @@ interface StateEnvelope {
   deployment: DeploymentIdentity;
   orders: ManagedOrder[];
   admissions: AdmissionRecord[];
+  /** Credits this maker gave up moving. They outlive the order that created
+   *  them, because the order is retired precisely so it stops holding a
+   *  listing slot, and the money is still in the contract. */
+  strandedCredits?: StrandedCredit[];
+}
+
+/**
+ * One payout the contract refused to move often enough, over long enough, that
+ * the maker stopped trying. Everything an operator needs to collect it by hand
+ * is here, and nothing secret is: the ledger key, the swap it came from, what
+ * it was worth when it was parked, and when that happened.
+ */
+export interface StrandedCredit {
+  orderId: string;
+  leg: "eth" | "qrl";
+  token: string;
+  account: string;
+  hashlock: string;
+  /** Base units, as a decimal string, at the moment of parking. */
+  amount: string;
+  parkedAt: number;
+  /**
+   * Whose payout this is. The distinction decides whether an operator can ever
+   * clear it: a maker-owned credit is this maker's own revenue and only it can
+   * redirect it, so it is collectable and it gates the drain. A
+   * counterparty-owned one is a courtesy push to an address that refused the
+   * payout, and if that address can never receive, no action by anyone clears
+   * it. Gating the drain on that would let one hostile take block the cutover
+   * procedure forever. Records written before this field existed are treated
+   * as maker-owned, which is the conservative reading.
+   */
+  owner: "maker" | "counterparty";
+}
+
+const STRANDED_KEY = (entry: { leg: string; token: string; account: string }): string =>
+  `${entry.leg}:${entry.token.toLowerCase()}:${entry.account.toLowerCase()}`;
+
+/**
+ * Parse the parked-credit list. A malformed row is dropped, because refusing to
+ * start over a reporting record would be worse than losing it, and the next
+ * persist erases it. So the drop is described: these rows point at money in the
+ * contract, and an operator who never hears about one has no way back to it.
+ */
+function parseStrandedCredits(raw: unknown): {
+  entries: StrandedCredit[];
+  dropped: string[];
+} {
+  if (!Array.isArray(raw)) return { entries: [], dropped: [] };
+  const entries: StrandedCredit[] = [];
+  const dropped: string[] = [];
+  const describe = (row: unknown, reason: string): string => {
+    if (typeof row !== "object" || row === null) return `${reason}, unreadable shape`;
+    const fields = row as Record<string, unknown>;
+    const part = (key: string): string =>
+      typeof fields[key] === "string" ? (fields[key] as string) : "?";
+    return `${reason}, leg ${part("leg")} account ${part("account")} hashlock ${part("hashlock")}`;
+  };
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) {
+      dropped.push(describe(entry, "malformed row"));
+      continue;
+    }
+    const row = entry as Record<string, unknown>;
+    const leg = row["leg"];
+    if (leg !== "eth" && leg !== "qrl") {
+      dropped.push(describe(row, "unknown leg"));
+      continue;
+    }
+    const strings = ["orderId", "token", "account", "hashlock", "amount"] as const;
+    const missing = strings.find((key) => typeof row[key] !== "string");
+    if (missing !== undefined) {
+      dropped.push(describe(row, `missing ${missing}`));
+      continue;
+    }
+    if (typeof row["parkedAt"] !== "number" || !Number.isSafeInteger(row["parkedAt"])) {
+      dropped.push(describe(row, "invalid parkedAt"));
+      continue;
+    }
+    if (!AMOUNT_RE.test(row["amount"] as string)) {
+      dropped.push(describe(row, "invalid amount"));
+      continue;
+    }
+    const owner = row["owner"];
+    entries.push({
+      orderId: row["orderId"] as string,
+      leg,
+      token: row["token"] as string,
+      account: row["account"] as string,
+      hashlock: row["hashlock"] as string,
+      amount: row["amount"] as string,
+      parkedAt: row["parkedAt"],
+      // Records written before the field existed are maker-owned: the
+      // conservative reading, since that is the one that gates the drain.
+      owner: owner === "counterparty" ? "counterparty" : "maker",
+    });
+  }
+  return { entries, dropped };
 }
 
 type PersistedOrder = Omit<
@@ -68,6 +165,10 @@ type PersistedOrder = Omit<
   | "quotedMidMilli"
   | "announcedAt"
   | "sponsorSentAt"
+  | "withdrawSentAt"
+  | "pushSentAt"
+  | "withdrawAttempts"
+  | "pushAttempts"
   | "asset"
   | "deployment"
   | "protocol"
@@ -76,6 +177,10 @@ type PersistedOrder = Omit<
   quotedMidMilli?: string | null;
   announcedAt?: number | null;
   sponsorSentAt?: number | null;
+  withdrawSentAt?: number | null;
+  pushSentAt?: number | null;
+  withdrawAttempts?: number;
+  pushAttempts?: number;
   asset?: string;
   deployment?: unknown;
   protocol?: unknown;
@@ -126,12 +231,29 @@ export const LEASE_HEARTBEAT_INTERVAL_MS = 10_000;
  */
 export const LEASE_CLOCK_SKEW_MS = 30_000;
 
+/**
+ * Staleness threshold for a recovery guard from another PID namespace, which
+ * is the one case where no process id can be inspected. A guard is held for a
+ * few file operations and is never refreshed, so any age beyond this is a dead
+ * creator with an enormous margin. The threshold is far longer than the lease
+ * lifetime on purpose: the rename that installs a taken-over lease and the
+ * read that confirms it are two operations, so two starters that both judged
+ * one guard dead could in principle both confirm their own record. This margin
+ * puts that precondition, a starter stalled inside the guard window for this
+ * long, at the level of a machine fault, which the write fence and the
+ * heartbeat then contain. A shorter threshold would invite it at ordinary
+ * scheduling latency.
+ */
+export const GUARD_STALE_MS = 600_000;
+
 /** Recorded when this process cannot read its own PID namespace. */
 export const UNKNOWN_PID_NAMESPACE = "unknown";
 
 export interface StateLeaseAcquireOptions {
   /** Test and embedding seam for deterministic acquisition interleavings. */
   afterStaleObservation?: () => void;
+  /** Test seam: runs between writing the lease record and confirming it. */
+  afterLeaseWritten?: () => void;
   /** Test seam: observe the lease as a process in this PID namespace. */
   pidNamespace?: string | null;
   /** Test seam: clock used for foreign-namespace heartbeat freshness. */
@@ -207,7 +329,7 @@ function parseLease(raw: string): LeaseRecord | null {
   }
 }
 
-function fsyncDirectory(directory: string): void {
+export function fsyncDirectory(directory: string): void {
   const directoryDescriptor = openSync(directory, "r");
   try {
     fsyncSync(directoryDescriptor);
@@ -289,6 +411,29 @@ function isLiveLease(
   return age < liveness.ttlMs;
 }
 
+/**
+ * Liveness of a recovery guard. Its creator's process id decides inside our own
+ * namespace and boot, exactly as for the lease. From any other namespace the
+ * heartbeat rule applies with GUARD_STALE_MS, so taking a guard over stays
+ * conservative where no process id can be read.
+ */
+function isLiveGuard(
+  observed: ObservedLease | undefined,
+  liveness: LeaseLiveness,
+): observed is LiveObservedLease {
+  if (observed === undefined || observed.record === null) return false;
+  const record = observed.record;
+  if (usesPidSemantics(record, liveness)) {
+    return (
+      record.bootId === liveness.bootId &&
+      processStart(record.pid) === record.processStart
+    );
+  }
+  const age = heartbeatAgeMs(observed, liveness);
+  if (age < -LEASE_CLOCK_SKEW_MS) return false;
+  return age < GUARD_STALE_MS;
+}
+
 function readLease(path: string): ObservedLease | undefined {
   let descriptor: number | undefined;
   try {
@@ -364,11 +509,13 @@ function replaceStaleLeaseFile(
 }
 
 /**
- * Manual step named by every contention refusal, so one wording covers the
- * recovery guard and the lease itself.
+ * Manual step for the one refusal that still needs an operator. The refusal
+ * names the guard path just before this text, and this text says to keep the
+ * lease file, so nobody removes the lease a live holder owns.
  */
 const LEASE_MANUAL_RECOVERY =
-  'confirm no market maker process runs on this state volume, then remove the file by hand (see "Single active process" in marketmaker/README.md)';
+  `confirm no market maker process runs on this state volume, then remove that guard file by hand and ` +
+  `leave the lease file itself in place (see "Single active process" in marketmaker/README.md)`;
 
 /**
  * Drop staging files a crashed starter left behind between creating and
@@ -468,6 +615,10 @@ export class StateProcessLease {
     const identityDigest = createHash("sha256")
       .update(JSON.stringify(identity))
       .digest("hex");
+    // Fails closed on an unreadable /proc, so this process never writes a
+    // record at all. The order book's port of this file instead records the
+    // unknown PID namespace there and falls back to heartbeat liveness, which
+    // is the one intentional behavior difference between the two copies.
     const currentStart = processStart(process.pid);
     if (currentStart === null)
       throw new Error("cannot determine market maker process identity");
@@ -507,18 +658,27 @@ export class StateProcessLease {
       if (!tryCreateLeaseFile(recoveryPath, recoveryRecord, directory)) {
         const recoveryOwner = readLease(recoveryPath);
         if (
-          recoveryOwner !== undefined &&
-          recoveryOwner.record !== null &&
-          !isLiveLease(recoveryOwner, liveness)
+          recoveryOwner === undefined ||
+          recoveryOwner.record === null ||
+          isLiveGuard(recoveryOwner, liveness)
         ) {
-          throw new Error(
-            `state lease recovery guard ${recoveryPath} is stale: its owner is gone and, for a guard ` +
-              `from another PID namespace, its heartbeat expired. Refusing unsafe automatic removal; ` +
-              LEASE_MANUAL_RECOVERY,
-          );
+          // A live guard, a guard that vanished between the failed create and
+          // this read, or a half-written one whose owner may still be running.
+          // All three are retried.
+          waitForLeaseRecovery();
+          continue;
         }
-        waitForLeaseRecovery();
-        continue;
+        // The starter that created this guard is gone: its process is dead in
+        // this namespace, or the guard is older than GUARD_STALE_MS, which is
+        // ten minutes for a window that lasts a few file operations and is
+        // never refreshed. A guard left behind by a
+        // kill between its creation and its release would otherwise block
+        // every later start forever, which is a restart loop no operator can
+        // resolve without deleting files. Taking it over is safe on its own:
+        // exclusion is decided by the checks on the lease path below, and the
+        // confirmation read after the write catches a second starter that took
+        // the same guard over concurrently.
+        replaceStaleLeaseFile(recoveryPath, recoveryRecord, directory);
       }
 
       try {
@@ -538,14 +698,22 @@ export class StateProcessLease {
         } else {
           replaceStaleLeaseFile(path, record, directory);
         }
+        options.afterLeaseWritten?.();
+        // Confirm the record at the path is the one just written. A guard
+        // taken over from a dead starter can in principle be held twice, and
+        // this is where the loser of that race finds out before it believes it
+        // owns anything. The next attempt then sees the winner's live lease
+        // and refuses with the ordinary message.
+        const confirmed = readLease(path);
+        if (confirmed?.record?.leaseId !== leaseId) continue;
         return new StateProcessLease(path, leaseId, liveness.ttlMs);
       } finally {
         releaseOwnedLeaseFile(recoveryPath, recoveryLeaseId, directory);
       }
     }
     throw new Error(
-      `state lease ${path} remained contended during stale-lock recovery: another starter holds the ` +
-        `recovery guard ${recoveryPath}, or a guard file outlived its owner. If this repeats, ` +
+      `state lease ${path} remained contended during stale-lock recovery: another starter keeps ` +
+        `holding the recovery guard ${recoveryPath}. If this repeats, ` +
         LEASE_MANUAL_RECOVERY,
     );
   }
@@ -1410,6 +1578,10 @@ const recoveryError = (file: string, reason: string): Error =>
 export class StateFile {
   private orders = new Map<string, ManagedOrder>();
   private admissions = new Map<string, number>();
+  private stranded = new Map<string, StrandedCredit>();
+  /** Anything hydration could not read, for the operator. Reported, never
+   *  fatal: refusing to start over a reporting record would be worse. */
+  readonly warnings: string[] = [];
   private poisoned: Error | null = null;
 
   constructor(
@@ -1483,6 +1655,15 @@ export class StateFile {
         this.admissions.set(entry.id, entry.retainUntil);
       }
     }
+    const parsedStranded = parseStrandedCredits(envelope.strandedCredits);
+    for (const entry of parsedStranded.entries) {
+      this.stranded.set(STRANDED_KEY(entry), entry);
+    }
+    this.warnings.push(
+      ...parsedStranded.dropped.map(
+        (reason) => `dropped an unreadable parked-credit record: ${reason}`,
+      ),
+    );
 
     // Records carry live preimages, so a state file this build cannot
     // interpret must stop the daemon loudly. Skipping or relabeling one
@@ -1559,6 +1740,13 @@ export class StateFile {
         quotedMidMilli: order.quotedMidMilli ?? null,
         announcedAt: order.announcedAt ?? null,
         sponsorSentAt: order.sponsorSentAt ?? null,
+        // HTLCv3 credit markers. Records written before payout credits
+        // existed default to "never attempted", which is correct: they were
+        // created against a contract that could not defer a payout.
+        withdrawSentAt: order.withdrawSentAt ?? null,
+        pushSentAt: order.pushSentAt ?? null,
+        withdrawAttempts: order.withdrawAttempts ?? 0,
+        pushAttempts: order.pushAttempts ?? 0,
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),
@@ -1575,6 +1763,69 @@ export class StateFile {
   retainedAdmissionCount(now: number): number {
     this.assertHealthy();
     return [...this.admissions.values()].filter(until => until > now).length;
+  }
+
+  /**
+   * Remember a credit the maker stopped trying to move. Keyed on the ledger
+   * entry, so two orders that park the same (leg, token, account) balance are
+   * one entry: that balance is one thing an operator collects once.
+   */
+  recordStrandedCredit(entry: StrandedCredit): void {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (this.stranded.has(key)) return;
+    this.stranded.set(key, entry);
+    this.persist();
+  }
+
+  /** Every credit still parked, of either owner. Survives the retirement of
+   *  the order that created it, which is the whole point: the order goes so it
+   *  stops holding a listing slot, and the money stays in the contract. */
+  strandedCredits(): StrandedCredit[] {
+    this.assertHealthy();
+    return [...this.stranded.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Parked credits this maker owns. Collectable, so these gate a drain. */
+  ownStrandedCredits(): StrandedCredit[] {
+    return this.strandedCredits().filter((entry) => entry.owner === "maker");
+  }
+
+  /** Parked courtesy pushes to a counterparty. If that address can never
+   *  receive, no action by anyone clears one, so these are reported and never
+   *  gate a drain; an operator dismisses them. */
+  counterpartyStrandedCredits(): StrandedCredit[] {
+    return this.strandedCredits().filter((entry) => entry.owner === "counterparty");
+  }
+
+  /**
+   * Forget a counterparty-owned parked credit on an operator's say-so. Only
+   * that kind: a maker-owned credit is this maker's own money and dismissing
+   * it would erase the only record of where it is, so it has to be collected.
+   * Returns the entry that was removed, for the caller to log.
+   */
+  dismissCounterpartyCredit(key: string): StrandedCredit | null {
+    this.assertHealthy();
+    const entry = this.stranded.get(key);
+    if (entry === undefined || entry.owner !== "counterparty") return null;
+    this.stranded.delete(key);
+    this.persist();
+    return { ...entry };
+  }
+
+  /** The key an entry is stored under, which is the ledger entry it moves. */
+  static strandedKey(entry: { leg: string; token: string; account: string }): string {
+    return STRANDED_KEY(entry);
+  }
+
+  /** Drop a parked entry once its ledger balance reads zero, whether the
+   *  operator collected it by hand or the token started cooperating. */
+  clearStrandedCredit(entry: { leg: string; token: string; account: string }): boolean {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (!this.stranded.delete(key)) return false;
+    this.persist();
+    return true;
   }
 
   private rememberAdmission(order: ManagedOrder): void {
@@ -1647,6 +1898,7 @@ export class StateFile {
       admissions: [...this.admissions.entries()]
         .filter(([, until]) => until > Math.floor(Date.now() / 1000))
         .map(([id, retainUntil]) => ({ id, retainUntil })),
+      strandedCredits: [...this.stranded.values()],
     };
     let fileDescriptor: number | undefined;
     let renamed = false;

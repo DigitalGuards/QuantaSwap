@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { encodeFunctionCall, encodeParameters } from "@theqrl/web3-qrl-abi";
-import { decodeQrvmSwap, encodeQrvmHtlc, type QrvmHtlcMethod } from "./qrvmHtlc";
+import {
+  decodeQrvmSwap,
+  decodeQrvmUints,
+  encodeQrvmHtlc,
+  type QrvmHtlcMethod,
+} from "./qrvmHtlc";
+import { QRVM_ZERO_ADDRESS } from "./qip55";
 
 const hash = `0x${"12".repeat(32)}`;
 const secret = `0x${"34".repeat(32)}`;
 const account = `Q${"ab".repeat(64)}`;
 const timeout = 1_800_007_200;
+const token = `Q${"cd".repeat(64)}`;
 const cases: [QrvmHtlcMethod, string[], (string | number | bigint)[]][] = [
   ["lockNative", ["bytes32", "address", "uint256"], [hash, account, timeout]],
   ["lockNativeOpen", ["bytes32", "uint256"], [hash, timeout]],
@@ -14,6 +21,12 @@ const cases: [QrvmHtlcMethod, string[], (string | number | bigint)[]][] = [
   ["refund", ["bytes32"], [hash]],
   ["release", ["bytes32"], [hash]],
   ["getSwap", ["bytes32"], [hash]],
+  ["withdraw", ["address", "address", "uint256"], [token, account, 7n]],
+  ["withdrawAll", ["address", "address"], [token, account]],
+  ["pushCredit", ["address", "address"], [token, account]],
+  ["creditOf", ["address", "address"], [token, account]],
+  ["outstandingCredit", ["address"], [token]],
+  ["deliveryGasPolicy", [], []],
 ];
 
 describe("bounded QRVM HTLC codec", () => {
@@ -51,6 +64,24 @@ describe("bounded QRVM HTLC codec", () => {
       token: `0x${"0".repeat(128)}`, amount: 10n ** 18n, timeout,
       status: 1, preimage: secret,
     });
+  });
+
+  it("encodes the native-coin credit key as the all-zero address word", () => {
+    // HTLCv3 keys native-coin escrow and credits on address(0), which
+    // carries no checksum to verify, so the codec accepts exactly that word
+    // and nothing else in raw hexadecimal form.
+    const encoded = encodeQrvmHtlc("creditOf", [QRVM_ZERO_ADDRESS, account]);
+    expect(encoded.slice(10, 10 + 128)).toBe("0".repeat(128));
+    expect(() => encodeQrvmHtlc("creditOf", [`0x${"ab".repeat(64)}`, account])).toThrow();
+  });
+
+  it("decodes one and two uint256 return words with strict padding", () => {
+    expect(decodeQrvmUints(encodeParameters(["uint256"], ["42"]), 1)).toEqual([42n]);
+    expect(
+      decodeQrvmUints(encodeParameters(["uint256", "uint256"], ["100000", "150000"]), 2),
+    ).toEqual([100_000n, 150_000n]);
+    expect(() => decodeQrvmUints(`0x${"0".repeat(127)}1`, 2)).toThrow(/64-byte word/);
+    expect(() => decodeQrvmUints(`0x1${"0".repeat(127)}`, 1)).toThrow(/padding/);
   });
 
   it("rejects wrong word width, padded overflow, invalid status, and bytes32 tails", () => {
