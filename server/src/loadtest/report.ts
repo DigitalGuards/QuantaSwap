@@ -81,7 +81,7 @@ export interface ScenarioReport {
   capChecks: CapCheck[];
   healthProbe?: HealthProbeReport;
   bookProcess?: BookProcessUsage;
-  /** Size of the persisted state that every mutation rewrites and fsyncs. */
+  /** Size of the persisted state that one group commit rewrites and fsyncs. */
   storage: {
     dataFileBytes: number;
     feedFileBytes: number;
@@ -330,7 +330,7 @@ export function formatRun(result: RunResult): string {
     const consistency = scenario.consistency;
     out.push("");
     out.push(
-      `   persisted state at the end of the run: store ${(scenario.storage.dataFileBytes / 1024 / 1024).toFixed(2)} MiB, federation feed ${(scenario.storage.feedFileBytes / 1024 / 1024).toFixed(2)} MiB, ${String(scenario.storage.retainedIntents)} retained proposals. Every mutation rewrites and fsyncs the whole store file.`,
+      `   persisted state at the end of the run: store ${(scenario.storage.dataFileBytes / 1024 / 1024).toFixed(2)} MiB, federation feed ${(scenario.storage.feedFileBytes / 1024 / 1024).toFixed(2)} MiB, ${String(scenario.storage.retainedIntents)} retained proposals. One group commit rewrites and fsyncs the whole store file for every mutation it carries.`,
     );
     out.push("");
     out.push(

@@ -832,7 +832,8 @@ concurrent and daily source budgets need only the stored order and the request
 address, so this route answers them before it verifies the ML-DSA-87 proof.
 That keeps a full order from spending a verification on a proposal it cannot
 accept, at one visible cost: a request with an invalid signature against a full
-or closed order now reads as `429` capacity or `409` state rather than `401`.
+or closed order now reads as `429` capacity or `409` state, where it used to
+read `401`.
 No admission number changed.
 
 Two rules make this safe to rely on. A request whose `auth.nonce` matches a

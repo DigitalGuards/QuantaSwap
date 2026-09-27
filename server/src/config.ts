@@ -307,7 +307,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // commit, and the book is one process, so past a small number of them in
     // flight extra concurrency only lengthens the queue. The default admits far
     // more than a live deployment offers while keeping the worst queueing delay
-    // under a second, so a rush is refused honestly instead of timing out.
+    // under a second, so a rush is refused honestly and well before it reaches
+    // the request timeout.
     maxInflightMutations: integerEnv(
       env,
       "ORDERBOOK_MAX_INFLIGHT_MUTATIONS",

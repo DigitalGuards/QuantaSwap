@@ -117,6 +117,12 @@ run, so the host itself was never saturated.
 
 ## Results
 
+Everything from here to
+[Recommendations](#recommendations-ranked-by-impact) is the measurement that
+motivated the write-path work, kept as it was recorded. The
+[After write-path changes](#after-write-path-changes) section at the end is the
+same harness on the same machine against the new code.
+
 ### Admissions are capacity-bound, and the ceiling does not move with demand
 
 `POST /orders/:id/intents` during the measured window.
@@ -381,6 +387,10 @@ Ranked by measured contribution:
 
 ## Recommendations, ranked by impact
 
+Items 1, 2 and 4 have since landed. This list is kept as it was written; the
+measurements of what they changed are in
+[After write-path changes](#after-write-path-changes).
+
 1. **Stop rewriting the whole store on every mutation.** Options, cheapest
    first: coalesce mutations that arrive in the same tick into one persist,
    since bursts are exactly the case that hurts; or move the order store to an
@@ -470,3 +480,243 @@ for any real deployment.
   the opposite extreme, where every client shares one address. The double-fill
   probe deliberately keeps using per-maker addresses even in that scenario, so
   the shared source's mutation budget cannot refuse a correctness check.
+
+## After write-path changes
+
+Three changes landed in the write path after the measurements above:
+
+1. **Group commit.** A mutation changes memory, marks the store dirty and
+   returns. One commit at a time serialises the whole order map, rewrites
+   `orders.json`, fsyncs it, and appends that batch's public events to the feed
+   log under one further barrier. The commit runs at the end of the event-loop
+   turn, so every mutation that completed in that turn shares one durability
+   barrier. A request still reports success only after the commit that carries
+   its mutation completed.
+2. **Shed before verify.** The order state, its remaining runway, the per-order
+   live-proposal count and the caller's concurrent and daily source budgets now
+   answer before ML-DSA-87 verification on `POST /orders/:id/intents`. A request
+   whose `auth.nonce` matches a retained proposal skips that gate and is
+   verified, and every check that reads signed content stays behind
+   verification.
+3. **An in-flight bound for mutations.** At most
+   `ORDERBOOK_MAX_INFLIGHT_MUTATIONS` mutating requests are admitted at once,
+   32 by default, and the rest are refused at the door with `503` and
+   `Retry-After: 1`. Reads, heartbeats, the SSE stream, `/api/health` and
+   `/api/status` are never gated.
+
+Same machine, same flags, same harness. Every figure below is a fresh run of
+`nice -n 15 npm run loadtest -- --takers <N> --duration 20 --scenarios a,b,c,e`
+plus the paired sequential control, exactly as documented above.
+
+### The same work finishes in a fraction of the time
+
+`POST /orders/:id/intents` during the measured window, before and after. Each
+cell is `before -> after`.
+
+| N | Scenario | Submitted | Admitted | req/s | p50 ms | p95 ms | p99 ms | max ms |
+| --: | --- | --: | --- | --- | --- | --- | --- | --- |
+| 50 | a hot order | 300 | 8 -> 8 | 97.0 -> 202.5 | 164 -> 9 | 346 -> 114 | 429 -> 130 | 444 -> 131 |
+| 50 | b spread | 300 | 189 -> 191 | 55.6 -> 169.4 | 613 -> 225 | 5299 -> 1749 | 5364 -> 1753 | 5380 -> 1754 |
+| 50 | c mixed | 300 | 176 -> 180 | 14.6 -> 14.6 | 482 -> 178 | 5522 -> 1756 | 5592 -> 1756 | 5609 -> 1756 |
+| 50 | e shared address | 300 | 4 -> 4 | 446.2 -> 1978.5 | 46 -> 6 | 657 -> 134 | 660 -> 136 | 660 -> 137 |
+| 100 | a hot order | 600 | 8 -> 8 | 126.8 -> 386.8 | 270 -> 12 | 547 -> 120 | 695 -> 139 | 729 -> 141 |
+| 100 | b spread | 600 | 192 -> 192 | 84.9 -> 380.1 | 210 -> 32 | 5473 -> 1267 | 7018 -> 1560 | 7050 -> 1561 |
+| 100 | c mixed | 600 | 174 -> 180 | 29.3 -> 29.1 | 235 -> 33 | 6479 -> 1626 | 7268 -> 1667 | 7300 -> 1670 |
+| 100 | e shared address | 600 | 4 -> 4 | 815.9 -> 3475.2 | 5 -> 4 | 652 -> 114 | 725 -> 158 | 725 -> 159 |
+| 200 | a hot order | 1200 | 8 -> 8 | 149.3 -> 716.5 | 333 -> 10 | 360 -> 77 | 1264 -> 187 | 1333 -> 190 |
+| 200 | b spread | 1200 | 192 -> 192 | 115.9 -> 727.8 | 250 -> 10 | 703 -> 233 | 9664 -> 1579 | 10336 -> 1614 |
+| 200 | c mixed | 1200 | 175 -> 180 | 58.6 -> 58.4 | 255 -> 15 | 595 -> 217 | 10836 -> 1694 | 10896 -> 1695 |
+| 200 | e shared address | 1200 | 4 -> 4 | 1551.0 -> 5129.3 | 5 -> 5 | 148 -> 62 | 715 -> 180 | 722 -> 190 |
+| 500 | a hot order | 3000 | 8 -> 8 | 171.3 -> 1574.9 | 332 -> 9 | 345 -> 20 | 669 -> 96 | 3001 -> 237 |
+| 500 | b spread | 3000 | 192 -> 192 | 151.0 -> 1547.4 | 331 -> 11 | 1042 -> 286 | 1264 -> 391 | 10140 -> 1593 |
+| 500 | c mixed | 2938 -> 3000 | 173 -> 180 | 140.5 -> 146.1 | 321 -> 10 | 507 -> 187 | 6904 -> 1729 | 15042 -> 1947 |
+| 500 | e shared address | 3000 | 4 -> 4 | 3228.5 -> 6119.3 | 5 -> 8 | 54 -> 14 | 321 -> 71 | 721 -> 166 |
+
+Admitted counts are still flat in N and still match the documented policy
+exactly. All 40 cap assertions across these 16 scenario runs held, as did every
+invariant check.
+
+Scenario c is bound by its 20 s duration, so its request rate cannot rise; what
+moved there is the tail, from an 11 s worst case at 200 takers to 1.7 s, and a
+15 s worst case at 500 takers to 1.9 s. The other three scenarios drain a
+fixed pre-signed batch as fast as the book will take it, so their rate is the
+capacity figure. The same batch now drains in:
+
+| N | Scenario a | Scenario b |
+| --: | --- | --- |
+| 50 | 3.1 s -> 1.5 s | 5.4 s -> 1.8 s |
+| 100 | 4.7 s -> 1.6 s | 7.1 s -> 1.6 s |
+| 200 | 8.0 s -> 1.7 s | 10.4 s -> 1.7 s |
+| 500 | 17.5 s -> 1.9 s | 19.9 s -> 1.9 s |
+
+The drain time is now nearly flat in the taker count, which is what a shedding
+path that costs almost nothing looks like.
+
+### Refusing a proposal costs a fiftieth of what it did
+
+Book CPU as a percentage is no longer comparable between the two runs, because
+the same work now finishes in a quarter to a tenth of the wall time. CPU
+milliseconds per submitted mutation-class request is comparable:
+
+| N | Scenario | CPU ms per submitted request |
+| --: | --- | --- |
+| 200 | a hot order | 5.96 -> 0.35 |
+| 200 | b spread | 6.73 -> 1.34 |
+| 500 | a hot order | 5.70 -> 0.27 |
+| 500 | b spread | 6.03 -> 0.69 |
+| 500 | c mixed | 6.26 -> 1.18 |
+
+The clearest case is the hot-order race at 500 takers. It used to spend 17.1 s
+of CPU to refuse 2992 proposals that could not be admitted. It now spends
+0.80 s of CPU for the whole scenario, admissions included, and reaches 42% of
+one core where it used to sit at 98%. Per refused proposal that is 5.7 ms
+before and 0.27 ms after, a factor of 21.
+
+The harness now reports those refusals in its own bucket. At 200 takers
+scenario a shows 1192 proposals shed before verification at a 9.8 ms p50 and
+zero refused after verification, where the whole 1192 used to pay full
+verification. The sequential control still measures the post-verification
+refusal path, because its refusals are `account_pending_intent`, the check that
+deliberately stays behind verification.
+
+### Reads and the health probe stay answerable
+
+`GET /orders` in the mixed workload, where eight clients poll at 5 Hz:
+
+| N | p50 ms | p95 ms | achieved req/s |
+| --: | --- | --- | --- |
+| 50 | 3.2 -> 2.5 | 436 -> 42 | 31.5 -> 37.1 |
+| 100 | 3.3 -> 2.9 | n/a -> 52 | n/a -> 37.3 |
+| 200 | 3.2 -> 2.6 | 436 -> 76 | 31.5 -> 37.4 |
+| 500 | 339 -> 2.4 | n/a -> 58 | 13.8 -> 37.1 |
+
+The read collapse at 500 takers is gone. The eight pollers keep their full
+37 requests per second at a 2.4 ms median, where the earlier run had them down
+to 13.8 per second at a 339 ms median. The before column reports the two
+figures the earlier run recorded: a 3.2 to 3.3 ms p50 with a 436 ms p95 up to
+200 takers, and the collapse at 500.
+
+The externally probed `GET /api/health`, for the four cases the earlier run
+called unusable:
+
+| N | Scenario | Probe samples | Grid ticks missed | Replies not 200 | Worst reply |
+| --: | --- | --- | --- | --- | --- |
+| 200 | b spread | 2 -> 1 | 101 -> 14 | 1 -> 0 | 10.0 s -> 1.50 s |
+| 200 | c mixed | 97 -> 189 | 107 -> 16 | 1 -> 0 | 10.0 s -> 1.64 s |
+| 500 | b spread | 15 -> 5 | 183 -> 14 | 1 -> 0 | 10.0 s -> 1.48 s |
+| 500 | c mixed | 14 -> 186 | 194 -> 18 | 1 -> 0 | 10.0 s -> 1.88 s |
+
+No probe request exceeded its 10 s client timeout in any run, at any taker
+count. In the 20 s mixed workload the probe now takes almost every sample it
+schedules, 189 of about 205 at 200 takers and 186 at 500.
+
+Read the spread rows with care. Scenario b's measured window collapsed to about
+1.7 s, so the probe only has 16 grid slots to sample in the first place, and
+losing 14 of them means the book was saturated for most of a 1.7 s burst rather
+than most of a 10 s one. The sample counts are small for that reason, and the
+missed-tick count is still the honest signal: the window where `/api/health` is
+slow shrank from about 10 s to under 2 s, and it never stopped answering.
+
+### Queue-free service time is unchanged
+
+The paired control, 50 takers, strictly sequential, run once on the disk-backed
+filesystem and once on a memory filesystem:
+
+| Measure | Disk before | Disk after | Memory before | Memory after |
+| --- | --: | --: | --: | --: |
+| Admitted, verify plus persist, p50 | 24.7 ms | 25.8 ms | 9.2 ms | 9.8 ms |
+| Refused after verification, p50 | 5.9 ms | 6.3 ms | 6.1 ms | 6.2 ms |
+| Sequential listing read, p50 | 1.8 ms | 1.8 ms | 1.6 ms | 2.4 ms |
+| Admitted, first quarter | 23.0 ms | 25.6 ms | 8.3 ms | 9.4 ms |
+| Admitted, last quarter | 25.6 ms | 26.5 ms | 10.3 ms | 10.5 ms |
+| Admitted throughput | 35.3/s | 33.2/s | 76.7/s | 71.7/s |
+| Book CPU during the window | 49% | 50% | 98% | 97% |
+
+This is the expected result and it is worth stating plainly: with one request in
+flight there is nothing to batch, so a group commit carries exactly one
+mutation and costs the same barrier it always did, plus one event-loop hop. The
+one to two millisecond difference is that hop and run-to-run noise. Every gain
+above comes from concurrency, and the component split measured earlier still
+holds: about 6 ms of verification and parsing, about 3.5 ms of serialising and
+rewriting, and about 16 ms of fsync barrier, now shared.
+
+### The in-flight bound is insurance, and 32 is the right default
+
+At the harness's 64-request in-flight cap the default bound of 32 is almost
+never reached. It fired 11 times in one scenario at 500 takers and not at all
+below that, and a run with the bound raised to 1024 measures the same as the
+default within noise at 200 takers: 719.6 against 727.8 requests per second,
+192 admitted either way, 15 against 14 missed probe ticks.
+
+That figure describes the harness. Its 64 workers each hold one request at a
+time and pace themselves on a shared machine, so the concurrency that reaches
+the book is lower than the cap suggests. Twelve genuinely simultaneous
+unsigned creates against a book with the bound at 1 answer `33` created and
+`31` refused, and 64 simultaneous creates against the default bound answer
+33 created and 31 refused in 88 ms, so the mechanism engages exactly as
+specified when the concurrency is real.
+
+Lowering the bound is worse, measured at 200 takers on scenarios b and c:
+
+| Bound | b admitted | b req/s | b max ms | c p99 ms | c probe missed | Gate refusals |
+| --- | --: | --: | --: | --: | --: | --: |
+| 8 | 72 | 1297.7 | 906 | 2352 | 22 | 99 in b, 205 in c |
+| 32 (default) | 192 | 727.8 | 1614 | 1694 | 16 | 0 |
+| 1024 | 192 | 719.6 | 1648 | 1869 | 18 | 0 |
+
+At 8 the book sheds legitimate work. The spread scenario admitted 72 proposals
+where the policy allows 192, because its whole batch drained in 0.9 s while a
+quarter of it was refused for capacity, and one maker repost in the mixed
+scenario was refused too. The tail and the probe both got worse.
+A maker repricing its book cancels and reposts every listing inside one
+mutation window, 28 listings at current production depth, so the bound has to
+leave room for that burst. 32 does; 8 does not.
+
+### What the numbers say about the recommendations not taken
+
+- **Recommendation 3, keeping signature material out of the store rows.** Still
+  the right next structural change, and now the dominant remaining cost of an
+  admitted mutation. A group commit still rewrites the whole 3.21 MiB file, so
+  the amplification per mutation only falls with the batch size, and at the
+  documented 64-order ceiling it becomes 8.57 MiB per commit. The memory
+  filesystem column above shows the byte-count term as the 9.4 ms to 10.5 ms
+  drift across the run with the barrier removed.
+- **Recommendation 5, more than one core of verification.** The case for it is
+  weaker than it was. One core of ML-DSA-87 verification was the wall behind
+  the fsync barrier, and it still bounds admitted throughput, but the cost per
+  refused proposal fell by a factor of 21 and refusals are the overwhelming
+  majority of a rush. At 500 takers racing one order the book now answers
+  1575 requests per second on 42% of one core. A verifier pool would raise the
+  admitted ceiling only, which the per-order and per-source policy caps already
+  hold well below what one core can verify.
+- **Recommendation 6, how long a consumed proposal slot is held.** Unchanged and
+  still an economic decision. The per-round figures are still `8, 0, 0, 0, 0, 0`
+  in the hot-order race at every taker count. What changed is only the price of
+  saying no.
+- **Recommendation 7, liveness probes.** Still sound advice, with a smaller
+  margin needed. No probe request exceeded 2 s in any run here, against a 10 s
+  client timeout exceeded at 200 and 500 takers before, so a supervision timeout
+  of a few seconds is now defensible where it was not.
+
+### Reproducing these numbers
+
+```bash
+cd server
+npm ci
+for takers in 50 100 200 500; do
+  nice -n 15 npm run loadtest -- --takers "$takers" --duration 20 \
+    --scenarios a,b,c,e
+done
+nice -n 15 npm run loadtest -- --takers 50 --duration 30 --scenarios f \
+  --run-dir /tmp/orderbook-loadtest-disk
+nice -n 15 npm run loadtest -- --takers 50 --duration 30 --scenarios f \
+  --run-dir /dev/shm/orderbook-loadtest-memory
+```
+
+The in-flight bound is read from the environment the harness inherits, so the
+sensitivity run is the same command with the bound set:
+
+```bash
+ORDERBOOK_MAX_INFLIGHT_MUTATIONS=8 nice -n 15 npm run loadtest -- \
+  --takers 200 --duration 20 --scenarios b,c
+```

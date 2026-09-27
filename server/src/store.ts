@@ -1230,9 +1230,10 @@ export class OrderStore {
     }
   }
 
-  /** Fires after every observable change (mutation persisted, or a maker
-   *  coming back online). The server uses it to push the book to
-   *  streaming clients. */
+  /** Fires after every observable change (a group commit reached the file, or
+   *  a maker came back online). The server uses it to push the book to
+   *  streaming clients. A listener must not throw: it runs inside the commit
+   *  loop, where there is no request left to answer with the failure. */
   subscribe(fn: () => void): void {
     this.listeners.push(fn);
   }
@@ -1241,7 +1242,7 @@ export class OrderStore {
    * Receives one group commit's public events, in mutation order, after the
    * orders file is durable and before the commit is reported as durable. A
    * listener that throws fails the commit, so the batch's callers are refused
-   * instead of being told their mutation reached the feed.
+   * and none is told its mutation reached the feed.
    */
   subscribeFederation(fn: (events: readonly FederationEvent[]) => void): void {
     this.federationListeners.push(fn);

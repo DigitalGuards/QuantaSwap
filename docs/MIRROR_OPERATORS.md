@@ -141,8 +141,8 @@ Rules the lease follows:
   disk. Ownership is still proved at the start of each request, before any
   in-memory change, so the common case is refused before a mutation exists.
   When it is the commit that is refused, memory already holds mutations whose
-  callers were told they failed, so the process stops rather than carrying them
-  to disk in a later commit.
+  callers were told they failed, so the process stops and a later commit cannot
+  carry them to disk.
 - `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
   startup rejects those paths because the suffix names the lease files.
 
@@ -610,9 +610,8 @@ Use both endpoints:
 
 Watch the `503` rate on mutating routes as well. A sustained stream of
 `order book has too many requests in flight` means demand is past
-`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, which is a capacity signal rather than a
-fault: the book is shedding on purpose and its reads and probes are still being
-served.
+`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`. That is a capacity signal: the book is
+shedding on purpose and its reads and probes are still being served.
 
 A `lease.ready` of false means writes are being refused while reads still
 serve. Treat a repeated occurrence as a storage fault on the state volume.

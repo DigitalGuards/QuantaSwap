@@ -392,7 +392,7 @@ store.subscribeFederation((events) => {
     federationHealthy = false;
     console.error("[orderbook] federation event persistence failed:", error);
     initiateShutdown("federation storage failure", 1);
-    // Fails the commit, so every request in the batch is refused rather than
+    // Fails the commit, so every request in the batch is refused and none is
     // told its mutation reached a feed that never received it.
     throw new OrderStorePersistenceError(
       "federation events could not be persisted safely",

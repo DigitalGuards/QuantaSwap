@@ -1053,8 +1053,8 @@ describe("fill intent admission fairness", () => {
       }
       // An unverifiable body against a full order is answered from capacity,
       // before any ML-DSA-87 work. The status a client sees for this request
-      // is 429 rather than 401, which is the documented consequence of
-      // shedding first.
+      // is 429 where it used to be 401, the documented consequence of shedding
+      // first.
       const forged = makeFill(now, order, 44, 66, {
         requestNonceByte: 0x7f,
         takerKeys: takerAt(1),
