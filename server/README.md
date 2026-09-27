@@ -510,5 +510,37 @@ npm test
 npm start
 ```
 
+## Concurrency load test
+
+`src/loadtest/` holds a harness that starts a real book process on loopback
+with a throwaway data directory, seeds signed portable V2 orders from synthetic
+makers, and drives hundreds of synthetic takers, makers, listing pollers and
+stream subscribers at it.
+
+It is developer tooling. It compiles through its own `tsconfig.loadtest.json`
+into `dist-loadtest`, so `npm run build` leaves it out of `dist` and the runtime
+image never carries it. `npm test` does not execute it. CI typechecks it with
+`npm run typecheck:loadtest`.
+
+```bash
+nice -n 15 npm run loadtest -- --takers 200 --duration 20
+```
+
+Each scenario runs in three phases with separate metrics: preparation signs
+every proof and seeds the book, the measured window sends only what was
+prepared, and the audit verifies the invariants. Reported latency, throughput
+and book CPU cover the measured window alone.
+
+It reports per-endpoint latency percentiles, admitted and refused proposals
+split by whether the refusal paid signature verification, fairness against the
+documented proposal ordering, SSE delivery lag, externally probed
+responsiveness, and assertions against the documented admission ceilings. The
+end-of-run invariant checks cover the store against the append-only feed log
+paged like a mirror peer, exactly one stored fill under a deliberate
+double-fill race with the losing proof retained as conflict evidence, and an
+identical reload after a restart. The run exits non-zero when any assertion
+fails. Results and analysis for this deployment are in
+[`../docs/LOAD_TEST.md`](../docs/LOAD_TEST.md).
+
 The complete wire protocol remains in
 [`../docs/ORDERBOOK_API.md`](../docs/ORDERBOOK_API.md).

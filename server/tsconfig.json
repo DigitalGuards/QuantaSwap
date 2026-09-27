@@ -17,5 +17,9 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The load harness is developer tooling. It compiles through
+  // tsconfig.loadtest.json into dist-loadtest so it never reaches the runtime
+  // image, which packages dist only.
+  "exclude": ["src/loadtest"]
 }

@@ -81,6 +81,10 @@ jobs:
         working-directory: server
         run: npm test
 
+      - name: Typecheck the load harness
+        working-directory: server
+        run: npm run typecheck:loadtest
+
       - name: Audit dependencies
         working-directory: server
         run: npm audit --audit-level=moderate
