@@ -124,6 +124,12 @@ export interface ManagedOrder {
    *  after the preimage went public; null on older records. */
   sponsorSentAt: number | null;
   refundSentAt: number | null;
+  /** Last attempt to collect our own deferred payout on this swap, when a
+   *  settlement credited us instead of delivering; null on older records. */
+  withdrawSentAt: number | null;
+  /** Last attempt to push the taker's deferred payout to the taker after a
+   *  sponsored claim credited them; null on older records. */
+  pushSentAt: number | null;
   createdAt: number;
 }
 
@@ -136,6 +142,8 @@ export type Decision =
   | "claim" // taker's lock verified at depth: claim it (reveals secret)
   | "sponsor" // secret public: claim our lock for the taker, paying the gas
   | "refund" // our lock is open past its timeout
+  | "withdraw" // a settlement credited us instead of delivering: collect it
+  | "push" // a sponsored claim credited the taker: deliver it to them
   | "finish" // both sides settled; stop tracking
   | "abort"; // order evaporated before any funds moved; forget it
 
@@ -176,6 +184,13 @@ export interface DecideInput {
   /** Skip sponsoring this close to the lock's timeout. Must cover a full
    *  transaction wait, since claim() reverts at the timeout. */
   sponsorMarginS: number;
+  /** Our own undelivered payout on this swap, in the token of the leg that
+   *  pays us. HTLCv3 leaves one behind when a settlement's delivery fails;
+   *  null on RPC failure, which decides nothing. */
+  ourCredit: bigint | null;
+  /** The taker's undelivered payout on the leg we funded, left by a claim
+   *  (ours or theirs) whose delivery failed; null on RPC failure. */
+  takerCredit: bigint | null;
 }
 
 const retryOk = (
@@ -323,12 +338,57 @@ export function decide(x: DecideInput): Decision {
     return "refund";
   }
 
+  // HTLCv3 payout credits. A settlement whose delivery failed is still
+  // terminal: the amount is held as a credit owned by the payee, so it has
+  // to be collected before this order is retired, or the record that names
+  // the swap is gone while value is still in the contract. Ours is revenue
+  // we withdraw to ourselves. The taker's, on the leg we funded, is finished
+  // with pushCredit, which is permissionless, takes no destination, and can
+  // only pay the taker: it is the credit-path half of a sponsored claim, and
+  // it is what keeps a taker with no gas on the paying chain from sitting
+  // behind a deferred payout. Both are irreversible sends, so both carry a
+  // persisted marker and the same retry spacing as claim and refund.
+  if (
+    x.ourCredit !== null &&
+    x.ourCredit > 0n &&
+    retryOk(managed.withdrawSentAt, nowS, x.resendAfterS)
+  ) {
+    return "withdraw";
+  }
+
+  // A taker credit is only ours to finish when it sits on the exact lock we
+  // funded for this taker and this operator sponsors claims. The hashlock is
+  // public before we lock, so a third party could hold the record on our
+  // initiator chain; a credit there belongs to their swap.
+  const pushableTakerCredit =
+    x.sponsorClaims &&
+    x.takerOnInitiatorLeg !== null &&
+    x.iState.status === SwapStatus.Claimed &&
+    sameAddr(x.iState.initiator, x.ourInitiator) &&
+    sameAddr(x.iState.recipient, x.takerOnInitiatorLeg);
+
+  if (
+    pushableTakerCredit &&
+    x.takerCredit !== null &&
+    x.takerCredit > 0n &&
+    retryOk(managed.pushSentAt, nowS, x.resendAfterS)
+  ) {
+    return "push";
+  }
+
   // Settled: our leg terminal and the responder leg terminal or never
-  // touched past its window.
+  // touched past its window. A credit outstanding on either side reaches
+  // the branches above first, so finishing means nothing is left to collect.
   const rSettled =
     terminal(x.rState) ||
     (x.rState !== null && x.rState.status === SwapStatus.None && nowS >= t2);
-  if (terminal(x.iState) && rSettled) return "finish";
+  // Retiring the record deletes the only local handle on this swap, so it
+  // waits until every credit this maker is responsible for is provably
+  // gone. A read that failed is not a zero balance, and a credit inside its
+  // retry spacing is still outstanding: both fail closed here.
+  const creditsSettled =
+    x.ourCredit === 0n && (!pushableTakerCredit || x.takerCredit === 0n);
+  if (terminal(x.iState) && rSettled && creditsSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
   if (

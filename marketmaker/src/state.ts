@@ -68,6 +68,8 @@ type PersistedOrder = Omit<
   | "quotedMidMilli"
   | "announcedAt"
   | "sponsorSentAt"
+  | "withdrawSentAt"
+  | "pushSentAt"
   | "asset"
   | "deployment"
   | "protocol"
@@ -76,6 +78,8 @@ type PersistedOrder = Omit<
   quotedMidMilli?: string | null;
   announcedAt?: number | null;
   sponsorSentAt?: number | null;
+  withdrawSentAt?: number | null;
+  pushSentAt?: number | null;
   asset?: string;
   deployment?: unknown;
   protocol?: unknown;
@@ -1622,6 +1626,11 @@ export class StateFile {
         quotedMidMilli: order.quotedMidMilli ?? null,
         announcedAt: order.announcedAt ?? null,
         sponsorSentAt: order.sponsorSentAt ?? null,
+        // HTLCv3 credit markers. Records written before payout credits
+        // existed default to "never attempted", which is correct: they were
+        // created against a contract that could not defer a payout.
+        withdrawSentAt: order.withdrawSentAt ?? null,
+        pushSentAt: order.pushSentAt ?? null,
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),

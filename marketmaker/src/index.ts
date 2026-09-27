@@ -18,15 +18,19 @@ import { cancelOpenListing } from "./drain.js";
 import {
   NATIVE_TOKEN,
   QRL_NATIVE_TOKEN,
+  assertDeliveryGasPolicy,
   encodeApprove,
   encodeClaim,
   encodeLock,
   encodeLockToken,
+  encodePushCredit,
   encodeRefund,
+  encodeWithdrawAll,
   erc20Allowance,
   erc20BalanceOf,
   getChainId,
   getConfirmedSwapState,
+  getCredit,
   getSwapState,
   submitPreflightedClaim,
   type LegKey,
@@ -291,6 +295,26 @@ async function legStateOrNull(
   }
 }
 
+/** The token a leg escrows for this order: the compiled-in registry address
+ *  on the Ethereum leg, the native sentinel on QRL. Never book-provided.
+ *  Payout credits are per token, so this is also the credit's key. */
+function legToken(leg: LegKey, asset: AssetSymbol): string {
+  return leg === "eth" ? (assetInfo(asset).tokenAddress ?? NATIVE_TOKEN) : QRL_NATIVE_TOKEN;
+}
+
+async function creditOrNull(
+  leg: LegRpc,
+  token: string,
+  account: string | null,
+): Promise<bigint | null> {
+  if (account === null) return null;
+  try {
+    return await getCredit(leg, token, account);
+  } catch {
+    return null; // fail closed; decide() never retires a record on an unknown credit
+  }
+}
+
 async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   if (canRetireExpiredUnfundedQuote(managed, nowS())) {
     state.delete(managed.id);
@@ -314,13 +338,19 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   if (view !== null) persistAuthenticatedFillObservation(managed, view);
 
   const hashlock = managed.hashlock;
-  const [iState, rState, rConfirmed] = hashlock
+  // Payout credits are read alongside chain state: the deferred half of a
+  // settlement is invisible in getSwap, which reports Claimed either way.
+  const takerOnInitiatorLeg =
+    iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
+  const [iState, rState, rConfirmed, ourCredit, takerCredit] = hashlock
     ? await Promise.all([
         legStateOrNull(legRpc[iLeg], hashlock, false),
         legStateOrNull(legRpc[rLeg], hashlock, false),
         legStateOrNull(legRpc[rLeg], hashlock, true),
+        creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg)),
+        creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), takerOnInitiatorLeg),
       ])
-    : [null, null, null];
+    : [null, null, null, null, null];
 
   if (
     bookError !== undefined &&
@@ -574,6 +604,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     protocol?.fillProof === undefined ? bookStatus : "locking";
   const fillResponseExpired =
     protocol?.fillProof !== undefined && nowS() >= protocol.fillProof.auth.expiresAt;
+  const sponsorMarginS = Math.ceil(cfg.txTimeoutMs / 1000) + 60;
   const decision = decide({
     bookStatus: lifecycleBookStatus,
     released: Boolean(view?.released) || fillResponseExpired,
@@ -586,18 +617,17 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     // We receive the order's ETH-leg asset only when the taker locks the
     // ETH leg (direction qrl->eth); the QRL leg is always native. The
     // address comes from the compiled-in registry, never from the book.
-    expectedToken:
-      rLeg === "eth"
-        ? (assetInfo(managed.asset).tokenAddress ?? NATIVE_TOKEN)
-        : QRL_NATIVE_TOKEN,
+    expectedToken: legToken(rLeg, managed.asset),
     nowS: nowS(),
     resendAfterS: cfg.resendAfterS,
     claimSafetyS: cfg.claimSafetyS,
     lockGraceS: cfg.lockGraceS,
     sponsorClaims: cfg.sponsorClaims,
     ourInitiator: myAddress(iLeg),
-    takerOnInitiatorLeg: iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount,
-    sponsorMarginS: Math.ceil(cfg.txTimeoutMs / 1000) + 60,
+    takerOnInitiatorLeg,
+    sponsorMarginS,
+    ourCredit,
+    takerCredit,
   });
 
   switch (decision) {
@@ -723,8 +753,13 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         async () => {
           managed.claimSentAt = nowS();
           state.upsert(managed);
-          return sender(rLeg).send(claimData, 0n);
+          return sender(rLeg).send(claimData, 0n, undefined, { settlement: true });
         },
+        // The claim cutoff, re-checked against a fresh read of the escrow's
+        // own deadline immediately before the secret goes out. A margin
+        // checked when this decision was taken is not a margin at broadcast
+        // (docs/FINALITY.md section 3.3).
+        { hashlock: managed.hashlock, marginS: cfg.claimSafetyS, nowS },
       );
       log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
       break;
@@ -745,7 +780,11 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           legRpc[iLeg],
           myAddress(iLeg),
           claimData,
-          () => sender(iLeg).send(claimData, 0n),
+          // A sponsored claim carries the settlement buffer above all: the
+          // taker holds no gas on this chain, so a payout deferred into a
+          // credit would leave them behind a withdrawal they cannot send.
+          () => sender(iLeg).send(claimData, 0n, undefined, { settlement: true }),
+          { hashlock: managed.hashlock, marginS: sponsorMarginS, nowS },
         );
         log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
       } catch (err) {
@@ -761,8 +800,57 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       if (managed.hashlock === null) break;
       managed.refundSentAt = nowS();
       state.upsert(managed);
-      const hash = await sender(iLeg).send(encodeRefund(iLeg, managed.hashlock), 0n);
+      const hash = await sender(iLeg).send(
+        encodeRefund(iLeg, managed.hashlock),
+        0n,
+        undefined,
+        { settlement: true },
+      );
       log(`order ${short(managed.id)} refunded ${iLeg} leg (taker never finished), tx ${hash}`);
+      break;
+    }
+
+    case "withdraw": {
+      // A settlement credited us instead of delivering. The credit is ours
+      // and only we can move it, so it goes straight to our own address.
+      // Marker first, like every other irreversible send.
+      managed.withdrawSentAt = nowS();
+      state.upsert(managed);
+      const token = legToken(rLeg, managed.asset);
+      const hash = await sender(rLeg).send(
+        encodeWithdrawAll(rLeg, token, myAddress(rLeg)),
+        0n,
+        undefined,
+        { settlement: true },
+      );
+      log(`order ${short(managed.id)} withdrew a deferred payout on the ${rLeg} leg, tx ${hash}`);
+      break;
+    }
+
+    case "push": {
+      // The taker's payout deferred into a credit. pushCredit is
+      // permissionless and takes no destination, so this can only pay the
+      // taker: it finishes the sponsored claim without gaining any redirect
+      // authority. A courtesy on a swap we were already paid for, so a
+      // failure is logged and retried on the marker's own spacing.
+      if (takerOnInitiatorLeg === null) break;
+      managed.pushSentAt = nowS();
+      state.upsert(managed);
+      const token = legToken(iLeg, managed.asset);
+      try {
+        const hash = await sender(iLeg).send(
+          encodePushCredit(iLeg, token, takerOnInitiatorLeg),
+          0n,
+          undefined,
+          { settlement: true },
+        );
+        log(`order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`);
+      } catch (err) {
+        log(
+          `order ${short(managed.id)} credit push skipped:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
       break;
     }
 
@@ -964,6 +1052,8 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
         claimSentAt: null,
         sponsorSentAt: null,
         refundSentAt: null,
+        withdrawSentAt: null,
+        pushSentAt: null,
         createdAt: nowS(),
       };
       // Persist the signed listing before publish. Maker identity plus nonce
@@ -1064,6 +1154,14 @@ async function main(): Promise<void> {
     getChainId(legRpc.qrl),
   ]);
   assertRuntimeChainIds(deployment, ethRpcChainId, qrlRpcChainId);
+  // Only HTLCv3 answers deliveryGasPolicy(), so this both proves the pinned
+  // addresses are the interface this build settles against and pins the
+  // constants the settlement gas rule adds. A wrong contract generation
+  // stops the daemon here instead of quietly deferring every payout.
+  await Promise.all([
+    assertDeliveryGasPolicy(legRpc.eth),
+    assertDeliveryGasPolicy(legRpc.qrl),
+  ]);
   health.markRuntimeVerified();
   if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
   log(`maker eth=${eth.address} qrl=${qrl.address}`);

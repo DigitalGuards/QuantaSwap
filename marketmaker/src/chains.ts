@@ -5,7 +5,7 @@ import { FetchRequest, JsonRpcProvider, Wallet } from "ethers";
 import * as qrlweb3 from "@theqrl/web3";
 import type { Config } from "./config.js";
 import { assertQip55ExecutionReady } from "./qip55.js";
-import { assertQrlRuntime, type LegRpc } from "./htlc.js";
+import { assertQrlRuntime, settlementGasLimit, type LegRpc } from "./htlc.js";
 
 /** Bound any promise so a hung library call cannot wedge the single-
  *  threaded tick. Used for @theqrl/web3, which takes no abort signal; the
@@ -46,13 +46,27 @@ export type QrlLegConfig = Pick<
   "qrlRpcUrl" | "qrlHexseed" | "qrlHtlc" | "qrlChainId" | "netTimeoutMs" | "txTimeoutMs"
 >;
 
+/** Per-send options. `settlement` applies the HTLCv3 gas rule
+ *  (`estimateGas + 250000`) so a payout that can be delivered is not
+ *  deferred into a credit by a minimal estimate; see
+ *  docs/audit/HTLCV3_SCOPE.md A1 and A2. Every claim, refund, release and
+ *  credit move sets it; locks and approvals do not. */
+export interface SendOptions {
+  settlement?: boolean;
+}
+
 /** Transaction sender surface shared by both legs, so callers and tests
  *  can depend on the capability, with the concrete client chosen by the
  *  caller. */
 export interface LegSender {
   readonly address: string;
   balance(): Promise<bigint>;
-  send(data: string, valueWei: bigint, to?: string): Promise<string>;
+  send(
+    data: string,
+    valueWei: bigint,
+    to?: string,
+    options?: SendOptions,
+  ): Promise<string>;
 }
 
 interface QrlAccount {
@@ -103,11 +117,35 @@ export class EthLeg implements LegSender {
    *  contract as `to`. Success is judged by the receipt status alone
    *  (wait() throws on a reverted tx), never by decoded return data, so
    *  no-return-value tokens (tUSDT) are safe. */
-  async send(data: string, valueWei: bigint, to = this.htlc): Promise<string> {
+  async send(
+    data: string,
+    valueWei: bigint,
+    to = this.htlc,
+    options: SendOptions = {},
+  ): Promise<string> {
     if ((await this.provider.getNetwork()).chainId !== this.chainId) {
       throw new Error("ETH RPC chain mismatch; refusing transaction");
     }
-    const tx = await this.wallet.sendTransaction({ to, data, value: valueWei, chainId: this.chainId });
+    // ethers estimates for us on an ordinary send. A settlement overrides
+    // that estimate with the HTLCv3 rule.
+    const gasLimit =
+      options.settlement === true
+        ? settlementGasLimit(
+            await this.wallet.estimateGas({
+              to,
+              data,
+              value: valueWei,
+              chainId: this.chainId,
+            }),
+          )
+        : undefined;
+    const tx = await this.wallet.sendTransaction({
+      to,
+      data,
+      value: valueWei,
+      chainId: this.chainId,
+      ...(gasLimit === undefined ? {} : { gasLimit }),
+    });
     // Bound the confirmation wait: a stuck tx throws instead of hanging the
     // tick forever, and decide() reconciles from chain state next tick.
     await tx.wait(1, this.txTimeoutMs);
@@ -143,7 +181,12 @@ export class QrlLeg implements LegSender {
     return BigInt(await withTimeout(this.web3.qrl.getBalance(this.address), this.netTimeoutMs, "qrl getBalance"));
   }
 
-  async send(data: string, valueWei: bigint): Promise<string> {
+  async send(
+    data: string,
+    valueWei: bigint,
+    _to?: string,
+    options: SendOptions = {},
+  ): Promise<string> {
     await assertQrlRuntime(this.rpc);
     const base: Record<string, unknown> = {
       from: this.address,
@@ -154,7 +197,10 @@ export class QrlLeg implements LegSender {
     };
     const gasPrice = await withTimeout(this.web3.qrl.getGasPrice(), this.netTimeoutMs, "qrl getGasPrice");
     const estimated = await withTimeout(this.web3.qrl.estimateGas(base), this.netTimeoutMs, "qrl estimateGas");
-    const gas = (BigInt(estimated) * 13n) / 10n;
+    const gas =
+      options.settlement === true
+        ? settlementGasLimit(BigInt(estimated))
+        : (BigInt(estimated) * 13n) / 10n;
     await assertQrlRuntime(this.rpc);
     const receipt = await withTimeout(
       this.web3.qrl.sendTransaction({ ...base, gas, gasPrice }),

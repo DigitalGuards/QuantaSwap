@@ -1,11 +1,28 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
+import { Interface } from "ethers";
 import {
+  DELIVERY_GAS_LIMIT,
+  DELIVERY_GAS_RESERVE,
+  HTLC_ABI,
+  NATIVE_TOKEN,
+  QRL_NATIVE_TOKEN,
+  SETTLEMENT_GAS_BUFFER,
+  assertDeliveryGasPolicy,
+  claimCutoffBlocked,
+  encodePushCredit,
+  encodeWithdrawAll,
   getChainId,
+  getCredit,
+  getDeliveryGasPolicy,
+  settlementGasLimit,
   simulateHtlcCall,
   submitPreflightedClaim,
   type LegRpc,
 } from "./htlc.js";
+import { encodeQrvmHtlc } from "./qrvmHtlc.js";
+
+const htlcAbi = new Interface(HTLC_ABI);
 
 interface RpcRequest {
   jsonrpc: string;
@@ -153,6 +170,139 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
         },
       );
     });
+  });
+});
+
+/** getSwap as the ETH leg's HTLC would answer it. */
+function swapResult(status: number, timeout: number): string {
+  return htlcAbi.encodeFunctionResult("getSwap", [
+    [
+      `0x${"9".repeat(40)}`,
+      `0x${"a".repeat(40)}`,
+      `0x${"0".repeat(40)}`,
+      1n,
+      BigInt(timeout),
+      BigInt(status),
+      `0x${"0".repeat(64)}`,
+    ],
+  ]);
+}
+
+describe("claim cutoff at broadcast", { concurrency: false }, () => {
+  const NOW = 1_800_000_000;
+  const MARGIN = 600;
+  const hashlock = `0x${"12".repeat(32)}`;
+
+  it("abandons a claim whose escrow deadline moved inside the margin", async () => {
+    // FINALITY.md section 3.3: claim() closes at the escrow timeout, so a
+    // claim that mines at or after it reverts with the preimage already
+    // public. A margin checked when the decision was taken is not a margin
+    // at broadcast.
+    let submissions = 0;
+    await withRpcResponse({ result: swapResult(1, NOW + MARGIN) }, async () => {
+      await assert.rejects(
+        submitPreflightedClaim(
+          ETH_LEG,
+          `0x${"7".repeat(40)}`,
+          `0x${"34".repeat(68)}`,
+          async () => {
+            submissions += 1;
+            return "0xtxhash";
+          },
+          { hashlock, marginS: MARGIN, nowS: () => NOW },
+        ),
+        /abandoned inside the escrow's safety margin/,
+      );
+    });
+    assert.equal(submissions, 0);
+  });
+
+  it("broadcasts while the escrow deadline is outside the margin", async () => {
+    await withRpcResponse({ result: swapResult(1, NOW + MARGIN + 1) }, async () => {
+      assert.equal(
+        await submitPreflightedClaim(
+          ETH_LEG,
+          `0x${"7".repeat(40)}`,
+          `0x${"34".repeat(68)}`,
+          async () => "0xtxhash",
+          { hashlock, marginS: MARGIN, nowS: () => NOW },
+        ),
+        "0xtxhash",
+      );
+    });
+  });
+
+  it("is the same rule the pure predicate states", () => {
+    assert.equal(claimCutoffBlocked(NOW + MARGIN, NOW, MARGIN), true);
+    assert.equal(claimCutoffBlocked(NOW + MARGIN + 1, NOW, MARGIN), false);
+    assert.equal(claimCutoffBlocked(NOW - 1, NOW, MARGIN), true);
+  });
+});
+
+describe("HTLCv3 settlement gas rule and payout credits", { concurrency: false }, () => {
+  it("adds the delivery budget and the credit reserve to an estimate", () => {
+    // docs/audit/HTLCV3_SCOPE.md A1 and A2: a bare estimate lands on the
+    // credit path, because crediting is cheaper than a real transfer.
+    assert.equal(SETTLEMENT_GAS_BUFFER, DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE);
+    assert.equal(SETTLEMENT_GAS_BUFFER, 250_000n);
+    assert.equal(settlementGasLimit(37_038n), 287_038n);
+  });
+
+  it("reads a credit and the published gas policy on the Ethereum leg", async () => {
+    await withRpcResponse(
+      { result: htlcAbi.encodeFunctionResult("creditOf", [42n]) },
+      async (requests) => {
+        assert.equal(await getCredit(ETH_LEG, NATIVE_TOKEN, `0x${"a".repeat(40)}`), 42n);
+        assert.equal(requests[0]?.method, "eth_call");
+      },
+    );
+    await withRpcResponse(
+      {
+        result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [
+          DELIVERY_GAS_LIMIT,
+          DELIVERY_GAS_RESERVE,
+        ]),
+      },
+      async () => {
+        assert.deepEqual(await getDeliveryGasPolicy(ETH_LEG), {
+          gasLimit: DELIVERY_GAS_LIMIT,
+          gasReserve: DELIVERY_GAS_RESERVE,
+        });
+        await assertDeliveryGasPolicy(ETH_LEG);
+      },
+    );
+  });
+
+  it("refuses a contract that publishes a different budget", async () => {
+    await withRpcResponse(
+      { result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [1n, 2n]) },
+      async () => {
+        await assert.rejects(
+          assertDeliveryGasPolicy(ETH_LEG),
+          /was not written for \(1\/2\); refusing to settle/,
+        );
+      },
+    );
+  });
+
+  it("encodes withdrawAll and pushCredit for both legs", () => {
+    const account = `0x${"a".repeat(40)}`;
+    assert.equal(
+      encodeWithdrawAll("eth", NATIVE_TOKEN, account),
+      htlcAbi.encodeFunctionData("withdrawAll", [NATIVE_TOKEN, account]),
+    );
+    assert.equal(
+      encodePushCredit("eth", NATIVE_TOKEN, account),
+      htlcAbi.encodeFunctionData("pushCredit", [NATIVE_TOKEN, account]),
+    );
+    const qrlAccount = `Q${"a".repeat(128)}`;
+    assert.equal(
+      encodeWithdrawAll("qrl", QRL_NATIVE_TOKEN, qrlAccount),
+      encodeQrvmHtlc("withdrawAll", [QRL_NATIVE_TOKEN, qrlAccount]),
+    );
+    // A 64-byte QRL account can never ride in the 20-byte Ethereum codec.
+    assert.throws(() => encodeWithdrawAll("eth", NATIVE_TOKEN, qrlAccount));
+    assert.throws(() => encodePushCredit("eth", NATIVE_TOKEN, qrlAccount));
   });
 });
 

@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { Descriptor, ExtendedSeed, MLDSA87 } from "@theqrl/wallet.js";
+
 import { getBytes } from "ethers";
 import {
   V2_TEST_EXTENDED_SEED,
@@ -32,6 +34,17 @@ import {
   type OrderSigningScheme,
   type ProtocolAuthV1,
 } from "./protocol-signing.js";
+
+// The one shared source of the cross-package digest vectors. Portable wire V2
+// signs both HTLC addresses into every order, so these move with the pinned
+// deployment: reading them here keeps browser, order book and LP kit from
+// drifting apart on a cutover.
+const vectors = JSON.parse(
+  readFileSync(
+    new URL("../../config/protocol-v2-vectors.json", import.meta.url),
+    "utf8",
+  ),
+) as { expected: Record<string, string> };
 
 const NOW = 1_800_000_000;
 const EXTENDED_SEED = V2_TEST_EXTENDED_SEED;
@@ -179,29 +192,22 @@ describe("headless protocol signing", () => {
     );
     const auth = orderUnsignedAuth(NOW, NOW + 3600, ORDER_NONCE);
     const digest = computeOrderDigest(body, auth);
-    assert.equal(
-      digest,
-      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4",
-    );
+    assert.equal(digest, vectors.expected["orderDigest"]);
     assert.equal(
       hex(officialQrlDigest(buildOrderV1Payload(body, auth))),
-      "0x49306e3003652005268fb015ed71399dd033ac02c95bf03aa03a7d674d71cf27e2935d293120dd4cfaa0d61fefcad60249a3e5113e495197bb50a6084566202c",
+      vectors.expected["messageDigest"],
     );
   });
 
   it("matches the server capability-aware semantic replay vectors", () => {
     const orderAuth = orderUnsignedAuth(NOW, NOW + 3600, ORDER_NONCE);
-    const orderDigest =
-      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4";
+    const orderDigest = vectors.expected["orderDigest"]!;
     const releaseCommitment = computeReleaseCommitment(
       orderDigest,
       REQUEST_NONCE,
       `0x${"55".repeat(32)}`,
     );
-    assert.equal(
-      releaseCommitment,
-      "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
-    );
+    assert.equal(releaseCommitment, vectors.expected["releaseCommitment"]);
     const intent = {
       orderDigest,
       takerEthAccount: "0x2222222222222222222222222222222222222222",
@@ -215,10 +221,7 @@ describe("headless protocol signing", () => {
       nonce: REQUEST_NONCE,
     };
     const intentDigest = computeFillIntentDigest(intent, intentAuth);
-    assert.equal(
-      intentDigest,
-      "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
-    );
+    assert.equal(intentDigest, vectors.expected["intentDigest"]);
     assert.equal(
       computeFillDigest(
         {
@@ -231,14 +234,14 @@ describe("headless protocol signing", () => {
         orderAuth,
         { issuedAt: NOW + 20, expiresAt: NOW + 80, nonce: FILL_NONCE },
       ),
-      "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
+      vectors.expected["fillDigest"],
     );
     assert.equal(
       computeCancelDigest({ orderDigest, reasonCode: 1 }, orderAuth, {
         issuedAt: NOW + 30,
         nonce: CANCEL_NONCE,
       }),
-      "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd",
+      vectors.expected["cancelDigest"],
     );
   });
 
@@ -396,7 +399,7 @@ describe("headless protocol signing", () => {
     );
     assert.equal(
       computeFillDigest(fill, order.auth, fillAuth),
-      "0x036a1105f4f96224a2423616c37fa334e18aa1d51a178530739f2b06f4076b28",
+      "0x55b43e52d324d40c49e5426d64064f511a529dce93d63a50bc9cc86579495e8f",
     );
 
     const cancel = { orderDigest, reasonCode: 1 };
@@ -420,7 +423,7 @@ describe("headless protocol signing", () => {
     );
     assert.equal(
       computeCancelDigest(cancel, order.auth, cancelAuth),
-      "0x5f7460d8d57766301caed78aab496939c5c70c0ff7d3ba006f3efd00d6be9c04",
+      "0x772f78339e67b6ff6c833f3be97bbafad2d640be495f9115638da307d8a8c146",
     );
     assert.throws(
       () =>

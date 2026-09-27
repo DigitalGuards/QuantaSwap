@@ -1,5 +1,6 @@
 import { protocolMessageBytes } from "./protocol-v2-wire.js";
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { shake256 } from "@noble/hashes/sha3.js";
 import { SCHEME_TAG_MSG, computeMessageDigest } from "@qrlwallet/connect";
@@ -568,8 +569,16 @@ describe("federated order protocol signing", () => {
   });
 
   it("keeps semantic replay digest vectors stable", () => {
-    const orderDigestValue =
-      "0xda031198a8064c9afbf37a3d8a0246dfc7cad2af8abebc215aa2cdc07964a5a4";
+    // Read from the one shared vector file: portable wire V2 signs both HTLC
+    // addresses into every order, so these move with the pinned deployment
+    // and all three packages have to move together.
+    const vectors = JSON.parse(
+      readFileSync(
+        new URL("../../config/protocol-v2-vectors.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { expected: Record<string, string> };
+    const orderDigestValue = vectors.expected["orderDigest"]!;
     const requestNonce = `0x${"43".repeat(32)}`;
     const releaseCommitment = computeReleaseCommitment(
       orderDigestValue,
@@ -612,22 +621,10 @@ describe("federated order protocol signing", () => {
       reasonCode: 1,
       ...ORDER_V1_DEPLOYMENT,
     };
-    assert.equal(
-      releaseCommitment,
-      "0x43b8a0a54301cd814f20e5108484dc36c6b75c5666bddea13f58fe649fc81133",
-    );
-    assert.equal(
-      intentDigestValue,
-      "0xadce8e5a9ce6cacd0148f3a5c0aee4771a144a8c7755e8f50a327128c036b7e5",
-    );
-    assert.equal(
-      fillDigest(fillTerms),
-      "0x2666b9a4c6129fe84abe8f583d50dee8474375420f8dc4370b443a8a021fcd0a",
-    );
-    assert.equal(
-      cancelDigest(cancelTerms),
-      "0xeb767418bc586392a19dc549c6e4498fa5f7f4e9d324e72945b13abd03e298dd",
-    );
+    assert.equal(releaseCommitment, vectors.expected["releaseCommitment"]);
+    assert.equal(intentDigestValue, vectors.expected["intentDigest"]);
+    assert.equal(fillDigest(fillTerms), vectors.expected["fillDigest"]);
+    assert.equal(cancelDigest(cancelTerms), vectors.expected["cancelDigest"]);
   });
 
   const verifiedByScheme = new Map<

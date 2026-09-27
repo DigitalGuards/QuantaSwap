@@ -3,7 +3,7 @@
 // order book coordinates, the chain decides.
 
 import { Interface } from "ethers";
-import { decodeQrvmSwap, encodeQrvmHtlc } from "./qrvmHtlc.js";
+import { decodeQrvmSwap, decodeQrvmUints, encodeQrvmHtlc } from "./qrvmHtlc.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import {
   QIP55_QRVM_ABI_ERROR,
@@ -19,7 +19,37 @@ export const HTLC_ABI = [
   "function claim(bytes32 hashlock, bytes32 preimage)",
   "function refund(bytes32 hashlock)",
   "function getSwap(bytes32 hashlock) view returns (tuple(address initiator, address recipient, address token, uint256 amount, uint256 timeout, uint8 status, bytes32 preimage))",
+  // HTLCv3 payout credits. A settlement whose delivery fails stays
+  // terminal and leaves the amount as a credit owned by the payee: the
+  // payee redirects it with withdraw/withdrawAll, and anyone can deliver
+  // it to the payee itself with the destinationless pushCredit.
+  "function withdraw(address token, address to, uint256 amount)",
+  "function withdrawAll(address token, address to)",
+  "function pushCredit(address token, address account)",
+  "function creditOf(address token, address account) view returns (uint256)",
+  "function outstandingCredit(address token) view returns (uint256)",
+  "function deliveryGasPolicy() view returns (uint256 gasLimit, uint256 gasReserve)",
+  "event PayoutCredited(address indexed token, address indexed account, bytes32 indexed hashlock, uint256 amount)",
+  "event PayoutWithdrawn(address indexed token, address indexed account, address to, uint256 amount)",
 ];
+
+/** The HTLCv3 delivery budget and credit reserve, mirrored from
+ *  contracts/hyperion/HTLCv3.hyp and published on chain by
+ *  deliveryGasPolicy(). */
+export const DELIVERY_GAS_LIMIT = 100_000n;
+export const DELIVERY_GAS_RESERVE = 150_000n;
+
+/** The settlement gas rule of docs/audit/HTLCV3_SCOPE.md (A1, A2): submit
+ *  claim, refund and release with `estimateGas + DELIVERY_GAS_LIMIT +
+ *  DELIVERY_GAS_RESERVE`. Estimation minimises gas and the credit path is
+ *  cheaper than a real transfer, so a bare estimate defers a payout that
+ *  would have gone through. It matters most for a sponsored claim, where a
+ *  taker with no gas on the paying chain cannot withdraw a credit. Unused
+ *  gas is refunded, so the buffer costs only transaction-limit headroom. */
+export const SETTLEMENT_GAS_BUFFER = DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE;
+
+export const settlementGasLimit = (estimate: bigint): bigint =>
+  estimate + SETTLEMENT_GAS_BUFFER;
 
 /** Minimal ERC-20 surface for the token leg. approve is declared with no
  *  return value on purpose: USDT-style tokens return no data, so the
@@ -152,16 +182,53 @@ export async function simulateHtlcCall(
   }
 }
 
+/**
+ * The hard claim cutoff of docs/FINALITY.md section 3.3, re-checked at
+ * broadcast. `claim` closes at the escrow's own timeout, so a claim that is
+ * composed in good time and mines at or after it reverts with the preimage
+ * already public and the swap still Open. A margin checked when a decision
+ * was taken is not a margin at broadcast, so the escrow's timeout is read
+ * again from chain immediately before the secret goes out, and a claim
+ * inside the margin is abandoned.
+ */
+export interface ClaimCutoff {
+  hashlock: string;
+  marginS: number;
+  nowS: () => number;
+}
+
+export const claimCutoffBlocked = (
+  timeout: number,
+  nowS: number,
+  marginS: number,
+): boolean => nowS >= timeout - marginS;
+
 /** Choke point for claim submission. The callback may persist the attempt
  * marker and broadcast only after preflight succeeds. It is never invoked
- * on a failed simulation, and its errors are sanitized before logging. */
+ * on a failed simulation, and its errors are sanitized before logging.
+ * `cutoff` fails the submission closed when the escrow's own deadline moved
+ * inside the safety margin since the decision was taken. */
 export async function submitPreflightedClaim(
   leg: LegRpc,
   from: string,
   data: string,
   submit: () => Promise<string>,
+  cutoff?: ClaimCutoff,
 ): Promise<string> {
   await simulateHtlcCall(leg, from, data, 0n);
+  if (cutoff !== undefined) {
+    // A read failure fails the claim closed: an unknown deadline is not a
+    // safe one, and the next tick retries.
+    const state = await getSwapState(leg, cutoff.hashlock);
+    if (
+      state.status === SwapStatus.Open &&
+      claimCutoffBlocked(state.timeout, cutoff.nowS(), cutoff.marginS)
+    ) {
+      throw new Error(
+        `${leg.ns} claim abandoned inside the escrow's safety margin; the secret was not broadcast`,
+      );
+    }
+  }
   try {
     return await submit();
   } catch {
@@ -302,3 +369,94 @@ export const encodeRefund = (leg: LegKey, hashlock: string): string => {
   if (leg === "qrl") return encodeQrvmHtlc("refund", [hashlock]);
   return iface.encodeFunctionData("refund", [hashlock]);
 };
+
+/** Move the caller's whole credit in `token` to `to`. */
+export const encodeWithdrawAll = (leg: LegKey, token: string, to: string): string => {
+  if (leg === "qrl") return encodeQrvmHtlc("withdrawAll", [token, to]);
+  if (isQip55QrlAddress(to)) throw new Error(QIP55_QRVM_ABI_ERROR);
+  return iface.encodeFunctionData("withdrawAll", [token, qToHex(to)]);
+};
+
+/** Deliver `account`'s whole credit in `token` to `account`. Permissionless
+ *  and destinationless, so a sponsor can finish a deferred payout for a
+ *  taker with no gas on that chain without gaining redirect authority. */
+export const encodePushCredit = (leg: LegKey, token: string, account: string): string => {
+  if (leg === "qrl") return encodeQrvmHtlc("pushCredit", [token, account]);
+  if (isQip55QrlAddress(account)) throw new Error(QIP55_QRVM_ABI_ERROR);
+  return iface.encodeFunctionData("pushCredit", [token, qToHex(account)]);
+};
+
+/** Undelivered payout owned by `account` in `token` on this leg. Zero
+ *  whenever the payout was delivered, which is the normal case. */
+export async function getCredit(
+  leg: LegRpc,
+  token: string,
+  account: string,
+): Promise<bigint> {
+  await assertQrlRuntime(leg);
+  if (leg.ns === "qrl") {
+    const raw = await rpc(
+      leg.url,
+      "qrl_call",
+      [{ to: leg.htlc, data: encodeQrvmHtlc("creditOf", [token, account]) }, "latest"],
+      leg.timeoutMs,
+    );
+    return decodeQrvmUints(raw, 1)[0] ?? 0n;
+  }
+  const data = iface.encodeFunctionData("creditOf", [token, qToHex(account)]);
+  const raw = (await rpc(
+    leg.url,
+    "eth_call",
+    [{ to: leg.htlc, data }, "latest"],
+    leg.timeoutMs,
+  )) as string;
+  const [value] = iface.decodeFunctionResult("creditOf", raw) as unknown as [bigint];
+  return value;
+}
+
+export interface DeliveryGasPolicy {
+  gasLimit: bigint;
+  gasReserve: bigint;
+}
+
+/** The deployed contract's own delivery budget and credit reserve. Only
+ *  HTLCv3 answers this call, so a successful read also proves the
+ *  configured address is the interface this build settles against. */
+export async function getDeliveryGasPolicy(leg: LegRpc): Promise<DeliveryGasPolicy> {
+  await assertQrlRuntime(leg);
+  if (leg.ns === "qrl") {
+    const raw = await rpc(
+      leg.url,
+      "qrl_call",
+      [{ to: leg.htlc, data: encodeQrvmHtlc("deliveryGasPolicy", []) }, "latest"],
+      leg.timeoutMs,
+    );
+    const [gasLimit, gasReserve] = decodeQrvmUints(raw, 2);
+    return { gasLimit: gasLimit ?? 0n, gasReserve: gasReserve ?? 0n };
+  }
+  const data = iface.encodeFunctionData("deliveryGasPolicy", []);
+  const raw = (await rpc(
+    leg.url,
+    "eth_call",
+    [{ to: leg.htlc, data }, "latest"],
+    leg.timeoutMs,
+  )) as string;
+  const [gasLimit, gasReserve] = iface.decodeFunctionResult(
+    "deliveryGasPolicy",
+    raw,
+  ) as unknown as [bigint, bigint];
+  return { gasLimit, gasReserve };
+}
+
+/** Refuse to run against a contract whose published budget differs from the
+ *  one the settlement gas rule is built from. Called before the first send
+ *  of a process, so a wrong address or a wrong contract generation stops the
+ *  daemon instead of quietly deferring every payout. */
+export async function assertDeliveryGasPolicy(leg: LegRpc): Promise<void> {
+  const policy = await getDeliveryGasPolicy(leg);
+  if (policy.gasLimit !== DELIVERY_GAS_LIMIT || policy.gasReserve !== DELIVERY_GAS_RESERVE) {
+    throw new Error(
+      `the ${leg.ns} HTLC publishes a delivery budget this build was not written for (${policy.gasLimit}/${policy.gasReserve}); refusing to settle`,
+    );
+  }
+}

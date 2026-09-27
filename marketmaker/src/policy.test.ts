@@ -60,6 +60,8 @@ function managed(overrides: Partial<ManagedOrder> = {}): ManagedOrder {
     claimSentAt: null,
     sponsorSentAt: null,
     refundSentAt: null,
+    withdrawSentAt: null,
+    pushSentAt: null,
     createdAt: NOW - 120,
     ...overrides,
   };
@@ -114,6 +116,10 @@ function input(overrides: Partial<DecideInput> = {}): DecideInput {
     ourInitiator: TAKER_ETH,
     takerOnInitiatorLeg: `0x${MY_QRL.slice(1)}`,
     sponsorMarginS: 240,
+    // Delivered payouts, which is the normal case: HTLCv3 only leaves a
+    // credit when a settlement could not hand over the funds.
+    ourCredit: 0n,
+    takerCredit: 0n,
     ...overrides,
   };
 }
@@ -580,6 +586,113 @@ describe("refund and settlement", () => {
       nowS: T1 + 100,
     });
     assert.equal(decide(x), "finish");
+  });
+
+  it("collects our own deferred payout before retiring the record", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    // HTLCv3 reports Claimed whether the payout was delivered or credited,
+    // so the credit read is the only signal. Retiring the record first would
+    // delete the local handle on value still in the contract.
+    assert.equal(decide(input({ ...settled, ourCredit: AMOUNT })), "withdraw");
+    assert.equal(decide(input({ ...settled, ourCredit: 0n })), "finish");
+  });
+
+  it("spaces withdrawal retries like every other irreversible send", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourCredit: AMOUNT,
+      nowS: T1 + 100,
+    };
+    const justSent = managed({ withdrawSentAt: T1 + 100 });
+    assert.equal(decide(input({ ...settled, managed: justSent })), "wait");
+    assert.equal(
+      decide(input({ ...settled, managed: justSent, nowS: T1 + 100 + 241 })),
+      "withdraw",
+    );
+  });
+
+  it("pushes a credited taker payout on the leg we funded", () => {
+    const sponsored = {
+      iState: leg(SwapStatus.Claimed, {
+        initiator: TAKER_ETH,
+        recipient: `0x${MY_QRL.slice(1)}`,
+      }),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    // pushCredit is permissionless and takes no destination, so the only
+    // address it can pay is the taker: it finishes the sponsored claim
+    // without gaining any redirect authority.
+    assert.equal(decide(input({ ...sponsored, takerCredit: AMOUNT })), "push");
+    // Off under the operator's sponsor policy, exactly like the claim half.
+    assert.equal(
+      decide(input({ ...sponsored, takerCredit: AMOUNT, sponsorClaims: false })),
+      "finish",
+    );
+  });
+
+  it("never pushes a credit from a lock that is not the one we funded", () => {
+    const foreign = {
+      iState: leg(SwapStatus.Claimed, {
+        initiator: SCAM_TOKEN,
+        recipient: `0x${MY_QRL.slice(1)}`,
+      }),
+      rState: leg(SwapStatus.Claimed),
+      takerCredit: AMOUNT,
+      nowS: T1 + 100,
+    };
+    assert.equal(decide(input(foreign)), "finish");
+  });
+
+  it("collects our own credit before pushing the taker's", () => {
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Claimed),
+          rState: leg(SwapStatus.Claimed),
+          ourCredit: AMOUNT,
+          takerCredit: AMOUNT,
+          nowS: T1 + 100,
+        }),
+      ),
+      "withdraw",
+    );
+  });
+
+  it("refuses to retire a record while a credit read is unknown", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    assert.equal(decide(input({ ...settled, ourCredit: null })), "wait");
+    assert.equal(decide(input({ ...settled, takerCredit: null })), "wait");
+    // With sponsorship off the taker credit is not ours to act on, so an
+    // unreadable one does not hold the record open.
+    assert.equal(
+      decide(input({ ...settled, takerCredit: null, sponsorClaims: false })),
+      "finish",
+    );
+  });
+
+  it("refunds a live leg before collecting a credit on the other one", () => {
+    // The refund window closes; a credit never expires.
+    assert.equal(
+      decide(
+        input({
+          iState: leg(SwapStatus.Open),
+          rState: leg(SwapStatus.Claimed),
+          ourCredit: AMOUNT,
+          nowS: T1,
+        }),
+      ),
+      "refund",
+    );
   });
 
   it("settles a refunded swap the taker never joined", () => {
