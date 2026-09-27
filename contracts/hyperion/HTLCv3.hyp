@@ -93,20 +93,21 @@ pragma hyperion >=0.0;
  *       always fits after the attempt fails, including after an out-of-gas
  *       child frame. The 63/64 rule alone does not guarantee that: one 64th
  *       of the gas at the call site can be far less than a cold storage
- *       write. The credit path costs about 46,000 gas on the EVM target (two
- *       cold storage writes, one log, the guard reset), so the reserve holds
- *       roughly three times its measured cost. The QRL gas schedule has to be
- *       measured before deployment; the headroom exists to absorb a wider
- *       64-byte storage slot without a second deployment.
- *     - The settling frame does copy whatever the attempt reverted with. The
- *       high-level call below discards the value and the generated code still
- *       copies the bytes, on both targets. What bounds that copy is the
- *       payload: every revert leaving selfDeliver is a custom error or a
- *       panic, because nothing on that path makes a typed external call, and
- *       a typed call is the only construct that re-emits a callee's revert
- *       data verbatim. An out-of-gas child returns no data at all. The copy is
- *       therefore a constant. What a token chooses to return does not change
- *       it. See _selfBalance for the measurement that made this explicit.
+ *       write. Measured on the EVM target, the settling frame's whole cost
+ *       after the attempt is about 47,000 gas, two cold storage writes, one
+ *       log and the guard reset, flat against anything a token hands back. The
+ *       reserve therefore holds about three times its measured cost. The QRL
+ *       gas schedule has to be measured before deployment, and the headroom
+ *       exists to absorb a wider 64-byte storage slot without a second
+ *       deployment.
+ *     - The settling frame never copies the attempt's return or revert data.
+ *       selfDeliver returns nothing and the trampoline catches without a
+ *       parameter, so the frame has nothing to decode and the generated code
+ *       emits no copy on either target. Copying would let an untrusted callee
+ *       spend the reserve on memory expansion: measured with an earlier
+ *       low-level trampoline, a token reverting from balanceOf with a
+ *       120,832-byte payload cost the settling frame 97,764 gas of the
+ *       reserve. An out-of-gas child returns no data at all.
  *     - A settlement is never refused because a payout failed. A caller that
  *       supplies little gas shrinks the budget and pushes the payout into the
  *       credit path. That is deliberate: it conserves value, pays the same
@@ -424,8 +425,10 @@ contract HTLCv3 {
     /// @dev This exists so an untrusted token or recipient can fail, revert,
     ///      run out of gas, or return an oversized blob entirely inside a
     ///      frame whose gas is capped, without any of that reaching the frame
-    ///      that has to record the credit. Do not call it directly; an
-    ///      external caller is rejected with Unauthorized.
+    ///      that has to record the credit. It returns nothing, which is what
+    ///      lets the settling frame catch a failure without copying anything.
+    ///      Do not call it directly; an external caller is rejected with
+    ///      Unauthorized.
     function selfDeliver(address token, address to, uint256 amount) external {
         if (msg.sender != address(this)) revert Unauthorized();
         _strictPayout(token, to, amount);
@@ -502,15 +505,19 @@ contract HTLCv3 {
         uint256 available = gasleft();
         uint256 budget = available > DELIVERY_GAS_RESERVE ? available - DELIVERY_GAS_RESERVE : 0;
         if (budget > DELIVERY_GAS_LIMIT) budget = DELIVERY_GAS_LIMIT;
-        // Return data is deliberately discarded: copying it would let an
-        // untrusted callee spend this frame's reserve on memory expansion.
-        // The child frame is where an oversized blob, an out-of-gas loop, or
-        // a revert has to be paid for, and its revert undoes any partial
-        // movement, so a credit below is always fully backed.
-        (bool delivered, ) = address(this).call{gas: budget}(
-            abi.encodeWithSelector(this.selfDeliver.selector, token, payee, amount)
-        );
-        if (delivered) return;
+        // selfDeliver returns nothing and the catch takes no parameter, so this
+        // frame never copies the attempt's return or revert data. That is the
+        // structural half of the reserve guarantee: whatever a token or a
+        // recipient hands back, the settling frame pays nothing for it and
+        // keeps the reserve it needs to record the credit. The child frame is
+        // where an oversized payload, an out-of-gas loop, or a revert has to be
+        // paid for, and its revert undoes any partial movement, so a credit
+        // below is always fully backed.
+        try this.selfDeliver{gas: budget}(token, payee, amount) {
+            return;
+        } catch {
+            // The attempt did not go through. Fall through to the credit.
+        }
 
         _credits[token][payee] += amount;
         _outstanding[token] += amount;
@@ -555,26 +562,15 @@ contract HTLCv3 {
     /// @dev Read this contract's own balance of `token` without ever re-emitting
     ///      the token's failure.
     ///
-    ///      This is load-bearing. A typed external call
-    ///      bubbles the callee's revert data verbatim, and the settling frame
-    ///      copies whatever the delivery attempt reverted with (the high-level
-    ///      call in _settle discards the value, and the generated code still
-    ///      copies the bytes; that holds on both targets). A token whose
-    ///      balanceOf reverts with a large payload could therefore charge the
-    ///      settling frame for memory expansion out of the reserve that has to
-    ///      record the credit. Measured on the EVM target before this was
-    ///      closed: a 120,832-byte revert payload cost the settling frame
-    ///      97,764 gas of the 150,000 reserve. With it closed the settling
-    ///      frame costs 47,074 for that payload and for a four-byte one alike,
-    ///      which the test suite pins by reading both from a trace.
-    ///
-    ///      Reading through a low-level call keeps the copy inside the frame
-    ///      that pays for it, which is the delivery attempt's own bounded
-    ///      budget, and turns every failure into a four-byte custom error. No
-    ///      revert leaving selfDeliver can now exceed a custom error or a
-    ///      panic, so the settling frame's copy is a constant. The contract
-    ///      contains no typed external call at all, which makes that property
-    ///      checkable, and not only reviewable.
+    ///      The reserve does not depend on this. The trampoline in _settle
+    ///      copies nothing, so what selfDeliver reverts with cannot reach the
+    ///      settling frame at all. What a low-level read still buys is a
+    ///      uniform failure mode inside the attempt, every problem with a token
+    ///      becoming TransferFailed, and it keeps the attempt's own bounded
+    ///      budget from being spent copying a payload it will not use. It costs
+    ///      nothing over a typed read, and it means a later change to the
+    ///      trampoline cannot quietly reintroduce an unbounded revert payload
+    ///      on this path.
     function _selfBalance(address token) private view returns (uint256) {
         (bool ok, bytes memory ret) = token.staticcall(
             abi.encodeWithSelector(IPayoutERC20.balanceOf.selector, address(this))

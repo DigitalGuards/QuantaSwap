@@ -42,7 +42,7 @@ EVM-256 compiler target at `build/hyperion/evm/HTLC.json`; QRL uses the QRVM-512
 Source-bundle note: `contracts/hyperion/` now also holds the undeployed `HTLCv3.hyp`
 (issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)). The bundle hash covers every
 source in that directory, so it moved to
-`c2d17fd8b2c569bd31557a3d5d8a9e79c080cab59a68727a2625ed679b3ef6fe`. `HTLC.hyp` itself is
+`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. `HTLC.hyp` itself is
 unchanged, and the two deployed runtime hashes above still reproduce byte for byte from the
 current tree, which is what verifies the live contracts.
 Their manifests require the same source-bundle hash and ABI, and record distinct compiler versions,

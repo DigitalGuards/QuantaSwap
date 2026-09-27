@@ -21,6 +21,11 @@ const PORT = 8590;
 const RPC = `http://127.0.0.1:${PORT}`;
 const FORK = process.env.FORK_URL || "https://ethereum-rpc.publicnode.com";
 
+// The documented integration rule, so the attempt is handed its whole budget.
+// A smaller buffer forwards less and measures a delivery that never had the
+// budget the contract promises it.
+const SETTLE_GAS_BUFFER = 250000n;
+
 const TOKENS = {
   WETH: { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", decimals: 18, amount: 10n ** 17n,
           holders: ["0x8EB8a3b98659Cce290402893d0123abb75E3ab28", "0x2F0b23f53734b29847fAc2Bd4ECbb1f4E8f62e30"] },
@@ -69,7 +74,6 @@ async function main() {
     const token = new ethers.Contract(cfg.address, ERC20, provider);
     if (name === "WETH") {
       await provider.send("anvil_setBalance", [to, "0x" + (10n ** 21n).toString(16)]);
-      const signer = await provider.getSigner(to).catch(() => null);
       await provider.send("anvil_impersonateAccount", [to]);
       const s = await provider.getSigner(to);
       await (await token.connect(s).deposit({ value: amount * 4n })).wait();
@@ -119,7 +123,7 @@ async function main() {
       await (await htlc.lockToken(secret.hashlock, recipient, cfg.address, cfg.amount, timeout)).wait();
       const claimAs = htlc.connect(relayer).claim;
       const est = await claimAs.estimateGas(secret.hashlock, secret.preimage);
-      const tx = await claimAs(secret.hashlock, secret.preimage, { gasLimit: est + 170000n });
+      const tx = await claimAs(secret.hashlock, secret.preimage, { gasLimit: est + SETTLE_GAS_BUFFER });
       const r = await tx.wait();
       const c = await childCost(tx.hash);
       const delivered = (await htlc.creditOf(cfg.address, recipient)) === 0n;

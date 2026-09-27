@@ -154,19 +154,6 @@ async function main() {
     "creditOf takes (token, account)"
   );
 
-  // A typed external call is the only construct that re-emits a callee's revert
-  // data verbatim, and the settling frame copies whatever the delivery attempt
-  // reverted with, so the contract holds no interface cast at all. This is a
-  // tripwire; the gate that actually proves the property is the revert-bomb test
-  // below, which measures the settling frame's cost from a trace.
-  const htlcSource = require("fs").readFileSync(
-    path.join(repoRoot, "contracts", "hyperion", "HTLCv3.hyp"),
-    "utf8"
-  );
-  assert(
-    !/IPayoutERC20\s*\(/.test(htlcSource),
-    "HTLCv3 must make no typed external call: a revert would be re-emitted verbatim"
-  );
 
   console.log("[htlcv3] starting anvil");
   const anvil = spawn(
@@ -317,11 +304,23 @@ async function main() {
     }
     assert(back > 0, "the settling frame resumed after the delivery attempt");
     const last = logs[logs.length - 1];
+    // A typed call to `this` may carry an EXTCODESIZE check ahead of the CALL.
+    // It is charged to the settling frame before the budget is forwarded, so it
+    // belongs in the reserve arithmetic; count it and report its cost.
+    let probe = 0;
+    for (let i = callIdx - 1; i >= 0 && logs[i].depth === 1; i--) {
+      if (logs[i].op === "EXTCODESIZE") {
+        probe += logs[i].gasCost;
+        break;
+      }
+      if (logs[i].op === "CALL" || logs[i].op === "STATICCALL") break;
+    }
     return {
       budget: logs[callIdx].gasCost,
       childUsed: logs[callIdx].gas - logs[back].gas,
       afterChild: logs[back].gas - last.gas,
       retained: logs[back].gas,
+      trampolineProbe: probe,
       copies: logs
         .slice(back)
         .filter((l) => l.depth === 1 && l.op === "RETURNDATACOPY").length,
@@ -1227,9 +1226,19 @@ async function main() {
     await (await htlc.lockNative(direct.hashlock, bob.address, timeout, { value: amount })).wait();
     track.track(direct.hashlock, ethers.ZeroAddress, direct.preimage);
     const bobBefore = await provider.getBalance(bob.address);
-    const receipt = await settle(claimAs, direct.hashlock, direct.preimage);
+    const directGasLimit =
+      (await claimAs.estimateGas(direct.hashlock, direct.preimage)) + SETTLE_GAS_BUFFER;
+    const directTx = await claimAs(direct.hashlock, direct.preimage, { gasLimit: directGasLimit });
+    const receipt = await directTx.wait();
     assertEq(creditedEvents(htlc, receipt).length, 0, "documented gas rule delivers directly");
     assertEq((await provider.getBalance(bob.address)) - bobBefore, amount, "recipient paid");
+    // A successful attempt returns nothing, so the delivery path copies nothing
+    // either.
+    assertEq(
+      (await settleFrameCost(directTx.hash)).copies,
+      0,
+      "a successful delivery copies nothing in the settling frame"
+    );
     await track.check("documented gas rule");
 
     // A bare estimate, and a range of tighter and wider limits, must all end
@@ -1297,6 +1306,11 @@ async function main() {
     });
     await baseTx.wait();
     const baseline = await settleFrameCost(baseTx.hash);
+    // The structural half of the guarantee: selfDeliver returns nothing and the
+    // trampoline catches without a parameter, so the settling frame copies
+    // neither a return value nor a revert payload. Nothing a token hands back
+    // can reach the reserve.
+    assertEq(baseline.copies, 0, "baseline: the settling frame copies nothing");
     assertEq(await htlc.creditOf(baseToken.target, bob.address), 10n, "baseline credited");
     // The tracker reads balanceOf, which an armed bomb refuses to answer.
     await (await baseToken.disarm()).wait();
@@ -1318,6 +1332,7 @@ async function main() {
       assertEq((await htlc.getSwap(secret.hashlock)).status, Status.Claimed, `${size} bytes: terminal`);
       assertEq(await htlc.creditOf(token.target, bob.address), 10n, `${size} bytes: credited`);
       const cost = await settleFrameCost(tx.hash);
+      assertEq(cost.copies, 0, `${size} bytes: the settling frame copies nothing`);
       if (BigInt(cost.afterChild) > worst) worst = BigInt(cost.afterChild);
       assert(
         BigInt(cost.afterChild) <= BigInt(baseline.afterChild) + 2_000n,
@@ -1326,10 +1341,6 @@ async function main() {
       await (await token.disarm()).wait();
       await track.check(`revert bomb ${size} bytes`);
     }
-    // The copy itself is expected and stays: the high-level call in _settle
-    // discards the value and the generated code still copies the bytes, on both
-    // targets. What changed is that the bytes are now always a custom error.
-    assertEq(baseline.copies, 1, "the settling frame copies the attempt's revert payload");
     console.log(
       `       revert bomb: settling frame ${baseline.afterChild} baseline, ${worst} worst, ` +
         `reserve ${DELIVERY_GAS_RESERVE}, parent RETURNDATACOPY ${baseline.copies}`
@@ -1352,8 +1363,10 @@ async function main() {
     assertEq(await htlc.creditOf(edgeToken.target, bob.address), 10n, "reserve floor: credited");
     await (await edgeToken.disarm()).wait();
     const edgeCost = await settleFrameCost(edgeTx.hash);
+    assertEq(edgeCost.copies, 0, "reserve floor: the settling frame copies nothing");
     assert(
-      BigInt(edgeCost.retained) <= DELIVERY_GAS_RESERVE + 4_000n,
+      BigInt(edgeCost.retained) >= DELIVERY_GAS_RESERVE &&
+        BigInt(edgeCost.retained) <= DELIVERY_GAS_RESERVE + 8_000n,
       `reserve floor: the frame retained ${edgeCost.retained}, expected about ${DELIVERY_GAS_RESERVE}`
     );
     assert(
@@ -1362,7 +1375,7 @@ async function main() {
     );
     console.log(
       `       reserve floor: retained ${edgeCost.retained}, spent ${edgeCost.afterChild}, ` +
-        `child used ${edgeCost.childUsed}`
+        `child used ${edgeCost.childUsed}, trampoline probe ${edgeCost.trampolineProbe}`
     );
     await track.check("reserve floor");
   });
