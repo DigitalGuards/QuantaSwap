@@ -20,7 +20,12 @@ const NOW = Math.floor(Date.now() / 1000);
 const ETH_AMOUNT = 10n ** 18n;
 const QRL_AMOUNT = 5n * 10n ** 18n;
 
+/** Credited-by-this-swap amounts, keyed leg:token:account. */
 const credits = new Map<string, bigint>();
+/** Extra ledger balance from other swaps, same key. */
+const foreignCredits = new Map<string, bigint>();
+/** Keys whose read should fail, to exercise the unconfirmed state. */
+const unreadable = new Set<string>();
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/htlc")>();
@@ -49,10 +54,14 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
       leg === "eth" ? claimedEth : claimedQrl,
     ),
     getSwapEvents: vi.fn(async () => []),
-    getCredit: vi.fn(async (leg: string, token: string, account: string) => {
-      const key = `${leg}:${token.toLowerCase()}:${account.toLowerCase()}`;
-      return credits.get(key) ?? 0n;
-    }),
+    readSwapCredit: vi.fn(
+      async (leg: string, token: string, account: string) => {
+        const key = `${leg}:${token.toLowerCase()}:${account.toLowerCase()}`;
+        if (unreadable.has(leg)) throw new Error("offline test");
+        const credited = credits.get(key) ?? 0n;
+        return { global: credited + (foreignCredits.get(key) ?? 0n), credited };
+      },
+    ),
   };
 });
 
@@ -103,6 +112,8 @@ function renderFlow(role: ActiveSwap["role"]) {
 
 beforeEach(() => {
   credits.clear();
+  foreignCredits.clear();
+  unreadable.clear();
 });
 afterEach(cleanup);
 
@@ -190,6 +201,64 @@ describe("deferred payout panel", () => {
     renderFlow("taker");
     await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
     expect(screen.getByText(/with a payout still to collect below/)).toBeTruthy();
+  });
+
+  it("withholds the completion banner until the payout read lands", async () => {
+    // An empty reading map and a delivered payout are the same shape, so a
+    // green "complete" before the read completes would assert the funds
+    // arrived on no evidence.
+    unreadable.add("eth");
+    unreadable.add("qrl");
+    renderFlow("taker");
+    await waitFor(() =>
+      expect(screen.getByText(/Confirming the payouts actually landed/)).toBeTruthy(),
+    );
+    expect(screen.queryByText("Atomic swap complete on both chains")).toBeNull();
+    expect(screen.queryByTestId("payout-credits")).toBeNull();
+  });
+
+  it("hides a ledger balance this swap did not credit", async () => {
+    // creditOf is shared across every swap that address settled. Another
+    // swap's balance must never be shown, and never offered a push, here.
+    foreignCredits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    renderFlow("taker");
+    await waitFor(() => expect(screen.getByTestId("swap-outcome")).toBeTruthy());
+    expect(screen.queryByTestId("payout-credits")).toBeNull();
+    expect(screen.getByText("Atomic swap complete on both chains")).toBeTruthy();
+  });
+
+  it("labels the rest of the ledger balance when this swap owns part of it", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    foreignCredits.set(
+      `eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`,
+      ETH_AMOUNT * 2n,
+    );
+    renderFlow("taker");
+    await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
+    expect(screen.getByText("1.0 ETH")).toBeTruthy();
+    expect(screen.getByText(/2.0 ETH from other swaps/)).toBeTruthy();
+  });
+
+  it("asks for a wallet before offering either exit", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    render(
+      <MemoryRouter>
+        <SwapFlow
+          swap={swap("taker")}
+          ethAccount={null}
+          qrlAccount={null}
+          browserProvider={null}
+          ensureSepolia={vi.fn()}
+          qrlRequest={vi.fn()}
+          qrlTransport={null}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
+    expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Push to recipient" })).toBeNull();
+    expect(screen.getByText(/Connect a wallet on Sepolia to move this credit/)).toBeTruthy();
   });
 
   it("says the swap is final either way", async () => {

@@ -16,9 +16,11 @@ import {
   buildReleaseData,
   buildWithdrawAllData,
   getConfirmedLegState,
-  getCredit,
   getLegState,
   getSwapEvents,
+  readSwapCredit,
+  unverifiedDeliveryPolicyLegs,
+  type CreditReading,
   type LegState,
   type SwapEvent,
 } from "@/lib/htlc";
@@ -127,7 +129,11 @@ export function SwapFlow({
   const [order, setOrder] = useState<OrderView | null>(null);
   // HTLCv3 payout credits, polled like swap state: a Claimed or Refunded
   // leg whose delivery failed holds the amount as a credit for its payee.
-  const [credits, setCredits] = useState<ReadonlyMap<string, bigint>>(new Map());
+  const [credits, setCredits] = useState<ReadonlyMap<string, CreditReading>>(new Map());
+  // Legs whose credit read has completed at least once. Until a leg is in
+  // here nothing on this page may claim its payout arrived: an empty map
+  // and a delivered payout look identical.
+  const [creditReadOk, setCreditReadOk] = useState<ReadonlyMap<LegKey, boolean>>(new Map());
   // Destination for a withdrawal, per credit. Empty means the payee's own
   // address, which is the default the contract would pay anyway.
   const [withdrawTo, setWithdrawTo] = useState<Record<string, string>>({});
@@ -189,17 +195,17 @@ export function SwapFlow({
   );
   const refreshCredits = useCallback(async () => {
     const current = machineRef.current;
-    if (current === null) return;
+    if (current === null || !hashlock) return;
     const candidates = creditCandidates(current);
     const results = await Promise.allSettled(
       candidates.map((candidate) =>
-        getCredit(candidate.leg, candidate.token, candidate.account),
+        readSwapCredit(candidate.leg, candidate.token, candidate.account, hashlock),
       ),
     );
     setCredits((previous) => {
       const next = new Map(previous);
       candidates.forEach((candidate, index) => {
-        // A failed read keeps the last known amount: a credit that vanished
+        // A failed read keeps the last known reading: a credit that vanished
         // from the panel on an RPC hiccup would read as a payout that never
         // happened.
         const result = results[index];
@@ -209,14 +215,39 @@ export function SwapFlow({
       });
       return next;
     });
-  }, [candidateKey]);
+    setCreditReadOk((previous) => {
+      const next = new Map(previous);
+      candidates.forEach((candidate, index) => {
+        if (results[index]?.status === "fulfilled") next.set(candidate.leg, true);
+      });
+      return next;
+    });
+  }, [candidateKey, hashlock]);
+
+  // Only poll once a leg is terminal. Before that there is nothing to
+  // credit, so this would be 4 reads every 5 seconds for the whole swap.
+  // A leg that settled, and whose reads have completed and found nothing,
+  // needs no further watching either: a credit can only appear at the
+  // settlement that created it.
+  const anyLegTerminal =
+    legs[iLeg] !== undefined &&
+    legs[rLeg] !== undefined &&
+    [iLeg, rLeg].some((leg) => {
+      const status = legs[leg]?.status;
+      return status === SwapStatus.Claimed || status === SwapStatus.Refunded;
+    });
+  const creditsQuiet =
+    credits.size > 0 &&
+    [...credits.values()].every((reading) => reading.global === 0n) &&
+    [iLeg, rLeg].every((leg) => creditReadOk.get(leg) === true);
+  const creditPollActive = candidateKey !== "" && anyLegTerminal && !creditsQuiet;
 
   useEffect(() => {
-    if (candidateKey === "") return undefined;
+    if (!creditPollActive) return undefined;
     void refreshCredits();
     const t = setInterval(() => void refreshCredits(), 5000);
     return () => clearInterval(t);
-  }, [candidateKey, refreshCredits]);
+  }, [creditPollActive, refreshCredits]);
 
   // Advance the clock on the wall, independent of RPC success: the time
   // gates (secret reveal, refund availability) must keep tightening even
@@ -598,6 +629,14 @@ export function SwapFlow({
     (ethAccount && !sameAddr(ethAccount, ownEth)) || (qrlAccount && !sameAddr(qrlAccount, ownQrl));
 
   const creditList = creditViews(creditCandidates(machine), credits);
+  // A payout is confirmed only once every terminal leg's credit read has
+  // completed. An empty reading map and a delivered payout are the same
+  // shape, so painting the green banner before the read lands would tell
+  // the user their funds arrived on no evidence at all.
+  const payoutsConfirmed = [iLeg, rLeg].every(
+    (leg) =>
+      legs[leg]?.status === SwapStatus.None || creditReadOk.get(leg) === true,
+  );
   const connectedOn = (leg: LegKey): string | null => (leg === "eth" ? ethAccount : qrlAccount);
 
   const roleLabel =
@@ -645,12 +684,27 @@ export function SwapFlow({
             // is still sitting in the contract as a credit. Saying "complete"
             // on its own here would read as "funds received", which is the
             // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
-            <div className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400">
+            <div
+              className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400"
+              data-testid="swap-outcome"
+            >
               Atomic swap complete on both chains, with a payout still to collect below
             </div>
-          ) : (
-            <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
+          ) : payoutsConfirmed ? (
+            <div
+              className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success"
+              data-testid="swap-outcome"
+            >
               Atomic swap complete on both chains
+            </div>
+          ) : (
+            // Terminal on chain, payout still unread. Under HTLCv3 that is a
+            // real open question, so it gets its own state.
+            <div
+              className="mb-3 rounded-md border border-border bg-muted/30 p-3 text-center text-sm font-medium text-muted-foreground"
+              data-testid="swap-outcome"
+            >
+              Both legs are settled on chain. Confirming the payouts actually landed…
             </div>
           )
         ) : null}
@@ -714,7 +768,10 @@ export function SwapFlow({
                 {step.issue ? (
                   <p className="text-xs text-destructive">
                     {step.key === "claim-initiator"
-                      ? `Not safe to proceed: ${step.issue}.`
+                      ? // The margin closes the claim well before the timeout,
+                        // so say plainly what happens next and when, or this
+                        // reads as a dead end with funds inside.
+                        `Not safe to proceed: ${step.issue}. Claiming this close to the deadline risks publishing the secret into a claim that reverts. The escrow refunds to its initiator from ${new Date(initiatorRefundAt * 1000).toLocaleString()}, and the Refund button appears here then.`
                       : `Not safe to proceed: the counterparty lock failed verification, ${step.issue}.`}
                   </p>
                 ) : null}
@@ -787,6 +844,18 @@ export function SwapFlow({
           );
         })}
 
+        {unverifiedDeliveryPolicyLegs().length > 0 ? (
+          <p className="mt-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
+            The delivery gas policy could not be read from the{" "}
+            {unverifiedDeliveryPolicyLegs()
+              .map((leg) => legByKey(leg).name)
+              .join(" and ")}{" "}
+            HTLC, so the settlement gas buffer is unconfirmed against the deployed contract.
+            Settlements still carry it, and the next one retries the check. A payout may defer into
+            a credit, which this page will show.
+          </p>
+        ) : null}
+
         {creditList.length > 0 ? (
           <div
             className="mt-3 space-y-3 rounded-md border border-amber-400/40 bg-amber-400/5 p-3"
@@ -821,8 +890,26 @@ export function SwapFlow({
                         {view.own ? " (you)" : " (the counterparty)"}
                       </dd>
                     </div>
+                    {view.otherSwaps > 0n ? (
+                      <div>
+                        <dt className="inline text-muted-foreground">
+                          Also held for this address:{" "}
+                        </dt>
+                        <dd className="inline">
+                          {view.otherSwapsDisplay} from other swaps. Moving this credit moves the
+                          whole balance, because the contract keeps one ledger per address and
+                          asset.
+                        </dd>
+                      </div>
+                    ) : null}
                   </dl>
-                  {creditExit(view, connectedOn(view.leg)) === "withdraw" ? (
+                  {creditExit(view, connectedOn(view.leg)) === "connect" ? (
+                    <p className="text-xs text-amber-400">
+                      Connect a wallet on {legByKey(view.leg).name} to move this credit. Anyone can
+                      pay it to the address that owns it, and only that address can send it
+                      somewhere else.
+                    </p>
+                  ) : creditExit(view, connectedOn(view.leg)) === "withdraw" ? (
                     <div className="space-y-1.5">
                       <label className="block text-xs text-muted-foreground">
                         Send it to
@@ -884,7 +971,9 @@ export function SwapFlow({
                 disabled={busy !== null}
                 onClick={() => refundLeg(leg)}
               >
-                Refund {legPlan[leg].symbol} leg
+                {busy === `refund-${leg}`
+                  ? "Waiting for wallet…"
+                  : `Refund ${legPlan[leg].symbol} leg`}
               </Button>
             ))}
           </div>

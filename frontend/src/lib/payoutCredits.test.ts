@@ -105,25 +105,61 @@ describe("credit candidates", () => {
 describe("credit views", () => {
   const machine = machineFor("taker");
   const candidates = creditCandidates(machine);
+  const reading = (global: bigint, credited: bigint) => ({ global, credited });
 
-  it("shows only the payees that actually hold a credit", () => {
-    const amounts = new Map([
-      [creditKey("eth", NATIVE_TOKEN, TAKER_ETH), ETH_AMOUNT],
-      [creditKey("qrl", QRL_NATIVE_TOKEN, MAKER_QRL), 0n],
+  it("shows only the payees this swap actually credited", () => {
+    const readings = new Map([
+      [creditKey("eth", NATIVE_TOKEN, TAKER_ETH), reading(ETH_AMOUNT, ETH_AMOUNT)],
+      [creditKey("qrl", QRL_NATIVE_TOKEN, MAKER_QRL), reading(0n, 0n)],
     ]);
-    const views = creditViews(candidates, amounts);
+    const views = creditViews(candidates, readings);
     expect(views).toHaveLength(1);
     expect(views[0]?.display).toBe("1.0 ETH");
+    expect(views[0]?.otherSwaps).toBe(0n);
     // withdraw reads msg.sender, so the exit depends on the wallet attached
     // to that leg, and never on the address the swap was agreed with.
     expect(creditExit(views[0]!, TAKER_ETH)).toBe("withdraw");
     expect(creditExit(views[0]!, MAKER_ETH)).toBe("push");
-    expect(creditExit(views[0]!, null)).toBe("push");
+    expect(creditExit(views[0]!, null)).toBe("connect");
+  });
+
+  it("hides a ledger balance this swap did not credit", () => {
+    // creditOf is a per-address ledger shared by every swap that account
+    // settled. A balance with no PayoutCredited log for this hashlock
+    // belongs to another swap, and this page must not offer to move it.
+    const readings = new Map([
+      [creditKey("eth", NATIVE_TOKEN, TAKER_ETH), reading(ETH_AMOUNT, 0n)],
+    ]);
+    expect(creditViews(candidates, readings)).toEqual([]);
+  });
+
+  it("reports the rest of the ledger balance separately", () => {
+    const readings = new Map([
+      [creditKey("eth", NATIVE_TOKEN, TAKER_ETH), reading(ETH_AMOUNT * 3n, ETH_AMOUNT)],
+    ]);
+    const views = creditViews(candidates, readings);
+    expect(views[0]?.amount).toBe(ETH_AMOUNT);
+    expect(views[0]?.display).toBe("1.0 ETH");
+    expect(views[0]?.otherSwaps).toBe(ETH_AMOUNT * 2n);
+    expect(views[0]?.otherSwapsDisplay).toBe("2.0 ETH");
+  });
+
+  it("caps this swap's credit at what the ledger still holds", () => {
+    // A withdrawal drains the shared ledger without naming a swap, so what
+    // remains collectible here is the smaller of the two figures.
+    const readings = new Map([
+      [creditKey("eth", NATIVE_TOKEN, TAKER_ETH), reading(ETH_AMOUNT / 4n, ETH_AMOUNT)],
+    ]);
+    const views = creditViews(candidates, readings);
+    expect(views[0]?.amount).toBe(ETH_AMOUNT / 4n);
+    expect(views[0]?.otherSwaps).toBe(0n);
   });
 
   it("offers only a push for a counterparty credit", () => {
-    const amounts = new Map([[creditKey("qrl", QRL_NATIVE_TOKEN, MAKER_QRL), QRL_AMOUNT]]);
-    const views = creditViews(candidates, amounts);
+    const readings = new Map([
+      [creditKey("qrl", QRL_NATIVE_TOKEN, MAKER_QRL), reading(QRL_AMOUNT, QRL_AMOUNT)],
+    ]);
+    const views = creditViews(candidates, readings);
     expect(views).toHaveLength(1);
     expect(views[0]?.own).toBe(false);
     expect(creditExit(views[0]!, TAKER_QRL)).toBe("push");

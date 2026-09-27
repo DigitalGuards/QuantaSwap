@@ -282,8 +282,12 @@ export const makePreflightedClaimSender =
       h.qrlTransport,
       gasLimit,
     );
-    await guard?.();
+    // The network recheck runs before the cutoff guard, so nothing
+    // network-bound sits between the guard reading the escrow's deadline and
+    // the broadcast: a slow call there would widen the very window the guard
+    // exists to close.
     await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
+    await guard?.();
     try {
       await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] });
     } catch {

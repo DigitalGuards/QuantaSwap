@@ -202,6 +202,13 @@ export async function getDeliveryGasPolicy(leg: LegKey): Promise<DeliveryGasPoli
 }
 
 const policyChecked = new Map<LegKey, Promise<void>>();
+const policyUnverified = new Set<LegKey>();
+
+/** Legs whose delivery-policy read has failed and not yet succeeded. The
+ *  settlement gas rule is then unconfirmed against the deployed contract, so
+ *  the UI says so: settlements still go out with the compiled-in buffer,
+ *  which is the safe direction, and the next settlement retries the check. */
+export const unverifiedDeliveryPolicyLegs = (): LegKey[] => [...policyUnverified];
 
 /** Confirm per leg that the deployed contract publishes the budget this
  *  build's settlement gas rule is built from. A mismatch fails closed: the
@@ -221,9 +228,11 @@ export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
           `The ${leg} HTLC publishes a delivery budget this client was not built for; refusing to settle`,
         );
       }
+      policyUnverified.delete(leg);
     },
     () => {
       policyChecked.delete(leg);
+      policyUnverified.add(leg);
     },
   );
   policyChecked.set(leg, check);
@@ -233,6 +242,7 @@ export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
 /** Test seam: forget the per-session delivery-policy verdicts. */
 export const resetDeliveryGasPolicyCache = (): void => {
   policyChecked.clear();
+  policyUnverified.clear();
 };
 
 /** Pure depth arithmetic for the confirmed snapshot: the block a lock
@@ -341,6 +351,95 @@ export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<Swap
     events.push({ kind, txHash: log.transactionHash });
   }
   return events;
+}
+
+/** An indexed `address` topic word: 32 bytes left-padded on Ethereum, the
+ *  64-byte address itself on QRVM-512. */
+function addressTopic(leg: LegKey, address: string): string {
+  const hex = qToHex(address).slice(2).toLowerCase();
+  return leg === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+}
+
+const PAYOUT_CREDITED_TOPIC = (() => {
+  const frag = htlcInterface.getEvent("PayoutCredited");
+  if (frag === null) throw new Error("unknown HTLC event PayoutCredited");
+  return frag.topicHash;
+})();
+
+/**
+ * The amount `PayoutCredited` recorded for this exact swap, in this token,
+ * for this account. `creditOf` is a per-(token, account) ledger shared by
+ * every swap that account ever settled, so it cannot answer "what did THIS
+ * swap leave behind". The event can: its third indexed field is the
+ * hashlock, which names one swap.
+ *
+ * The filter pins all four topics, so the query is selective even scanning
+ * from genesis, which is what the existing hashlock event lookup already
+ * does on both legs. Returns 0 when the payout was delivered, which is the
+ * normal case.
+ */
+export async function getCreditedForSwap(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<bigint> {
+  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
+  const cfg = legByKey(leg);
+  const params = [
+    {
+      address: cfg.htlc,
+      topics: [
+        leg === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
+        addressTopic(leg, token),
+        addressTopic(leg, account),
+        leg === "qrl" ? qrvm64Topic(hashlock) : hashlock,
+      ],
+      fromBlock: "0x0",
+      toBlock: "latest",
+    },
+  ];
+  const raw = await (leg === "qrl"
+    ? qrlRpc("qrl_getLogs", params)
+    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
+  if (!Array.isArray(raw)) return 0n;
+  let total = 0n;
+  for (const entry of raw as unknown[]) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { data } = entry as { data?: unknown };
+    if (typeof data !== "string") continue;
+    // One 32-byte word on Ethereum, one 64-byte word on QRVM-512.
+    const expected = leg === "qrl" ? 128 : 64;
+    if (!new RegExp(`^0x[0-9a-fA-F]{${expected}}$`).test(data)) continue;
+    total += BigInt(data);
+  }
+  return total;
+}
+
+/** What one payee still holds, and how much of it this swap left behind. */
+export interface CreditReading {
+  /** The per-(token, account) ledger balance, across every swap. */
+  global: bigint;
+  /** What this swap's settlement credited, from its PayoutCredited log. */
+  credited: bigint;
+}
+
+/**
+ * Read both halves together. A withdrawal drains the shared ledger without
+ * naming a swap, so the amount this swap can still be said to be owed is
+ * the smaller of the two: `credited` is the ceiling, `global` is what is
+ * actually left to move.
+ */
+export async function readSwapCredit(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): Promise<CreditReading> {
+  const global = await getCredit(leg, token, account);
+  // The log query only earns its cost once something is actually there.
+  const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+  return { global, credited };
 }
 
 function assertEthersAddressRecipient(recipient: string): void {

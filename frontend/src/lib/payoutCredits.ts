@@ -8,6 +8,7 @@
 
 import { formatUnits } from "ethers";
 import type { LegKey } from "../config";
+import type { CreditReading } from "./htlc";
 import { sameAddr, type SwapMachine } from "./swapMachine";
 
 /** One (leg, token, account) the browser polls creditOf() for. */
@@ -26,8 +27,15 @@ export interface CreditCandidate {
 }
 
 export interface CreditView extends CreditCandidate {
+  /** What THIS swap still owes this account: the smaller of what its
+   *  settlement credited and what the shared ledger still holds. */
   amount: bigint;
   display: string;
+  /** The rest of this account's ledger balance in this token, left by other
+   *  swaps. Shown separately and labelled, because this page can say nothing
+   *  about where it came from. */
+  otherSwaps: bigint;
+  otherSwapsDisplay: string;
 }
 
 /** Stable key for a candidate, also the key of the polled amount map. */
@@ -67,19 +75,32 @@ export function creditCandidates(machine: SwapMachine): CreditCandidate[] {
   return candidates;
 }
 
-/** The candidates that actually hold a credit, in polling order. */
+/**
+ * The candidates this swap actually left a credit for, in polling order.
+ * A ledger balance with no PayoutCredited log for this hashlock belongs to
+ * another swap: this page cannot say anything true about it, and it must
+ * never be offered a Push here, so it is left out of the list and only
+ * reported as the labelled remainder on an entry this swap does own.
+ */
 export function creditViews(
   candidates: readonly CreditCandidate[],
-  amounts: ReadonlyMap<string, bigint>,
+  readings: ReadonlyMap<string, CreditReading>,
 ): CreditView[] {
   const views: CreditView[] = [];
   for (const candidate of candidates) {
-    const amount = amounts.get(creditKey(candidate.leg, candidate.token, candidate.account));
-    if (amount === undefined || amount <= 0n) continue;
+    const reading = readings.get(
+      creditKey(candidate.leg, candidate.token, candidate.account),
+    );
+    if (reading === undefined) continue;
+    const amount = reading.credited < reading.global ? reading.credited : reading.global;
+    if (amount <= 0n) continue;
+    const otherSwaps = reading.global - amount;
     views.push({
       ...candidate,
       amount,
       display: `${formatUnits(amount, candidate.decimals)} ${candidate.symbol}`,
+      otherSwaps,
+      otherSwapsDisplay: `${formatUnits(otherSwaps, candidate.decimals)} ${candidate.symbol}`,
     });
   }
   return views;
@@ -90,11 +111,16 @@ export function creditViews(
  * `msg.sender`, so only the wallet that holds the credit can name a
  * destination; every other signer, including this user on a different wallet,
  * is left with the permissionless push, which pays the credited account
- * itself and gains nobody any redirect authority. `connected` is the wallet
- * currently attached on that leg, or null when none is.
+ * itself and gains nobody any redirect authority. With no wallet attached on
+ * that leg there is nothing to sign with at all, which is its own state:
+ * neither exit is offered and the user is asked to connect.
  */
 export const creditExit = (
   view: CreditView,
   connected: string | null,
-): "withdraw" | "push" =>
-  connected !== null && sameAddr(connected, view.account) ? "withdraw" : "push";
+): "withdraw" | "push" | "connect" =>
+  connected === null
+    ? "connect"
+    : sameAddr(connected, view.account)
+      ? "withdraw"
+      : "push";
