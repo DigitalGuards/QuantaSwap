@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "./orderbook";
 import {
+  OrderBookBusyError,
   OrderbookClient,
   OrderGoneError,
   type EventSourcePort,
@@ -256,6 +257,41 @@ describe("endpoint-bound order book client", () => {
       { fetch: async () => response({ error: "gone" }, 404) },
     );
     await expect(client.get("missing")).rejects.toEqual(new OrderGoneError("gone"));
+  });
+
+  it("maps a shed 503 to OrderBookBusyError with its delay", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      {
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              error: "order book has too many requests in flight, retry shortly",
+            }),
+            {
+              status: 503,
+              headers: {
+                "Content-Type": "application/json",
+                "Retry-After": "1",
+              },
+            },
+          ),
+      },
+    );
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OrderBookBusyError);
+    expect((failure as OrderBookBusyError).retryAfterS).toBe(1);
+    expect((failure as Error).message).toContain("too many requests in flight");
+  });
+
+  it("maps a rate-limit 429 to OrderBookBusyError without a delay", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { fetch: async () => response({ error: "rate limited, slow down" }, 429) },
+    );
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(OrderBookBusyError);
+    expect((failure as OrderBookBusyError).retryAfterS).toBeUndefined();
   });
 
   it("bounds list snapshots and rejects malformed rows", async () => {
