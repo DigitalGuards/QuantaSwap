@@ -18,7 +18,6 @@ import {
   type CreditReading,
 } from "@/lib/htlc";
 import { makeSettlementSender } from "@/lib/legSender";
-import { isQrlAddress } from "@/lib/qrlAddress";
 import { sameAddr } from "@/lib/swapMachine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
@@ -227,8 +226,3 @@ export function DeferredPayoutPanel({
     </div>
   );
 }
-
-/** Whether a destination is an address the leg's codec can encode. Exported
- *  so callers can validate before offering a custom payout target. */
-export const destinationFitsLeg = (destination: string, leg: LegKey): boolean =>
-  leg === "eth" ? /^0x[0-9a-fA-F]{40}$/.test(destination) : isQrlAddress(destination);
