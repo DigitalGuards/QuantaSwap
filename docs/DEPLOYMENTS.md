@@ -1,13 +1,12 @@
 # Deployments
 
-## HTLCv3 staged, 2026-09-27 (not yet used by any client)
+## HTLCv3, deployed 2026-09-27, current
 
 HTLCv3 (issue #47: payout credits, see [`docs/audit/HTLCV3_SCOPE.md`](audit/HTLCV3_SCOPE.md))
 is deployed on both legs from the qualified artifacts of source bundle
-`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. The live swap flow still uses the HTLCv2 deployment below until the
-client integration and a new protocol configuration ship. Both deployed runtimes
-matched their qualified artifacts at deploy time (EVM 5,212 bytes, QRVM-512 6,225
-bytes).
+`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. Both deployed
+runtimes matched their qualified artifacts at deploy time (EVM 5,212 bytes, QRVM-512
+6,225 bytes).
 
 | Leg | Chain ID | HTLCv3 address | Deploy transaction |
 |---|---|---|---|
@@ -17,12 +16,36 @@ bytes).
 Deploy with `HTLC_CONTRACT=HTLCv3 npm run deploy:eth` and
 `HTLC_CONTRACT=HTLCv3 npm run deploy:qrl` after `npm run compile`.
 
-## Private v3 testnet release, 2026-09-21
+### Which configuration field flips a client to HTLCv3
 
-The current deployment uses Sepolia and the private QRL v3 testnet. QRL network v3,
-the HTLCv2 open-recipient contract interface, and portable signing wire V2 are separate
-versioned interfaces. The public deployment source of truth is
-[`config/protocol-v2.json`](../config/protocol-v2.json).
+[`config/protocol-v2.json`](../config/protocol-v2.json) carries the whole cutover:
+
+| Field | HTLCv2 (history) | HTLCv3 (current) |
+|---|---|---|
+| `htlcInterface` | absent | `"v3"` |
+| `ethHtlc` | `0x4D9D3adAe3e479CA8a9e13c6E5eE4E4E7Bc4f9B5` | `0xCD5Aa74452cC29e73C6e52591b3b54D775C683e4` |
+| `qrlHtlc` | `Q71D5194Eaa...580D05405` | `QBFe6834059...ea2274437` |
+
+`htlcInterface` is the marker every client asserts at load: the browser, the order
+book, the market maker and the scripted taker all refuse to start against a profile
+whose interface is not the one they were built for. The addresses are signed into
+every portable V2 order, so the three fields move as one: changing them rotates the
+signing domain, which is why `config/protocol-v2-vectors.json` carries HTLCv3-bound
+digests and why a mixed-version pair of clients cannot agree on an order.
+
+In-flight HTLCv2 swaps and open HTLCv2 orders do not migrate. Every client keys a
+swap record on the HTLC address it was created against and keeps claiming or
+refunding that address until the record is terminal; see
+[ARCHITECTURE.md](ARCHITECTURE.md) section 2.
+
+## Private v3 testnet release, 2026-09-21 (HTLCv2, superseded by HTLCv3 above)
+
+This deployment used Sepolia and the private QRL v3 testnet with the HTLCv2
+open-recipient contract. QRL network v3, the HTLC contract interface, and portable
+signing wire V2 are separate versioned interfaces. The public deployment source of
+truth is [`config/protocol-v2.json`](../config/protocol-v2.json); these addresses are
+kept here as history and as the settlement target of any swap record that still names
+them.
 
 | Leg | Chain ID | HTLC address | Deploy transaction |
 |---|---|---|---|
@@ -56,8 +79,9 @@ The current reviewed Hyperion source builds into two target-bound artifacts. Eth
 EVM-256 compiler target at `build/hyperion/evm/HTLC.json`; QRL uses the QRVM-512 Q128 target at
 `build/hyperion/qrl/HTLC.json`. Both builds enable the optimizer at 200 runs and `viaIR: true`.
 
-Source-bundle note: `contracts/hyperion/` now also holds the undeployed `HTLCv3.hyp`
-(issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)). The bundle hash covers every
+Source-bundle note: `contracts/hyperion/` also holds `HTLCv3.hyp`, which the current
+clients settle against (issue #47, see [audit/HTLCV3_SCOPE.md](audit/HTLCV3_SCOPE.md)).
+Its target-bound artifacts are `build/hyperion/{evm,qrl}/HTLCv3.json`. The bundle hash covers every
 source in that directory, so it moved to
 `674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. `HTLC.hyp` itself is
 unchanged, and the two deployed runtime hashes above still reproduce byte for byte from the
