@@ -3111,6 +3111,26 @@ export class OrderStore {
     return this.commitTake(best, body, takerIp);
   }
 
+  /**
+   * Whether this raw token is the maker capability of that order, answered
+   * without changing anything and without throwing. The admission gate uses it
+   * to decide whether a request may use the headroom reserved for maker
+   * traffic, so it has to be cheap and it has to say no for an unknown order,
+   * a malformed token and a mismatch alike. The comparison is the same
+   * fixed-time one the authorising paths use.
+   */
+  matchesMakerCapability(id: string, token: unknown): boolean {
+    const order = this.orders.get(id);
+    if (order === undefined) return false;
+    return order.makerAuth === undefined
+      ? legacyTokenMatches(order.makerTokenHash, token)
+      : capabilityMatches(
+          order.makerTokenHash,
+          token,
+          computeMakerTokenCommitment,
+        );
+  }
+
   private authorized(order: Order, body: Record<string, unknown>): void {
     const token = body["token"];
     const valid =

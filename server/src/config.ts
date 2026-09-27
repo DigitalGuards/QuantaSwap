@@ -23,6 +23,7 @@ export interface ServerConfig {
   maxInflightMutations: number;
   reservedMakerMutations: number;
   maxInflightBodyReads: number;
+  reservedMakerBodyReads: number;
   bodyReadTimeoutMs: number;
   shutdownTimeoutMs: number;
   streamBackpressureMs: number;
@@ -232,6 +233,25 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "ORDERBOOK_RESERVED_MAKER_MUTATIONS must be below ORDERBOOK_MAX_INFLIGHT_MUTATIONS",
     );
   }
+  const inflightBodyReads = integerEnv(
+    env,
+    "ORDERBOOK_MAX_INFLIGHT_BODY_READS",
+    256,
+    8,
+    4096,
+  );
+  const reservedMakerBodyReads = integerEnv(
+    env,
+    "ORDERBOOK_RESERVED_MAKER_BODY_READS",
+    32,
+    0,
+    4095,
+  );
+  if (reservedMakerBodyReads >= inflightBodyReads) {
+    throw new Error(
+      "ORDERBOOK_RESERVED_MAKER_BODY_READS must be below ORDERBOOK_MAX_INFLIGHT_BODY_READS",
+    );
+  }
   if (rawProxyTrust !== "none" && rawProxyTrust !== "loopback" && rawProxyTrust !== "all") {
     throw new Error("ORDERBOOK_TRUST_PROXY must be none, loopback, or all");
   }
@@ -342,13 +362,12 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     // Reading a body is cheap, so this bound is wide; the deadline is what
     // stops a client that promises a body and never sends it from holding
     // anything. A mutation slot is taken only once the body is in hand.
-    maxInflightBodyReads: integerEnv(
-      env,
-      "ORDERBOOK_MAX_INFLIGHT_BODY_READS",
-      256,
-      8,
-      4096,
-    ),
+    maxInflightBodyReads: inflightBodyReads,
+    // The same two-tier idea as the mutation bound. Without it, enough sources
+    // holding half-open bodies fill the global body-read bound and refuse every
+    // writer, the maker's reserved mutation lane included, because a request
+    // that cannot read its body never reaches that lane.
+    reservedMakerBodyReads,
     bodyReadTimeoutMs: integerEnv(
       env,
       "ORDERBOOK_BODY_READ_TIMEOUT_MS",

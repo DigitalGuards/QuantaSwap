@@ -120,6 +120,33 @@ describe("federation response concurrency", () => {
     releaseC();
   });
 
+  it("holds a caller below the configured ceilings when asked", () => {
+    const limiter = new FederationConcurrencyLimiter({
+      perSourceLimit: 4,
+      globalLimit: 8,
+    });
+    // A lowered global ceiling leaves the rest of the bound for callers that
+    // do not lower it, which is how one class keeps headroom inside another.
+    const lowered = Array.from({ length: 4 }, (_value, index) =>
+      limiter.acquire(`source-${String(index)}`, { global: 4 }),
+    );
+    assert.ok(lowered.every((release) => release !== null));
+    assert.equal(limiter.acquire("source-x", { global: 4 }), null);
+    const reserved = limiter.acquire("source-x");
+    assert.ok(reserved);
+    // A lowered per-source ceiling binds the same way.
+    assert.equal(limiter.acquire("source-x", { perSource: 1 }), null);
+    // An override can never raise a ceiling above the configured one: the
+    // rest of the bound fills, and then even an absurd request is refused.
+    const rest = Array.from({ length: 3 }, (_value, index) =>
+      limiter.acquire(`filler-${String(index)}`, { global: 99 }),
+    );
+    assert.ok(rest.every((release) => release !== null));
+    assert.equal(limiter.acquire("source-y", { global: 99 }), null);
+    for (const release of [...lowered, ...rest]) release?.();
+    reserved();
+  });
+
   it("keeps capacity available for another authenticated source", () => {
     const limiter = new FederationConcurrencyLimiter({
       perSourceLimit: 1,

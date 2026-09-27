@@ -75,7 +75,10 @@ async function startBook(
       ORDERBOOK_FEDERATION_ONION_ONLY: "false",
       ORDERBOOK_FEDERATION_ONION_PROXY: "",
       ORDERBOOK_FEDERATION_READ_TOKEN: "",
-      ORDERBOOK_TRUST_PROXY: "none",
+      // The same trusted-proxy path the service uses in production, so each
+      // synthetic client below is a distinct source to every per-source
+      // budget. Without it every request here would be 127.0.0.1.
+      ORDERBOOK_TRUST_PROXY: "loopback",
       ORDERBOOK_CORS_ORIGINS: "",
       PRESENCE_TTL_S: "90",
       ...overrides,
@@ -140,7 +143,11 @@ async function postOrder(
 }
 
 /** A request with full headers and a promised body that never arrives. */
-async function halfOpenPost(port: number, bytes = 400): Promise<Socket> {
+async function halfOpenPost(
+  port: number,
+  bytes = 400,
+  forwardedFor?: string,
+): Promise<Socket> {
   const socket = connect(port, "127.0.0.1");
   sockets.push(socket);
   await new Promise<void>((resolve, reject) => {
@@ -149,6 +156,9 @@ async function halfOpenPost(port: number, bytes = 400): Promise<Socket> {
   });
   socket.write(
     "POST /api/orders HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+      (forwardedFor === undefined
+        ? ""
+        : `X-Forwarded-For: ${forwardedFor}\r\n`) +
       `Content-Type: application/json\r\nContent-Length: ${String(bytes)}\r\n\r\n`,
   );
   return socket;
@@ -177,6 +187,7 @@ async function stageRequest(
   path: string,
   payload: string,
   forwardedFor?: string,
+  makerToken?: string,
 ): Promise<StagedRequest> {
   const socket = connect(port, "127.0.0.1");
   sockets.push(socket);
@@ -191,6 +202,9 @@ async function stageRequest(
       (forwardedFor === undefined
         ? ""
         : `X-Forwarded-For: ${forwardedFor}\r\n`) +
+      (makerToken === undefined
+        ? ""
+        : `X-Maker-Token: ${makerToken}\r\n`) +
       `Content-Length: ${String(body.byteLength)}\r\n\r\n`,
   );
   socket.write(body.subarray(0, body.byteLength - 1));
@@ -302,13 +316,13 @@ describe("in-flight mutation gate", () => {
       // whole mutation bound. Before the bound moved behind the body read,
       // two of these refused every writer for the request timeout.
       const held = await Promise.all([
-        halfOpenPost(book.port),
-        halfOpenPost(book.port),
-        halfOpenPost(book.port),
-        halfOpenPost(book.port),
+        halfOpenPost(book.port, 400, "198.51.100.11"),
+        halfOpenPost(book.port, 400, "198.51.100.12"),
+        halfOpenPost(book.port, 400, "198.51.100.13"),
+        halfOpenPost(book.port, 400, "198.51.100.14"),
       ]);
       await delay(300);
-      const legitimate = await postOrder(book.port, 1);
+      const legitimate = await postOrder(book.port, 1, "198.51.100.20");
       assert.equal(legitimate.status, 201);
 
       // Each half-open request is answered at the read deadline and lets go.
@@ -320,7 +334,7 @@ describe("in-flight mutation gate", () => {
       for (const socket of held) socket.destroy();
 
       // Nothing leaked: the bound is free again.
-      const after = await postOrder(book.port, 2);
+      const after = await postOrder(book.port, 2, "198.51.100.21");
       assert.equal(after.status, 201);
     },
   );
@@ -406,8 +420,9 @@ describe("in-flight mutation gate", () => {
         stageRequest(
           book.port,
           `/api/orders/${String(id)}/cancel`,
-          JSON.stringify({ token: makerToken }),
+          JSON.stringify({}),
           "192.0.2.7",
+          String(makerToken),
         ),
         ...Array.from({ length: 10 }, (_value, index) =>
           stageRequest(
@@ -435,6 +450,111 @@ describe("in-flight mutation gate", () => {
       for (const reply of shed) {
         assert.equal(reply.stage, "pre-verification");
       }
+    },
+  );
+
+  it(
+    "keeps the maker lane open when the body-read bound is exhausted",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_BODY_READS: "8",
+        ORDERBOOK_RESERVED_MAKER_BODY_READS: "4",
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "3000",
+      });
+      const created = await postOrder(book.port, 1, "192.0.2.10");
+      assert.equal(created.status, 201);
+      const order = created.body["order"] as Record<string, unknown>;
+      const id = String(order["id"]);
+      const makerToken = String(created.body["makerToken"]);
+
+      // Four sources, two half-open bodies each, which is the whole taker
+      // share of the body-read bound. Every further taker body is refused,
+      // and none of them ever reaches the mutation bound at all.
+      const held: Socket[] = [];
+      for (const source of ["198.51.100.31", "198.51.100.32", "198.51.100.33", "198.51.100.34"]) {
+        held.push(await halfOpenPost(book.port, 400, source));
+        held.push(await halfOpenPost(book.port, 400, source));
+      }
+      await delay(200);
+      const refusedTaker = await postOrder(book.port, 2, "198.51.100.40");
+      assert.equal(refusedTaker.status, 503);
+      assert.equal(refusedTaker.stage, "pre-verification");
+      assert.deepEqual(refusedTaker.body, {
+        error:
+          "order book has too many request bodies in flight, retry shortly",
+      });
+
+      // The maker's lane is a different share of the same bound, so a caller
+      // that presents the order's capability still gets its body read and its
+      // cancel served. This is the whole point of the reservation: a flood of
+      // bodies must not be able to refuse the route that stops the bleeding.
+      const cancelled = await fetch(
+        `http://127.0.0.1:${String(book.port)}/api/orders/${id}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "192.0.2.10",
+            "X-Maker-Token": makerToken,
+          },
+          body: JSON.stringify({}),
+        },
+      );
+      const cancelBody = (await cancelled.json()) as {
+        order?: { status?: string };
+      };
+      assert.equal(cancelled.status, 200);
+      assert.equal(cancelBody.order?.status, "cancelled");
+
+      for (const socket of held) socket.destroy();
+      await delay(200);
+      const resumed = await postOrder(book.port, 3, "198.51.100.41");
+      assert.equal(resumed.status, 201);
+    },
+  );
+
+  it(
+    "keeps a maker route without its capability in the taker lane",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_BODY_READS: "8",
+        ORDERBOOK_RESERVED_MAKER_BODY_READS: "4",
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "3000",
+      });
+      const created = await postOrder(book.port, 1, "192.0.2.10");
+      assert.equal(created.status, 201);
+      const order = created.body["order"] as Record<string, unknown>;
+      const id = String(order["id"]);
+
+      const held: Socket[] = [];
+      for (const source of ["198.51.100.51", "198.51.100.52", "198.51.100.53", "198.51.100.54"]) {
+        held.push(await halfOpenPost(book.port, 400, source));
+        held.push(await halfOpenPost(book.port, 400, source));
+      }
+      await delay(200);
+
+      // A maker path is not a maker: naming one without the capability would
+      // otherwise be a way for anyone to reach the reserved share.
+      for (const token of [undefined, "ff".repeat(32)]) {
+        const reply = await fetch(
+          `http://127.0.0.1:${String(book.port)}/api/orders/${id}/cancel`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Forwarded-For": "198.51.100.60",
+              ...(token === undefined ? {} : { "X-Maker-Token": token }),
+            },
+            body: JSON.stringify({}),
+          },
+        );
+        await reply.json();
+        assert.equal(reply.status, 503);
+        assert.equal(reply.headers.get("x-refusal-stage"), "pre-verification");
+      }
+      for (const socket of held) socket.destroy();
     },
   );
 
