@@ -2,6 +2,11 @@
 
 ## HTLCv3, deployed 2026-09-27, current
 
+Live on quantaswap.io and dev.quantaswap.io since 2026-09-27 (staging 17:17 UTC,
+production 17:26 UTC). Verified after the flip with scripted-taker swaps in both
+directions on each deployment, all settled with no deferred payout. The previous
+release is served at `/v2/` for recovering swaps that started on HTLCv2.
+
 HTLCv3 (issue #47: payout credits, see [`docs/audit/HTLCV3_SCOPE.md`](audit/HTLCV3_SCOPE.md))
 is deployed on both legs from the qualified artifacts of source bundle
 `674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. Both deployed
@@ -78,6 +83,16 @@ Drain first, then flip. Per component, in order:
    the new `config/protocol-v2.json`. The book goes first because it is the
    verifier: on the HTLCv3 domain it rejects HTLCv2 orders, so a mixed pair
    cannot form.
+   - **Start the book on fresh data files.** The book re-verifies every
+     persisted signed order when it loads, and an HTLCv2 order fails under the
+     rotated signing domain, so a book started on its old `orders.json` stops
+     at startup. After the drain every HTLCv2 row is terminal; back up the
+     orders file and the federation feed, move them aside, and start empty.
+   - **Update any maker environment that pins the contracts.** A maker started
+     with `MM_ETH_HTLC` or `MM_QRL_HTLC` naming the HTLCv2 addresses refuses to
+     start ("configured deployment does not match the portable protocol signing
+     domain"). Point both at the HTLCv3 addresses above, or remove them so the
+     pinned configuration applies.
 5. **Confirm the maker's boot check.** It reads `deliveryGasPolicy()` on both
    legs and refuses to start if either answers anything but the budget it was
    built for, so a clean boot is itself the check that the addresses are the

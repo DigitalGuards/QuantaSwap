@@ -183,6 +183,9 @@ Portable V2 uses canonical, deployment-bound message bytes through SDK 5 message
 signing. Legacy V1 proofs and deployment-bound recovery state are rejected.
 Drain an old maker and preserve its original recovery environment before starting
 with fresh v3 state. Existing locks must settle on their original contracts.
+If your environment pins `MM_ETH_HTLC` / `MM_QRL_HTLC`, point them at the new
+contracts (or remove them) before starting the new profile; a pin naming another
+contract stops the daemon at boot.
 Build the container from the repository root context through the provided Compose
 file; both Node packages require the sibling `config/protocol-v2.json` at runtime.
 
