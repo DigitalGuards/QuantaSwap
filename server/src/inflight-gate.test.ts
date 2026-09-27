@@ -1,5 +1,15 @@
-// The in-flight gate and the body-read bound are HTTP admission rules, so they
-// are only proven by running the real service and racing real sockets at it.
+// Admission over HTTP, against a real order book process.
+//
+// Saturation here is held by state the test owns: a socket that has sent its
+// headers and a Content-Length and no body occupies a body-read slot until the
+// read deadline, which the test sets. Nothing below depends on two requests
+// overlapping by luck, which is not a property of the code and does not survive
+// a loaded or single-core runner.
+//
+// The mutation bound's arithmetic, including the maker reservation and the
+// signed-create sub-reserve, is exercised directly in admission.test.ts. The
+// refusal it produces uses the same helper and carries the same headers as the
+// body-read refusal asserted here.
 
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -164,72 +174,37 @@ async function halfOpenPost(
   return socket;
 }
 
-interface StagedRequest {
-  socket: Socket;
-  /** Sends the one byte still missing, which completes the body. */
-  finish: () => void;
-  reply: Promise<{ status: number; stage: string | null; text: string }>;
-}
-
 /**
- * A POST on its own socket with every byte of the body but the last already
- * sent, so the server has parsed the request and is waiting on one byte.
- *
- * This is how the tests below get requests genuinely in flight together. The
- * global fetch pools and can serialise requests to one origin, and even one
- * socket per request only overlaps when the connects and writes happen to land
- * in the same event-loop turn, which a slower machine does not guarantee.
- * Staging first and then writing every last byte in one synchronous loop puts
- * the bytes in flight at the same moment, so the handlers resume together.
+ * Waits until the taker share of the body-read bound is known to be full. It
+ * asks the book, so the wait ends on the condition itself and never on a guess
+ * at how long filling it takes. The probe sends an empty JSON body: a `503`
+ * means the lane had no slot for it, and a `4xx` from the store means the body
+ * was read, so the lane still has room. Either way the store is left
+ * untouched, and every attempt uses a fresh source so no per-source budget is
+ * spent on waiting.
  */
-async function stageRequest(
-  port: number,
-  path: string,
-  payload: string,
-  forwardedFor?: string,
-  makerToken?: string,
-): Promise<StagedRequest> {
-  const socket = connect(port, "127.0.0.1");
-  sockets.push(socket);
-  await new Promise<void>((resolve, reject) => {
-    socket.once("connect", () => resolve());
-    socket.once("error", reject);
-  });
-  const body = Buffer.from(payload, "utf8");
-  socket.write(
-    `POST ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
-      "Content-Type: application/json\r\n" +
-      (forwardedFor === undefined
-        ? ""
-        : `X-Forwarded-For: ${forwardedFor}\r\n`) +
-      (makerToken === undefined
-        ? ""
-        : `X-Maker-Token: ${makerToken}\r\n`) +
-      `Content-Length: ${String(body.byteLength)}\r\n\r\n`,
-  );
-  socket.write(body.subarray(0, body.byteLength - 1));
-  const reply = readSocket(socket).then((text) => ({
-    status: Number(/^HTTP\/1\.1 ([0-9]{3})/.exec(text)?.[1] ?? "0"),
-    stage: /x-refusal-stage: ([a-z-]+)/i.exec(text)?.[1] ?? null,
-    text,
-  }));
-  return {
-    socket,
-    finish: () => {
-      socket.write(body.subarray(body.byteLength - 1));
-    },
-    reply,
-  };
-}
-
-/** Completes every staged body in one turn, then collects the replies. */
-async function releaseTogether(
-  staged: readonly StagedRequest[],
-): Promise<Array<{ status: number; stage: string | null; text: string }>> {
-  for (const entry of staged) entry.finish();
-  const replies = await Promise.all(staged.map((entry) => entry.reply));
-  for (const entry of staged) entry.socket.destroy();
-  return replies;
+async function awaitTakerBodyLaneFull(port: number): Promise<void> {
+  for (let attempt = 1; attempt <= 60; attempt += 1) {
+    const res = await fetch(`http://127.0.0.1:${String(port)}/api/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Forwarded-For": `203.0.113.${String(attempt)}`,
+      },
+      body: "{}",
+    });
+    await res.json();
+    if (res.status === 503) {
+      assert.equal(res.headers.get("x-refusal-stage"), "pre-verification");
+      return;
+    }
+    assert.ok(
+      res.status >= 400 && res.status < 500,
+      `a probe body must be refused by the store, got ${String(res.status)}`,
+    );
+    await delay(20);
+  }
+  throw new Error("the taker body-read lane never filled");
 }
 
 function readSocket(socket: Socket): Promise<string> {
@@ -244,62 +219,70 @@ function readSocket(socket: Socket): Promise<string> {
   });
 }
 
-describe("in-flight mutation gate", () => {
+describe("write admission over HTTP", () => {
   it(
-    "refuses a mutation burst at the door and keeps reads answering",
+    "refuses a write burst at the door and keeps reads answering",
     { timeout: 120_000 },
     async () => {
       const book = await startBook({
-        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
-        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+        // Four body-read slots for the taker lane, four held for the maker
+        // lane, and a deadline long enough that the held sockets stay held for
+        // the whole case.
+        ORDERBOOK_MAX_INFLIGHT_BODY_READS: "8",
+        ORDERBOOK_RESERVED_MAKER_BODY_READS: "4",
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "30000",
       });
-      const staged = await Promise.all(
+      // Two sources at the per-source limit of two fill the taker lane's whole
+      // share, so from here every taker write is refused with no timing
+      // involved.
+      const held: Socket[] = [];
+      for (const source of ["198.51.100.11", "198.51.100.12"]) {
+        held.push(await halfOpenPost(book.port, 400, source));
+        held.push(await halfOpenPost(book.port, 400, source));
+      }
+      await awaitTakerBodyLaneFull(book.port);
+      const burst = await Promise.all(
         Array.from({ length: 12 }, (_value, index) =>
-          stageRequest(
-            book.port,
-            "/api/orders",
-            makerOrder(index + 1),
-            `198.51.100.${String(index + 1)}`,
-          ),
+          postOrder(book.port, index + 1, `198.51.100.${String(index + 21)}`),
         ),
       );
-      const burst = await releaseTogether(staged);
-      const created = burst.filter((reply) => reply.status === 201);
-      const refused = burst.filter((reply) => reply.status === 503);
-      assert.ok(created.length >= 1, "a bound of one taker slot admits work");
-      assert.ok(refused.length >= 1, "a burst of twelve must be shed");
-      assert.equal(created.length + refused.length, burst.length);
-      for (const reply of refused) {
-        assert.match(reply.text, /retry-after: 1/i);
+      assert.equal(
+        burst.filter((reply) => reply.status === 503).length,
+        burst.length,
+      );
+      for (const reply of burst) {
+        assert.equal(reply.retryAfter, "1");
         assert.equal(reply.stage, "pre-verification");
-        assert.match(
-          reply.text,
-          /order book has too many requests in flight, retry shortly/,
-        );
+        assert.deepEqual(reply.body, {
+          error:
+            "order book has too many request bodies in flight, retry shortly",
+        });
       }
 
       // Reads and the probes are not gated, so the book stays answerable
-      // while it refuses mutations.
+      // while it refuses writes.
       const health = await fetch(
         `http://127.0.0.1:${String(book.port)}/api/health`,
       );
       assert.equal(health.status, 200);
-      await health.text();
+      assert.deepEqual(await health.json(), { status: "ok" });
       const listing = (await fetch(
         `http://127.0.0.1:${String(book.port)}/api/orders`,
       ).then((res) => res.json())) as { orders: unknown[] };
-      // A refused request leaves nothing behind: the store holds exactly the
-      // rows the book answered 201 for.
-      assert.equal(listing.orders.length, created.length);
+      // A refused request leaves nothing behind.
+      assert.equal(listing.orders.length, 0);
+      assert.throws(() => readFileSync(book.dataFile, "utf8"));
+
+      // The slots come back when the requests holding them end, so a write is
+      // admitted again.
+      for (const socket of held) socket.destroy();
+      await delay(200);
+      const admitted = await postOrder(book.port, 200, "198.51.100.40");
+      assert.equal(admitted.status, 201);
       const persisted = JSON.parse(
         readFileSync(book.dataFile, "utf8"),
       ) as unknown[];
-      assert.equal(persisted.length, created.length);
-
-      // The slot is released when a request finishes, so a later mutation is
-      // admitted again.
-      const after = await postOrder(book.port, 200);
-      assert.equal(after.status, 201);
+      assert.equal(persisted.length, 1);
     },
   );
 
@@ -346,15 +329,20 @@ describe("in-flight mutation gate", () => {
       const book = await startBook({
         ORDERBOOK_BODY_READ_TIMEOUT_MS: "500",
       });
-      const socket = await halfOpenPost(book.port, 4000);
+      const socket = await halfOpenPost(book.port, 4000, "198.51.100.80");
       socket.write("{");
       const startedAt = Date.now();
       const reply = await readSocket(socket);
       const elapsed = Date.now() - startedAt;
       assert.match(reply, /^HTTP\/1\.1 408 /);
       assert.match(reply, /x-refusal-stage: pre-verification/i);
+      assert.match(reply, /connection: close/i);
+      // The read deadline is what ends this request, so it ends long before
+      // ORDERBOOK_REQUEST_TIMEOUT_MS, which is 15 s and would be the other way
+      // for it to end. The margin is wide because the assertion is about which
+      // limit fired, and not about the scheduler.
       assert.ok(
-        elapsed < 5000,
+        elapsed < 10_000,
         `the deadline must cut the read early, took ${String(elapsed)} ms`,
       );
       socket.destroy();
@@ -377,7 +365,10 @@ describe("in-flight mutation gate", () => {
           `http://127.0.0.1:${String(book.port)}/api/orders`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              "X-Forwarded-For": `192.0.2.${String(40 + attempt)}`,
+            },
             body: JSON.stringify({ direction: "nonsense" }),
           },
         );
@@ -385,71 +376,22 @@ describe("in-flight mutation gate", () => {
         assert.ok(res.status >= 400 && res.status < 500, String(res.status));
         await res.json();
       }
-      // Bodies that stop halfway and abort.
+      // Bodies that stop halfway and abort. Each one gets its own source, so a
+      // slot that is slow to come back cannot be mistaken for one that leaked.
       for (let attempt = 0; attempt < 6; attempt += 1) {
-        const socket = await halfOpenPost(book.port, 4000);
+        const socket = await halfOpenPost(
+          book.port,
+          4000,
+          `198.51.100.${String(90 + attempt)}`,
+        );
         socket.write("{");
         await delay(20);
         socket.destroy();
       }
-      await delay(200);
-      const after = await postOrder(book.port, 1);
+      // Nothing leaked: both bounds admit a write again, from a source that
+      // held none of the slots above.
+      const after = await postOrder(book.port, 1, "198.51.100.99");
       assert.equal(after.status, 201);
-    },
-  );
-
-  it(
-    "keeps headroom for maker routes while takers fill the bound",
-    { timeout: 120_000 },
-    async () => {
-      const book = await startBook({
-        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
-        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
-      });
-      const created = await postOrder(book.port, 1);
-      assert.equal(created.status, 201);
-      const order = created.body["order"] as Record<string, unknown>;
-      const id = order["id"];
-      const makerToken = created.body["makerToken"];
-      assert.equal(typeof id, "string");
-      assert.equal(typeof makerToken, "string");
-
-      // One taker slot only, so a taker burst cannot take the last slot. The
-      // maker's cancel goes through while that burst is being refused.
-      const staged = await Promise.all([
-        stageRequest(
-          book.port,
-          `/api/orders/${String(id)}/cancel`,
-          JSON.stringify({}),
-          "192.0.2.7",
-          String(makerToken),
-        ),
-        ...Array.from({ length: 10 }, (_value, index) =>
-          stageRequest(
-            book.port,
-            "/api/orders",
-            makerOrder(index + 10),
-            `198.51.100.${String(index + 1)}`,
-          ),
-        ),
-      ]);
-      const [cancelled, ...rest] = await releaseTogether(staged);
-      if (cancelled === undefined) throw new Error("the cancel had no reply");
-      assert.equal(cancelled.status, 200);
-      assert.match(cancelled.text, /"status":"cancelled"/);
-      assert.equal(rest.length, 10);
-      // The reserved headroom is for maker paths only, so the taker burst
-      // cannot reach it and part of it is shed.
-      const shed = rest.filter((reply) => reply.status === 503);
-      assert.ok(
-        shed.length >= 1,
-        `a taker burst above the taker ceiling must be shed: ${rest
-          .map((reply) => String(reply.status))
-          .join(",")}`,
-      );
-      for (const reply of shed) {
-        assert.equal(reply.stage, "pre-verification");
-      }
     },
   );
 
@@ -482,7 +424,7 @@ describe("in-flight mutation gate", () => {
         held.push(await halfOpenPost(book.port, 400, source));
         held.push(await halfOpenPost(book.port, 400, source));
       }
-      await delay(200);
+      await awaitTakerBodyLaneFull(book.port);
       const refusedTaker = await postOrder(book.port, 2, "198.51.100.40");
       assert.equal(refusedTaker.status, 503);
       assert.equal(refusedTaker.stage, "pre-verification");
@@ -521,12 +463,13 @@ describe("in-flight mutation gate", () => {
   );
 
   it(
-    "admits the shipped maker client's cancel while the taker lane is full",
+    "admits the shipped maker client's cancel while takers are refused",
     { timeout: 120_000 },
     async () => {
       const book = await startBook({
-        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
-        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+        ORDERBOOK_MAX_INFLIGHT_BODY_READS: "8",
+        ORDERBOOK_RESERVED_MAKER_BODY_READS: "4",
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "30000",
       });
       const created = await postOrder(book.port, 1, "192.0.2.10");
       assert.equal(created.status, 201);
@@ -534,37 +477,41 @@ describe("in-flight mutation gate", () => {
       const id = String(order["id"]);
       const makerToken = String(created.body["makerToken"]);
 
-      // The request both shipped maker clients now send for a legacy cancel:
-      // the capability in X-Maker-Token, which is what the admission gate
-      // reads before the body, and the same value in the body, which is what
-      // an order book from before the reserved lane authenticates against.
-      // See frontend/src/lib/orderbookClient.ts and
-      // marketmaker/src/orderbook.ts, whose own tests pin that shape.
-      const staged = await Promise.all([
-        stageRequest(
-          book.port,
-          `/api/orders/${id}/cancel`,
-          JSON.stringify({ token: makerToken }),
-          "192.0.2.10",
-          makerToken,
-        ),
-        ...Array.from({ length: 10 }, (_value, index) =>
-          stageRequest(
-            book.port,
-            "/api/orders",
-            makerOrder(index + 30),
-            `198.51.100.${String(index + 61)}`,
-          ),
-        ),
-      ]);
-      const [cancelled, ...takers] = await releaseTogether(staged);
-      if (cancelled === undefined) throw new Error("the cancel had no reply");
-      assert.equal(cancelled.status, 200);
-      assert.match(cancelled.text, /"status":"cancelled"/);
-      assert.ok(
-        takers.some((reply) => reply.status === 503),
-        "the taker lane must be full for this to prove anything",
+      const held: Socket[] = [];
+      for (const source of ["198.51.100.61", "198.51.100.62"]) {
+        held.push(await halfOpenPost(book.port, 400, source));
+        held.push(await halfOpenPost(book.port, 400, source));
+      }
+      // The taker lane is full, held by sockets this test owns, and the book
+      // confirms it before anything else is asserted.
+      await awaitTakerBodyLaneFull(book.port);
+      const refused = await postOrder(book.port, 2, "198.51.100.70");
+      assert.equal(refused.status, 503);
+
+      // The request both shipped maker clients send for a legacy cancel: the
+      // capability in X-Maker-Token, which is what the admission gate reads
+      // before the body, and the same value in the body, which is what an
+      // order book from before the reserved lane authenticates against. See
+      // frontend/src/lib/orderbookClient.ts and marketmaker/src/orderbook.ts,
+      // whose own tests pin that shape.
+      const cancelled = await fetch(
+        `http://127.0.0.1:${String(book.port)}/api/orders/${id}/cancel`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "192.0.2.10",
+            "X-Maker-Token": makerToken,
+          },
+          body: JSON.stringify({ token: makerToken }),
+        },
       );
+      const cancelBody = (await cancelled.json()) as {
+        order?: { status?: string };
+      };
+      assert.equal(cancelled.status, 200);
+      assert.equal(cancelBody.order?.status, "cancelled");
+      for (const socket of held) socket.destroy();
     },
   );
 
@@ -593,7 +540,7 @@ describe("in-flight mutation gate", () => {
         held.push(await halfOpenPost(book.port, 400, source));
         held.push(await halfOpenPost(book.port, 400, source));
       }
-      await delay(200);
+      await awaitTakerBodyLaneFull(book.port);
 
       // A maker path is not a maker: naming one without the capability would
       // otherwise be a way for anyone to reach the reserved share.
