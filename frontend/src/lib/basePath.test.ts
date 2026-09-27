@@ -59,7 +59,11 @@ describe("base path", () => {
     expect(absoluteAppUrl("/o/abc")).toBe(`${origin}/o/abc`);
   });
 
-  it("offers the previous release at /v2/ from the site root", () => {
-    expect(LEGACY_RELEASE_PATH).toBe("/v2/");
+  it("links to no previous release until one is configured", () => {
+    // A default of /v2/ would point at a 404 on every deployment that has
+    // not put a build there yet, and it would do it to someone looking for
+    // locked funds. The operator sets VITE_LEGACY_RELEASE_PATH when the path
+    // is actually served.
+    expect(LEGACY_RELEASE_PATH).toBe("");
   });
 });

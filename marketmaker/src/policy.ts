@@ -130,12 +130,22 @@ export interface ManagedOrder {
   /** Last attempt to push the taker's deferred payout to the taker after a
    *  sponsored claim credited them; null on older records. */
   pushSentAt: number | null;
-  /** How many times each credit move has been attempted. A token that
-   *  refuses to pay anyone cannot be made to, so an uncapped retry would pin
-   *  this order open forever and hold a listing slot with it; older records
-   *  default to zero. */
+  /** How many times each credit move was REJECTED BY THE CONTRACT: a mined
+   *  revert, or an estimate that reverted with contract error data. A token
+   *  that refuses to pay anyone cannot be made to, so an uncapped retry would
+   *  pin this order open forever and hold a listing slot with it. Network
+   *  faults, node restarts and confirmation timeouts are not counted: they say
+   *  nothing about whether the credit can move, and burning the cap on them
+   *  would park a perfectly collectible payout. Older records default to
+   *  zero. */
   withdrawAttempts?: number;
   pushAttempts?: number;
+  /** When the contract first rejected each move, so parking can also require
+   *  a wall-clock floor: a cluster of rejections inside a few minutes is a
+   *  chain condition that may pass, and giving up on it would strand a credit
+   *  that a later block would have paid. */
+  withdrawFirstRejectedAt?: number | null;
+  pushFirstRejectedAt?: number | null;
   createdAt: number;
 }
 
@@ -365,8 +375,12 @@ export function decide(x: DecideInput): Decision {
   // and refund.
   if (
     ((x.ourResponderCredit ?? 0n) > 0n || (x.ourInitiatorCredit ?? 0n) > 0n) &&
-    !withdrawParked(managed) &&
-    retryOk(managed.withdrawSentAt, nowS, x.resendAfterS)
+    !withdrawParked(managed, nowS) &&
+    retryOk(
+      managed.withdrawSentAt,
+      nowS,
+      creditRetryAfterS(managed.withdrawAttempts ?? 0, x.resendAfterS),
+    )
   ) {
     return "withdraw";
   }
@@ -386,8 +400,12 @@ export function decide(x: DecideInput): Decision {
     pushableTakerCredit &&
     x.takerCredit !== null &&
     x.takerCredit > 0n &&
-    !pushParked(managed) &&
-    retryOk(managed.pushSentAt, nowS, x.resendAfterS)
+    !pushParked(managed, nowS) &&
+    retryOk(
+      managed.pushSentAt,
+      nowS,
+      creditRetryAfterS(managed.pushAttempts ?? 0, x.resendAfterS),
+    )
   ) {
     return "push";
   }
@@ -408,9 +426,9 @@ export function decide(x: DecideInput): Decision {
   // will never pay, which is a denial of service a taker can trigger by
   // locking to a recipient no payout can reach.
   const creditsSettled =
-    (withdrawParked(managed) ||
+    (withdrawParked(managed, nowS) ||
       (x.ourResponderCredit === 0n && x.ourInitiatorCredit === 0n)) &&
-    (!pushableTakerCredit || pushParked(managed) || x.takerCredit === 0n);
+    (!pushableTakerCredit || pushParked(managed, nowS) || x.takerCredit === 0n);
   if (terminal(x.iState) && rSettled && creditsSettled) return "finish";
 
   // Never locked and the responder window has closed: nothing will move.
@@ -488,18 +506,45 @@ export interface RefillInput {
  *  rung), under the in-flight exposure cap, holding inventory beyond the
  *  reserve, and holding native gas headroom on the ETH leg. */
 /**
- * Attempts allowed per credit before the maker stops trying. Enough to ride
- * out a transient RPC or fee problem, few enough that a permanently
- * unpayable credit cannot hold an order open. A parked credit is conserved on
- * chain, reported in the health snapshot, and needs an operator.
+ * Contract rejections allowed per credit before the maker stops trying. Only
+ * a rejection by the contract counts, so this measures "this credit cannot
+ * move". A network fault says nothing about the call.
  */
 export const MAX_CREDIT_ATTEMPTS = 5;
 
-export const withdrawParked = (managed: ManagedOrder): boolean =>
-  (managed.withdrawAttempts ?? 0) >= MAX_CREDIT_ATTEMPTS;
+/**
+ * A credit is parked only when the contract has refused it this many times AND
+ * a full day has passed since the first refusal. Both halves are needed: the
+ * count alone parks a credit that five bad minutes could produce, and the clock
+ * alone parks one whose single early failure never repeated. Until both hold,
+ * the order stays and the retries continue.
+ */
+export const CREDIT_PARK_AFTER_S = 24 * 60 * 60;
 
-export const pushParked = (managed: ManagedOrder): boolean =>
-  (managed.pushAttempts ?? 0) >= MAX_CREDIT_ATTEMPTS;
+/** Spacing between attempts, doubling per rejection from the ordinary resend
+ *  interval, capped so a parked-in-waiting credit is still retried hourly. */
+export const CREDIT_RETRY_CAP_S = 60 * 60;
+
+export function creditRetryAfterS(rejections: number, resendAfterS: number): number {
+  const scaled = resendAfterS * 2 ** Math.max(0, rejections);
+  return Math.min(scaled, CREDIT_RETRY_CAP_S);
+}
+
+const parked = (
+  rejections: number | undefined,
+  firstRejectedAt: number | null | undefined,
+  nowS: number,
+): boolean =>
+  (rejections ?? 0) >= MAX_CREDIT_ATTEMPTS &&
+  firstRejectedAt !== null &&
+  firstRejectedAt !== undefined &&
+  nowS - firstRejectedAt >= CREDIT_PARK_AFTER_S;
+
+export const withdrawParked = (managed: ManagedOrder, nowS: number): boolean =>
+  parked(managed.withdrawAttempts, managed.withdrawFirstRejectedAt, nowS);
+
+export const pushParked = (managed: ManagedOrder, nowS: number): boolean =>
+  parked(managed.pushAttempts, managed.pushFirstRejectedAt, nowS);
 
 /** Inventory or gas below what the next listing needs. */
 export function fundsShort(x: RefillInput): boolean {

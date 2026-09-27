@@ -19,6 +19,8 @@ import {
   NATIVE_TOKEN,
   QRL_NATIVE_TOKEN,
   assertDeliveryGasPolicy,
+  getCredit,
+  isContractRejection,
   readSwapCredit,
   encodeApprove,
   encodeClaim,
@@ -838,7 +840,6 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       // the leg we funded after a refund or a release of our own.
       const leg = (ourResponderCredit ?? 0n) > 0n ? rLeg : iLeg;
       managed.withdrawSentAt = nowS();
-      managed.withdrawAttempts = (managed.withdrawAttempts ?? 0) + 1;
       state.upsert(managed);
       const token = legToken(leg, managed.asset);
       try {
@@ -852,15 +853,38 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       } catch (err) {
         // A credit that will not move is conserved on chain. Throwing here
         // would abort the whole tick and flip health to degraded on a
-        // condition only an operator can resolve.
+        // condition only an operator can resolve. Only the contract refusing
+        // the call counts towards giving up: a timeout or an unreachable node
+        // says nothing about whether this credit can move.
+        const rejected = isContractRejection(err);
+        if (rejected) {
+          managed.withdrawAttempts = (managed.withdrawAttempts ?? 0) + 1;
+          managed.withdrawFirstRejectedAt = managed.withdrawFirstRejectedAt ?? nowS();
+          state.upsert(managed);
+        }
         log(
-          `order ${short(managed.id)} credit withdrawal failed (attempt ${managed.withdrawAttempts} of ${MAX_CREDIT_ATTEMPTS}):`,
+          `order ${short(managed.id)} credit withdrawal failed (${
+            rejected
+              ? `contract rejection ${managed.withdrawAttempts ?? 0} of ${MAX_CREDIT_ATTEMPTS}`
+              : "transient, cap untouched"
+          }):`,
           err instanceof Error ? err.message : err,
         );
-        if (withdrawParked(managed)) {
+        if (withdrawParked(managed, nowS())) {
           log(
-            `ATTENTION order ${short(managed.id)}: giving up on a deferred payout owed to this maker on the ${leg} leg after ${MAX_CREDIT_ATTEMPTS} attempts. The value is conserved in the HTLC credit ledger and needs an operator; the order is released so it cannot hold a listing slot.`,
+            `ATTENTION order ${short(managed.id)}: giving up on a deferred payout owed to this maker on the ${leg} leg after ${MAX_CREDIT_ATTEMPTS} contract rejections over at least a day. The value is conserved in the HTLC credit ledger and needs an operator; the order is released so it cannot hold a listing slot.`,
           );
+          state.recordStrandedCredit({
+            orderId: managed.id,
+            leg,
+            token,
+            account: myAddress(leg),
+            hashlock: managed.hashlock ?? "",
+            amount: String(
+              (leg === rLeg ? ourResponderCredit : ourInitiatorCredit) ?? 0n,
+            ),
+            parkedAt: nowS(),
+          });
         }
       }
       break;
@@ -874,7 +898,6 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       // failure is logged and retried on the marker's own spacing.
       if (takerOnInitiatorLeg === null) break;
       managed.pushSentAt = nowS();
-      managed.pushAttempts = (managed.pushAttempts ?? 0) + 1;
       state.upsert(managed);
       const token = legToken(iLeg, managed.asset);
       try {
@@ -886,14 +909,33 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         );
         log(`order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`);
       } catch (err) {
+        const rejected = isContractRejection(err);
+        if (rejected) {
+          managed.pushAttempts = (managed.pushAttempts ?? 0) + 1;
+          managed.pushFirstRejectedAt = managed.pushFirstRejectedAt ?? nowS();
+          state.upsert(managed);
+        }
         log(
-          `order ${short(managed.id)} credit push skipped (attempt ${managed.pushAttempts} of ${MAX_CREDIT_ATTEMPTS}):`,
+          `order ${short(managed.id)} credit push skipped (${
+            rejected
+              ? `contract rejection ${managed.pushAttempts ?? 0} of ${MAX_CREDIT_ATTEMPTS}`
+              : "transient, cap untouched"
+          }):`,
           err instanceof Error ? err.message : err,
         );
-        if (pushParked(managed)) {
+        if (pushParked(managed, nowS())) {
           log(
-            `ATTENTION order ${short(managed.id)}: giving up on pushing a deferred payout to the taker on the ${iLeg} leg after ${MAX_CREDIT_ATTEMPTS} attempts. The credit is conserved and the taker can still collect it themselves; this order is released.`,
+            `ATTENTION order ${short(managed.id)}: giving up on pushing a deferred payout to the taker on the ${iLeg} leg after ${MAX_CREDIT_ATTEMPTS} contract rejections over at least a day. The credit is conserved and the taker can still collect it themselves; this order is released.`,
           );
+          state.recordStrandedCredit({
+            orderId: managed.id,
+            leg: iLeg,
+            token,
+            account: takerOnInitiatorLeg,
+            hashlock: managed.hashlock ?? "",
+            amount: String(takerCredit ?? 0n),
+            parkedAt: nowS(),
+          });
         }
       }
       break;
@@ -1120,6 +1162,32 @@ let stopping = false;
 let tickTimer: ReturnType<typeof setInterval> | undefined;
 let healthServer: Server | undefined;
 
+/** How often a parked credit is re-read. No sends: a balance that reached
+ *  zero, by an operator's hand or by a token that started cooperating, simply
+ *  drops out of the list. */
+const STRANDED_RECHECK_MS = 60 * 60 * 1000;
+let strandedCheckedAt = 0;
+
+async function recheckStrandedCredits(): Promise<void> {
+  const parked = state.strandedCredits();
+  if (parked.length === 0) return;
+  if (Date.now() - strandedCheckedAt < STRANDED_RECHECK_MS) return;
+  strandedCheckedAt = Date.now();
+  for (const entry of parked) {
+    try {
+      const balance = await getCredit(legRpc[entry.leg], entry.token, entry.account);
+      if (balance === 0n) {
+        state.clearStrandedCredit(entry);
+        log(
+          `stranded credit from order ${short(entry.orderId)} on the ${entry.leg} leg reads zero and is cleared`,
+        );
+      }
+    } catch {
+      // A read that did not complete says nothing; the next hour retries.
+    }
+  }
+}
+
 async function tick(): Promise<void> {
   if (running || stopping || leaseLost) return;
   running = true;
@@ -1155,6 +1223,7 @@ async function tick(): Promise<void> {
       }
     }
     await refill(views);
+    await recheckStrandedCredits();
   } catch (err) {
     errorCount += 1;
     log("tick error:", err instanceof Error ? err.message : err);
@@ -1167,14 +1236,14 @@ async function tick(): Promise<void> {
   } finally {
     let orderCount = startingOrderCount;
     try {
-      const live = state.all();
-      orderCount = live.length;
-      // Credits this maker stopped trying to move. Reported, and the status
-      // is left alone: a token that refuses to pay cannot be made to, and
-      // holding at degraded forever would bury every other signal.
-      health.markStrandedCredits(
-        live.filter((order) => withdrawParked(order) || pushParked(order)).length,
-      );
+      orderCount = state.all().length;
+      // Credits this maker stopped trying to move. Counted from the persisted
+      // list, which outlives the orders that created them, so the number an
+      // operator is told to wait for does not fall back to zero one tick after
+      // parking. Reported, and the status is left alone: a token that refuses
+      // to pay cannot be made to, and holding at degraded forever would bury
+      // every other signal.
+      health.markStrandedCredits(state.strandedCredits().length);
       health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
     } catch {
       // A poisoned state file is already forcing process shutdown.
@@ -1218,6 +1287,19 @@ async function main(): Promise<void> {
   ]);
   health.markRuntimeVerified();
   if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
+  // Parked credits are money sitting in the contract with no order left to
+  // chase it, so an operator is told at every start, loudly and by name.
+  const parkedAtBoot = state.strandedCredits();
+  if (parkedAtBoot.length > 0) {
+    log(
+      `ATTENTION ${parkedAtBoot.length} stranded payout credit(s) need an operator. Collect each with withdrawAll(token, to) from the credited account, or pushCredit(token, account) for one owed to a taker; an entry clears itself within the hour once its balance reads zero.`,
+    );
+    for (const entry of parkedAtBoot) {
+      log(
+        `  stranded: order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
+      );
+    }
+  }
   log(`maker eth=${eth.address} qrl=${qrl.address}`);
   log(
     `deployment ${deployment.configFingerprint} | ` +

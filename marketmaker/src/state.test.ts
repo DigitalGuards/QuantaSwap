@@ -358,6 +358,69 @@ function assertRefusedWithoutMutation(
   }
 }
 
+describe("stranded payout credits", () => {
+  const parked = {
+    orderId: "abcdef0123456789",
+    leg: "qrl" as const,
+    token: `0x${"0".repeat(128)}`,
+    account: `Q${"c".repeat(128)}`,
+    hashlock: `0x${"12".repeat(32)}`,
+    amount: "11000",
+    parkedAt: 1_800_000_000,
+  };
+
+  it("outlives the order that parked it, across a restart", (t) => {
+    // The order is retired precisely so it stops holding a listing slot, and
+    // the money is still in the contract. An operator is told to wait for this
+    // count to reach zero, so it cannot vanish with the order.
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      state.recordStrandedCredit(parked);
+      state.delete(state.all()[0]!.id);
+      const restarted = new StateFile(file, DEPLOYMENT);
+      assert.equal(restarted.all().length, 0);
+      assert.deepEqual(restarted.strandedCredits(), [parked]);
+    });
+  });
+
+  it("keys on the ledger entry, so one balance is one entry", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state) => {
+      state.recordStrandedCredit(parked);
+      // A second order parking the same (leg, token, account) balance: an
+      // operator collects that balance once.
+      state.recordStrandedCredit({ ...parked, orderId: "fedcba9876543210" });
+      assert.equal(state.strandedCredits().length, 1);
+      assert.equal(state.strandedCredits()[0]?.orderId, parked.orderId);
+    });
+  });
+
+  it("drops an entry once its balance reads zero", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    withStateFile(envelope([portableOpenRecord(now + 300)]), (state, file) => {
+      state.recordStrandedCredit(parked);
+      assert.equal(state.clearStrandedCredit(parked), true);
+      assert.equal(state.clearStrandedCredit(parked), false);
+      assert.deepEqual(new StateFile(file, DEPLOYMENT).strandedCredits(), []);
+    });
+  });
+
+  it("skips a malformed persisted entry and still starts", (t) => {
+    const now = preFieldRecord.createdAt;
+    t.mock.method(Date, "now", () => now * 1000);
+    const withBadEntry = {
+      ...envelope([portableOpenRecord(now + 300)]),
+      strandedCredits: [parked, { ...parked, leg: "btc" }, { ...parked, amount: "x" }],
+    };
+    withStateFile(withBadEntry, (state) => {
+      assert.deepEqual(state.strandedCredits(), [parked]);
+    });
+  });
+});
+
 describe("deployment-bound state hydration", () => {
   it("keeps field-level upgrade defaults inside a correctly bound deployment", () => {
     withStateFile(

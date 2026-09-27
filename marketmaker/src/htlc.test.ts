@@ -10,11 +10,14 @@ import {
   SETTLEMENT_GAS_BUFFER,
   assertDeliveryGasPolicy,
   claimCutoffBlocked,
+  creditFilterTopics,
+  decodeCreditedAmount,
   encodePushCredit,
   encodeWithdrawAll,
   getChainId,
   getCredit,
   getDeliveryGasPolicy,
+  isContractRejection,
   settlementGasLimit,
   simulateHtlcCall,
   submitPreflightedClaim,
@@ -303,6 +306,83 @@ describe("HTLCv3 settlement gas rule and payout credits", { concurrency: false }
     // A 64-byte QRL account can never ride in the 20-byte Ethereum codec.
     assert.throws(() => encodeWithdrawAll("eth", NATIVE_TOKEN, qrlAccount));
     assert.throws(() => encodePushCredit("eth", NATIVE_TOKEN, qrlAccount));
+  });
+});
+
+describe("PayoutCredited filter widths", { concurrency: false }, () => {
+  // Pinned against a real HTLCv3 log on the private QRL v3 devnet, tx
+  // 0x3791b66310c199f9807e12b5c8a0794e57b3df4f4e87dae95305d1e86dcab6a3. Every
+  // QRVM-512 topic is a 64-byte word: a 32-byte value sits in the high half,
+  // an address fills the word. A topic built the Ethereum way matches nothing,
+  // and a filter that matches nothing reads as a delivered payout.
+  const accountHex =
+    "64f616d40a895750df633414e9dafad5426444fcd5acec79e01640a1278648c8" +
+    "b949633f721a2503dc54c51026f3ea08e5123faa5b2e458d412c3dc822af900f";
+  const hashlock = "0xcf36ed676a65c67d7a9cb2bdb006cdf1fc116bb305ca283f538256ba4ca3e1b9";
+
+  it("matches the topics of a real devnet log", () => {
+    const topics = creditFilterTopics(
+      "qrl",
+      QRL_NATIVE_TOKEN,
+      `Q${accountHex.toUpperCase()}`,
+      hashlock,
+    );
+    assert.deepEqual(topics, [
+      `0xf2697db9906dec024a78bb07c851ec99b2ff405724ae7ed468537578f6030109${"0".repeat(64)}`,
+      `0x${"0".repeat(128)}`,
+      `0x${accountHex}`,
+      `0x${hashlock.slice(2)}${"0".repeat(64)}`,
+    ]);
+    for (const topic of topics) assert.equal(topic.length, 2 + 128);
+  });
+
+  it("uses Ethereum widths on the Ethereum leg", () => {
+    const topics = creditFilterTopics("eth", NATIVE_TOKEN, `0x${"a".repeat(40)}`, hashlock);
+    for (const topic of topics) assert.equal(topic.length, 2 + 64);
+    assert.equal(topics[2], `0x${"0".repeat(24)}${"a".repeat(40)}`);
+    assert.equal(topics[3], hashlock);
+  });
+
+  it("decodes one data word per target and refuses any other width", () => {
+    assert.equal(decodeCreditedAmount("qrl", `0x${(11000n).toString(16).padStart(128, "0")}`), 11000n);
+    assert.equal(decodeCreditedAmount("eth", `0x${(11000n).toString(16).padStart(64, "0")}`), 11000n);
+    assert.equal(decodeCreditedAmount("qrl", `0x${(11000n).toString(16).padStart(64, "0")}`), null);
+    assert.equal(decodeCreditedAmount("eth", "0x"), null);
+  });
+});
+
+describe("credit failure classification", { concurrency: false }, () => {
+  // Only the contract refusing a call counts towards giving up on a credit.
+  // Counting a timeout or an unreachable node would park real money for a
+  // reason that says nothing about whether the credit can move.
+  it("counts a contract refusal", () => {
+    for (const message of [
+      "execution reverted",
+      "execution reverted: TransferFailed",
+      "eth claim submission failed: reverted",
+      "NoCredit()",
+      "InsufficientCredit",
+      "transaction failed with status 0",
+    ]) {
+      assert.equal(isContractRejection(new Error(message)), true, message);
+    }
+  });
+
+  it("does not count a fault that never reached the contract", () => {
+    for (const message of [
+      "qrl sendTransaction timed out after 180000ms",
+      "connect ECONNREFUSED",
+      "fetch failed",
+      "RPC eth_call failed: HTTP 502",
+      "HTTP 429 rate limit",
+      "nonce too low",
+      "replacement transaction underpriced",
+      "socket hang up",
+      "The operation was aborted",
+      "something nobody has seen before",
+    ]) {
+      assert.equal(isContractRejection(new Error(message)), false, message);
+    }
   });
 });
 

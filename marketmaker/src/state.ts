@@ -60,6 +60,55 @@ interface StateEnvelope {
   deployment: DeploymentIdentity;
   orders: ManagedOrder[];
   admissions: AdmissionRecord[];
+  /** Credits this maker gave up moving. They outlive the order that created
+   *  them, because the order is retired precisely so it stops holding a
+   *  listing slot, and the money is still in the contract. */
+  strandedCredits?: StrandedCredit[];
+}
+
+/**
+ * One payout the contract refused to move often enough, over long enough, that
+ * the maker stopped trying. Everything an operator needs to collect it by hand
+ * is here, and nothing secret is: the ledger key, the swap it came from, what
+ * it was worth when it was parked, and when that happened.
+ */
+export interface StrandedCredit {
+  orderId: string;
+  leg: "eth" | "qrl";
+  token: string;
+  account: string;
+  hashlock: string;
+  /** Base units, as a decimal string, at the moment of parking. */
+  amount: string;
+  parkedAt: number;
+}
+
+const STRANDED_KEY = (entry: { leg: string; token: string; account: string }): string =>
+  `${entry.leg}:${entry.token.toLowerCase()}:${entry.account.toLowerCase()}`;
+
+function parseStrandedCredits(raw: unknown): StrandedCredit[] {
+  if (!Array.isArray(raw)) return [];
+  const out: StrandedCredit[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const row = entry as Record<string, unknown>;
+    const leg = row["leg"];
+    if (leg !== "eth" && leg !== "qrl") continue;
+    const strings = ["orderId", "token", "account", "hashlock", "amount"] as const;
+    if (strings.some((key) => typeof row[key] !== "string")) continue;
+    if (typeof row["parkedAt"] !== "number" || !Number.isSafeInteger(row["parkedAt"])) continue;
+    if (!AMOUNT_RE.test(row["amount"] as string)) continue;
+    out.push({
+      orderId: row["orderId"] as string,
+      leg,
+      token: row["token"] as string,
+      account: row["account"] as string,
+      hashlock: row["hashlock"] as string,
+      amount: row["amount"] as string,
+      parkedAt: row["parkedAt"],
+    });
+  }
+  return out;
 }
 
 type PersistedOrder = Omit<
@@ -1481,6 +1530,7 @@ const recoveryError = (file: string, reason: string): Error =>
 export class StateFile {
   private orders = new Map<string, ManagedOrder>();
   private admissions = new Map<string, number>();
+  private stranded = new Map<string, StrandedCredit>();
   private poisoned: Error | null = null;
 
   constructor(
@@ -1553,6 +1603,9 @@ export class StateFile {
       for (const entry of parseAdmissionRecords(envelope.admissions)) {
         this.admissions.set(entry.id, entry.retainUntil);
       }
+    }
+    for (const entry of parseStrandedCredits(envelope.strandedCredits)) {
+      this.stranded.set(STRANDED_KEY(entry), entry);
     }
 
     // Records carry live preimages, so a state file this build cannot
@@ -1655,6 +1708,37 @@ export class StateFile {
     return [...this.admissions.values()].filter(until => until > now).length;
   }
 
+  /**
+   * Remember a credit the maker stopped trying to move. Keyed on the ledger
+   * entry, so two orders that park the same (leg, token, account) balance are
+   * one entry: that balance is one thing an operator collects once.
+   */
+  recordStrandedCredit(entry: StrandedCredit): void {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (this.stranded.has(key)) return;
+    this.stranded.set(key, entry);
+    this.persist();
+  }
+
+  /** Every credit still parked. Survives the retirement of the order that
+   *  created it, which is the whole point: the order goes so it stops holding
+   *  a listing slot, and the money stays in the contract. */
+  strandedCredits(): StrandedCredit[] {
+    this.assertHealthy();
+    return [...this.stranded.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Drop a parked entry once its ledger balance reads zero, whether the
+   *  operator collected it by hand or the token started cooperating. */
+  clearStrandedCredit(entry: { leg: string; token: string; account: string }): boolean {
+    this.assertHealthy();
+    const key = STRANDED_KEY(entry);
+    if (!this.stranded.delete(key)) return false;
+    this.persist();
+    return true;
+  }
+
   private rememberAdmission(order: ManagedOrder): void {
     const now = Math.floor(Date.now() / 1000);
     for (const [id, until] of this.admissions) {
@@ -1725,6 +1809,7 @@ export class StateFile {
       admissions: [...this.admissions.entries()]
         .filter(([, until]) => until > Math.floor(Date.now() / 1000))
         .map(([id, retainUntil]) => ({ id, retainUntil })),
+      strandedCredits: [...this.stranded.values()],
     };
     let fileDescriptor: number | undefined;
     let renamed = false;

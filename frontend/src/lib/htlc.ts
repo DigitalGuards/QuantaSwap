@@ -367,6 +367,39 @@ const PAYOUT_CREDITED_TOPIC = (() => {
 })();
 
 /**
+ * The four pinned topics of a `PayoutCredited` filter for one swap, token and
+ * account. Exported because the widths are the whole correctness question:
+ * on QRVM-512 every topic is a 64-byte word, so a 32-byte value sits in the
+ * high half and an address fills the word, while on Ethereum a topic is 32
+ * bytes and an address is left-padded into it. A topic built the wrong way
+ * matches nothing, and a filter that matches nothing reads as a payout that
+ * was delivered.
+ */
+export function creditFilterTopics(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): [string, string, string, string] {
+  return [
+    leg === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
+    addressTopic(leg, token),
+    addressTopic(leg, account),
+    leg === "qrl" ? qrvm64Topic(hashlock) : hashlock.toLowerCase(),
+  ];
+}
+
+/** One `PayoutCredited` data word: 32 bytes on Ethereum, 64 on QRVM-512.
+ *  Null for anything else, so a malformed answer is never read as a number. */
+export function decodeCreditedAmount(leg: LegKey, data: unknown): bigint | null {
+  const width = leg === "qrl" ? 128 : 64;
+  if (typeof data !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) {
+    return null;
+  }
+  return BigInt(data);
+}
+
+/**
  * The amount `PayoutCredited` recorded for this exact swap, in this token,
  * for this account. `creditOf` is a per-(token, account) ledger shared by
  * every swap that account ever settled, so it cannot answer "what did THIS
@@ -389,12 +422,7 @@ export async function getCreditedForSwap(
   const params = [
     {
       address: cfg.htlc,
-      topics: [
-        leg === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
-        addressTopic(leg, token),
-        addressTopic(leg, account),
-        leg === "qrl" ? qrvm64Topic(hashlock) : hashlock,
-      ],
+      topics: creditFilterTopics(leg, token, account, hashlock),
       fromBlock: "0x0",
       toBlock: "latest",
     },
@@ -407,11 +435,9 @@ export async function getCreditedForSwap(
   for (const entry of raw as unknown[]) {
     if (typeof entry !== "object" || entry === null) continue;
     const { data } = entry as { data?: unknown };
-    if (typeof data !== "string") continue;
-    // One 32-byte word on Ethereum, one 64-byte word on QRVM-512.
-    const expected = leg === "qrl" ? 128 : 64;
-    if (!new RegExp(`^0x[0-9a-fA-F]{${expected}}$`).test(data)) continue;
-    total += BigInt(data);
+    const amount = decodeCreditedAmount(leg, data);
+    if (amount === null) continue;
+    total += amount;
   }
   return total;
 }

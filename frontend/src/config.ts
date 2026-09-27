@@ -210,11 +210,13 @@ export const absoluteAppUrl = (path: string): string =>
  * namespaced on both HTLC addresses and scoped to the origin, so a build of
  * the previous release at this path reads exactly the records that deployment
  * wrote: it is the recovery route for funds locked before a contract cutover.
- * Empty disables the link. Defaults to /v2/ at the site root, and to nothing
- * when this build is already served under a sub-path.
+ * Empty by default, and empty is what a build ships with: linking to /v2/
+ * before anything is served there points users at a 404 while they are
+ * looking for locked funds. An operator sets VITE_LEGACY_RELEASE_PATH=/v2/ at
+ * build time once that path is actually served.
  */
 export const LEGACY_RELEASE_PATH: string = (() => {
   const raw = import.meta.env.VITE_LEGACY_RELEASE_PATH;
-  if (typeof raw === "string") return raw === "" ? "" : normalizeBasePath(raw);
-  return BASE_PATH === "/" ? "/v2/" : "";
+  if (typeof raw !== "string" || raw === "") return "";
+  return normalizeBasePath(raw);
 })();

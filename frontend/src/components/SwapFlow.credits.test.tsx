@@ -26,6 +26,8 @@ const credits = new Map<string, bigint>();
 const foreignCredits = new Map<string, bigint>();
 /** Keys whose read should fail, to exercise the unconfirmed state. */
 const unreadable = new Set<string>();
+/** Per-leg on-chain status, mutable so a test can settle a leg mid-run. */
+const legStatus: Record<"eth" | "qrl", number> = { eth: 2, qrl: 2 };
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/htlc")>();
@@ -47,12 +49,17 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
     timeout: NOW + 3600,
     preimage: PREIMAGE,
   };
+  const stateFor = (leg: "eth" | "qrl"): LegState => {
+    const base = leg === "eth" ? claimedEth : claimedQrl;
+    const status = legStatus[leg] as LegState["status"];
+    return status === actual.SwapStatus.Claimed
+      ? base
+      : { ...base, status, preimage: `0x${"0".repeat(64)}` };
+  };
   return {
     ...actual,
-    getLegState: vi.fn(async (leg: "eth" | "qrl") => (leg === "eth" ? claimedEth : claimedQrl)),
-    getConfirmedLegState: vi.fn(async (leg: "eth" | "qrl") =>
-      leg === "eth" ? claimedEth : claimedQrl,
-    ),
+    getLegState: vi.fn(async (leg: "eth" | "qrl") => stateFor(leg)),
+    getConfirmedLegState: vi.fn(async (leg: "eth" | "qrl") => stateFor(leg)),
     getSwapEvents: vi.fn(async () => []),
     readSwapCredit: vi.fn(
       async (leg: string, token: string, account: string) => {
@@ -114,6 +121,8 @@ beforeEach(() => {
   credits.clear();
   foreignCredits.clear();
   unreadable.clear();
+  legStatus.eth = 2;
+  legStatus.qrl = 2;
 });
 afterEach(cleanup);
 
@@ -222,9 +231,10 @@ describe("deferred payout panel", () => {
     // swap's balance must never be shown, and never offered a push, here.
     foreignCredits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
     renderFlow("taker");
-    await waitFor(() => expect(screen.getByTestId("swap-outcome")).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText("Atomic swap complete on both chains")).toBeTruthy(),
+    );
     expect(screen.queryByTestId("payout-credits")).toBeNull();
-    expect(screen.getByText("Atomic swap complete on both chains")).toBeTruthy();
   });
 
   it("labels the rest of the ledger balance when this swap owns part of it", async () => {
@@ -259,6 +269,31 @@ describe("deferred payout panel", () => {
     expect(screen.queryByRole("button", { name: "Withdraw" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Push to recipient" })).toBeNull();
     expect(screen.getByText(/Connect a wallet on Sepolia to move this credit/)).toBeTruthy();
+  });
+
+  it("keeps watching until every leg has settled", async () => {
+    // The ordinary sponsored-claim shape: our leg settles first, the
+    // counterparty settles theirs afterwards, and that settlement defers.
+    // Going quiet after the first one would miss it and paint the swap green.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      legStatus.qrl = 1; // still Open
+      renderFlow("taker");
+      // The ETH leg is settled and clear, so the poll would otherwise fall
+      // silent here: nothing is complete and no credit exists yet.
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(screen.queryByTestId("payout-credits")).toBeNull();
+      expect(screen.queryByTestId("swap-outcome")).toBeNull();
+      // The counterparty now settles our QRL leg, and its payout defers.
+      legStatus.qrl = 2;
+      credits.set(`qrl:${QRL_NATIVE_TOKEN.toLowerCase()}:${MAKER_QRL.toLowerCase()}`, QRL_AMOUNT);
+      await vi.advanceTimersByTimeAsync(6000);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(screen.getByTestId("payout-credits")).toBeTruthy();
+      expect(screen.getByText(/with a payout still to collect below/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("says the swap is final either way", async () => {

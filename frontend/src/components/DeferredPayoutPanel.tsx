@@ -24,6 +24,16 @@ import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { errorMessage } from "@/utils/errorMessage";
 
+/**
+ * What THIS escrow still owes, from a reading of the shared ledger and of the
+ * PayoutCredited log for its own hashlock. `creditOf` is keyed only by token
+ * and account, so a balance alone cannot say which swap left it; the log says
+ * which one, and a withdrawal drains the ledger without naming a swap, so the
+ * answer is the smaller of the two.
+ */
+export const attributedCredit = (reading: CreditReading): bigint =>
+  reading.credited < reading.global ? reading.credited : reading.global;
+
 /** One escrow payout this view is responsible for showing. */
 export interface DeferredPayoutTarget {
   /** Stable identity for the poll and the busy key. */
@@ -93,7 +103,13 @@ export function DeferredPayoutPanel({
     });
     targets.forEach((target, index) => {
       const result = results[index];
-      if (result?.status === "fulfilled" && result.value.global === 0n) onCleared?.(target);
+      // Cleared means THIS escrow's payout is out, which is what the caller
+      // is holding its record open for. The ledger is shared with every other
+      // swap of that address, so waiting for the whole balance to reach zero
+      // would pin the record on somebody else's credit.
+      if (result?.status === "fulfilled" && attributedCredit(result.value) === 0n) {
+        onCleared?.(target);
+      }
     });
     // The target list is identified by `key`, and onCleared is a caller
     // callback whose identity must not restart the poll.
@@ -121,7 +137,7 @@ export function DeferredPayoutPanel({
   const outstanding = targets.flatMap((target) => {
     const reading = readings.get(target.id);
     if (reading === undefined) return [];
-    const amount = reading.credited < reading.global ? reading.credited : reading.global;
+    const amount = attributedCredit(reading);
     if (amount <= 0n) return [];
     return [{ target, amount, otherSwaps: reading.global - amount }];
   });

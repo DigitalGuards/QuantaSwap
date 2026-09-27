@@ -132,6 +132,28 @@ procedure, in order:
 
 Existing locks always settle on their original contracts. Nothing migrates.
 
+### Clearing a stranded payout credit
+
+A credit the contract has refused five times, over at least a day, is parked:
+the maker stops trying, the order retires so it stops holding a listing slot,
+and the entry is written into the state file, where it outlives that order. It
+is counted in `strandedCredits` in the health snapshot, listed by name in the
+log at every start, and re-read once an hour with no sends.
+
+To clear one:
+
+1. Read the log line: it names the order, the leg, the amount at parking time
+   and when it was parked.
+2. Collect the balance from the credited account: `withdrawAll(token, to)` for
+   a credit owed to this maker, choosing any destination that can be paid, or
+   `pushCredit(token, account)` for one owed to a taker, which pays them and
+   takes no destination.
+3. Wait up to an hour. The entry drops itself as soon as its balance reads
+   zero, and `strandedCredits` falls with it. Nothing else has to be edited.
+
+A parked credit is conserved the whole time. It is off the maker's hands, and
+it is not lost.
+
 ## QRL network compatibility gate
 
 The private v3 deployment uses chain ID `3151909`, 64-byte Q-prefixed addresses,

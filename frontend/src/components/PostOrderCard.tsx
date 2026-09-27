@@ -50,6 +50,7 @@ import {
 import { makeLegSender, makeSettlementSender, sendEthTokenLock } from "@/lib/legSender";
 import {
   DeferredPayoutPanel,
+  attributedCredit,
   type DeferredPayoutTarget,
 } from "@/components/DeferredPayoutPanel";
 import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
@@ -669,10 +670,14 @@ export function PostOrderCard({
             "the escrow is released, and the payout could not be confirmed from chain yet. This record is kept until it is: retry shortly.",
           );
         }
-        if (reading.global > 0n) {
+        if (attributedCredit(reading) > 0n) {
           setDeferredRelease(target);
           throw new Error(
-            "the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this record stays until you do.",
+            `the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this record stays until you do.${
+              reading.global > attributedCredit(reading)
+                ? " That address also holds a credit from other swaps, and collecting moves the whole balance."
+                : ""
+            }`,
           );
         }
         // Payout provably delivered: record dead.

@@ -59,9 +59,12 @@ Drain first, then flip. Per component, in order:
 1. **Drain the maker to zero.** Set `MM_DRAIN=true` and restart it. It cancels
    its open listings, posts no replacements, and settles what is in flight.
    Wait until `managedOrders` in its health snapshot reads 0 and
-   `strandedCredits` reads 0. A parked credit means a payout it could not move:
-   collect it under the current configuration before going on, because the new
-   profile will not see that record.
+   `strandedCredits` reads 0. A parked credit is a payout the contract refused
+   often enough, over long enough, that the maker stopped trying; it is
+   recorded in the state file, listed in the log at every start, and re-read
+   hourly. Collect each one under the current configuration before going on,
+   because the new profile will not see it. `marketmaker/README.md` has the
+   three-step procedure.
 2. **Stop the maker.**
 3. **Move its state file aside**, or point `MM_STATE_FILE` at a new path. A
    state file records the deployment its records settle on, and the daemon

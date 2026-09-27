@@ -397,9 +397,9 @@ export const encodePushCredit = (leg: LegKey, token: string, account: string): s
 
 /** An indexed `address` topic word: 32 bytes left-padded on Ethereum, the
  *  64-byte address itself on QRVM-512. */
-function addressTopic(leg: LegRpc, address: string): string {
+function addressTopic(ns: LegKey, address: string): string {
   const hex = qToHex(address).slice(2).toLowerCase();
-  return leg.ns === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+  return ns === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
 }
 
 /** QRVM-512 log topics are 64-byte words: a 32-byte value sits in the high
@@ -423,6 +423,30 @@ const PAYOUT_CREDITED_TOPIC = (() => {
  * this order's counterparty. All four topics are pinned, so the query stays
  * selective.
  */
+export function creditFilterTopics(
+  ns: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+): [string, string, string, string] {
+  return [
+    ns === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
+    addressTopic(ns, token),
+    addressTopic(ns, account),
+    ns === "qrl" ? qrvm64Topic(hashlock) : hashlock.toLowerCase(),
+  ];
+}
+
+/** One PayoutCredited data word: 32 bytes on Ethereum, 64 on QRVM-512. Null
+ *  for anything else, so a malformed answer is never read as a number. */
+export function decodeCreditedAmount(ns: LegKey, data: unknown): bigint | null {
+  const width = ns === "qrl" ? 128 : 64;
+  if (typeof data !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) {
+    return null;
+  }
+  return BigInt(data);
+}
+
 export async function getCreditedForSwap(
   leg: LegRpc,
   token: string,
@@ -436,12 +460,7 @@ export async function getCreditedForSwap(
     [
       {
         address: leg.htlc,
-        topics: [
-          leg.ns === "qrl" ? qrvm64Topic(PAYOUT_CREDITED_TOPIC) : PAYOUT_CREDITED_TOPIC,
-          addressTopic(leg, token),
-          addressTopic(leg, account),
-          leg.ns === "qrl" ? qrvm64Topic(hashlock) : hashlock,
-        ],
+        topics: creditFilterTopics(leg.ns, token, account, hashlock),
         fromBlock: "0x0",
         toBlock: "latest",
       },
@@ -449,14 +468,13 @@ export async function getCreditedForSwap(
     leg.timeoutMs,
   );
   if (!Array.isArray(raw)) return 0n;
-  const width = leg.ns === "qrl" ? 128 : 64;
   let total = 0n;
   for (const entry of raw as unknown[]) {
     if (typeof entry !== "object" || entry === null) continue;
     const { data } = entry as { data?: unknown };
-    if (typeof data !== "string") continue;
-    if (!new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) continue;
-    total += BigInt(data);
+    const amount = decodeCreditedAmount(leg.ns, data);
+    if (amount === null) continue;
+    total += amount;
   }
   return total;
 }
@@ -484,6 +502,54 @@ export async function readSwapCredit(
   const global = await getCredit(leg, token, account);
   const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
   return { global, credited };
+}
+
+/**
+ * Did the contract refuse this send, or did the attempt simply not get there?
+ * The difference decides whether a credit is one step closer to being given up
+ * on. A mined revert and an estimate that reverted with contract error data
+ * both say "this call cannot succeed"; a timeout, a socket error, a nonce
+ * problem or an unreachable node say nothing about the call at all, and
+ * counting them would park a credit that is perfectly collectible.
+ *
+ * Unrecognised failures are treated as transient, which is the safe direction:
+ * the cost is more retries, and the alternative is giving up on real money for
+ * a reason nobody checked.
+ */
+export function isContractRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const text = message.toLowerCase();
+  const transient = [
+    "timed out",
+    "timeout",
+    "econnrefused",
+    "econnreset",
+    "enotfound",
+    "etimedout",
+    "socket",
+    "network",
+    "fetch failed",
+    "aborted",
+    "http 5",
+    "http 429",
+    "nonce",
+    "replacement",
+    "underpriced",
+    "rate limit",
+  ];
+  if (transient.some((hint) => text.includes(hint))) return false;
+  const rejected = [
+    "revert",
+    "execution reverted",
+    "transferfailed",
+    "nocredit",
+    "insufficientcredit",
+    "invalidparams",
+    "unauthorized",
+    "status 0",
+    "always failing transaction",
+  ];
+  return rejected.some((hint) => text.includes(hint));
 }
 
 /** Undelivered payout owned by `account` in `token` on this leg. Zero

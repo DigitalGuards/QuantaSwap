@@ -55,6 +55,7 @@ import { SwapStatus, buildReleaseData, getLegState, readSwapCredit } from "@/lib
 import { makeSettlementSender } from "@/lib/legSender";
 import {
   DeferredPayoutPanel,
+  attributedCredit,
   type DeferredPayoutTarget,
 } from "@/components/DeferredPayoutPanel";
 import { prelockCreditTarget } from "@/components/PostOrderCard";
@@ -755,10 +756,14 @@ export function MyOrderCard({
             "the escrow is released, and the payout could not be confirmed from chain yet. This order stays open until it is: retry shortly.",
           );
         }
-        if (reading.global > 0n) {
+        if (attributedCredit(reading) > 0n) {
           setDeferredRelease(target);
           throw new Error(
-            "the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this order stays until you do.",
+            `the escrow is released, and the payout could not be delivered to your address, so the HTLC is holding it as a credit. Collect it below; this order stays until you do.${
+              reading.global > attributedCredit(reading)
+                ? " That address also holds a credit from other swaps, and collecting moves the whole balance."
+                : ""
+            }`,
           );
         }
       }

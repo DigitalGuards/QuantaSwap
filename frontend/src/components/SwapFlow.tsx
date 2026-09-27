@@ -134,6 +134,10 @@ export function SwapFlow({
   // here nothing on this page may claim its payout arrived: an empty map
   // and a delivered payout look identical.
   const [creditReadOk, setCreditReadOk] = useState<ReadonlyMap<LegKey, boolean>>(new Map());
+  // The leg statuses that were on chain when the last fully successful credit
+  // read ran. A reading taken before a leg settled says nothing about that
+  // leg's payout, so it must not silence the poll or confirm the outcome.
+  const [creditReadStatuses, setCreditReadStatuses] = useState<string | null>(null);
   // Destination for a withdrawal, per credit. Empty means the payee's own
   // address, which is the default the contract would pay anyway.
   const [withdrawTo, setWithdrawTo] = useState<Record<string, string>>({});
@@ -196,6 +200,9 @@ export function SwapFlow({
   const refreshCredits = useCallback(async () => {
     const current = machineRef.current;
     if (current === null || !hashlock) return;
+    // Captured before the reads, so a settlement that lands during them
+    // leaves the result marked as belonging to the older chain state.
+    const readStatuses = statusKeyRef.current;
     const candidates = creditCandidates(current);
     const results = await Promise.allSettled(
       candidates.map((candidate) =>
@@ -222,24 +229,36 @@ export function SwapFlow({
       });
       return next;
     });
+    if (results.every((result) => result.status === "fulfilled")) {
+      setCreditReadStatuses(readStatuses);
+    }
   }, [candidateKey, hashlock]);
 
   // Only poll once a leg is terminal. Before that there is nothing to
   // credit, so this would be 4 reads every 5 seconds for the whole swap.
-  // A leg that settled, and whose reads have completed and found nothing,
-  // needs no further watching either: a credit can only appear at the
-  // settlement that created it.
-  const anyLegTerminal =
-    legs[iLeg] !== undefined &&
-    legs[rLeg] !== undefined &&
-    [iLeg, rLeg].some((leg) => {
-      const status = legs[leg]?.status;
-      return status === SwapStatus.Claimed || status === SwapStatus.Refunded;
-    });
+  const terminalLeg = (leg: LegKey): boolean => {
+    const status = legs[leg]?.status;
+    return status === SwapStatus.Claimed || status === SwapStatus.Refunded;
+  };
+  const bothLegsLoaded = legs[iLeg] !== undefined && legs[rLeg] !== undefined;
+  const anyLegTerminal = bothLegsLoaded && [iLeg, rLeg].some(terminalLeg);
+  const allLegsTerminal = bothLegsLoaded && [iLeg, rLeg].every(terminalLeg);
+  // Identity of the current chain state. A reading is only about the state it
+  // was taken in, so this is what tells a stale reading from a current one.
+  const statusKey = `${String(legs[iLeg]?.status ?? "?")}:${String(legs[rLeg]?.status ?? "?")}`;
+  const statusKeyRef = useRef(statusKey);
+  statusKeyRef.current = statusKey;
+  const creditsRead = creditReadStatuses === statusKey;
+  // Stop watching only when every leg has settled AND the reads that found
+  // nothing were taken with all of them already settled. Going quiet after the
+  // first settlement would miss the second one, which is the ordinary
+  // sponsored-claim shape: the counterparty settles our leg afterwards, and a
+  // payout that defers there would never be seen.
   const creditsQuiet =
+    allLegsTerminal &&
+    creditsRead &&
     credits.size > 0 &&
-    [...credits.values()].every((reading) => reading.global === 0n) &&
-    [iLeg, rLeg].every((leg) => creditReadOk.get(leg) === true);
+    [...credits.values()].every((reading) => reading.global === 0n);
   const creditPollActive = candidateKey !== "" && anyLegTerminal && !creditsQuiet;
 
   useEffect(() => {
@@ -633,10 +652,10 @@ export function SwapFlow({
   // completed. An empty reading map and a delivered payout are the same
   // shape, so painting the green banner before the read lands would tell
   // the user their funds arrived on no evidence at all.
-  const payoutsConfirmed = [iLeg, rLeg].every(
-    (leg) =>
-      legs[leg]?.status === SwapStatus.None || creditReadOk.get(leg) === true,
-  );
+  // Confirmed means a completed read taken with the chain in exactly this
+  // state. A read from before the last settlement proves nothing about it.
+  const payoutsConfirmed =
+    creditsRead && [iLeg, rLeg].every((leg) => creditReadOk.get(leg) === true);
   const connectedOn = (leg: LegKey): string | null => (leg === "eth" ? ethAccount : qrlAccount);
 
   const roleLabel =

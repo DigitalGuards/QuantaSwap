@@ -13,7 +13,9 @@ import {
 } from "./htlc.js";
 import {
   canContinueWithoutBook,
+  CREDIT_PARK_AFTER_S,
   MAX_CREDIT_ATTEMPTS,
+  creditRetryAfterS,
   decide,
   earliestValidFillIntent,
   pushParked,
@@ -694,11 +696,19 @@ describe("refund and settlement", () => {
       ourResponderCredit: AMOUNT,
       nowS: T1 + 10_000,
     };
-    const spent = managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS, withdrawSentAt: null });
-    assert.equal(withdrawParked(spent), true);
+    const spent = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+      withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      withdrawSentAt: null,
+    });
+    assert.equal(withdrawParked(spent, T1 + 10_000), true);
     assert.equal(decide(input({ ...settled, managed: spent })), "finish");
     // One attempt short, it still tries.
-    const nearly = managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS - 1, withdrawSentAt: null });
+    const nearly = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS - 1,
+      withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      withdrawSentAt: null,
+    });
     assert.equal(decide(input({ ...settled, managed: nearly })), "withdraw");
   });
 
@@ -709,17 +719,80 @@ describe("refund and settlement", () => {
       takerCredit: AMOUNT,
       nowS: T1 + 10_000,
     };
-    const spent = managed({ pushAttempts: MAX_CREDIT_ATTEMPTS, pushSentAt: null });
-    assert.equal(pushParked(spent), true);
+    const spent = managed({
+      pushAttempts: MAX_CREDIT_ATTEMPTS,
+      pushFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+      pushSentAt: null,
+    });
+    assert.equal(pushParked(spent, T1 + 10_000), true);
     assert.equal(decide(input({ ...sponsored, managed: spent })), "finish");
     assert.equal(
       decide(
         input({
           ...sponsored,
-          managed: managed({ pushAttempts: MAX_CREDIT_ATTEMPTS - 1, pushSentAt: null }),
+          managed: managed({
+            pushAttempts: MAX_CREDIT_ATTEMPTS - 1,
+            pushFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+            pushSentAt: null,
+          }),
         }),
       ),
       "push",
+    );
+  });
+
+  it("needs both the rejection count and a day before parking", () => {
+    // Five rejections inside a few minutes is a chain condition that may
+    // pass. Giving up there would strand money a later block would have paid.
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    const fresh = managed({
+      withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+      withdrawFirstRejectedAt: T1 + 10_000 - 600,
+      withdrawSentAt: null,
+    });
+    assert.equal(withdrawParked(fresh, T1 + 10_000), false);
+    assert.equal(decide(input({ ...settled, managed: fresh })), "withdraw");
+    // A day later, with the same rejections behind it, it parks.
+    assert.equal(withdrawParked(fresh, T1 + 10_000 + CREDIT_PARK_AFTER_S), true);
+  });
+
+  it("never parks on a record the contract has not rejected", () => {
+    // Transient faults leave the counters alone, so a credit that has only
+    // ever failed to reach the chain is retried forever, which is correct:
+    // nothing has said it cannot move.
+    const never = managed({ withdrawAttempts: 0, withdrawFirstRejectedAt: null });
+    assert.equal(withdrawParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
+    assert.equal(pushParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
+  });
+
+  it("spaces credit retries wider with each contract rejection", () => {
+    // Doubling from the ordinary resend interval, capped so a credit waiting
+    // out its day is still retried hourly.
+    assert.equal(creditRetryAfterS(0, 240), 240);
+    assert.equal(creditRetryAfterS(1, 240), 480);
+    assert.equal(creditRetryAfterS(4, 240), 3600);
+    assert.equal(creditRetryAfterS(40, 240), 3600);
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      ourResponderCredit: AMOUNT,
+      nowS: T1 + 10_000,
+    };
+    // Two rejections in: the ordinary 240 s interval is no longer enough.
+    const spaced = managed({
+      withdrawAttempts: 2,
+      withdrawFirstRejectedAt: T1,
+      withdrawSentAt: T1 + 10_000 - 300,
+    });
+    assert.equal(decide(input({ ...settled, managed: spaced })), "wait");
+    assert.equal(
+      decide(input({ ...settled, managed: spaced, nowS: T1 + 10_000 + 1200 })),
+      "withdraw",
     );
   });
 
@@ -733,7 +806,10 @@ describe("refund and settlement", () => {
           rState: leg(SwapStatus.Claimed),
           ourResponderCredit: AMOUNT,
           takerCredit: AMOUNT,
-          managed: managed({ withdrawAttempts: MAX_CREDIT_ATTEMPTS }),
+          managed: managed({
+            withdrawAttempts: MAX_CREDIT_ATTEMPTS,
+            withdrawFirstRejectedAt: T1 + 10_000 - CREDIT_PARK_AFTER_S,
+          }),
           nowS: T1 + 10_000,
         }),
       ),
