@@ -133,11 +133,15 @@ yours.
     The reference maker does both automatically, with the same persisted send
     markers and retry spacing as its claim and refund, and it holds an order
     open while a credit attributable to that order's hashlock is outstanding.
-    It gives up after five attempts per credit: a token that refuses to pay
-    anyone cannot be made to, and an uncapped retry would let a taker pin a
-    listing slot forever by locking to a recipient no payout can reach. A
-    parked credit is reported as `strandedCredits` in the health snapshot and
-    needs an operator.
+    It gives up after five refusals by the contract, and only then if a day has
+    passed since the first: a token that refuses to pay anyone cannot be made
+    to, and an uncapped retry would let a taker pin a listing slot forever by
+    locking to a recipient no payout can reach. A network fault never counts
+    towards that, because it says nothing about whether the credit can move. A
+    parked credit owed to the maker is reported as `strandedCredits` and is
+    collectable; one owed to a taker is reported as
+    `parkedCounterpartyCredits`, can only ever be paid to that taker, and is
+    dismissed, because there is nothing to collect it into.
 11. **Cancel or repost**: before selecting an intent, a maker may sign and
    persist CancelV2, then `POST /orders/:id/cancel/signed`. A filled or
    cancelled listing is terminal. Authenticate the exact CancelV2 and digest

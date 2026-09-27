@@ -504,52 +504,147 @@ export async function readSwapCredit(
   return { global, credited };
 }
 
+/** How deep a chain of wrapped causes is walked. Bounded so a self
+ *  referential or absurdly nested error cannot spin here. */
+const CAUSE_DEPTH = 6;
+
+/** Every error in a wrapped chain, outermost first. @theqrl/web3 nests the
+ *  real reason under `innerError`, ethers under `cause` or `info.error`. */
+function causeChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<unknown>();
+  let current = error;
+  for (let depth = 0; depth < CAUSE_DEPTH && current !== undefined && current !== null; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    chain.push(current);
+    if (typeof current !== "object") break;
+    const node = current as Record<string, unknown>;
+    const next =
+      node["innerError"] ??
+      node["cause"] ??
+      (typeof node["info"] === "object" && node["info"] !== null
+        ? (node["info"] as Record<string, unknown>)["error"]
+        : undefined);
+    current = next;
+  }
+  return chain;
+}
+
+/** Error names and codes that mean "the contract refused this call". The
+ *  @theqrl/web3 names come from @theqrl/web3-errors; ethers uses
+ *  CALL_EXCEPTION for a revert. */
+const REJECTION_NAMES = new Set([
+  "ContractExecutionError",
+  "Eip838ExecutionError",
+  "TransactionRevertInstructionError",
+  "TransactionRevertWithCustomError",
+  "TransactionRevertedWithoutReasonError",
+  "RevertInstructionError",
+  "Web3ContractError",
+]);
+const REJECTION_CODES = new Set([
+  "CALL_EXCEPTION",
+  "ACTION_REJECTED",
+  310, // ERR_CONTRACT_EXECUTION_REVERTED
+  401, // ERR_TX_REVERT_INSTRUCTION
+  402, // ERR_TX_REVERT_TRANSACTION
+  405, // ERR_TX_REVERT_WITHOUT_REASON
+  406, // ERR_TX_REVERT_TRANSACTION_CUSTOM_ERROR
+  3, // EIP-1474 execution error
+]);
+
+const TRANSIENT_HINTS = [
+  "timed out",
+  "timeout",
+  "econnrefused",
+  "econnreset",
+  "enotfound",
+  "etimedout",
+  "socket",
+  "network",
+  "fetch failed",
+  "aborted",
+  "http 5",
+  "http 429",
+  "nonce",
+  "replacement",
+  "underpriced",
+  "rate limit",
+  "connection not open",
+];
+
+const REJECTION_HINTS = [
+  "revert",
+  "transferfailed",
+  "nocredit",
+  "insufficientcredit",
+  "invalidparams",
+  "unauthorized",
+  "status 0",
+  "always failing transaction",
+  "out of gas",
+];
+
 /**
  * Did the contract refuse this send, or did the attempt simply not get there?
  * The difference decides whether a credit is one step closer to being given up
- * on. A mined revert and an estimate that reverted with contract error data
- * both say "this call cannot succeed"; a timeout, a socket error, a nonce
- * problem or an unreachable node say nothing about the call at all, and
- * counting them would park a credit that is perfectly collectible.
+ * on, so it has to be read from the error's shape and not only from its text.
  *
- * Unrecognised failures are treated as transient, which is the safe direction:
- * the cost is more retries, and the alternative is giving up on real money for
- * a reason nobody checked.
+ * The text alone is not enough on the QRL leg: @theqrl/web3 wraps a revert in
+ * a ContractExecutionError whose own message is the generic "Error happened
+ * while trying to execute a function inside a smart contract", with the reason
+ * under `innerError`. Reading only the outer message classified every QRL
+ * revert as transient, so the cap never filled there and a taker whose address
+ * cannot receive native QRL pinned an order forever.
+ *
+ * The transient shapes are checked first, over the whole wrapped chain, because
+ * a timeout inside a contract call is still a timeout. Then the structure: a
+ * known revert error class, a revert code, or present revert data. Then the
+ * text, as a last resort for a provider that reports a revert as a plain
+ * Error.
+ *
+ * An error that matches nothing is transient, which is the safe direction: the
+ * cost is more retries, and the alternative is giving up on real money for a
+ * reason nobody checked.
  */
 export function isContractRejection(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const text = message.toLowerCase();
-  const transient = [
-    "timed out",
-    "timeout",
-    "econnrefused",
-    "econnreset",
-    "enotfound",
-    "etimedout",
-    "socket",
-    "network",
-    "fetch failed",
-    "aborted",
-    "http 5",
-    "http 429",
-    "nonce",
-    "replacement",
-    "underpriced",
-    "rate limit",
-  ];
-  if (transient.some((hint) => text.includes(hint))) return false;
-  const rejected = [
-    "revert",
-    "execution reverted",
-    "transferfailed",
-    "nocredit",
-    "insufficientcredit",
-    "invalidparams",
-    "unauthorized",
-    "status 0",
-    "always failing transaction",
-  ];
-  return rejected.some((hint) => text.includes(hint));
+  const chain = causeChain(error);
+  const text = chain
+    .map((node) => {
+      if (node instanceof Error) return node.message;
+      if (typeof node === "string") return node;
+      if (typeof node === "object" && node !== null) {
+        const message = (node as Record<string, unknown>)["message"];
+        return typeof message === "string" ? message : "";
+      }
+      return "";
+    })
+    .join(" | ")
+    .toLowerCase();
+
+  if (TRANSIENT_HINTS.some((hint) => text.includes(hint))) return false;
+
+  for (const node of chain) {
+    if (typeof node !== "object" || node === null) continue;
+    const row = node as Record<string, unknown>;
+    if (typeof row["name"] === "string" && REJECTION_NAMES.has(row["name"])) return true;
+    const code = row["code"];
+    if ((typeof code === "string" || typeof code === "number") && REJECTION_CODES.has(code)) {
+      return true;
+    }
+    // Revert data is only ever produced by a call that reached the contract.
+    const data = row["data"];
+    if (typeof data === "string" && /^0x[0-9a-fA-F]*$/.test(data) && data.length > 2) return true;
+    // A receipt with status 0 is a mined revert.
+    const receipt = row["receipt"];
+    if (typeof receipt === "object" && receipt !== null) {
+      const status = (receipt as Record<string, unknown>)["status"];
+      if (status === "0x0" || status === 0n || status === 0) return true;
+    }
+  }
+
+  return REJECTION_HINTS.some((hint) => text.includes(hint));
 }
 
 /** Undelivered payout owned by `account` in `token` on this leg. Zero

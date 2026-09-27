@@ -132,27 +132,44 @@ procedure, in order:
 
 Existing locks always settle on their original contracts. Nothing migrates.
 
-### Clearing a stranded payout credit
+### Clearing a parked payout credit
 
 A credit the contract has refused five times, over at least a day, is parked:
 the maker stops trying, the order retires so it stops holding a listing slot,
-and the entry is written into the state file, where it outlives that order. It
-is counted in `strandedCredits` in the health snapshot, listed by name in the
-log at every start, and re-read once an hour with no sends.
+and the entry is written into the state file, where it outlives that order. Both
+kinds are listed by name in the log at every start and re-read once an hour with
+no sends. The two kinds are not the same problem:
 
-To clear one:
+| Owner | What it is | Health field | Gates a drain |
+|---|---|---|---|
+| `maker` | this maker's own payout | `strandedCredits` | yes |
+| `counterparty` | a courtesy push to a taker's address that refused the payout | `parkedCounterpartyCredits` | no |
 
-1. Read the log line: it names the order, the leg, the amount at parking time
-   and when it was parked.
-2. Collect the balance from the credited account: `withdrawAll(token, to)` for
-   a credit owed to this maker, choosing any destination that can be paid, or
-   `pushCredit(token, account)` for one owed to a taker, which pays them and
-   takes no destination.
-3. Wait up to an hour. The entry drops itself as soon as its balance reads
-   zero, and `strandedCredits` falls with it. Nothing else has to be edited.
+**A maker-owned credit is collected.** Read the log line: it names the order,
+the leg, the amount at parking time and when it was parked. Then move the
+balance from the credited account with `withdrawAll(token, to)`, choosing any
+destination that can be paid. Within the hour the entry drops itself, because
+its balance reads zero, and `strandedCredits` falls with it. Nothing else has to
+be edited.
 
-A parked credit is conserved the whole time. It is off the maker's hands, and
-it is not lost.
+**A counterparty-owned credit may never clear.** `pushCredit` can only ever pay
+the address that owns the credit, so if that address cannot receive, no action by
+this maker or by its operator moves it. The taker can still collect it
+themselves at any time. It is reported and it never gates a drain; dismiss it
+when you want it to stop being reported:
+
+```bash
+# with the maker stopped: this takes the same exclusive state lease
+npm run credits -- list
+npm run credits -- dismiss <key from the list>
+```
+
+`dismiss` refuses a maker-owned credit, because forgetting that one would erase
+the only local record of where this maker's own money is. It prints exactly what
+it removed, and the funds stay in the HTLC ledger for their owner.
+
+A parked credit is conserved the whole time. It is off the maker's hands, and it
+is not lost.
 
 ## QRL network compatibility gate
 

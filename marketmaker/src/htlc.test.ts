@@ -23,7 +23,20 @@ import {
   submitPreflightedClaim,
   type LegRpc,
 } from "./htlc.js";
+import {
+  ContractExecutionError,
+  Eip838ExecutionError,
+  TransactionRevertInstructionError,
+  TransactionRevertedWithoutReasonError,
+} from "@theqrl/web3-errors";
 import { encodeQrvmHtlc } from "./qrvmHtlc.js";
+
+/** True when a string carries none of the textual revert hints, so a test can
+ *  prove a structural classification did the work. */
+const REJECTION_HINTS_ABSENT = (message: string): boolean =>
+  !/revert|status 0|nocredit|insufficientcredit|transferfailed|invalidparams|unauthorized|out of gas/i.test(
+    message,
+  );
 
 const htlcAbi = new Interface(HTLC_ABI);
 
@@ -354,8 +367,9 @@ describe("PayoutCredited filter widths", { concurrency: false }, () => {
 describe("credit failure classification", { concurrency: false }, () => {
   // Only the contract refusing a call counts towards giving up on a credit.
   // Counting a timeout or an unreachable node would park real money for a
-  // reason that says nothing about whether the credit can move.
-  it("counts a contract refusal", () => {
+  // reason that says nothing about whether the credit can move, and missing a
+  // real refusal lets one unpayable payee pin an order forever.
+  it("counts a refusal reported as plain text", () => {
     for (const message of [
       "execution reverted",
       "execution reverted: TransferFailed",
@@ -366,6 +380,54 @@ describe("credit failure classification", { concurrency: false }, () => {
     ]) {
       assert.equal(isContractRejection(new Error(message)), true, message);
     }
+  });
+
+  it("counts the @theqrl/web3 revert shapes, whose own message says nothing", () => {
+    // ContractExecutionError.message is the generic "Error happened while
+    // trying to execute a function inside a smart contract"; the reason lives
+    // under innerError. Reading the outer message alone classified every QRL
+    // revert as transient, so the cap never filled on that leg.
+    const contractError = new ContractExecutionError({
+      code: 3,
+      message: "execution reverted",
+      data: "0xb5d5b5ba",
+    });
+    assert.match(contractError.message, /Error happened while trying to execute/);
+    assert.equal(
+      REJECTION_HINTS_ABSENT(contractError.message),
+      true,
+      "the outer message must carry no revert hint, or this test proves nothing",
+    );
+    assert.equal(isContractRejection(contractError), true);
+
+    assert.equal(
+      isContractRejection(new Eip838ExecutionError({ code: 3, message: "execution reverted" })),
+      true,
+    );
+    assert.equal(
+      isContractRejection(
+        new TransactionRevertInstructionError("reverted", "0xb5d5b5ba", { status: "0x0" }),
+      ),
+      true,
+    );
+    assert.equal(
+      isContractRejection(new TransactionRevertedWithoutReasonError({ status: "0x0" })),
+      true,
+    );
+  });
+
+  it("counts the ethers revert shape", () => {
+    // ethers reports a revert as code CALL_EXCEPTION, sometimes with the
+    // provider's own error nested under info.
+    assert.equal(isContractRejection({ code: "CALL_EXCEPTION", shortMessage: "" }), true);
+    assert.equal(
+      isContractRejection({
+        code: "UNKNOWN_ERROR",
+        info: { error: { code: 3, data: "0xb5d5b5ba" } },
+      }),
+      true,
+    );
+    assert.equal(isContractRejection({ message: "", receipt: { status: 0n } }), true);
   });
 
   it("does not count a fault that never reached the contract", () => {
@@ -379,10 +441,27 @@ describe("credit failure classification", { concurrency: false }, () => {
       "replacement transaction underpriced",
       "socket hang up",
       "The operation was aborted",
+      "connection not open",
       "something nobody has seen before",
     ]) {
       assert.equal(isContractRejection(new Error(message)), false, message);
     }
+    // A timeout inside a contract call is still a timeout, however it is
+    // wrapped: the transient shapes are read over the whole chain first.
+    const wrapped = new ContractExecutionError({ code: 3, message: "request timed out" });
+    assert.equal(isContractRejection(wrapped), false);
+  });
+
+  it("walks a bounded chain and survives a cycle", () => {
+    const deep = { message: "", cause: { message: "", cause: new Error("execution reverted") } };
+    assert.equal(isContractRejection(deep), true);
+    const cyclic: Record<string, unknown> = { message: "unclear" };
+    cyclic["cause"] = cyclic;
+    assert.equal(isContractRejection(cyclic), false);
+    // Past the depth bound nothing is read, which fails to the safe side.
+    let buried: unknown = new Error("execution reverted");
+    for (let i = 0; i < 10; i += 1) buried = { message: "", cause: buried };
+    assert.equal(isContractRejection(buried), false);
   });
 });
 

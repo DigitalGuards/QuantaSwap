@@ -62,9 +62,12 @@ Drain first, then flip. Per component, in order:
    `strandedCredits` reads 0. A parked credit is a payout the contract refused
    often enough, over long enough, that the maker stopped trying; it is
    recorded in the state file, listed in the log at every start, and re-read
-   hourly. Collect each one under the current configuration before going on,
-   because the new profile will not see it. `marketmaker/README.md` has the
-   three-step procedure.
+   hourly. `strandedCredits` counts only this maker's own payouts, which are
+   collectable: collect each under the current configuration before going on,
+   because the new profile will not see it. `parkedCounterpartyCredits` counts
+   courtesy pushes to a taker's address that refused the payout, which only that
+   address can ever receive, so they do not gate this step; dismiss them if you
+   want them out of the report. `marketmaker/README.md` has both procedures.
 2. **Stop the maker.**
 3. **Move its state file aside**, or point `MM_STATE_FILE` at a new path. A
    state file records the deployment its records settle on, and the daemon

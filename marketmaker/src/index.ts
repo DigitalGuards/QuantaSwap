@@ -884,6 +884,7 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
               (leg === rLeg ? ourResponderCredit : ourInitiatorCredit) ?? 0n,
             ),
             parkedAt: nowS(),
+            owner: "maker",
           });
         }
       }
@@ -935,6 +936,10 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
             hashlock: managed.hashlock ?? "",
             amount: String(takerCredit ?? 0n),
             parkedAt: nowS(),
+            // The taker's own payout. If their address can never receive, no
+            // action by anyone clears this, so it is reported and it never
+            // gates a drain.
+            owner: "counterparty",
           });
         }
       }
@@ -1243,7 +1248,12 @@ async function tick(): Promise<void> {
       // parking. Reported, and the status is left alone: a token that refuses
       // to pay cannot be made to, and holding at degraded forever would bury
       // every other signal.
-      health.markStrandedCredits(state.strandedCredits().length);
+      // Split by owner: only a collectable credit gates a drain. A courtesy
+      // push to an address that can never receive would otherwise block the
+      // documented cutover procedure forever, which one hostile take could
+      // arrange.
+      health.markStrandedCredits(state.ownStrandedCredits().length);
+      health.markParkedCounterpartyCredits(state.counterpartyStrandedCredits().length);
       health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
     } catch {
       // A poisoned state file is already forcing process shutdown.
@@ -1287,16 +1297,32 @@ async function main(): Promise<void> {
   ]);
   health.markRuntimeVerified();
   if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
+  // A record this state file could not read points at money in the contract,
+  // so a silent drop is the one outcome an operator must never get. The next
+  // persist erases the row, and this line is the only trace left.
+  for (const warning of state.warnings) log(`ATTENTION ${warning}`);
   // Parked credits are money sitting in the contract with no order left to
-  // chase it, so an operator is told at every start, loudly and by name.
-  const parkedAtBoot = state.strandedCredits();
-  if (parkedAtBoot.length > 0) {
+  // chase it, so an operator is told at every start, loudly and by name. Split
+  // by owner, because only one kind can actually be collected.
+  const ownParked = state.ownStrandedCredits();
+  const theirParked = state.counterpartyStrandedCredits();
+  if (ownParked.length > 0) {
     log(
-      `ATTENTION ${parkedAtBoot.length} stranded payout credit(s) need an operator. Collect each with withdrawAll(token, to) from the credited account, or pushCredit(token, account) for one owed to a taker; an entry clears itself within the hour once its balance reads zero.`,
+      `ATTENTION ${ownParked.length} payout credit(s) owed to this maker need an operator. Collect each with withdrawAll(token, to) from the credited account; the entry clears itself within the hour once its balance reads zero, and a drain waits for it. Run \`npm run credits -- list\` with the maker stopped.`,
     );
-    for (const entry of parkedAtBoot) {
+    for (const entry of ownParked) {
       log(
-        `  stranded: order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
+        `  stranded (maker): order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
+      );
+    }
+  }
+  if (theirParked.length > 0) {
+    log(
+      `${theirParked.length} parked payout credit(s) are owed to a counterparty. Only their own address can be paid, so if it can never receive, nothing here clears them; they never gate a drain. Dismiss one with \`npm run credits -- dismiss <key>\` when you want it to stop being reported.`,
+    );
+    for (const entry of theirParked) {
+      log(
+        `  parked (counterparty): order ${short(entry.orderId)} leg ${entry.leg} amount ${entry.amount} parked ${new Date(entry.parkedAt * 1000).toISOString()}`,
       );
     }
   }
