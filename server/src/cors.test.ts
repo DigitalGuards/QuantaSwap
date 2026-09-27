@@ -16,7 +16,7 @@ describe("order-book CORS policy", () => {
     assert.deepEqual(corsHeaders("https://swap.example", "configured-origin", ALLOWED), {
       "Access-Control-Allow-Origin": "https://swap.example",
       // A browser needs this to read Retry-After off a shed 503.
-      "Access-Control-Expose-Headers": "Retry-After",
+      "Access-Control-Expose-Headers": "Retry-After, X-Refusal-Stage",
       Vary: "Origin",
     });
     assert.deepEqual(corsHeaders("https://attacker.example", "configured-origin", ALLOWED), {});

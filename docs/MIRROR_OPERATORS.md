@@ -201,6 +201,19 @@ rollback. They are also safe to leave inside a state backup: a restored
 `.lock` from a dead process is recognised as stale, by its process id on the
 same host or by its expired heartbeat otherwise.
 
+### Upgrading past the IPv6 source grouping
+
+Per-source budgets key on one IPv4 address or one IPv6 /64. Before that
+grouping, an IPv6 client was counted by its full address, and the store keeps
+the source of a create and of a fill intent as a salted hash of that key.
+
+Those persisted hashes are not rewritten on upgrade, so for IPv6 clients the
+value changes once: their per-source counts and their rolling daily fill-intent
+cap restart from zero at the first start on the new build, and rows already on
+disk keep their old hashes and stay valid. IPv4 clients are unaffected, because
+their key did not change. Nothing else depends on the value, and the effect is a
+single window of extra headroom for v6 clients, not a lasting one.
+
 ### Concurrency bound for mutating requests
 
 The book is one process, and every mutating request verifies an ML-DSA-87 proof
@@ -243,15 +256,40 @@ ORDERBOOK_RESERVED_MAKER_MUTATIONS=8
 Default 8, and it must stay below the bound itself; startup refuses a
 reservation that would leave takers nothing. A taker rush is exactly what fills
 the bound, and a maker who cannot withdraw a stale-priced order during one is
-exposed on price. With the defaults, takers share 24 slots and the maker routes
-can always reach the remaining 8. A quiet book gives a maker the whole bound, so
-a reprice that cancels and reposts 28 listings inside one window fits; during a
-full taker rush the same reprice proceeds 8 requests at a time, and its cancels,
-which are the part that stops the bleeding, always get in.
+exposed on price.
 
-The legacy unsigned `POST /orders` is deliberately outside the reserved class.
-It carries no proof, so it is the cheapest route to flood, and the reservation
-exists to keep a flood away from the maker's own path.
+What the reservation protects against is a taker rush, and nothing more. With
+the defaults, takers share 24 slots and the remaining 8 are reachable only by a
+caller that presents a maker capability, so no volume of taker traffic can take
+them. It is not protection against a maker flooding its own lane, against many
+makers competing for it, or against an attacker who holds a real maker token for
+some order. Those are bounded by the per-source rate limit and the per-source
+body-read share, the same as any other caller.
+
+A request reaches the reserved lane by presenting the order's maker token in
+`X-Maker-Token`, checked against the stored commitment before the body is read.
+The header works on `/cancel` and `/hashlock` as well as on `/cancel/signed` and
+`/fill`, and on those two legacy routes it also authorises the request, so the
+admission decision and the authorisation agree about who is calling. A request
+to a maker path without a valid token is a taker-lane request: keying the
+reservation on the path alone would let anyone reach it by naming a maker route.
+
+A maker client that carries its capability only in the request body is admitted
+through the ordinary lane, because the book decides before it reads the body.
+The browser client and the reference market maker send the token in both places,
+and any other maker client should as well: the header reaches the lane, and the
+body is what an order book from before this reservation authenticates against.
+
+`POST /orders/signed` cannot be keyed that way, because the commitment it would
+be checked against arrives inside the request. It gets half the reservation as a
+sub-reserve of its own, so a signed-create flood cannot consume the headroom the
+capability-authenticated routes need, and a repost still has somewhere to go
+during a rush. The legacy unsigned `POST /orders` is outside the reservation
+entirely: it carries no proof at all, so it is the cheapest route to flood.
+
+The reference market maker posts one rung per pair and direction per tick, in
+sequence, so it does not need a wide lane; it needs a lane that a rush cannot
+close.
 
 Raise the bound only with evidence: the queue it allows is paid in the latency
 of every request in it. Lowering it sheds a rush earlier and also sheds
@@ -264,20 +302,47 @@ the default.
 A request that promises a body and sends it slowly, or never, must not hold a
 mutation slot: a handful of those would refuse every writer for the whole
 `ORDERBOOK_REQUEST_TIMEOUT_MS` while `/api/health` still reported ready. Body
-reads therefore have their own bound and their own short deadline:
+reads therefore have their own bound, their own reservation and their own short
+deadline:
 
 ```dotenv
 ORDERBOOK_MAX_INFLIGHT_BODY_READS=256
+ORDERBOOK_RESERVED_MAKER_BODY_READS=32
 ORDERBOOK_BODY_READ_TIMEOUT_MS=3000
 ```
 
-Ranges 8 to 4096 and 250 ms to 60 s. At most 8 concurrent body reads come from
-one source. A body that misses the deadline is answered `408 request body was
-too slow`, its remaining bytes are read and discarded without being buffered,
-and the connection closes; the service request timeout still closes the socket
-itself. Raise the deadline only for genuinely slow clients on a slow link. The
-bound is wide on purpose, because reading a body is cheap and the deadline is
-what limits the damage.
+Ranges 8 to 4096, 0 to below the bound, and 250 ms to 60 s. At most 2
+concurrent body reads come from one source, or 4 on the maker lane, because a
+real client has one body in flight at a time. A body that misses the deadline is
+answered `408 request body was too slow`, its remaining bytes are read and
+discarded without being buffered, and the connection closes; the service request
+timeout still closes the socket itself. Raise the deadline only for genuinely
+slow clients on a slow link.
+
+**The global body-read bound is a service-wide refusal point.** Once it is full
+every further body of that lane is answered
+`503 order book has too many request bodies in flight`, and a request whose body
+cannot be read never reaches the mutation bound at all, so without the
+reservation a flood of promised-and-unsent bodies would refuse the maker lane
+too. The reservation is what keeps that lane reachable, and the same lane rules
+apply: the maker share needs the order's capability in `X-Maker-Token`.
+
+Watch it. The refusal is distinct from the in-flight one and carries
+`X-Refusal-Stage: pre-verification`; the load harness reports it as
+`book_body_read_gate` and the read deadline as `body_read_timeout`. A steady
+stream of either from ordinary clients means the bound or the deadline is too
+tight for the paths your visitors come over. A burst of them from many sources
+at once is the flood this bound exists to absorb.
+
+**A buffering reverse proxy removes this exposure entirely.** nginx buffers
+request bodies by default (`proxy_request_buffering on`), so it forwards a
+request only once the whole body has arrived and the book never sees a
+half-open body. A mirror behind such a proxy is not exposed to this at all, and
+these bounds are then a second line only. They matter for a book that is
+reachable directly: a self-hosted mirror with no proxy in front, and the onion
+profile, where Tor connects to the service without buffering. Putting nginx or
+an equivalent buffering proxy in front is the recommended deployment either
+way.
 
 ## 3. Configure federation and browser access
 

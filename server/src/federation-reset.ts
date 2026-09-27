@@ -130,12 +130,28 @@ export class FederationConcurrencyLimiter {
     );
   }
 
-  acquire(source: string): (() => void) | null {
+  /**
+   * Takes one slot, or returns null when a ceiling is reached. `limits` lowers
+   * the ceilings for this one caller, which is how a class of requests is held
+   * below the configured maximum so another class keeps headroom inside it.
+   */
+  acquire(
+    source: string,
+    limits: { perSource?: number; global?: number } = {},
+  ): (() => void) | null {
     if (source.length < 1 || source.length > 256) {
       throw new Error("federation concurrency source is invalid");
     }
+    const perSourceLimit = Math.min(
+      this.perSourceLimit,
+      limits.perSource ?? this.perSourceLimit,
+    );
+    const globalLimit = Math.min(
+      this.globalLimit,
+      limits.global ?? this.globalLimit,
+    );
     const sourceCount = this.sourceCounts.get(source) ?? 0;
-    if (sourceCount >= this.perSourceLimit || this.globalCount >= this.globalLimit) {
+    if (sourceCount >= perSourceLimit || this.globalCount >= globalLimit) {
       return null;
     }
     this.globalCount += 1;

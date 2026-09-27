@@ -424,8 +424,12 @@ untaken escrow at any moment with `release`.
 
 ## Rate limits
 
-Per-IP, fixed one-minute windows, split by class so a burst of one cannot
-starve the other (`429 rate limited, slow down`):
+Per source, fixed one-minute windows, split by class so a burst of one cannot
+starve the other (`429 rate limited, slow down`). A source is one IPv4 address,
+or one IPv6 /64: a single assignment is a /64 or larger, so counting each IPv6
+address separately would hand one holder billions of budgets. Every per-source
+budget in this document uses that same key, the SSE connection count and the
+fill-intent caps included:
 
 | Class                    | Limit    | Notes                                          |
 | ------------------------ | -------- | ---------------------------------------------- |
@@ -452,26 +456,43 @@ Concurrent mutating requests are bounded across all sources
 request is refused with `503`, `Retry-After: 1` and
 `order book has too many requests in flight, retry shortly`: nothing was
 applied, so retry after the named delay. A share of the bound
-(`ORDERBOOK_RESERVED_MAKER_MUTATIONS`, default 8) is reachable only by the maker
-write routes, which are `POST /orders/signed`, `/cancel`, `/cancel/signed`,
-`/fill` and `/hashlock`, so a taker rush cannot stop a maker from withdrawing or
-reposting an order. Reads, heartbeats, the SSE
+(`ORDERBOOK_RESERVED_MAKER_MUTATIONS`, default 8) is reachable only by a caller
+that presents the order's maker token in `X-Maker-Token`, on `/cancel`,
+`/cancel/signed`, `/fill` and `/hashlock`, so a taker rush cannot stop a maker
+from withdrawing or filling an order.
+
+**Makers: send the token in the header on those four routes.** The book reads
+`X-Maker-Token` before it reads the body, so a client that carries its
+capability only in the body is admitted through the ordinary lane and can be
+refused while the reserved one sits empty. Send it in both places: the header
+reaches the lane, and the body is what an order book from before this
+reservation authenticates against. Where both are present the header wins. The
+browser client and the reference market maker both do this. `POST /orders/signed` carries its
+commitment inside the request and cannot be checked that way, so it gets half
+that reservation as a sub-reserve. Everything else, the legacy unsigned
+`POST /orders` included, uses the bound minus the reservation. Reads, heartbeats, the SSE
 stream, `/api/health` and `/api/status` are not gated, so they keep answering
 while a rush is shed. A refused request does not spend the source's per-minute
 mutation budget.
 
 Request bodies are bounded separately (`ORDERBOOK_MAX_INFLIGHT_BODY_READS`,
-default 256, at most 8 per source) and read under their own deadline
-(`ORDERBOOK_BODY_READ_TIMEOUT_MS`, default 3 s). A body that arrives too slowly
-is refused with `408 request body was too slow` and the connection closes. Send
-the whole body promptly after the headers.
+default 256, at most 2 per source and 4 on the maker lane, with
+`ORDERBOOK_RESERVED_MAKER_BODY_READS` of it held for that lane) and read under
+their own deadline (`ORDERBOOK_BODY_READ_TIMEOUT_MS`, default 3 s). Past the
+bound a body is refused with
+`503 order book has too many request bodies in flight`. A body that arrives too
+slowly is refused with `408 request body was too slow` and the connection
+closes. Send one request at a time per connection and the whole body promptly
+after the headers.
 
 Every refusal the book produced before it verified anything carries
 `X-Refusal-Stage: pre-verification`. That covers the two bounds above, the
 per-source rate limiter, the shutdown gate and the fill-intent refusals
 described below. It is a diagnostic, and a client needs only the status code.
-Browsers may read `Retry-After` on these replies: the configured-origin CORS
-policy exposes it.
+Browsers may read `Retry-After` and `X-Refusal-Stage` on these replies: the
+configured-origin CORS policy exposes both. A 503 without the header is the book
+reporting a fault of its own, such as storage it cannot write or data it no
+longer owns, and repeating the request on a timer does not help.
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.

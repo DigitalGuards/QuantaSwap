@@ -80,9 +80,27 @@ describe("order-book runtime configuration", () => {
         }),
       /ORDERBOOK_RESERVED_MAKER_MUTATIONS must be below/,
     );
+    assert.equal(readConfig({}).reservedMakerBodyReads, 32);
+    assert.equal(
+      readConfig({
+        ORDERBOOK_MAX_INFLIGHT_BODY_READS: "16",
+        ORDERBOOK_RESERVED_MAKER_BODY_READS: "4",
+      }).reservedMakerBodyReads,
+      4,
+    );
     assert.throws(
       () => readConfig({ ORDERBOOK_MAX_INFLIGHT_BODY_READS: "4" }),
       /ORDERBOOK_MAX_INFLIGHT_BODY_READS must be between 8 and 4096/,
+    );
+    // The same rule as the mutation reservation: a reservation that takes the
+    // whole bound would leave every other caller nothing.
+    assert.throws(
+      () =>
+        readConfig({
+          ORDERBOOK_MAX_INFLIGHT_BODY_READS: "16",
+          ORDERBOOK_RESERVED_MAKER_BODY_READS: "16",
+        }),
+      /ORDERBOOK_RESERVED_MAKER_BODY_READS must be below/,
     );
     assert.throws(
       () => readConfig({ ORDERBOOK_BODY_READ_TIMEOUT_MS: "100" }),

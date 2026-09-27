@@ -500,13 +500,24 @@ Four changes landed in the write path after the measurements above:
    verification.
 3. **An in-flight bound for mutations**, `ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, 32
    by default, of which `ORDERBOOK_RESERVED_MAKER_MUTATIONS`, 8 by default,
-   only the maker write routes can reach. Past the bound a mutation is refused
-   with `503`, `Retry-After: 1` and `X-Refusal-Stage: pre-verification`. Reads,
-   heartbeats, the SSE stream, `/api/health` and `/api/status` are never gated.
+   only a caller presenting an order's maker capability can reach. Past the
+   bound a mutation is refused with `503`, `Retry-After: 1` and
+   `X-Refusal-Stage: pre-verification`. Reads, heartbeats, the SSE stream,
+   `/api/health` and `/api/status` are never gated.
 4. **A separate bound and deadline for reading bodies**,
-   `ORDERBOOK_MAX_INFLIGHT_BODY_READS` (256, at most 8 per source) and
-   `ORDERBOOK_BODY_READ_TIMEOUT_MS` (3 s). A mutation takes its in-flight slot
-   only once its body is in hand.
+   `ORDERBOOK_MAX_INFLIGHT_BODY_READS` (256, with
+   `ORDERBOOK_RESERVED_MAKER_BODY_READS` of it held for the maker lane, and at
+   most 2 bodies per source) and `ORDERBOOK_BODY_READ_TIMEOUT_MS` (3 s). A
+   mutation takes its in-flight slot only once its body is in hand.
+
+The numbers below were recorded before the lane reservations and the per-source
+body-read share were tightened. A rerun of scenarios a, b, c and e at 200
+takers afterwards reproduced them within run-to-run noise: 726 against 697
+requests per second in the hot-order race, 685 against 609 in the spread
+workload, the same admitted counts, the same refusal mix, and every cap
+assertion and invariant check holding again. The per-source body-read share does
+not show up in these runs at all, because a small body arrives in the same
+segment as its headers and its slot is held for microseconds.
 
 Same machine, same flags, same harness. Every figure below is a fresh run of
 `nice -n 15 npm run loadtest -- --takers <N> --duration 20 --scenarios a,b,c,e`

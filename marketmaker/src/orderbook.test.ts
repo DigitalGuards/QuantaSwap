@@ -156,9 +156,11 @@ describe("portable order book client", () => {
 
   it("publishes the exact signed create, fill, and cancellation envelopes", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
+    const makerHeaders: Array<string | null> = [];
     await withFetch(
       (url, init) => {
         assert.equal(init.redirect, "error");
+        makerHeaders.push(new Headers(init.headers).get("X-Maker-Token"));
         calls.push({
           url,
           body:
@@ -258,8 +260,99 @@ describe("portable order book client", () => {
             body: cancelProof,
           },
         ]);
+        // No maker header on any of these four: the creates cannot carry one,
+        // because a signed create's capability commitment is inside the
+        // request, and this case passes no token to the fill or the
+        // cancellation. The case above covers the header itself.
+        assert.deepEqual(makerHeaders, [null, null, null, null]);
       },
     );
+  });
+
+  it("presents the maker capability in a header on every maker write", async () => {
+    const seen: Array<{ url: string; header: string | null; token: unknown }> =
+      [];
+    await withFetch(
+      (url, init) => {
+        const headers = new Headers(init.headers);
+        const body =
+          typeof init.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : {};
+        seen.push({
+          url,
+          header: headers.get("X-Maker-Token"),
+          token: body["token"],
+        });
+        return new Response(JSON.stringify({ order: orderView }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      async () => {
+        const client = new OrderBookClient("https://book.test/api");
+        const fillProof: SignedFillV1 = {
+          fill: {
+            orderDigest: ORDER_DIGEST,
+            intentDigest: INTENT_DIGEST,
+            takerEthAccount: ETH,
+            takerQrlAccount: QRL,
+            releaseCommitment: selected.intent.releaseCommitment,
+            hashlock: HASHLOCK,
+            initiatorTimeout: NOW + 7200,
+            responderTimeout: NOW + 3600,
+          },
+          auth,
+        };
+        const cancelProof: SignedCancelV1 = {
+          cancel: { orderDigest: ORDER_DIGEST, reasonCode: 1 },
+          auth,
+        };
+        // This case is about the outgoing request. The stub answers with a row
+        // that does not reproduce these proofs, so the two signed calls reject
+        // on response authentication after the request was already sent, which
+        // other cases here cover on its own.
+        await client.cancel(orderView.id, MAKER_TOKEN);
+        await client
+          .cancelSigned(orderView.id, cancelProof, signedOrder, MAKER_TOKEN)
+          .catch(() => undefined);
+        await client
+          .fill(orderView.id, fillProof, selected, signedOrder, MAKER_TOKEN)
+          .catch(() => undefined);
+        await client.announceHashlock(orderView.id, {
+          token: MAKER_TOKEN,
+          hashlock: HASHLOCK,
+          initiatorTimeout: NOW + 7200,
+          responderTimeout: NOW + 3600,
+        });
+      },
+    );
+    // The book decides whether a write may use the headroom it reserves for
+    // maker traffic from this header, before it reads the body, so a maker
+    // that carries its token only in the body never reaches that lane. The
+    // body keeps it too, for a book from before that reservation.
+    assert.deepEqual(seen, [
+      {
+        url: `https://book.test/api/orders/${orderView.id}/cancel`,
+        header: MAKER_TOKEN,
+        token: MAKER_TOKEN,
+      },
+      {
+        url: `https://book.test/api/orders/${orderView.id}/cancel/signed`,
+        header: MAKER_TOKEN,
+        token: MAKER_TOKEN,
+      },
+      {
+        url: `https://book.test/api/orders/${orderView.id}/fill`,
+        header: MAKER_TOKEN,
+        token: MAKER_TOKEN,
+      },
+      {
+        url: `https://book.test/api/orders/${orderView.id}/hashlock`,
+        header: MAKER_TOKEN,
+        token: MAKER_TOKEN,
+      },
+    ]);
   });
 
   it("rejects redirects, non-JSON responses, and advertised oversized bodies", async () => {

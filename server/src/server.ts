@@ -297,6 +297,7 @@ async function readJsonBody(
   req: IncomingMessage,
   res: ServerResponse,
   ip: string,
+  lane: AdmissionLane,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   const contentType = req.headers["content-type"];
@@ -306,7 +307,17 @@ async function readJsonBody(
   ) {
     throw new ApiError(415, "content type must be application/json").shed();
   }
-  const release = bodyReadLimiter.acquire(ip);
+  const release = bodyReadLimiter.acquire(ip, {
+    perSource:
+      lane === "maker"
+        ? MAX_MAKER_BODY_READS_PER_SOURCE
+        : MAX_BODY_READS_PER_SOURCE,
+    global: laneCeiling(
+      lane,
+      config.maxInflightBodyReads,
+      config.reservedMakerBodyReads,
+    ),
+  });
   if (release === null) {
     throw new ApiError(
       503,
@@ -459,8 +470,8 @@ function assertBookOwnedForWrite(): void {
       }
       if (error instanceof ProcessLeaseUnverifiableError) {
         // A commit runs one event-loop turn or more after the entry point
-        // proved ownership, so a read that fails here may be a moment of
-        // filesystem trouble rather than a real change of holder. Re-read a
+        // proved ownership. A read that fails here has two possible causes: a
+        // moment of filesystem trouble, or a real change of holder. Re-read a
         // bounded number of times before treating it as terminal: the reads
         // are two small file operations and the window that matters is the
         // microsecond rename of a taken-over lease.
@@ -636,29 +647,72 @@ let inflightMutations = 0;
 
 /**
  * Per-source and global bound on bodies being read. A body read is cheap, so
- * the global bound is wide and the short read deadline does the real work; the
- * per-source share keeps one address from taking the whole global bound.
+ * the global bound is wide and the short read deadline does the real work. Both
+ * ceilings matter: a real client has one body in flight at a time, so the
+ * per-source share is small, and the global share is split by lane below,
+ * because a global bound that any source can fill would refuse every writer,
+ * the maker's reserved mutation lane included, since a request that cannot read
+ * its body never reaches that lane.
  */
-const MAX_BODY_READS_PER_SOURCE = 8;
+const MAX_BODY_READS_PER_SOURCE = 2;
+/** A maker may pipeline a few authenticated writes, so its lane allows more. */
+const MAX_MAKER_BODY_READS_PER_SOURCE = 4;
 const bodyReadLimiter = new FederationConcurrencyLimiter({
-  perSourceLimit: MAX_BODY_READS_PER_SOURCE,
+  perSourceLimit: MAX_MAKER_BODY_READS_PER_SOURCE,
   globalLimit: config.maxInflightBodyReads,
 });
 
 /**
- * Maker write routes, recognised from the path alone so the decision is
- * available before the body is read. A maker must be able to withdraw, fill,
- * announce and repost while takers rush the book, so these keep reserved
- * headroom inside the in-flight bound: a reprice cancels and reposts every
- * listing inside one mutation window, and losing half of that to a taker rush
- * leaves stale prices standing.
+ * Which share of each admission bound a request may use.
  *
- * The legacy unsigned create is deliberately left out. It carries no proof, so
- * it is the cheapest route to flood, and the reserved headroom exists to keep a
- * flood from reaching the maker's own path.
+ * - `maker` is a write to an order by a caller that presented that order's
+ *   maker capability, checked against the stored commitment before the body is
+ *   read. It may use the whole bound, so a maker can always withdraw or fill a
+ *   stale-priced order while takers rush the book.
+ * - `signed-create` is a maker action that carries no capability to check yet,
+ *   because the commitment it would be checked against arrives inside the
+ *   request. It gets a small sub-reserve of its own, so a create flood cannot
+ *   consume the headroom the capability-authenticated routes need.
+ * - `taker` is everything else, including the legacy unsigned create. It may
+ *   use the bound minus the whole reservation.
  */
-const MAKER_WRITE_PATH_RE =
-  /^\/api\/orders\/(?:signed|[^/]+\/(?:cancel|cancel\/signed|fill|hashlock))$/;
+type AdmissionLane = "maker" | "signed-create" | "taker";
+
+const SIGNED_CREATE_PATH = "/api/orders/signed";
+const MAKER_ORDER_PATH_RE =
+  /^\/api\/orders\/([^/]+)\/(?:cancel|cancel\/signed|fill|hashlock)$/;
+
+/**
+ * Decides the lane from the path and the presented capability alone, so the
+ * answer is available before the body is read. A request without a valid maker
+ * token falls into the taker lane: keying the reserved headroom on the path
+ * alone would let anyone reach it by naming a maker route.
+ */
+function admissionLane(path: string, req: IncomingMessage): AdmissionLane {
+  if (path === SIGNED_CREATE_PATH) return "signed-create";
+  const match = MAKER_ORDER_PATH_RE.exec(path);
+  if (match === null) return "taker";
+  const token = req.headers["x-maker-token"];
+  if (typeof token !== "string") return "taker";
+  return store.matchesMakerCapability(match[1] ?? "", token)
+    ? "maker"
+    : "taker";
+}
+
+/** The share of `total` this lane may use, given the reservation inside it. */
+function laneCeiling(
+  lane: AdmissionLane,
+  total: number,
+  reserved: number,
+): number {
+  if (lane === "maker") return total;
+  const shared = total - reserved;
+  // Half the reservation is the capability-authenticated floor, so a signed
+  // create can use the rest of it and no more.
+  return lane === "signed-create"
+    ? shared + Math.floor(reserved / 2)
+    : shared;
+}
 
 /**
  * Runs the expensive half of a mutating request under the in-flight bound. The
@@ -670,12 +724,14 @@ const MAKER_WRITE_PATH_RE =
 async function withMutationSlot(
   res: ServerResponse,
   ip: string,
-  path: string,
+  lane: AdmissionLane,
   run: () => Promise<void>,
 ): Promise<void> {
-  const ceiling = MAKER_WRITE_PATH_RE.test(path)
-    ? config.maxInflightMutations
-    : config.maxInflightMutations - config.reservedMakerMutations;
+  const ceiling = laneCeiling(
+    lane,
+    config.maxInflightMutations,
+    config.reservedMakerMutations,
+  );
   if (inflightMutations >= ceiling) {
     sendShedJson(
       res,
@@ -1020,6 +1076,15 @@ async function dispatch(
     }
     return;
   }
+  // The admission lane of a write is decided once here, from the path and the
+  // presented maker capability, and used by both bounds so they cannot
+  // disagree about which share a request may use. Only a write needs it, so a
+  // read never pays the capability comparison: a GET on a maker path is not
+  // admitted through either bound.
+  const lane: AdmissionLane = MUTATION_METHODS.has(method)
+    ? admissionLane(path, req)
+    : "taker";
+
   // Every route below can reach a persisted write: a mutation, or the
   // opportunistic expiry sweep that a plain read performs. Proving ownership
   // before the in-memory change keeps a refused write from leaving a change
@@ -1038,8 +1103,8 @@ async function dispatch(
     return;
   }
   if (method === "POST" && path === "/api/orders") {
-    const body = await readJsonBody(req, res, ip);
-    await withMutationSlot(res, ip, path, async () => {
+    const body = await readJsonBody(req, res, ip, lane);
+    await withMutationSlot(res, ip, lane, async () => {
       const created = store.create(body, ip);
       await store.flush();
       sendJson(res, 201, created);
@@ -1047,8 +1112,8 @@ async function dispatch(
     return;
   }
   if (method === "POST" && path === "/api/orders/signed") {
-    const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
-    await withMutationSlot(res, ip, path, async () => {
+    const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
+    await withMutationSlot(res, ip, lane, async () => {
       const verified = verifyOrderV1(body["order"], body["auth"]);
       const expectedKeys =
         verified.terms.visibility === "private"
@@ -1079,8 +1144,8 @@ async function dispatch(
   if (method === "POST" && path === "/api/orders/take") {
     // Take by terms: fills the best open order at the caller's bounds or
     // better. Returns the taker token alongside the order, like accept.
-    const body = await readJsonBody(req, res, ip);
-    await withMutationSlot(res, ip, path, async () => {
+    const body = await readJsonBody(req, res, ip, lane);
+    await withMutationSlot(res, ip, lane, async () => {
       const taken = store.take(body, ip);
       await store.flush();
       sendJson(res, 200, taken);
@@ -1094,9 +1159,9 @@ async function dispatch(
   if (signedCancelMatch && method === "POST") {
     const id = signedCancelMatch[1] ?? "";
     if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
-    const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
+    const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
     const headerToken = req.headers["x-maker-token"];
-    await withMutationSlot(res, ip, path, async () => {
+    await withMutationSlot(res, ip, lane, async () => {
       const order = store.cancelSigned(
         id,
         body["cancel"],
@@ -1125,9 +1190,9 @@ async function dispatch(
       return;
     }
     if (action === "intents" && method === "POST") {
-      const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
       const shareToken = req.headers["x-share-token"];
-      await withMutationSlot(res, ip, path, async () => {
+      await withMutationSlot(res, ip, lane, async () => {
         const intent = store.submitFillIntent(
           id,
           body["intent"],
@@ -1141,9 +1206,9 @@ async function dispatch(
       return;
     }
     if (action === "fill" && method === "POST") {
-      const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
       const makerToken = req.headers["x-maker-token"];
-      await withMutationSlot(res, ip, path, async () => {
+      await withMutationSlot(res, ip, lane, async () => {
         const order = store.fillOrder(
           id,
           body["fill"],
@@ -1178,7 +1243,7 @@ async function dispatch(
       return;
     }
     if (method === "POST" && action !== undefined) {
-      const body = await readJsonBody(req, res, ip);
+      const body = await readJsonBody(req, res, ip, lane);
       if (action === "heartbeat") {
         // Presence only: it writes nothing durable, so it neither takes an
         // in-flight slot nor waits for a commit that belongs to other
@@ -1186,7 +1251,20 @@ async function dispatch(
         sendJson(res, 200, { order: store.heartbeat(id, body) });
         return;
       }
-      await withMutationSlot(res, ip, path, async () => {
+      // The maker capability may ride in X-Maker-Token on these legacy routes
+      // too, as it already does on the signed cancel and the fill. Presenting
+      // it in the header is what lets the admission gate recognise a maker
+      // before the body is read, so the two agree on who is calling. The
+      // header wins over a token in the body when both are present, which is
+      // what the sibling signed routes already do; the shipped maker clients
+      // send the same value in both, so an order book from before the reserved
+      // lane still authenticates them from the body.
+      const headerToken = req.headers["x-maker-token"];
+      const makerBody =
+        typeof headerToken === "string"
+          ? { ...body, token: headerToken }
+          : body;
+      await withMutationSlot(res, ip, lane, async () => {
         if (action === "accept") {
           // Returns the taker token alongside the order, like create does
           // for the maker token.
@@ -1197,10 +1275,10 @@ async function dispatch(
         }
         const order =
           action === "hashlock"
-            ? store.announceHashlock(id, body)
+            ? store.announceHashlock(id, makerBody)
             : action === "release"
               ? store.release(id, body)
-              : store.cancel(id, body);
+              : store.cancel(id, makerBody);
         await store.flush();
         sendJson(res, 200, { order });
       });
