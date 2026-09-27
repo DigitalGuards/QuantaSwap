@@ -121,26 +121,31 @@ async function qrlTransport() {
     const gasPrice = await web3.qrl.getGasPrice();
     let hash = null;
     try {
-      const receipt = await new Promise((resolve, reject) => {
-        web3.qrl
-          .sendTransaction({ ...tx, from: account.address, gasPrice }, undefined, {
-            checkRevertBeforeSending: false,
-          })
-          .on("transactionHash", (value) => {
-            hash = typeof value === "string" ? value : `0x${Buffer.from(value).toString("hex")}`;
-          })
-          .on("receipt", resolve)
-          .on("error", reject);
+      // The returned PromiEvent is also a promise that rejects on a reverted
+      // receipt. Awaiting it directly keeps that rejection handled; a revert
+      // is an expected outcome here, so its receipt is read off the error.
+      const pending = web3.qrl.sendTransaction(
+        { ...tx, from: account.address, gasPrice },
+        undefined,
+        { checkRevertBeforeSending: false },
+      );
+      pending.on("transactionHash", (value) => {
+        hash = typeof value === "string" ? value : `0x${Buffer.from(value).toString("hex")}`;
       });
+      const receipt = await pending;
       return {
         hash: hash ?? receipt.transactionHash,
         status: Number(receipt.status) === 1,
         gasUsed: BigInt(receipt.gasUsed),
       };
     } catch (error) {
-      if (!hash) throw error;
-      const receipt = await receiptFor(hash);
-      return { hash, status: Number(receipt.status) === 1, gasUsed: BigInt(receipt.gasUsed) };
+      const receipt = error?.receipt ?? (hash ? await receiptFor(hash) : null);
+      if (!receipt) throw error;
+      return {
+        hash: hash ?? receipt.transactionHash,
+        status: Number(receipt.status) === 1,
+        gasUsed: BigInt(receipt.gasUsed),
+      };
     }
   };
 

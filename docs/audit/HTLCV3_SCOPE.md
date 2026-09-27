@@ -608,6 +608,38 @@ does **not** pin the floor: it leaves the frame holding the reserve plus the
 credit path's own cost, which is what the EVM suite reports as a retention near
 154,000 against a 150,000 reserve.
 
+### Result on the QRL v3 devnet, 2026-09-27
+
+Run against chain 3151909 with the pinned genesis, on the qualified QRL-target
+artifact (the throwaway measurement instance was
+`QA10Ad9981ab211896F7CF16FC761e6b8C82BC4104b198FB96b7Ff11438156F09eAA3C436211f017198dD2fA7C84C83fc44F3c92c9b39A676256204F2ac3C92E3`).
+Every bound held and the script exited 0.
+
+| Measurement | Result | Bound |
+|---|---|---|
+| `WrongPreimage` baseline | 37,038 gas | reference |
+| Minimum settling gas limit, token credit path, 4 B and 120,832 B bomb | 60,234 for both | reference |
+| Settling frame, token credit path | at most 23,196, spread 0 across payloads | under 150,000 |
+| Settling frame, native credit path to a rejecting 64-byte contract | at most 23,196 | under 150,000 |
+| Native delivery to a plain 64-byte account | about 7,810, delivered, no credit | under 100,000 |
+| Native delivery to a rejecting contract | about 23,196, credited | under 100,000 |
+| Claim sweep 80,000 to 400,000 with the bomb armed | 80,000 failed with the swap `Open`; 120,000 and above completed `Claimed` | failed stays `Open`, completed is terminal |
+
+The QRL settling frame is about half the EVM figure (23,196 against 46,865), a
+margin of about 6.5 times on `DELIVERY_GAS_RESERVE`. At the minimum settling
+limit the delivery budget is zero, so the attempt returns at once and the
+payload spread there is flat by construction. The bomb path itself is covered by
+the sweep, whose claims at 160,000 and above forward a real budget to the armed
+token and still complete, and by the structural check that the trampoline's
+settling frame performs no `RETURNDATACOPY` on the QRL target. A9's QRL
+deployment blocker is lifted by this run.
+
+The first attempt at this run stopped on a harness defect: the QRL web3
+transport returns a PromiEvent whose promise side rejects on a reverted receipt,
+and the expected `WrongPreimage` revert surfaced as an unhandled rejection. The
+transport now awaits the PromiEvent directly and reads the receipt off the
+revert error.
+
 ## 9. Review questions we would most like answered
 
 1. Is `DELIVERY_GAS_RESERVE` sufficient on the QRVM-512 gas schedule, in the
