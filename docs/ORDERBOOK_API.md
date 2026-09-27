@@ -447,6 +447,14 @@ sybil resistance):
   sources and drops the oldest-tracked one past that bound (fails open, like
   the HTTP rate limiter).
 
+Concurrent mutating requests are bounded across all sources
+(`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, default 32). Past the bound a mutating
+request is refused at the door with `503`, `Retry-After: 1` and
+`order book has too many requests in flight, retry shortly`, before its body is
+read: retry after the named delay. Reads, heartbeats, the SSE stream,
+`/api/health` and `/api/status` are not gated, so they keep answering while a
+rush is shed.
+
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
 

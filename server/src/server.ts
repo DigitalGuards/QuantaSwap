@@ -488,6 +488,9 @@ function clientIp(req: IncomingMessage): string {
 // X-Accel-Buffering keeps nginx from buffering the stream; the periodic
 // ping keeps Cloudflare's idle timeout (~100s) away.
 
+/** Mutating requests currently admitted by the in-flight gate. */
+let inflightMutations = 0;
+
 const MAX_STREAM_CLIENTS = 200;
 const MAX_STREAM_CLIENTS_PER_IP = 4;
 const STREAM_TICK_MS = 15_000;
@@ -661,6 +664,45 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     return;
   }
 
+  // Admission gate for the expensive class. Every mutation verifies a proof
+  // and joins a group commit on this one process, so past a small number in
+  // flight extra concurrency only lengthens the queue until requests reach the
+  // service's own timeout. Refusing at the door turns that into an immediate,
+  // honest answer and leaves the event loop for reads, the SSE stream and the
+  // health and status probes, none of which are gated. Placed after the
+  // per-source limiter so a flooding source is still metered per source first,
+  // and before the body is read, the lease is proved or the store is touched.
+  // The bound also bounds a group commit: at most this many mutations can be
+  // waiting for one, so the batch latency a mutation can inherit is two
+  // commits.
+  if (!mutation) {
+    await dispatch(req, res, method, url, path, ip);
+    return;
+  }
+  if (inflightMutations >= config.maxInflightMutations) {
+    res.setHeader("Retry-After", "1");
+    sendJson(res, 503, {
+      error: "order book has too many requests in flight, retry shortly",
+    });
+    return;
+  }
+  inflightMutations += 1;
+  try {
+    await dispatch(req, res, method, url, path, ip);
+  } finally {
+    inflightMutations -= 1;
+  }
+}
+
+/** Routes one request that the gate above has already admitted. */
+async function dispatch(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  url: URL,
+  path: string,
+  ip: string,
+): Promise<void> {
   if (method === "GET" && path === "/api/health") {
     const healthy =
       !shuttingDown &&

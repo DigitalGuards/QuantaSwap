@@ -11,6 +11,7 @@ describe("order-book runtime configuration", () => {
     assert.equal(config.port, 8091);
     assert.equal(config.proxyTrust, "loopback");
     assert.equal(config.presenceTtlS, 90);
+    assert.equal(config.maxInflightMutations, 32);
     assert.deepEqual(config.federationPeers, []);
     assert.deepEqual(config.federationPeerIds, []);
     assert.deepEqual(config.federationPeerTokens, []);
@@ -50,6 +51,26 @@ describe("order-book runtime configuration", () => {
     assert.equal(config.federationOnionOnly, false);
     assert.equal(config.federationOnionProxy, null);
     assert.deepEqual(config.corsOrigins, ["https://swap.example", "http://127.0.0.1:5173"]);
+  });
+
+  it("bounds the in-flight mutation gate", () => {
+    assert.equal(
+      readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "8" })
+        .maxInflightMutations,
+      8,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "0" }),
+      /ORDERBOOK_MAX_INFLIGHT_MUTATIONS must be between 1 and 1024/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "1025" }),
+      /ORDERBOOK_MAX_INFLIGHT_MUTATIONS must be between 1 and 1024/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "many" }),
+      /must be an integer/,
+    );
   });
 
   it("fails fast on ambiguous or unsafe values", () => {

@@ -20,6 +20,7 @@ export interface ServerConfig {
   presenceTtlS: number;
   proxyTrust: ProxyTrust;
   requestTimeoutMs: number;
+  maxInflightMutations: number;
   shutdownTimeoutMs: number;
   streamBackpressureMs: number;
 }
@@ -301,6 +302,19 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     presenceTtlS: integerEnv(env, "PRESENCE_TTL_S", 90, 1, 3600),
     proxyTrust: rawProxyTrust,
     requestTimeoutMs: integerEnv(env, "ORDERBOOK_REQUEST_TIMEOUT_MS", 15_000, 1000, 120_000),
+    // Concurrent mutating requests admitted at the door. Mutations are the
+    // expensive class: each one verifies an ML-DSA-87 proof and joins a group
+    // commit, and the book is one process, so past a small number of them in
+    // flight extra concurrency only lengthens the queue. The default admits far
+    // more than a live deployment offers while keeping the worst queueing delay
+    // under a second, so a rush is refused honestly instead of timing out.
+    maxInflightMutations: integerEnv(
+      env,
+      "ORDERBOOK_MAX_INFLIGHT_MUTATIONS",
+      32,
+      1,
+      1024,
+    ),
     shutdownTimeoutMs: integerEnv(env, "ORDERBOOK_SHUTDOWN_TIMEOUT_MS", 10_000, 1000, 60_000),
     streamBackpressureMs: integerEnv(
       env,

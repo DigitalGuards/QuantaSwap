@@ -195,6 +195,39 @@ rollback. They are also safe to leave inside a state backup: a restored
 `.lock` from a dead process is recognised as stale, by its process id on the
 same host or by its expired heartbeat otherwise.
 
+### Concurrency bound for mutating requests
+
+The book is one process, and every mutating request verifies an ML-DSA-87 proof
+and joins a group commit, so there is a small number of them in flight past
+which extra concurrency only lengthens the queue until requests reach
+`ORDERBOOK_REQUEST_TIMEOUT_MS` (15 s by default). The service therefore bounds
+how many it admits at once:
+
+```dotenv
+ORDERBOOK_MAX_INFLIGHT_MUTATIONS=32
+```
+
+Accepted range 1 to 1024, default 32. Beyond the bound a mutating request is
+refused at the door with `503`, `Retry-After: 1` and
+`order book has too many requests in flight, retry shortly`, before its body is
+read and before the store is touched. Clients should retry after the named
+delay.
+
+What the bound covers and what it does not:
+
+- Gated: every mutating request, which is every non-`GET` except `heartbeat`.
+- Not gated: `GET /api/health`, `GET /api/status`, order views, the SSE stream
+  and heartbeats, so a mutation rush no longer makes the probes unanswerable.
+  The federation feed read has its own concurrency lane and keeps it.
+- Applied after the per-source rate limiter, so a flooding source is still
+  metered per source first.
+- It also bounds a group commit: at most this many mutations can be waiting for
+  one, so the batch latency a mutation can inherit is two commits.
+
+Raise it only with evidence: the queue it allows is paid in the latency of every
+request in it. Lower it to shed a rush earlier. A deployment that serves a
+handful of makers and takers never reaches the default.
+
 ## 3. Configure federation and browser access
 
 Federation peers are public API bases selected by operator policy. The list is
@@ -574,6 +607,12 @@ Use both endpoints:
 - `/api/status` is diagnostic. Alert when top-level `status` is not `ok`, when
   `feed.ready` is false, when `lease.ready` is false, or when a configured peer
   remains `degraded` or `stale` beyond your incident window.
+
+Watch the `503` rate on mutating routes as well. A sustained stream of
+`order book has too many requests in flight` means demand is past
+`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, which is a capacity signal rather than a
+fault: the book is shedding on purpose and its reads and probes are still being
+served.
 
 A `lease.ready` of false means writes are being refused while reads still
 serve. Treat a repeated occurrence as a storage fault on the state volume.
