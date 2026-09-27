@@ -37,9 +37,10 @@ function ipv6Groups(value: string): string[] | undefined {
     for (const token of part.split(":")) {
       if (token.includes(".")) {
         const octets = token.split(".").map((octet) => Number(octet));
-        if (octets.length !== 4 || octets.some((octet) => !(octet >= 0 && octet <= 255))) {
-          return [];
-        }
+        const valid =
+          octets.length === 4 &&
+          octets.every((octet) => octet >= 0 && octet <= 255);
+        if (!valid) return [];
         groups.push((((octets[0] ?? 0) << 8) | (octets[1] ?? 0)).toString(16));
         groups.push((((octets[2] ?? 0) << 8) | (octets[3] ?? 0)).toString(16));
         continue;

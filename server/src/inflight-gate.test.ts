@@ -472,7 +472,13 @@ describe("in-flight mutation gate", () => {
       // share of the body-read bound. Every further taker body is refused,
       // and none of them ever reaches the mutation bound at all.
       const held: Socket[] = [];
-      for (const source of ["198.51.100.31", "198.51.100.32", "198.51.100.33", "198.51.100.34"]) {
+      const floodSources = [
+        "198.51.100.31",
+        "198.51.100.32",
+        "198.51.100.33",
+        "198.51.100.34",
+      ];
+      for (const source of floodSources) {
         held.push(await halfOpenPost(book.port, 400, source));
         held.push(await halfOpenPost(book.port, 400, source));
       }
@@ -529,7 +535,13 @@ describe("in-flight mutation gate", () => {
       const id = String(order["id"]);
 
       const held: Socket[] = [];
-      for (const source of ["198.51.100.51", "198.51.100.52", "198.51.100.53", "198.51.100.54"]) {
+      const floodSources = [
+        "198.51.100.51",
+        "198.51.100.52",
+        "198.51.100.53",
+        "198.51.100.54",
+      ];
+      for (const source of floodSources) {
         held.push(await halfOpenPost(book.port, 400, source));
         held.push(await halfOpenPost(book.port, 400, source));
       }
