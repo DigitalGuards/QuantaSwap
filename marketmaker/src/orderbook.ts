@@ -65,9 +65,14 @@ export interface OrderView {
 }
 
 export class OrderGoneError extends Error {}
+/** The book refused a state transition or a duplicate request (HTTP 409):
+ *  wrong status, a conflicting replay, a reused capability, or a proposal
+ *  this identity already has pending. Retrying the same request unchanged
+ *  cannot succeed until something else changes. */
+export class OrderBookConflictError extends Error {}
 export class OrderBookUnavailableError extends Error {}
 export class OrderBookCapacityError extends OrderBookUnavailableError {}
-class OrderBookResponseError extends Error {}
+export class OrderBookResponseError extends Error {}
 
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const ETH_ADDRESS_RE = /^0x[0-9a-f]{40}$/;
@@ -80,14 +85,14 @@ const MAKER_TOKEN_RE = /^[0-9a-f]{64}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
 const MAX_BOOK_RESPONSE_BYTES = 2 * 1024 * 1024;
 
-function record(value: unknown, field: string): Record<string, unknown> {
+export function record(value: unknown, field: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${field} is malformed`);
   }
   return value as Record<string, unknown>;
 }
 
-function exactKeys(
+export function exactKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
   field: string,
@@ -101,7 +106,7 @@ function exactKeys(
   }
 }
 
-function stringMatching(
+export function stringMatching(
   value: unknown,
   pattern: RegExp,
   field: string,
@@ -112,7 +117,7 @@ function stringMatching(
   return value;
 }
 
-function safeInteger(value: unknown, field: string): number {
+export function safeInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${field} is malformed`);
   }
@@ -519,7 +524,7 @@ function parseIntentAuth(value: unknown, index: number): FillIntentAuthV1 {
   };
 }
 
-function parseIntentRow(value: unknown, index: number): SelectedFillIntentV1 {
+export function parseIntentRow(value: unknown, index: number): SelectedFillIntentV1 {
   const field = `fill intent ${index}`;
   const row = record(value, field);
   exactKeys(row, ["intentDigest", "intent", "auth", "receivedAt"], field);
@@ -602,7 +607,7 @@ export class OrderBookClient {
     private readonly timeoutMs = 20_000,
   ) {}
 
-  private async api<T>(
+  protected async api<T>(
     method: string,
     path: string,
     body?: unknown,
@@ -653,6 +658,11 @@ export class OrderBookClient {
         : undefined;
     if (res.status === 404)
       throw new OrderGoneError(error ?? "order not found");
+    if (res.status === 409) {
+      throw new OrderBookConflictError(
+        error ?? "order book rejected a conflicting request",
+      );
+    }
     if (!res.ok) {
       throw new Error(
         error ?? `order book request failed (HTTP ${res.status})`,

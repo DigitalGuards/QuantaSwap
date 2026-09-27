@@ -5,6 +5,12 @@ operator-owned wallets and inventory. It uses the same public order-book and
 HTLC protocol as the browser maker. It does not grant an operator any protocol
 privilege, custody user funds, or share keys with another LP.
 
+It also ships the scripted taker (`npm run taker`), the other seat at the same
+protocol: it verifies maker orders locally, proposes signed fills, and settles
+swaps end to end without a browser. Full guide:
+[`../docs/TAKERS.md`](../docs/TAKERS.md); configuration reference:
+[`.env.taker.example`](.env.taker.example).
+
 **Testnet only.** QuantaSwap has not completed a real-value deployment review.
 Use only Sepolia ETH/tokens and private QRL v3 testnet funds until that milestone is
 explicitly closed in the project release notes.
@@ -40,7 +46,7 @@ never strip the ledger or relabel recovery state to make a downgrade load.
 - a multi-stage image built from a digest-pinned Node base and `npm ci` lockfile;
 - a non-root, read-only runtime with all Linux capabilities dropped;
 - independent ETH and QRL wallet generation without printing either secret;
-- read-only secret mounts instead of secrets baked into the image;
+- read-only secret mounts, with no secrets baked into the image;
 - a persistent, deployment-bound state volume for swap recovery;
 - portable OrderV2 listings plus deterministic verification and selection of
   short-lived taker FillIntentV2 proofs;
@@ -354,7 +360,43 @@ monitoring, and encrypted backups. Sharing this image is useful. Sharing the
 original operator's `.env`, state volume, wallet files, server access, or market
 making account is not decentralization.
 
-The complete policy and endpoint reference is in [`.env.example`](.env.example).
+## Scripted taker
+
+The taker entry point is `dist/taker-cli.js` (`npm run taker -- <command>`),
+with `list`, `quote`, `take`, `resume`, `status` and `release`. It reuses this
+package's chain senders, ML-DSA-87 signing, protocol verification and process
+lease, and keeps its own `TAKER_*` configuration, key files and state file, so
+a taker and a maker never share a state path or a lease.
+
+- `list`, `quote` and `status` are read-only and take no state lease, so
+  `status` works while a take is running; `list` and `quote` need no keys.
+- `take` refuses to fund unless the maker escrow verifies at the configured
+  confirmation depth on every field, its timeout outlives the taker's deadline
+  by the configured claim margin, and an authenticated FillV2 acknowledgment is
+  already durable.
+- Recovery material, including the walk-away release secret, is persisted
+  before each network send, so `resume` continues an interrupted swap without
+  repeating a transaction. `resume` drives every unsettled take to an outcome,
+  with `--once` for a single cron-style pass. An escrow already claimed by a
+  sponsoring maker counts as a completed payout when it paid the agreed
+  recipient.
+- A transient failure is logged and retried after the poll interval; only a
+  long run of consecutive failures stops a command, leaving the record for a
+  supervised `resume`, which reports an unfinished take with its own status
+  code and works through takes by nearest deadline first. Settled takes stay
+  in a local history that `status` prints, with outcomes and transaction
+  hashes and no secrets.
+- `--dry-run` prints the action each step would take and sends, signs and
+  writes nothing.
+
+The published image carries the taker as a second command in the same image,
+so `docker run ... node dist/taker-cli.js list` needs no separate build or
+release. Configuration, funding and the safety flags are documented in
+[`../docs/TAKERS.md`](../docs/TAKERS.md).
+
+The complete policy and endpoint reference is in [`.env.example`](.env.example)
+for the maker and [`.env.taker.example`](.env.taker.example) for the taker.
 Protocol invariants and API details live in
-[`../docs/LIQUIDITY_PROVIDERS.md`](../docs/LIQUIDITY_PROVIDERS.md) and
+[`../docs/LIQUIDITY_PROVIDERS.md`](../docs/LIQUIDITY_PROVIDERS.md),
+[`../docs/TAKERS.md`](../docs/TAKERS.md) and
 [`../docs/ORDERBOOK_API.md`](../docs/ORDERBOOK_API.md).

@@ -35,7 +35,7 @@ Two modes share the same on-chain core:
 
 The WETH in the diagram stands for any supported Ethereum-leg asset: the same `lockToken` path carries WETH, USDC and USDT (asset registry: [`config/tokens.json`](config/tokens.json), including USDT's non-standard ERC-20 behavior and issuer blocklist analysis).
 
-Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Order book wire reference: [docs/ORDERBOOK_API.md](docs/ORDERBOOK_API.md). Running the maker side yourself: [docs/LIQUIDITY_PROVIDERS.md](docs/LIQUIDITY_PROVIDERS.md).
+Details, timelock math, and threat analysis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Order book wire reference: [docs/ORDERBOOK_API.md](docs/ORDERBOOK_API.md). Running the maker side yourself: [docs/LIQUIDITY_PROVIDERS.md](docs/LIQUIDITY_PROVIDERS.md). Taking orders from a script, for bots and aggregators: [docs/TAKERS.md](docs/TAKERS.md).
 
 Protocol-mode discovery is portable and mirrorable. Makers sign complete
 OrderV2 terms with ML-DSA-87, takers sign short-lived FillIntentV2 proposals,
@@ -73,9 +73,9 @@ config/        tokens.json: Ethereum-leg asset registry (WETH, USDC, USDT)
 scripts/       compile, anvil test suite, deploy + live smoke tooling
 frontend/      React + Vite swap UI (order book market + both-sides sandbox)
 server/        Self-hostable federated signed mirror (coordination only)
-marketmaker/   Reproducible self-hosted protocol-mode LP kit
+marketmaker/   Reproducible self-hosted protocol-mode LP kit and scripted taker CLI
 solver/        Solver service for solver mode (Phala TEE target), planned
-docs/          Architecture, deployments, order book API, LP guide
+docs/          Architecture, deployments, order book API, LP and taker guides
 ```
 
 Contracts are Hyperion-only; [QuantaPool](https://github.com/DigitalGuards/QuantaPool) is the reference for live Hyperion contracts on this stack. One reviewed source bundle produces an EVM-256 artifact for Ethereum and a QRVM-512 artifact for QRL. Target manifests bind compiler and codegen settings while enforcing source and ABI parity. The canonical gate (`npm test`) exercises the EVM artifact on a throwaway anvil and full-width Q128 semantics on QRVM. Frontend gates mirror QuantaPool: tests plus `build`.

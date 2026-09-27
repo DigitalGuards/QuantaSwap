@@ -12,6 +12,7 @@
     "build": "tsc",
     "init:keys": "npm run build && node dist/init-keys.js",
     "start": "node dist/index.js",
+    "taker": "npm run build && node dist/taker-cli.js",
     "test": "npm run build && node --test dist/*.test.js"
   },
   "dependencies": {

@@ -34,6 +34,27 @@ const resolvedWeb3 = ns.Web3 ?? ns.default?.Web3;
 if (!resolvedWeb3) throw new Error("@theqrl/web3 did not expose Web3");
 const Web3: Web3Ctor = resolvedWeb3;
 
+/** The slice of configuration a leg sender needs. Both the maker Config
+ *  and the taker config satisfy it, so one sender serves both roles. */
+export type EthLegConfig = Pick<
+  Config,
+  "ethRpcUrl" | "ethPrivateKey" | "ethHtlc" | "ethChainId" | "netTimeoutMs" | "txTimeoutMs"
+>;
+
+export type QrlLegConfig = Pick<
+  Config,
+  "qrlRpcUrl" | "qrlHexseed" | "qrlHtlc" | "qrlChainId" | "netTimeoutMs" | "txTimeoutMs"
+>;
+
+/** Transaction sender surface shared by both legs, so callers and tests
+ *  can depend on the capability, with the concrete client chosen by the
+ *  caller. */
+export interface LegSender {
+  readonly address: string;
+  balance(): Promise<bigint>;
+  send(data: string, valueWei: bigint, to?: string): Promise<string>;
+}
+
 interface QrlAccount {
   address: string;
 }
@@ -53,7 +74,7 @@ interface Qrlweb3 {
 const txHashHex = (h: unknown): string =>
   typeof h === "string" ? h : `0x${Buffer.from(h as Uint8Array).toString("hex")}`;
 
-export class EthLeg {
+export class EthLeg implements LegSender {
   readonly address: string;
   private readonly wallet: Wallet;
   private readonly provider: JsonRpcProvider;
@@ -61,7 +82,7 @@ export class EthLeg {
   private readonly txTimeoutMs: number;
   private readonly chainId: bigint;
 
-  constructor(cfg: Config) {
+  constructor(cfg: EthLegConfig) {
     // FetchRequest.timeout bounds every RPC request (submit, balance, etc.);
     // the ethers default is 5 minutes, far too long for the serial tick.
     const req = new FetchRequest(cfg.ethRpcUrl);
@@ -94,7 +115,7 @@ export class EthLeg {
   }
 }
 
-export class QrlLeg {
+export class QrlLeg implements LegSender {
   readonly address: string;
   private readonly web3: Qrlweb3;
   private readonly htlc: string;
@@ -103,7 +124,7 @@ export class QrlLeg {
   private readonly chainId: bigint;
   private readonly rpc: LegRpc;
 
-  constructor(cfg: Config) {
+  constructor(cfg: QrlLegConfig) {
     this.web3 = new Web3(new Web3.providers.HttpProvider(cfg.qrlRpcUrl));
     const account = this.web3.qrl.accounts.seedToAccount(cfg.qrlHexseed);
     assertQip55ExecutionReady(account.address, cfg.qrlHtlc);

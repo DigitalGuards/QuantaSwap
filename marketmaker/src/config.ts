@@ -95,30 +95,30 @@ export interface Config {
   sponsorClaims: boolean;
 }
 
-function env(name: string, fallback: string): string {
+export function env(name: string, fallback: string): string {
   const v = process.env[name];
   return v === undefined || v === "" ? fallback : v;
 }
 
-function envInt(name: string, fallback: number): number {
+export function envInt(name: string, fallback: number): number {
   const v = Number(env(name, String(fallback)));
   if (!Number.isFinite(v) || v <= 0) throw new Error(`${name} must be a positive number`);
   return Math.floor(v);
 }
 
-function envBool(name: string, fallback: boolean): boolean {
+export function envBool(name: string, fallback: boolean): boolean {
   const raw = env(name, String(fallback)).toLowerCase();
   if (raw !== "true" && raw !== "false") throw new Error(`${name} must be true or false`);
   return raw === "true";
 }
 
-function envWei(name: string, fallback: bigint): bigint {
+export function envWei(name: string, fallback: bigint): bigint {
   const raw = env(name, fallback.toString());
   if (!/^[0-9]{1,30}$/.test(raw)) throw new Error(`${name} must be a decimal wei string`);
   return BigInt(raw);
 }
 
-function envChainId(name: string, fallback: string): string {
+export function envChainId(name: string, fallback: string): string {
   const raw = env(name, fallback);
   if (!/^[0-9]+$/.test(raw) || BigInt(raw) <= 0n) {
     throw new Error(`${name} must be a positive decimal chain ID`);
