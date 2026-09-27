@@ -35,12 +35,14 @@ const orderBody = (index = 1): Record<string, unknown> => ({
 });
 
 describe("order-store persistence", () => {
-  it("allows a missing first-boot file and creates private durable state", () => {
+  it("allows a missing first-boot file and creates private durable state", async () => {
     const dataFile = join(makeTemp(), "nested", "orders.json");
     const store = new OrderStore(dataFile);
     assert.equal(store.storageReady(), true);
     const created = store.create(orderBody(), "203.0.113.1");
     assert.equal("creatorIpHash" in created.order, false);
+    // A mutation is durable once its group commit completes.
+    await store.flush();
     assert.equal(statSync(dataFile).mode & 0o777, 0o600);
     const persisted = JSON.parse(readFileSync(dataFile, "utf8")) as Array<
       Record<string, unknown>
@@ -48,7 +50,7 @@ describe("order-store persistence", () => {
     assert.match(String(persisted[0]?.["creatorIpHash"]), /^[0-9a-f]{64}$/);
   });
 
-  it("refuses corrupt or structurally invalid state without replacing it", () => {
+  it("refuses corrupt or structurally invalid state without replacing it", async () => {
     const directory = makeTemp();
     const corrupt = join(directory, "corrupt.json");
     writeFileSync(corrupt, "not-json");
@@ -66,15 +68,17 @@ describe("order-store persistence", () => {
     const duplicate = join(directory, "duplicate.json");
     const source = new OrderStore(duplicate);
     source.create(orderBody(), "203.0.113.1");
+    await source.flush();
     const rows = JSON.parse(readFileSync(duplicate, "utf8")) as unknown[];
     writeFileSync(duplicate, JSON.stringify([rows[0], rows[0]]));
     assert.throws(() => new OrderStore(duplicate), /duplicate id/);
   });
 
-  it("preserves legacy-width records and refuses to reinterpret them on v3", () => {
+  it("preserves legacy-width records and refuses to reinterpret them on v3", async () => {
     const file = join(makeTemp(), "legacy.json");
     const source = new OrderStore(file);
     source.create(orderBody(), "203.0.113.1");
+    await source.flush();
     const records = JSON.parse(readFileSync(file, "utf8")) as Array<
       Record<string, unknown>
     >;

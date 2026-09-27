@@ -136,6 +136,19 @@ Rules the lease follows:
   because the lease file briefly cannot be read, the write is refused with
   `503`, nothing changes on disk, and `/api/status` reports
   `lease.ready: false` until a later check succeeds.
+- Writes are group-committed, so one lost or unverifiable lease refuses every
+  request in the batch it was proved for, with `503` and nothing changed on
+  disk. Ownership is still proved at the start of each request, before any
+  in-memory change, so the common case is refused before a mutation exists and
+  the book keeps serving.
+- A commit runs an event-loop turn or more after that proof, so the check is
+  repeated immediately before the file is touched, and an unreadable lease is
+  re-read a small bounded number of times first. A lease that stays unreadable
+  across those attempts restarts the process, which is stricter than a refused
+  request: memory already holds mutations whose callers were told they failed,
+  so the only safe resolution is a restart that reloads the file. A repeated
+  occurrence is a storage fault on the state volume and the container or
+  supervisor restart policy is what recovers it.
 - `ORDERBOOK_DATA` and `ORDERBOOK_FEDERATION_DATA` may not end in `.lock`;
   startup rejects those paths because the suffix names the lease files.
 
@@ -187,6 +200,84 @@ An older binary ignores these files, so leaving them in place is safe on a
 rollback. They are also safe to leave inside a state backup: a restored
 `.lock` from a dead process is recognised as stale, by its process id on the
 same host or by its expired heartbeat otherwise.
+
+### Concurrency bound for mutating requests
+
+The book is one process, and every mutating request verifies an ML-DSA-87 proof
+and joins a group commit, so there is a small number of them in flight past
+which extra concurrency only lengthens the queue until requests reach
+`ORDERBOOK_REQUEST_TIMEOUT_MS` (15 s by default). The service therefore bounds
+how many it admits at once:
+
+```dotenv
+ORDERBOOK_MAX_INFLIGHT_MUTATIONS=32
+```
+
+Accepted range 1 to 1024, default 32. Beyond the bound a mutating request is
+refused with `503`, `Retry-After: 1`, an `X-Refusal-Stage: pre-verification`
+header and `order book has too many requests in flight, retry shortly`, before
+the store is touched. Clients should retry after the named delay.
+
+What the bound covers and what it does not:
+
+- Gated: every mutating request, which is `POST`, `PUT`, `PATCH` and `DELETE`
+  except `heartbeat`. `GET` and `HEAD` are reads and `OPTIONS` is answered
+  before this point.
+- Not gated: `GET /api/health`, `GET /api/status`, order views, the SSE stream
+  and heartbeats, so a mutation rush no longer makes the probes unanswerable.
+  The federation feed read has its own concurrency lane and keeps it.
+- The slot is taken once the request body is in hand, so it covers verification
+  and the group commit. Reading the body is bounded separately, below.
+- A refused request leaves the source's per-minute mutation budget untouched.
+  Only an admitted one is counted.
+- It also bounds a group commit: at most this many mutations can be waiting for
+  one, so the batch latency a mutation can inherit is two commits.
+
+A share of the bound is reachable only by the maker write routes, which are
+`POST /orders/signed`, `/cancel`, `/cancel/signed`, `/fill` and `/hashlock`:
+
+```dotenv
+ORDERBOOK_RESERVED_MAKER_MUTATIONS=8
+```
+
+Default 8, and it must stay below the bound itself; startup refuses a
+reservation that would leave takers nothing. A taker rush is exactly what fills
+the bound, and a maker who cannot withdraw a stale-priced order during one is
+exposed on price. With the defaults, takers share 24 slots and the maker routes
+can always reach the remaining 8. A quiet book gives a maker the whole bound, so
+a reprice that cancels and reposts 28 listings inside one window fits; during a
+full taker rush the same reprice proceeds 8 requests at a time, and its cancels,
+which are the part that stops the bleeding, always get in.
+
+The legacy unsigned `POST /orders` is deliberately outside the reserved class.
+It carries no proof, so it is the cheapest route to flood, and the reservation
+exists to keep a flood away from the maker's own path.
+
+Raise the bound only with evidence: the queue it allows is paid in the latency
+of every request in it. Lowering it sheds a rush earlier and also sheds
+legitimate work, including a maker repricing a deep book inside one mutation
+window. A deployment that serves a handful of makers and takers never reaches
+the default.
+
+### Body reads are bounded separately
+
+A request that promises a body and sends it slowly, or never, must not hold a
+mutation slot: a handful of those would refuse every writer for the whole
+`ORDERBOOK_REQUEST_TIMEOUT_MS` while `/api/health` still reported ready. Body
+reads therefore have their own bound and their own short deadline:
+
+```dotenv
+ORDERBOOK_MAX_INFLIGHT_BODY_READS=256
+ORDERBOOK_BODY_READ_TIMEOUT_MS=3000
+```
+
+Ranges 8 to 4096 and 250 ms to 60 s. At most 8 concurrent body reads come from
+one source. A body that misses the deadline is answered `408 request body was
+too slow`, its remaining bytes are read and discarded without being buffered,
+and the connection closes; the service request timeout still closes the socket
+itself. Raise the deadline only for genuinely slow clients on a slow link. The
+bound is wide on purpose, because reading a body is cheap and the deadline is
+what limits the damage.
 
 ## 3. Configure federation and browser access
 
@@ -567,6 +658,11 @@ Use both endpoints:
 - `/api/status` is diagnostic. Alert when top-level `status` is not `ok`, when
   `feed.ready` is false, when `lease.ready` is false, or when a configured peer
   remains `degraded` or `stale` beyond your incident window.
+
+Watch the `503` rate on mutating routes as well. A sustained stream of
+`order book has too many requests in flight` means demand is past
+`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`. That is a capacity signal: the book is
+shedding on purpose and its reads and probes are still being served.
 
 A `lease.ready` of false means writes are being refused while reads still
 serve. Treat a repeated occurrence as a storage fault on the state volume.

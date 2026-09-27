@@ -19,6 +19,29 @@ import { verifyOrderCapabilities } from "./orderSigning";
 
 export class OrderGoneError extends Error {}
 
+/**
+ * The mirror refused this request for capacity before it did any work, and said
+ * when to come back. Its own class so a caller can retry or tell the visitor to
+ * wait, where a plain Error reads like a failure the request caused.
+ */
+export class OrderBookBusyError extends Error {
+  constructor(
+    message: string,
+    /** Seconds the mirror asked the caller to wait, when it named one. */
+    readonly retryAfterS?: number,
+  ) {
+    super(message);
+    this.name = "OrderBookBusyError";
+  }
+}
+
+/** `Retry-After` in delta-seconds form, which is what the mirror sends. */
+function retryAfterSeconds(header: string | null): number | undefined {
+  if (header === null || !/^[0-9]{1,6}$/.test(header.trim())) return undefined;
+  const seconds = Number(header.trim());
+  return Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
 export interface FillIntentView extends SignedFillIntentV1 {
   intentDigest: string;
   receivedAt: number;
@@ -266,6 +289,14 @@ export class OrderbookClient {
       typeof errorPayload.error === "string" ? errorPayload.error : undefined;
     if (response.status === 404) {
       throw new OrderGoneError(error ?? "order not found");
+    }
+    if (response.status === 503 || response.status === 429) {
+      // Shed for capacity, before the mirror verified anything. Nothing was
+      // applied, so this is safe to retry after the delay it named.
+      throw new OrderBookBusyError(
+        error ?? "order book is busy, retry shortly",
+        retryAfterSeconds(response.headers.get("Retry-After")),
+      );
     }
     if (!response.ok) {
       throw new Error(error ?? `order book request failed (HTTP ${response.status})`);

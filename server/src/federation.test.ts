@@ -370,6 +370,62 @@ describe("federation event feed", () => {
     });
   });
 
+  it("appends a batch of events under one barrier", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      const records = feed.appendBatch(
+        [orderEvent("one"), orderEvent("two"), orderEvent("three")],
+        100,
+      );
+      assert.deepEqual(
+        records.map((record) => record.seq),
+        [1, 2, 3],
+      );
+      assert.equal(feed.status().latestSequence, 3);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      for (const id of ["one", "two", "three"]) {
+        assert.equal(restored.has(federationEventId(orderEvent(id))), true);
+      }
+      // A replayed event in a batch keeps its first sequence number.
+      assert.deepEqual(
+        feed.appendBatch([orderEvent("two")], 101).map((record) => record.seq),
+        [2],
+      );
+      assert.equal(feed.status().latestSequence, 3);
+      assert.deepEqual(feed.appendBatch([], 101), []);
+    });
+  });
+
+  it("rolls a whole batch out of the ring when its write fails", () => {
+    withTempFile((file) => {
+      const feed = new FederationFeed(file, 8);
+      feed.append(orderEvent("one"), 100);
+      const before = readFileSync(file, "utf8");
+      const status = feed.status();
+      const seam = writeSeam(feed);
+      seam.writeChunk = (fileDescriptor, buffer, offset) => {
+        writeSync(fileDescriptor, buffer, offset, 8);
+        throw new Error("simulated write failure");
+      };
+      assert.throws(
+        () => feed.appendBatch([orderEvent("two"), orderEvent("three")], 101),
+        /persisted safely/,
+      );
+      Reflect.deleteProperty(seam, "writeChunk");
+      assert.equal(readFileSync(file, "utf8"), before);
+      assert.deepEqual(feed.status(), status);
+      assert.equal(feed.has(federationEventId(orderEvent("two"))), false);
+      assert.equal(feed.has(federationEventId(orderEvent("three"))), false);
+
+      // The retained ring took the batch back, so re-appending it is clean.
+      feed.appendBatch([orderEvent("two"), orderEvent("three")], 102);
+      const restored = new FederationFeed(file, 8);
+      assert.deepEqual(restored.status(), feed.status());
+      assert.equal(restored.status().latestSequence, 3);
+    });
+  });
+
   it("leaves the log byte-identical when an append write fails", () => {
     withTempFile((file) => {
       const feed = new FederationFeed(file, 8);

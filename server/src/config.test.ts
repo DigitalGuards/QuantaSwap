@@ -11,6 +11,7 @@ describe("order-book runtime configuration", () => {
     assert.equal(config.port, 8091);
     assert.equal(config.proxyTrust, "loopback");
     assert.equal(config.presenceTtlS, 90);
+    assert.equal(config.maxInflightMutations, 32);
     assert.deepEqual(config.federationPeers, []);
     assert.deepEqual(config.federationPeerIds, []);
     assert.deepEqual(config.federationPeerTokens, []);
@@ -50,6 +51,55 @@ describe("order-book runtime configuration", () => {
     assert.equal(config.federationOnionOnly, false);
     assert.equal(config.federationOnionProxy, null);
     assert.deepEqual(config.corsOrigins, ["https://swap.example", "http://127.0.0.1:5173"]);
+  });
+
+  it("bounds the in-flight mutation gate", () => {
+    const defaults = readConfig({});
+    assert.equal(defaults.maxInflightMutations, 32);
+    assert.equal(defaults.reservedMakerMutations, 8);
+    assert.equal(defaults.maxInflightBodyReads, 256);
+    assert.equal(defaults.bodyReadTimeoutMs, 3000);
+    assert.equal(
+      readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "16" })
+        .maxInflightMutations,
+      16,
+    );
+    assert.equal(
+      readConfig({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "4",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+      }).reservedMakerMutations,
+      1,
+    );
+    // Reserving the whole bound would leave takers nothing.
+    assert.throws(
+      () =>
+        readConfig({
+          ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "8",
+          ORDERBOOK_RESERVED_MAKER_MUTATIONS: "8",
+        }),
+      /ORDERBOOK_RESERVED_MAKER_MUTATIONS must be below/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_BODY_READS: "4" }),
+      /ORDERBOOK_MAX_INFLIGHT_BODY_READS must be between 8 and 4096/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_BODY_READ_TIMEOUT_MS: "100" }),
+      /ORDERBOOK_BODY_READ_TIMEOUT_MS must be between 250 and 60000/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "0" }),
+      /ORDERBOOK_MAX_INFLIGHT_MUTATIONS must be between 1 and 1024/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "1025" }),
+      /ORDERBOOK_MAX_INFLIGHT_MUTATIONS must be between 1 and 1024/,
+    );
+    assert.throws(
+      () => readConfig({ ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "many" }),
+      /must be an integer/,
+    );
   });
 
   it("fails fast on ambiguous or unsafe values", () => {

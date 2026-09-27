@@ -110,6 +110,14 @@ interface CachedResetPage {
   page: FederationPage;
 }
 
+/** One event applied to the retained ring, with the log lines it still owes
+ *  the file and the undo that removes it again. */
+interface StagedAppend {
+  lines: unknown[];
+  record: FederationRecord;
+  rollback: () => void;
+}
+
 /** Identifies the log file this process opened, so a file another process put
  *  in its place is never appended to. */
 interface LogFileIdentity {
@@ -377,11 +385,64 @@ export class FederationFeed {
     return after < oldest - 1 || after > highWater;
   }
 
+  /**
+   * Appends one event under its own durability barrier. The order book's write
+   * path uses `appendBatch`, which shares one barrier across a group commit;
+   * this single-event form stays the primitive for callers that append exactly
+   * one line, and both share `stageAppend` so their bookkeeping cannot drift.
+   */
   append(
     raw: FederationEvent,
     receivedAt = Math.floor(Date.now() / 1000),
     snapshot?: readonly FederationEvent[],
   ): FederationRecord {
+    const staged = this.stageAppend(raw, receivedAt, snapshot);
+    if (staged.lines.length === 0) return staged.record;
+    try {
+      this.appendLines(staged.lines);
+    } catch (error) {
+      staged.rollback();
+      throw error;
+    }
+    return staged.record;
+  }
+
+  /**
+   * Appends every event of one group commit under one durability barrier. An
+   * empty batch writes nothing. A failure rolls the whole batch out of the
+   * retained ring and leaves the log byte-identical, so the caller can refuse
+   * every request the batch carried.
+   */
+  appendBatch(
+    raws: readonly FederationEvent[],
+    receivedAt = Math.floor(Date.now() / 1000),
+  ): FederationRecord[] {
+    if (raws.length === 0) return [];
+    const staged: StagedAppend[] = [];
+    const lines: unknown[] = [];
+    try {
+      for (const raw of raws) {
+        const entry = this.stageAppend(raw, receivedAt);
+        staged.push(entry);
+        lines.push(...entry.lines);
+      }
+      if (lines.length > 0) this.appendLines(lines);
+    } catch (error) {
+      for (const entry of [...staged].reverse()) entry.rollback();
+      throw error;
+    }
+    return staged.map((entry) => entry.record);
+  }
+
+  /**
+   * Applies one event to the retained ring and returns the log lines it needs,
+   * with the undo that puts the ring back. Nothing touches the file here.
+   */
+  private stageAppend(
+    raw: FederationEvent,
+    receivedAt: number,
+    snapshot?: readonly FederationEvent[],
+  ): StagedAppend {
     const event = parseFederationEvent(raw);
     const eventId = federationEventId(event);
     const existing = this.events.find((entry) => entry.eventId === eventId);
@@ -395,7 +456,11 @@ export class FederationFeed {
     if (existing !== undefined && nextSnapshotDigest === this.snapshotDigest) {
       // The caller's snapshot changed behind any cached reset cursor.
       if (snapshot === undefined) this.cachedResetPage = undefined;
-      return publicRecord(existing);
+      return {
+        lines: [],
+        record: publicRecord(existing),
+        rollback: (): void => {},
+      };
     }
     if (!Number.isSafeInteger(receivedAt) || receivedAt < 0) {
       throw new Error("federation event receive time is invalid");
@@ -437,22 +502,26 @@ export class FederationFeed {
     ) {
       this.cachedResetPage = undefined;
     }
-    try {
-      this.appendLines(lines);
-    } catch (error) {
-      this.nextSeq = previousNextSeq;
-      this.snapshotDigest = previousSnapshotDigest;
-      if (existing === undefined) {
-        this.events.pop();
-        this.eventIds.delete(eventId);
-      }
-      for (const entry of removed.reverse()) {
-        this.events.unshift(entry);
-        this.eventIds.add(entry.eventId);
-      }
-      throw error;
-    }
-    return publicRecord(existing ?? record);
+    return {
+      lines,
+      record: publicRecord(existing ?? record),
+      rollback: (): void => {
+        this.nextSeq = previousNextSeq;
+        this.snapshotDigest = previousSnapshotDigest;
+        if (existing === undefined) {
+          const index = this.events.lastIndexOf(record);
+          if (index !== -1) this.events.splice(index, 1);
+          this.eventIds.delete(eventId);
+        }
+        for (const entry of removed.reverse()) {
+          // A batch longer than the retained ring can trim its own new record.
+          if (entry === record) continue;
+          this.events.unshift(entry);
+          this.eventIds.add(entry.eventId);
+        }
+        this.cachedResetPage = undefined;
+      },
+    };
   }
 
   /** Record the current store snapshot digest, typically at shutdown, so an
