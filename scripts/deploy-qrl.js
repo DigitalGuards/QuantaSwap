@@ -1,4 +1,4 @@
-// Deploy the HTLC to the pinned private v3 testnet.
+// Deploy an HTLC to the pinned private v3 testnet.
 // Required env (.env): QRL_RPC_URL, QRL_HEXSEED (funded Dilithium hex seed)
 // Run scripts/compile.js first.
 
@@ -15,7 +15,14 @@ if (!rpc || !hexseed) {
   process.exit(1);
 }
 
-const { abi, bytecode, deployedBytecode } = loadArtifact("qrl", "HTLC");
+// HTLC_CONTRACT selects the qualified contract: HTLC (the deployed v2
+// interface, the default) or HTLCv3 (payout credits, issue #47).
+const contractName = process.env.HTLC_CONTRACT ?? "HTLC";
+if (contractName !== "HTLC" && contractName !== "HTLCv3") {
+  console.error("HTLC_CONTRACT must be HTLC or HTLCv3");
+  process.exit(1);
+}
+const { abi, bytecode, deployedBytecode } = loadArtifact("qrl", contractName);
 
 const web3 = new Web3(new Web3.providers.HttpProvider(rpc));
 const acc = web3.qrl.accounts.seedToAccount(hexseed);
@@ -57,7 +64,7 @@ async function main() {
   });
 
   assertQip55Deployment(address);
-  console.log(`[deploy-qrl] HTLC deployed at ${address}`);
+  console.log(`[deploy-qrl] ${contractName} deployed at ${address}`);
   const code = await web3.qrl.getCode(address);
   if (code.toLowerCase() !== deployedBytecode.toLowerCase()) {
     throw new Error("deployed QRL runtime differs from the qualified artifact");
