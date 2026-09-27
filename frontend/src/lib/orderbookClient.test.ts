@@ -273,6 +273,7 @@ describe("endpoint-bound order book client", () => {
               headers: {
                 "Content-Type": "application/json",
                 "Retry-After": "1",
+                "X-Refusal-Stage": "pre-verification",
               },
             },
           ),
@@ -292,6 +293,22 @@ describe("endpoint-bound order book client", () => {
     const failure = await client.get("order-1").catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(OrderBookBusyError);
     expect((failure as OrderBookBusyError).retryAfterS).toBeUndefined();
+  });
+
+  it("keeps a service-problem 503 out of the busy class", async () => {
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      {
+        fetch: async () =>
+          response({ error: "order book storage is unavailable" }, 503),
+      },
+    );
+    // No pre-verification stage, so the mirror is reporting a fault of its own
+    // and a retry on the named delay would only hammer it.
+    const failure = await client.get("order-1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(OrderBookBusyError);
+    expect((failure as Error).message).toContain("storage is unavailable");
   });
 
   it("bounds list snapshots and rejects malformed rows", async () => {

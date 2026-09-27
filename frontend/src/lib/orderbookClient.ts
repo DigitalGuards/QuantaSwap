@@ -290,9 +290,16 @@ export class OrderbookClient {
     if (response.status === 404) {
       throw new OrderGoneError(error ?? "order not found");
     }
-    if (response.status === 503 || response.status === 429) {
-      // Shed for capacity, before the mirror verified anything. Nothing was
-      // applied, so this is safe to retry after the delay it named.
+    // A refusal the mirror produced before it verified anything is a capacity
+    // answer: nothing was applied and the same request is safe to send again
+    // after the delay it named. It says so itself in X-Refusal-Stage, and a
+    // rate limit is the same kind of answer. Any other 503 is the mirror
+    // reporting a problem of its own, such as storage it cannot write or data
+    // it no longer owns, and retrying that on a timer helps nobody.
+    const shed =
+      response.headers.get("X-Refusal-Stage") === "pre-verification" ||
+      response.status === 429;
+    if (shed && (response.status === 503 || response.status === 429)) {
       throw new OrderBookBusyError(
         error ?? "order book is busy, retry shortly",
         retryAfterSeconds(response.headers.get("Retry-After")),
