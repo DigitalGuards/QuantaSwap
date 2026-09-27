@@ -4,6 +4,8 @@
 const PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ["rate limited, slow down", "http_per_ip_rate_limit"],
   ["too many requests in flight", "book_inflight_gate"],
+  ["too many request bodies in flight", "book_body_read_gate"],
+  ["request body was too slow", "body_read_timeout"],
   ["too many pending fill intents", "order_live_intent_cap"],
   ["too many retained fill intents", "order_retained_intent_cap"],
   ["already have fill requests in progress", "source_concurrent_cap"],
@@ -25,27 +27,19 @@ const PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ["shutting down", "shutting_down"],
 ];
 
-/** Reasons the book answers before the router reaches signature verification.
- *  The in-flight gate, the per-source HTTP limiter and the shutdown gate sit in
- *  front of every handler, and the fill-intent route sheds the refusals it can
- *  reach from the order row and the caller's address before it verifies, so all
- *  of these replies cost almost nothing to produce. A proposal whose nonce the
- *  order already retains skips that gate and is verified, so the state and
- *  capacity codes below are a shed for every new nonce and, for a replayed one,
- *  a full verification counted in the wrong bucket. */
-const PRE_VERIFICATION_CODES = new Set([
-  "book_inflight_gate",
-  "http_per_ip_rate_limit",
-  "shutting_down",
-  "order_live_intent_cap",
-  "source_concurrent_cap",
-  "source_daily_cap",
-  "order_not_open",
-  "insufficient_runway",
-]);
-
-export function isPreVerificationShed(reason: string): boolean {
-  return PRE_VERIFICATION_CODES.has(reason);
+/**
+ * Whether the book answered this refusal before it verified anything. The
+ * service says so itself in the `X-Refusal-Stage` response header, on the
+ * in-flight gate, the body-read bound, the per-source limiter, the shutdown
+ * gate and every refusal the fill-intent route reaches from the stored order
+ * and the caller's address. Reading the header keeps the split exact: the same
+ * message can be a cheap shed for a new nonce and a fully verified refusal for
+ * a proposal the order already retains.
+ */
+export function isPreVerificationShed(reply: {
+  refusalStage?: string;
+}): boolean {
+  return reply.refusalStage === "pre-verification";
 }
 
 export function classifyReason(

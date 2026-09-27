@@ -10,6 +10,11 @@ export interface Reply {
   status: number;
   body: Record<string, unknown> | undefined;
   latencyMs: number;
+  /** The book's own statement that this refusal was answered before any
+   *  signature verification. Read from the X-Refusal-Stage response header, so
+   *  the split between a cheap shed and a verified refusal comes from the
+   *  service and never from matching message text. */
+  refusalStage?: string;
   /** Set when the request never produced a status line. */
   transportError?: string;
 }
@@ -80,11 +85,13 @@ export class BookClient {
         (res) => {
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          const stage = res.headers["x-refusal-stage"];
           res.on("end", () => {
             resolve({
               status: res.statusCode ?? 0,
               body: parseJson(Buffer.concat(chunks)),
               latencyMs: performance.now() - startedAt,
+              ...(typeof stage === "string" ? { refusalStage: stage } : {}),
             });
           });
         },

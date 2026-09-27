@@ -495,11 +495,11 @@ async function submitIntent(
   collector.refused += 1;
   const reason = classifyReason(reply.status, reply.body);
   collector.reasons.add(reason);
-  // The per-source HTTP limiter answers before the router reaches signature
-  // verification, so those replies cost the book almost nothing. Keeping them
-  // in their own bucket stops them from flattering the verified-and-refused
-  // figure.
-  if (isPreVerificationShed(reason)) {
+  // A refusal the book answered before any signature work costs it almost
+  // nothing. The book marks those replies itself, so keeping them in their own
+  // bucket stops them from flattering the verified-and-refused figure and
+  // never depends on reading the message.
+  if (isPreVerificationShed(reply)) {
     collector.shedBeforeVerifyLatency.add(reply.latencyMs);
   } else {
     collector.refusedAfterVerifyLatency.add(reply.latencyMs);
