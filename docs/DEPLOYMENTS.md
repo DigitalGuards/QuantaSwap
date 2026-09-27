@@ -1,5 +1,22 @@
 # Deployments
 
+## HTLCv3 staged, 2026-09-27 (not yet used by any client)
+
+HTLCv3 (issue #47: payout credits, see [`docs/audit/HTLCV3_SCOPE.md`](audit/HTLCV3_SCOPE.md))
+is deployed on both legs from the qualified artifacts of source bundle
+`674904c7df7b56db0d88c99539ffd7edc7f7990f7e6df5e7a18f3c7324c37ca5`. The live swap flow still uses the HTLCv2 deployment below until the
+client integration and a new protocol configuration ship. Both deployed runtimes
+matched their qualified artifacts at deploy time (EVM 5,212 bytes, QRVM-512 6,225
+bytes).
+
+| Leg | Chain ID | HTLCv3 address | Deploy transaction |
+|---|---|---|---|
+| QRL private v3 | `3151909` | `QBFe68340591f82a68C2258FA2cE7C02Be21E5fc7Bb71615B56a509db4985e863D9243B74da6335C065e257A01d40354653E551907338DBDc7A6b342ea2274437` | `0x9e91eece45845e4527575d54df223923b5a1bb27b4ce2cd7357b87af6700debf` |
+| Ethereum Sepolia | `11155111` | `0xCD5Aa74452cC29e73C6e52591b3b54D775C683e4` | `0xcaa1acb4ff58ac0a64db74001e83fdb8ac5cb036cc4bca6401f402047168a479` |
+
+Deploy with `HTLC_CONTRACT=HTLCv3 npm run deploy:eth` and
+`HTLC_CONTRACT=HTLCv3 npm run deploy:qrl` after `npm run compile`.
+
 ## Private v3 testnet release, 2026-09-21
 
 The current deployment uses Sepolia and the private QRL v3 testnet. QRL network v3,

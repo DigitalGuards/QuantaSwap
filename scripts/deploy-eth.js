@@ -1,4 +1,4 @@
-// Deploy the HTLC to the Ethereum leg (Sepolia for now).
+// Deploy an HTLC to the Ethereum leg (Sepolia for now).
 // Loads the target-bound EVM artifact compiled from the shared Hyperion source.
 // Required env (.env): ETH_RPC_URL, ETH_PRIVATE_KEY
 // Run scripts/compile.js first.
@@ -15,7 +15,14 @@ if (!rpc || !key) {
   process.exit(1);
 }
 
-const { abi, bytecode, deployedBytecode } = loadArtifact("evm", "HTLC");
+// HTLC_CONTRACT selects the qualified contract: HTLC (the deployed v2
+// interface, the default) or HTLCv3 (payout credits, issue #47).
+const contractName = process.env.HTLC_CONTRACT ?? "HTLC";
+if (contractName !== "HTLC" && contractName !== "HTLCv3") {
+  console.error("HTLC_CONTRACT must be HTLC or HTLCv3");
+  process.exit(1);
+}
+const { abi, bytecode, deployedBytecode } = loadArtifact("evm", contractName);
 
 async function main() {
   const provider = new ethers.JsonRpcProvider(rpc);
@@ -33,7 +40,7 @@ async function main() {
   await contract.waitForDeployment();
 
   const address = await contract.getAddress();
-  console.log(`[deploy-eth] HTLC deployed at ${address}`);
+  console.log(`[deploy-eth] ${contractName} deployed at ${address}`);
   const code = await provider.getCode(address);
   if (code.toLowerCase() !== deployedBytecode.toLowerCase()) {
     throw new Error("deployed Ethereum runtime differs from the qualified artifact");
