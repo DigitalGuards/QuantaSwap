@@ -709,6 +709,19 @@ describe("our own escrow with the wrong terms", () => {
     );
     assert.equal(verdict.decision, "refund");
   });
+
+  it("counts as exposed even when the lock marker is missing", () => {
+    const verdict = decideTaker(
+      input({
+        rState: mismatched,
+        cancelled: true,
+        bookStatus: "cancelled",
+        record: record({ lockSentAt: null }),
+      }),
+    );
+    assert.equal(verdict.decision, "wait");
+    assert.match(verdict.reason, /refund/);
+  });
 });
 
 describe("take bounds", () => {

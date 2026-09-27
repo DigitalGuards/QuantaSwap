@@ -338,6 +338,7 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
   const exposed =
     record.lockSentAt !== null ||
     ownLock.state === "ours" ||
+    ownLock.state === "ours-mismatched" ||
     ownLock.state === "settled";
 
   if (!exposed) {
