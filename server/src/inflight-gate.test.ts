@@ -154,6 +154,40 @@ async function halfOpenPost(port: number, bytes = 400): Promise<Socket> {
   return socket;
 }
 
+/**
+ * One POST on a socket of its own. The global fetch pools and can serialise
+ * requests to one origin, which is not the concurrency these bounds are about,
+ * so a test that needs N requests genuinely in flight opens N sockets.
+ */
+async function rawPost(
+  port: number,
+  path: string,
+  payload: string,
+  forwardedFor?: string,
+): Promise<{ status: number; stage: string | null; text: string }> {
+  const socket = connect(port, "127.0.0.1");
+  sockets.push(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve());
+    socket.once("error", reject);
+  });
+  const body = Buffer.from(payload, "utf8");
+  socket.write(
+    `POST ${path} HTTP/1.1\r\nHost: 127.0.0.1\r\n` +
+      "Content-Type: application/json\r\n" +
+      (forwardedFor === undefined
+        ? ""
+        : `X-Forwarded-For: ${forwardedFor}\r\n`) +
+      `Content-Length: ${String(body.byteLength)}\r\n\r\n`,
+  );
+  socket.write(body);
+  const reply = await readSocket(socket);
+  socket.destroy();
+  const status = Number(/^HTTP\/1\.1 ([0-9]{3})/.exec(reply)?.[1] ?? "0");
+  const stage = /x-refusal-stage: ([a-z-]+)/i.exec(reply)?.[1] ?? null;
+  return { status, stage, text: reply };
+}
+
 function readSocket(socket: Socket): Promise<string> {
   return new Promise<string>((resolve) => {
     let text = "";
@@ -177,7 +211,12 @@ describe("in-flight mutation gate", () => {
       });
       const burst = await Promise.all(
         Array.from({ length: 12 }, (_value, index) =>
-          postOrder(book.port, index + 1),
+          rawPost(
+            book.port,
+            "/api/orders",
+            makerOrder(index + 1),
+            `198.51.100.${String(index + 1)}`,
+          ),
         ),
       );
       const created = burst.filter((reply) => reply.status === 201);
@@ -186,11 +225,12 @@ describe("in-flight mutation gate", () => {
       assert.ok(refused.length >= 1, "a burst of twelve must be shed");
       assert.equal(created.length + refused.length, burst.length);
       for (const reply of refused) {
-        assert.equal(reply.retryAfter, "1");
+        assert.match(reply.text, /retry-after: 1/i);
         assert.equal(reply.stage, "pre-verification");
-        assert.deepEqual(reply.body, {
-          error: "order book has too many requests in flight, retry shortly",
-        });
+        assert.match(
+          reply.text,
+          /order book has too many requests in flight, retry shortly/,
+        );
       }
 
       // Reads and the probes are not gated, so the book stays answerable
@@ -329,26 +369,38 @@ describe("in-flight mutation gate", () => {
       assert.equal(typeof id, "string");
       assert.equal(typeof makerToken, "string");
 
-      // One taker slot only, so a taker burst can never take the last slot.
-      // The maker's cancel goes through while that burst is refused.
+      // One taker slot only, so a taker burst cannot take the last slot. The
+      // maker's cancel goes through while that burst is being refused.
       const burst = Array.from({ length: 10 }, (_value, index) =>
-        postOrder(book.port, index + 10),
+        rawPost(
+          book.port,
+          "/api/orders",
+          makerOrder(index + 10),
+          `198.51.100.${String(index + 1)}`,
+        ),
       );
-      const cancel = fetch(
-        `http://127.0.0.1:${String(book.port)}/api/orders/${String(id)}/cancel`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: makerToken }),
-        },
+      const cancel = rawPost(
+        book.port,
+        `/api/orders/${String(id)}/cancel`,
+        JSON.stringify({ token: makerToken }),
+        "192.0.2.7",
       );
       const [cancelled, ...rest] = await Promise.all([cancel, ...burst]);
-      const cancelBody = (await cancelled.json()) as {
-        order?: { status?: string };
-      };
       assert.equal(cancelled.status, 200);
-      assert.equal(cancelBody.order?.status, "cancelled");
-      assert.ok(rest.length === 10);
+      assert.match(cancelled.text, /"status":"cancelled"/);
+      assert.equal(rest.length, 10);
+      // The reserved headroom is for maker paths only, so the taker burst
+      // cannot reach it and part of it is shed.
+      const shed = rest.filter((reply) => reply.status === 503);
+      assert.ok(
+        shed.length >= 1,
+        `a taker burst above the taker ceiling must be shed: ${rest
+          .map((reply) => String(reply.status))
+          .join(",")}`,
+      );
+      for (const reply of shed) {
+        assert.equal(reply.stage, "pre-verification");
+      }
     },
   );
 

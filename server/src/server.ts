@@ -646,13 +646,19 @@ const bodyReadLimiter = new FederationConcurrencyLimiter({
 });
 
 /**
- * Maker-authenticated write routes, recognised from the path alone so the
- * decision is available before the body is read. A maker must be able to
- * withdraw or fill a stale-priced order while takers rush it, so these keep
- * reserved headroom inside the in-flight bound.
+ * Maker write routes, recognised from the path alone so the decision is
+ * available before the body is read. A maker must be able to withdraw, fill,
+ * announce and repost while takers rush the book, so these keep reserved
+ * headroom inside the in-flight bound: a reprice cancels and reposts every
+ * listing inside one mutation window, and losing half of that to a taker rush
+ * leaves stale prices standing.
+ *
+ * The legacy unsigned create is deliberately left out. It carries no proof, so
+ * it is the cheapest route to flood, and the reserved headroom exists to keep a
+ * flood from reaching the maker's own path.
  */
 const MAKER_WRITE_PATH_RE =
-  /^\/api\/orders\/[^/]+\/(?:cancel|cancel\/signed|fill)$/;
+  /^\/api\/orders\/(?:signed|[^/]+\/(?:cancel|cancel\/signed|fill|hashlock))$/;
 
 /**
  * Runs the expensive half of a mutating request under the in-flight bound. The

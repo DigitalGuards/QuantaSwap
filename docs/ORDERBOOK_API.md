@@ -449,11 +449,29 @@ sybil resistance):
 
 Concurrent mutating requests are bounded across all sources
 (`ORDERBOOK_MAX_INFLIGHT_MUTATIONS`, default 32). Past the bound a mutating
-request is refused at the door with `503`, `Retry-After: 1` and
-`order book has too many requests in flight, retry shortly`, before its body is
-read: retry after the named delay. Reads, heartbeats, the SSE stream,
-`/api/health` and `/api/status` are not gated, so they keep answering while a
-rush is shed.
+request is refused with `503`, `Retry-After: 1` and
+`order book has too many requests in flight, retry shortly`: nothing was
+applied, so retry after the named delay. A share of the bound
+(`ORDERBOOK_RESERVED_MAKER_MUTATIONS`, default 8) is reachable only by the maker
+write routes, which are `POST /orders/signed`, `/cancel`, `/cancel/signed`,
+`/fill` and `/hashlock`, so a taker rush cannot stop a maker from withdrawing or
+reposting an order. Reads, heartbeats, the SSE
+stream, `/api/health` and `/api/status` are not gated, so they keep answering
+while a rush is shed. A refused request does not spend the source's per-minute
+mutation budget.
+
+Request bodies are bounded separately (`ORDERBOOK_MAX_INFLIGHT_BODY_READS`,
+default 256, at most 8 per source) and read under their own deadline
+(`ORDERBOOK_BODY_READ_TIMEOUT_MS`, default 3 s). A body that arrives too slowly
+is refused with `408 request body was too slow` and the connection closes. Send
+the whole body promptly after the headers.
+
+Every refusal the book produced before it verified anything carries
+`X-Refusal-Stage: pre-verification`. That covers the two bounds above, the
+per-source rate limiter, the shutdown gate and the fill-intent refusals
+described below. It is a diagnostic, and a client needs only the status code.
+Browsers may read `Retry-After` on these replies: the configured-origin CORS
+policy exposes it.
 
 SSE stream: at most **200 concurrent connections** overall and **4 per IP**;
 beyond that the endpoint answers `503` and you should fall back to polling.
