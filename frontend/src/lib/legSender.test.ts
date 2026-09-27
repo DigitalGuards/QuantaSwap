@@ -1,7 +1,19 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserProvider } from "ethers";
 import { ETH_LEG, QRL_LEG } from "../config";
-import { makeLegSender, makePreflightedClaimSender, type LegSenderHandles } from "./legSender";
+import {
+  DELIVERY_GAS_LIMIT,
+  DELIVERY_GAS_RESERVE,
+  SETTLEMENT_GAS_BUFFER,
+  htlcInterface,
+  resetDeliveryGasPolicyCache,
+} from "./htlc";
+import {
+  makeLegSender,
+  makePreflightedClaimSender,
+  makeSettlementSender,
+  type LegSenderHandles,
+} from "./legSender";
 
 vi.mock("../config", async importOriginal => {
   const actual = await importOriginal<typeof import("../config")>();
@@ -13,19 +25,51 @@ const DATA = `0x${"12".repeat(68)}`;
 const ETH_ACCOUNT = "0x1111111111111111111111111111111111111111";
 const QRL_ACCOUNT = `Q${"2".repeat(128)}`;
 
+const GAS_POLICY = htlcInterface.encodeFunctionResult("deliveryGasPolicy", [
+  DELIVERY_GAS_LIMIT,
+  DELIVERY_GAS_RESERVE,
+]);
+
+/** A JSON-RPC fetch stub serving the reads a settlement makes directly:
+ *  the leg's deliveryGasPolicy(), the QRL identity checks and, on the QRL
+ *  leg, qrl_estimateGas. */
+function settlementFetch(
+  options: { policy?: string; qrlEstimate?: string } = {},
+): ReturnType<typeof vi.fn> {
+  return vi.fn(async (_url: unknown, init: RequestInit) => {
+    const { method } = JSON.parse(init.body as string) as { method: string };
+    const result =
+      method === "qrl_chainId"
+        ? QRL_LEG.chainIdHex
+        : method === "qrl_getBlockByNumber"
+          ? { number: "0x0", hash: QRL_LEG.genesisHash }
+          : method === "qrl_estimateGas"
+            ? (options.qrlEstimate ?? "0x10000")
+            : (options.policy ?? GAS_POLICY);
+    return { ok: true, json: async () => ({ result }) };
+  });
+}
+
+beforeEach(() => {
+  resetDeliveryGasPolicyCache();
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("secret-bearing claim preflight", () => {
   it("simulates from the actual Ethereum signer before sending", async () => {
+    vi.stubGlobal("fetch", settlementFetch());
     const wait = vi.fn().mockResolvedValue(undefined);
     const sendTransaction = vi.fn().mockResolvedValue({ wait });
     const signer = { getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT), sendTransaction };
     const rpcSend = vi.fn().mockResolvedValue("0x");
+    const estimateGas = vi.fn().mockResolvedValue(70_000n);
     const provider = {
       getSigner: vi.fn().mockResolvedValue(signer),
       send: rpcSend,
+      estimateGas,
     } as unknown as BrowserProvider;
     const ensureSepolia = vi.fn().mockResolvedValue(undefined);
     const send = makePreflightedClaimSender({
@@ -45,8 +89,110 @@ describe("secret-bearing claim preflight", () => {
     expect(rpcSend.mock.invocationCallOrder[0]!).toBeLessThan(
       sendTransaction.mock.invocationCallOrder[0]!,
     );
-    expect(sendTransaction).toHaveBeenCalledWith({ to: ETH_LEG.htlc, data: DATA, value: 0n });
+    // The HTLCv3 settlement rule: estimate plus the delivery budget plus
+    // the credit reserve, so a payout that can be delivered is delivered.
+    expect(sendTransaction).toHaveBeenCalledWith({
+      to: ETH_LEG.htlc,
+      data: DATA,
+      value: 0n,
+      gasLimit: 70_000n + SETTLEMENT_GAS_BUFFER,
+    });
     expect(wait).toHaveBeenCalledOnce();
+  });
+
+  it("abandons an Ethereum claim when the broadcast guard refuses", async () => {
+    vi.stubGlobal("fetch", settlementFetch());
+    const sendTransaction = vi.fn();
+    const provider = {
+      getSigner: vi.fn().mockResolvedValue({
+        getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT),
+        sendTransaction,
+      }),
+      send: vi.fn().mockResolvedValue("0x"),
+      estimateGas: vi.fn().mockResolvedValue(70_000n),
+    } as unknown as BrowserProvider;
+    const send = makePreflightedClaimSender({
+      browserProvider: provider,
+      ensureSepolia: vi.fn().mockResolvedValue(undefined),
+      qrlAccount: null,
+      qrlTransport: null,
+      qrlRequest: vi.fn(),
+    });
+
+    await expect(
+      send("eth", DATA, 0n, async () => {
+        throw new Error("inside the claim safety margin");
+      }),
+    ).rejects.toThrow(/claim safety margin/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses to settle when the deployed contract publishes another budget", async () => {
+    vi.stubGlobal(
+      "fetch",
+      settlementFetch({
+        policy: htlcInterface.encodeFunctionResult("deliveryGasPolicy", [1n, 2n]),
+      }),
+    );
+    const sendTransaction = vi.fn();
+    const provider = {
+      getSigner: vi.fn().mockResolvedValue({
+        getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT),
+        sendTransaction,
+      }),
+      send: vi.fn().mockResolvedValue("0x"),
+      estimateGas: vi.fn().mockResolvedValue(70_000n),
+    } as unknown as BrowserProvider;
+    const send = makePreflightedClaimSender({
+      browserProvider: provider,
+      ensureSepolia: vi.fn().mockResolvedValue(undefined),
+      qrlAccount: null,
+      qrlTransport: null,
+      qrlRequest: vi.fn(),
+    });
+
+    await expect(send("eth", DATA, 0n)).rejects.toThrow(/was not built for/);
+    expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("carries the settlement buffer on both QRL transports", async () => {
+    for (const transport of ["extension", "relay"] as const) {
+      resetDeliveryGasPolicyCache();
+      vi.stubGlobal("fetch", settlementFetch({ qrlEstimate: "0x10000" }));
+      const qrlRequest = vi.fn(
+        async ({
+          method,
+        }: {
+          method: string;
+          params?: unknown[];
+        }): Promise<unknown> => {
+          if (method === "qrl_chainId") return QRL_LEG.chainIdHex;
+          if (method === "qrl_getBlockByNumber")
+            return { number: "0x0", hash: QRL_LEG.genesisHash };
+          if (method === "qrl_sendTransaction") return `0x${"12".repeat(32)}`;
+          throw new Error("Unexpected wallet request");
+        },
+      );
+      await makePreflightedClaimSender({
+        browserProvider: null,
+        ensureSepolia: vi.fn(),
+        qrlAccount: QRL_ACCOUNT,
+        qrlTransport: transport,
+        qrlRequest,
+      })("qrl", DATA, 0n);
+      const expected = 0x10000n + SETTLEMENT_GAS_BUFFER;
+      const sent = qrlRequest.mock.calls
+        .map(([args]) => args)
+        .find((args) => args.method === "qrl_sendTransaction");
+      // The extension signs the fields it is handed, so it needs numeric
+      // gas under both keys; the relay estimates for itself and honours an
+      // explicit canonical hex quantity.
+      expect(sent?.params?.[0]).toMatchObject(
+        transport === "extension"
+          ? { gas: Number(expected), gasLimit: Number(expected) }
+          : { gas: `0x${expected.toString(16)}` },
+      );
+    }
   });
 
   it("does not ask the Ethereum wallet to send when simulation reverts", async () => {
@@ -104,6 +250,36 @@ describe("secret-bearing claim preflight", () => {
     await expect(send("qrl", DATA, 0n)).rejects.toThrow(/identity mismatch/);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(qrlRequest).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("refund and credit settlement", () => {
+  it("carries the settlement buffer on an Ethereum refund", async () => {
+    vi.stubGlobal("fetch", settlementFetch());
+    const wait = vi.fn().mockResolvedValue(undefined);
+    const sendTransaction = vi.fn().mockResolvedValue({ wait });
+    const provider = {
+      getSigner: vi.fn().mockResolvedValue({
+        getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT),
+        sendTransaction,
+      }),
+      estimateGas: vi.fn().mockResolvedValue(45_000n),
+    } as unknown as BrowserProvider;
+
+    await makeSettlementSender({
+      browserProvider: provider,
+      ensureSepolia: vi.fn().mockResolvedValue(undefined),
+      qrlAccount: null,
+      qrlTransport: null,
+      qrlRequest: vi.fn(),
+    })("eth", DATA, 0n);
+
+    expect(sendTransaction).toHaveBeenCalledWith({
+      to: ETH_LEG.htlc,
+      data: DATA,
+      value: 0n,
+      gasLimit: 45_000n + SETTLEMENT_GAS_BUFFER,
+    });
   });
 });
 

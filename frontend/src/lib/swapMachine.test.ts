@@ -6,7 +6,14 @@ import { describe, expect, it } from "vitest";
 import { CLAIM_MARGIN_S, ETH_ASSETS } from "../config";
 import { NATIVE_TOKEN, QRL_NATIVE_TOKEN, SwapStatus, type LegState } from "./htlc";
 import type { ActiveSwap, SwapRole } from "./activeSwap";
-import { ZERO32, deriveSwapMachine, sameAddr, type LegStates } from "./swapMachine";
+import {
+  CLAIM_CUTOFF_ISSUE,
+  ZERO32,
+  claimCutoffBlocked,
+  deriveSwapMachine,
+  sameAddr,
+  type LegStates,
+} from "./swapMachine";
 
 const MAKER_ETH = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TAKER_ETH = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -440,6 +447,43 @@ describe("step 4: claim with the revealed secret", () => {
     const legs = { eth: iOpen(), qrl: claimed(rOpen()) };
     const m = derive("taker", legs, legs, { nowS: I_TIMEOUT });
     expect(m.steps[3].canRun).toBe(false);
+  });
+
+  // FINALITY.md section 3.3: claim() closes hard at the escrow timeout, so a
+  // claim broadcast inside the margin can mine after the cutoff, revert, and
+  // leave the preimage public with the swap still Open. The margin is a
+  // refusal, and the refund path takes over.
+  it("refuses inside the claim safety margin of the on-chain timeout", () => {
+    const legs = { eth: iOpen(), qrl: claimed(rOpen()) };
+    const inside = derive("taker", legs, legs, { nowS: I_TIMEOUT - CLAIM_MARGIN_S });
+    expect(inside.steps[3].canRun).toBe(false);
+    expect(inside.steps[3].issue).toBe(CLAIM_CUTOFF_ISSUE);
+    const outside = derive("taker", legs, legs, { nowS: I_TIMEOUT - CLAIM_MARGIN_S - 1 });
+    expect(outside.steps[3].canRun).toBe(true);
+    expect(outside.steps[3].issue).toBeNull();
+  });
+
+  it("reads the margin against the lock's own timeout, not the announced one", () => {
+    // A maker that announced a long T1 but locked a near-term escrow.
+    const legs = { eth: iOpen({ timeout: NOW + 60 }), qrl: claimed(rOpen()) };
+    const m = derive("taker", legs, legs);
+    expect(m.steps[3].canRun).toBe(false);
+    expect(m.steps[3].issue).toBe(CLAIM_CUTOFF_ISSUE);
+  });
+
+  it("stays silent about the cutoff on the step the other side signs", () => {
+    const legs = { eth: iOpen(), qrl: claimed(rOpen()) };
+    const maker = derive("maker", legs, legs, { nowS: I_TIMEOUT - CLAIM_MARGIN_S });
+    expect(maker.steps[3].own).toBe(false);
+    expect(maker.steps[3].issue).toBeNull();
+  });
+
+  it("claimCutoffBlocked is the exact rule the broadcast check repeats", () => {
+    expect(claimCutoffBlocked(I_TIMEOUT, I_TIMEOUT - CLAIM_MARGIN_S - 1, CLAIM_MARGIN_S)).toBe(
+      false,
+    );
+    expect(claimCutoffBlocked(I_TIMEOUT, I_TIMEOUT - CLAIM_MARGIN_S, CLAIM_MARGIN_S)).toBe(true);
+    expect(claimCutoffBlocked(I_TIMEOUT, I_TIMEOUT + 1, CLAIM_MARGIN_S)).toBe(true);
   });
 });
 
