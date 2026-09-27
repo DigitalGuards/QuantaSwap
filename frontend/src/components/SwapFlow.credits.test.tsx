@@ -161,6 +161,13 @@ describe("deferred payout panel", () => {
     expect(screen.getByText("1.0 ETH")).toBeTruthy();
   });
 
+  it("stops the completion banner reading as funds received", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    renderFlow("taker");
+    await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
+    expect(screen.getByText(/with a payout still to collect below/)).toBeTruthy();
+  });
+
   it("says the swap is final either way", async () => {
     credits.set(`qrl:${QRL_NATIVE_TOKEN.toLowerCase()}:${MAKER_QRL.toLowerCase()}`, QRL_AMOUNT);
     renderFlow("maker");

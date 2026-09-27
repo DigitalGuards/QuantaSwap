@@ -639,9 +639,19 @@ export function SwapFlow({
           </p>
         ) : null}
         {complete ? (
-          <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
-            Atomic swap complete on both chains
-          </div>
+          creditList.length > 0 ? (
+            // Both legs are terminal, so the swap is complete, but one payout
+            // is still sitting in the contract as a credit. Saying "complete"
+            // on its own here would read as "funds received", which is the
+            // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
+            <div className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400">
+              Atomic swap complete on both chains, with a payout still to collect below
+            </div>
+          ) : (
+            <div className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success">
+              Atomic swap complete on both chains
+            </div>
+          )
         ) : null}
 
         {accountMismatch ? (
