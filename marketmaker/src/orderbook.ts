@@ -599,6 +599,17 @@ async function readBookJson(res: Response): Promise<unknown> {
   }
 }
 
+/**
+ * The maker capability as a request header. The order book reads it to decide,
+ * before it reads the body, whether a write may use the headroom it reserves
+ * for maker traffic, so a cancel or a fill still gets through while takers rush
+ * the book. The same token stays in the body, which is what an order book from
+ * before that reservation authenticates against.
+ */
+function makerTokenHeader(token: string | undefined): Record<string, string> {
+  return token === undefined ? {} : { "X-Maker-Token": token };
+}
+
 export class OrderBookClient {
   constructor(
     private readonly base: string,
@@ -611,12 +622,13 @@ export class OrderBookClient {
     method: string,
     path: string,
     body?: unknown,
+    headers: Record<string, string> = {},
   ): Promise<T> {
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...headers },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(this.timeoutMs),
         redirect: "error",
@@ -773,7 +785,12 @@ export class OrderBookClient {
       intentAuth: selected.auth,
       ...(token === undefined ? {} : { token }),
     };
-    const payload = await this.api<unknown>("POST", `/orders/${id}/fill`, body);
+    const payload = await this.api<unknown>(
+      "POST",
+      `/orders/${id}/fill`,
+      body,
+      makerTokenHeader(token),
+    );
     const response = record(payload, "signed fill response");
     exactKeys(response, ["order"], "signed fill response");
     return authenticateFillView(response["order"], order, proof, selected);
@@ -792,6 +809,7 @@ export class OrderBookClient {
         ...proof,
         ...(token === undefined ? {} : { token }),
       },
+      makerTokenHeader(token),
     );
     const response = record(payload, "signed cancellation response");
     exactKeys(response, ["order"], "signed cancellation response");
@@ -812,15 +830,19 @@ export class OrderBookClient {
         "POST",
         `/orders/${id}/hashlock`,
         body,
+        makerTokenHeader(body.token),
       )
     ).order;
   }
 
   async cancel(id: string, token: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>("POST", `/orders/${id}/cancel`, {
-        token,
-      })
+      await this.api<{ order: OrderView }>(
+        "POST",
+        `/orders/${id}/cancel`,
+        { token },
+        makerTokenHeader(token),
+      )
     ).order;
   }
 

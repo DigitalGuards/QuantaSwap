@@ -521,6 +521,54 @@ describe("in-flight mutation gate", () => {
   );
 
   it(
+    "admits the shipped maker client's cancel while the taker lane is full",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+      });
+      const created = await postOrder(book.port, 1, "192.0.2.10");
+      assert.equal(created.status, 201);
+      const order = created.body["order"] as Record<string, unknown>;
+      const id = String(order["id"]);
+      const makerToken = String(created.body["makerToken"]);
+
+      // The request both shipped maker clients now send for a legacy cancel:
+      // the capability in X-Maker-Token, which is what the admission gate
+      // reads before the body, and the same value in the body, which is what
+      // an order book from before the reserved lane authenticates against.
+      // See frontend/src/lib/orderbookClient.ts and
+      // marketmaker/src/orderbook.ts, whose own tests pin that shape.
+      const staged = await Promise.all([
+        stageRequest(
+          book.port,
+          `/api/orders/${id}/cancel`,
+          JSON.stringify({ token: makerToken }),
+          "192.0.2.10",
+          makerToken,
+        ),
+        ...Array.from({ length: 10 }, (_value, index) =>
+          stageRequest(
+            book.port,
+            "/api/orders",
+            makerOrder(index + 30),
+            `198.51.100.${String(index + 61)}`,
+          ),
+        ),
+      ]);
+      const [cancelled, ...takers] = await releaseTogether(staged);
+      if (cancelled === undefined) throw new Error("the cancel had no reply");
+      assert.equal(cancelled.status, 200);
+      assert.match(cancelled.text, /"status":"cancelled"/);
+      assert.ok(
+        takers.some((reply) => reply.status === 503),
+        "the taker lane must be full for this to prove anything",
+      );
+    },
+  );
+
+  it(
     "keeps a maker route without its capability in the taker lane",
     { timeout: 120_000 },
     async () => {

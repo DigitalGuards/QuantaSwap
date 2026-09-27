@@ -459,7 +459,15 @@ applied, so retry after the named delay. A share of the bound
 (`ORDERBOOK_RESERVED_MAKER_MUTATIONS`, default 8) is reachable only by a caller
 that presents the order's maker token in `X-Maker-Token`, on `/cancel`,
 `/cancel/signed`, `/fill` and `/hashlock`, so a taker rush cannot stop a maker
-from withdrawing or filling an order. `POST /orders/signed` carries its
+from withdrawing or filling an order.
+
+**Makers: send the token in the header on those four routes.** The book reads
+`X-Maker-Token` before it reads the body, so a client that carries its
+capability only in the body is admitted through the ordinary lane and can be
+refused while the reserved one sits empty. Send it in both places: the header
+reaches the lane, and the body is what an order book from before this
+reservation authenticates against. Where both are present the header wins. The
+browser client and the reference market maker both do this. `POST /orders/signed` carries its
 commitment inside the request and cannot be checked that way, so it gets half
 that reservation as a sub-reserve. Everything else, the legacy unsigned
 `POST /orders` included, uses the bound minus the reservation. Reads, heartbeats, the SSE

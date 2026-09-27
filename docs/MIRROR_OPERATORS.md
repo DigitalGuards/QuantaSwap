@@ -201,6 +201,19 @@ rollback. They are also safe to leave inside a state backup: a restored
 `.lock` from a dead process is recognised as stale, by its process id on the
 same host or by its expired heartbeat otherwise.
 
+### Upgrading past the IPv6 source grouping
+
+Per-source budgets key on one IPv4 address or one IPv6 /64. Before that
+grouping, an IPv6 client was counted by its full address, and the store keeps
+the source of a create and of a fill intent as a salted hash of that key.
+
+Those persisted hashes are not rewritten on upgrade, so for IPv6 clients the
+value changes once: their per-source counts and their rolling daily fill-intent
+cap restart from zero at the first start on the new build, and rows already on
+disk keep their old hashes and stay valid. IPv4 clients are unaffected, because
+their key did not change. Nothing else depends on the value, and the effect is a
+single window of extra headroom for v6 clients, not a lasting one.
+
 ### Concurrency bound for mutating requests
 
 The book is one process, and every mutating request verifies an ML-DSA-87 proof
@@ -260,6 +273,12 @@ The header works on `/cancel` and `/hashlock` as well as on `/cancel/signed` and
 admission decision and the authorisation agree about who is calling. A request
 to a maker path without a valid token is a taker-lane request: keying the
 reservation on the path alone would let anyone reach it by naming a maker route.
+
+A maker client that carries its capability only in the request body is admitted
+through the ordinary lane, because the book decides before it reads the body.
+The browser client and the reference market maker send the token in both places,
+and any other maker client should as well: the header reaches the lane, and the
+body is what an order book from before this reservation authenticates against.
 
 `POST /orders/signed` cannot be keyed that way, because the commitment it would
 be checked against arrives inside the request. It gets half the reservation as a

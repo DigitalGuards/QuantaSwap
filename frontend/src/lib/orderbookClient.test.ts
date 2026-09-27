@@ -233,6 +233,45 @@ describe("endpoint-bound order book client", () => {
     });
   });
 
+  it("presents the maker capability in a header on every maker write", async () => {
+    const request = vi.fn<
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    >(async () => response({ order }));
+    const client = new OrderbookClient(
+      { id: "community", apiBase: "https://mirror.test/api" },
+      { fetch: request },
+    );
+
+    await client.cancel("order-1", "maker-token");
+    await client.cancelSigned("order-1", cancel, "maker-token");
+    await client.fill("order-1", fill, intent, "maker-token");
+    await client.announceHashlock("order-1", {
+      token: "maker-token",
+      hashlock: `0x${"bb".repeat(32)}`,
+      initiatorTimeout: 200,
+      responderTimeout: 100,
+    });
+
+    // The mirror decides whether a write may use the headroom it reserves for
+    // maker traffic from this header, before it reads the body, so a maker
+    // client that carries its token only in the body never reaches that lane.
+    expect(request.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://mirror.test/api/orders/order-1/cancel",
+      "https://mirror.test/api/orders/order-1/cancel/signed",
+      "https://mirror.test/api/orders/order-1/fill",
+      "https://mirror.test/api/orders/order-1/hashlock",
+    ]);
+    for (const call of request.mock.calls) {
+      expect(call[1]?.headers).toEqual({
+        "Content-Type": "application/json",
+        "X-Maker-Token": "maker-token",
+      });
+      // The body keeps the token too, which is what a mirror from before the
+      // reservation authenticates against.
+      expect(JSON.parse(String(call[1]?.body))["token"]).toBe("maker-token");
+    }
+  });
+
   it("keeps private maker intent reads on their origin and token header", async () => {
     const request = vi.fn<
       (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
