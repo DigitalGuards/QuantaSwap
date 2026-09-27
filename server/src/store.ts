@@ -1327,10 +1327,14 @@ export class OrderStore {
           this.failCommit(error);
           return;
         }
+        // Observers run before the waiters are settled, so a flush requested
+        // from one of them lands in this batch's list and is settled below.
+        // Nothing else can run here: a commit is synchronous from the snapshot
+        // to this point.
+        this.notify();
         const settled = this.runningCommitWaiters;
         this.runningCommitWaiters = [];
         for (const waiter of settled) waiter.resolve();
-        this.notify();
       }
     } finally {
       this.committing = false;

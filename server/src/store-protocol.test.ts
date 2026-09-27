@@ -1581,6 +1581,28 @@ describe("order store group commit", () => {
     );
   });
 
+  it("settles a durability request made from an observer", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const entry = signedOrders(now, 1)[0];
+    if (entry === undefined) throw new Error("a signed order is required");
+    let observed: Promise<void> | undefined;
+    store.subscribe(() => {
+      // No mutation, so this observer's state is already in the snapshot the
+      // commit just wrote and its request settles with that commit.
+      observed ??= store.flush();
+    });
+    store.createVerified(
+      entry.order,
+      { makerToken: entry.makerToken },
+      "203.0.113.60",
+    );
+    await store.flush();
+    await observed;
+    assert.equal(store.hasUncommittedState(), false);
+  });
+
   it("refuses every request in a batch whose rewrite failed", async () => {
     const now = Math.floor(Date.now() / 1000);
     const file = storeFile();
