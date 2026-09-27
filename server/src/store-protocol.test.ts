@@ -1637,6 +1637,43 @@ describe("order store group commit", () => {
     assert.equal(store.hasUncommittedState(), true);
   });
 
+  it("refuses the waiters of both batches when the second commit fails", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const file = storeFile();
+    const store = new OrderStore(file);
+    const [first, second] = signedOrders(now, 2);
+    if (first === undefined || second === undefined) {
+      throw new Error("two signed orders are required");
+    }
+    let follower: Promise<void> | undefined;
+    store.subscribe(() => {
+      if (follower !== undefined) return;
+      // Applied while the first commit runs, so it belongs to the next one,
+      // and the storage is taken away before that one can write.
+      store.createVerified(
+        second.order,
+        { makerToken: second.makerToken },
+        "203.0.113.71",
+      );
+      follower = store.flush();
+      rmSync(dirname(file), { recursive: true, force: true });
+    });
+    store.createVerified(
+      first.order,
+      { makerToken: first.makerToken },
+      "203.0.113.70",
+    );
+    // The first batch reached the file, so its caller is told so.
+    await store.flush();
+    // The second batch never did, and its caller is refused.
+    await assert.rejects(
+      follower ?? Promise.resolve(),
+      OrderStorePersistenceError,
+    );
+    assert.equal(store.hasUncommittedState(), true);
+    await assert.rejects(store.flush(), OrderStorePersistenceError);
+  });
+
   it("reports an unawaited commit failure to its owner", async () => {
     const file = storeFile();
     const failures: unknown[] = [];

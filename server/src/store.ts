@@ -1232,8 +1232,9 @@ export class OrderStore {
 
   /** Fires after every observable change (a group commit reached the file, or
    *  a maker came back online). The server uses it to push the book to
-   *  streaming clients. A listener must not throw: it runs inside the commit
-   *  loop, where there is no request left to answer with the failure. */
+   *  streaming clients. A listener runs inside the commit loop, so it should
+   *  not throw and should not block; one that throws is logged and the commit
+   *  continues. */
   subscribe(fn: () => void): void {
     this.listeners.push(fn);
   }
@@ -1249,7 +1250,20 @@ export class OrderStore {
   }
 
   private notify(): void {
-    for (const fn of this.listeners) fn();
+    for (const fn of this.listeners) {
+      try {
+        fn();
+      } catch (error) {
+        // An observer runs inside the commit loop, where there is no request
+        // left to answer with its failure. Swallowing it keeps the commit's
+        // waiters from being stranded and the in-flight slots they hold from
+        // leaking, and the line says what happened.
+        console.error(
+          "[orderbook] an order-store change observer threw:",
+          error,
+        );
+      }
+    }
   }
 
   /** Buffers a public event for the commit that makes its mutation durable. */
@@ -2119,19 +2133,22 @@ export class OrderStore {
     shareToken?: unknown,
   ): PublicFillIntentV1 {
     this.sweep();
+    // Everything up to the verification below is answered from the stored
+    // order and the caller's address, so each refusal is marked as reached
+    // before any signature work.
     const order = this.orders.get(id);
-    if (!order) throw new ApiError(404, "order not found");
+    if (!order) throw new ApiError(404, "order not found").shed();
     if (
       order.visibility === "private" &&
       !this.shareAuthorized(order, shareToken)
     ) {
-      throw new ApiError(404, "order not found");
+      throw new ApiError(404, "order not found").shed();
     }
     if (order.makerAuth === undefined) {
-      throw new ApiError(409, "legacy orders use the accept endpoint");
+      throw new ApiError(409, "legacy orders use the accept endpoint").shed();
     }
     if (!usesPortableTerminalProtocol(order)) {
-      throw new ApiError(409, "legacy orders use the accept endpoint");
+      throw new ApiError(409, "legacy orders use the accept endpoint").shed();
     }
     this.shedFillIntent(order, rawAuth, takerIp);
     const verifiedOrder = verifiedSignedOrder(order);
@@ -2206,13 +2223,13 @@ export class OrderStore {
     }
     const now = nowS();
     if (order.status !== "open" || order.equivocated === true) {
-      throw new ApiError(409, "order is no longer open");
+      throw new ApiError(409, "order is no longer open").shed();
     }
     if (!this.hasRunway(order, now)) {
       throw new ApiError(
         409,
         "this pre-funded order has too little time left to swap safely",
-      );
+      ).shed();
     }
     // A direct proposal is verified without the expired allowance, so an
     // admissible one is always live and always counts against this ceiling.
@@ -2221,7 +2238,7 @@ export class OrderStore {
         429,
         "this order already has too many pending fill intents",
         "transient_capacity",
-      );
+      ).shed();
     }
     const ipHash = sha256Hex(takerIp);
     if (
@@ -2230,7 +2247,7 @@ export class OrderStore {
       throw new ApiError(
         429,
         "you already have fill requests in progress; finish or let them expire",
-      );
+      ).shed();
     }
     if (
       this.recentIntentAdmissions(ipHash, now).length >=
@@ -2239,7 +2256,7 @@ export class OrderStore {
       throw new ApiError(
         429,
         "daily fill intent limit reached; leave some liquidity for others",
-      );
+      ).shed();
     }
   }
 

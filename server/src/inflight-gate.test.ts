@@ -1,10 +1,10 @@
-// The in-flight gate is an HTTP admission bound, so it is only proven by
-// running the real service and racing real requests at it.
+// The in-flight gate and the body-read bound are HTTP admission rules, so they
+// are only proven by running the real service and racing real sockets at it.
 
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { connect, createServer, type Socket } from "node:net";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -15,8 +15,10 @@ const serverEntry = fileURLToPath(new URL("./server.js", import.meta.url));
 
 const tempDirectories: string[] = [];
 const children: ChildProcess[] = [];
+const sockets: Socket[] = [];
 
 after(() => {
+  for (const socket of sockets.splice(0)) socket.destroy();
   for (const child of children.splice(0)) {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");
@@ -44,18 +46,29 @@ async function freePort(): Promise<number> {
   });
 }
 
-function startBook(
-  directory: string,
-  port: number,
-  limit: string,
-): ChildProcess {
+interface StartedBook {
+  child: ChildProcess;
+  port: number;
+  directory: string;
+  dataFile: string;
+  federationDataFile: string;
+}
+
+async function startBook(
+  overrides: Record<string, string> = {},
+): Promise<StartedBook> {
+  const directory = mkdtempSync(join(tmpdir(), "quantaswap-inflight-"));
+  tempDirectories.push(directory);
+  const port = await freePort();
+  const dataFile = join(directory, "orders.json");
+  const federationDataFile = join(directory, "orders.json.federation");
   const child = spawn(process.execPath, [serverEntry], {
     env: {
       ...process.env,
       PORT: String(port),
       ORDERBOOK_HOST: "127.0.0.1",
-      ORDERBOOK_DATA: join(directory, "orders.json"),
-      ORDERBOOK_FEDERATION_DATA: join(directory, "orders.json.federation"),
+      ORDERBOOK_DATA: dataFile,
+      ORDERBOOK_FEDERATION_DATA: federationDataFile,
       ORDERBOOK_FEDERATION_PEERS: "",
       ORDERBOOK_FEDERATION_PEER_IDS: "",
       ORDERBOOK_FEDERATION_PEER_TOKENS: "",
@@ -64,22 +77,18 @@ function startBook(
       ORDERBOOK_FEDERATION_READ_TOKEN: "",
       ORDERBOOK_TRUST_PROXY: "none",
       ORDERBOOK_CORS_ORIGINS: "",
-      ORDERBOOK_MAX_INFLIGHT_MUTATIONS: limit,
       PRESENCE_TTL_S: "90",
+      ...overrides,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
   children.push(child);
-  return child;
-}
-
-async function waitForHealth(port: number, timeoutMs = 20_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + 20_000;
   for (;;) {
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+      const res = await fetch(`http://127.0.0.1:${String(port)}/api/health`);
       await res.text();
-      if (res.ok) return;
+      if (res.ok) break;
     } catch {
       // Not listening yet.
     }
@@ -88,6 +97,7 @@ async function waitForHealth(port: number, timeoutMs = 20_000): Promise<void> {
     }
     await delay(100);
   }
+  return { child, port, directory, dataFile, federationDataFile };
 }
 
 const makerOrder = (index: number): string =>
@@ -99,37 +109,85 @@ const makerOrder = (index: number): string =>
     makerQrlAccount: `Q${index.toString(16).padStart(128, "0")}`,
   });
 
+interface Reply {
+  status: number;
+  retryAfter: string | null;
+  stage: string | null;
+  body: Record<string, unknown>;
+}
+
+async function postOrder(
+  port: number,
+  index: number,
+  forwardedFor?: string,
+): Promise<Reply> {
+  const res = await fetch(`http://127.0.0.1:${String(port)}/api/orders`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(forwardedFor === undefined
+        ? {}
+        : { "X-Forwarded-For": forwardedFor }),
+    },
+    body: makerOrder(index),
+  });
+  return {
+    status: res.status,
+    retryAfter: res.headers.get("retry-after"),
+    stage: res.headers.get("x-refusal-stage"),
+    body: (await res.json()) as Record<string, unknown>,
+  };
+}
+
+/** A request with full headers and a promised body that never arrives. */
+async function halfOpenPost(port: number, bytes = 400): Promise<Socket> {
+  const socket = connect(port, "127.0.0.1");
+  sockets.push(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("connect", () => resolve());
+    socket.once("error", reject);
+  });
+  socket.write(
+    "POST /api/orders HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+      `Content-Type: application/json\r\nContent-Length: ${String(bytes)}\r\n\r\n`,
+  );
+  return socket;
+}
+
+function readSocket(socket: Socket): Promise<string> {
+  return new Promise<string>((resolve) => {
+    let text = "";
+    socket.on("data", (chunk: Buffer) => {
+      text += chunk.toString("utf8");
+      if (text.includes("\r\n\r\n")) resolve(text);
+    });
+    socket.once("close", () => resolve(text));
+    socket.once("error", () => resolve(text));
+  });
+}
+
 describe("in-flight mutation gate", () => {
   it(
     "refuses a mutation burst at the door and keeps reads answering",
     { timeout: 120_000 },
     async () => {
-      const directory = mkdtempSync(join(tmpdir(), "quantaswap-inflight-"));
-      tempDirectories.push(directory);
-      const port = await freePort();
-      const book = startBook(directory, port, "1");
-      await waitForHealth(port);
-
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+      });
       const burst = await Promise.all(
         Array.from({ length: 12 }, (_value, index) =>
-          fetch(`http://127.0.0.1:${port}/api/orders`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: makerOrder(index + 1),
-          }).then(async (res) => ({
-            status: res.status,
-            retryAfter: res.headers.get("retry-after"),
-            body: (await res.json()) as Record<string, unknown>,
-          })),
+          postOrder(book.port, index + 1),
         ),
       );
       const created = burst.filter((reply) => reply.status === 201);
       const refused = burst.filter((reply) => reply.status === 503);
-      assert.ok(created.length >= 1, "a gate of one still admits work");
+      assert.ok(created.length >= 1, "a bound of one taker slot admits work");
       assert.ok(refused.length >= 1, "a burst of twelve must be shed");
       assert.equal(created.length + refused.length, burst.length);
       for (const reply of refused) {
         assert.equal(reply.retryAfter, "1");
+        assert.equal(reply.stage, "pre-verification");
         assert.deepEqual(reply.body, {
           error: "order book has too many requests in flight, retry shortly",
         });
@@ -137,28 +195,190 @@ describe("in-flight mutation gate", () => {
 
       // Reads and the probes are not gated, so the book stays answerable
       // while it refuses mutations.
-      const health = await fetch(`http://127.0.0.1:${port}/api/health`);
+      const health = await fetch(
+        `http://127.0.0.1:${String(book.port)}/api/health`,
+      );
       assert.equal(health.status, 200);
       await health.text();
-      const listing = (await fetch(`http://127.0.0.1:${port}/api/orders`).then(
-        (res) => res.json(),
-      )) as { orders: unknown[] };
+      const listing = (await fetch(
+        `http://127.0.0.1:${String(book.port)}/api/orders`,
+      ).then((res) => res.json())) as { orders: unknown[] };
+      // A refused request leaves nothing behind: the store holds exactly the
+      // rows the book answered 201 for.
       assert.equal(listing.orders.length, created.length);
+      const persisted = JSON.parse(
+        readFileSync(book.dataFile, "utf8"),
+      ) as unknown[];
+      assert.equal(persisted.length, created.length);
 
-      // The slot is released when a request finishes, so the gate is not a
-      // leak: a later mutation is admitted again.
-      const after = await fetch(`http://127.0.0.1:${port}/api/orders`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: makerOrder(200),
-      });
+      // The slot is released when a request finishes, so a later mutation is
+      // admitted again.
+      const after = await postOrder(book.port, 200);
       assert.equal(after.status, 201);
-      await after.json();
+    },
+  );
 
-      book.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        book.once("exit", () => resolve());
+  it(
+    "keeps a half-open request out of the mutation bound",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "2000",
       });
+      // Four requests that promise a body and send none, which is twice the
+      // whole mutation bound. Before the bound moved behind the body read,
+      // two of these refused every writer for the request timeout.
+      const held = await Promise.all([
+        halfOpenPost(book.port),
+        halfOpenPost(book.port),
+        halfOpenPost(book.port),
+        halfOpenPost(book.port),
+      ]);
+      await delay(300);
+      const legitimate = await postOrder(book.port, 1);
+      assert.equal(legitimate.status, 201);
+
+      // Each half-open request is answered at the read deadline and lets go.
+      const replies = await Promise.all(held.map((socket) => readSocket(socket)));
+      for (const reply of replies) {
+        assert.match(reply, /^HTTP\/1\.1 408 /);
+        assert.match(reply, /request body was too slow/);
+      }
+      for (const socket of held) socket.destroy();
+
+      // Nothing leaked: the bound is free again.
+      const after = await postOrder(book.port, 2);
+      assert.equal(after.status, 201);
+    },
+  );
+
+  it(
+    "cuts a slow body at the read deadline",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_BODY_READ_TIMEOUT_MS: "500",
+      });
+      const socket = await halfOpenPost(book.port, 4000);
+      socket.write("{");
+      const startedAt = Date.now();
+      const reply = await readSocket(socket);
+      const elapsed = Date.now() - startedAt;
+      assert.match(reply, /^HTTP\/1\.1 408 /);
+      assert.match(reply, /x-refusal-stage: pre-verification/i);
+      assert.ok(
+        elapsed < 5000,
+        `the deadline must cut the read early, took ${String(elapsed)} ms`,
+      );
+      socket.destroy();
+      const after = await postOrder(book.port, 1);
+      assert.equal(after.status, 201);
+    },
+  );
+
+  it(
+    "returns a slot when the handler throws and when a body is aborted",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+      });
+      // Handlers that throw: an invalid order body is refused inside the slot.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const res = await fetch(
+          `http://127.0.0.1:${String(book.port)}/api/orders`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ direction: "nonsense" }),
+          },
+        );
+        // The body is refused inside the slot, whichever check catches it.
+        assert.ok(res.status >= 400 && res.status < 500, String(res.status));
+        await res.json();
+      }
+      // Bodies that stop halfway and abort.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const socket = await halfOpenPost(book.port, 4000);
+        socket.write("{");
+        await delay(20);
+        socket.destroy();
+      }
+      await delay(200);
+      const after = await postOrder(book.port, 1);
+      assert.equal(after.status, 201);
+    },
+  );
+
+  it(
+    "keeps headroom for maker routes while takers fill the bound",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook({
+        ORDERBOOK_MAX_INFLIGHT_MUTATIONS: "2",
+        ORDERBOOK_RESERVED_MAKER_MUTATIONS: "1",
+      });
+      const created = await postOrder(book.port, 1);
+      assert.equal(created.status, 201);
+      const order = created.body["order"] as Record<string, unknown>;
+      const id = order["id"];
+      const makerToken = created.body["makerToken"];
+      assert.equal(typeof id, "string");
+      assert.equal(typeof makerToken, "string");
+
+      // One taker slot only, so a taker burst can never take the last slot.
+      // The maker's cancel goes through while that burst is refused.
+      const burst = Array.from({ length: 10 }, (_value, index) =>
+        postOrder(book.port, index + 10),
+      );
+      const cancel = fetch(
+        `http://127.0.0.1:${String(book.port)}/api/orders/${String(id)}/cancel`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: makerToken }),
+        },
+      );
+      const [cancelled, ...rest] = await Promise.all([cancel, ...burst]);
+      const cancelBody = (await cancelled.json()) as {
+        order?: { status?: string };
+      };
+      assert.equal(cancelled.status, 200);
+      assert.equal(cancelBody.order?.status, "cancelled");
+      assert.ok(rest.length === 10);
+    },
+  );
+
+  it(
+    "persists every create it answered with 201",
+    { timeout: 120_000 },
+    async () => {
+      const book = await startBook();
+      const replies = await Promise.all(
+        Array.from({ length: 24 }, (_value, index) =>
+          postOrder(book.port, index + 1, `198.51.100.${String(index + 1)}`),
+        ),
+      );
+      const ids = replies
+        .filter((reply) => reply.status === 201)
+        .map((reply) => {
+          const order = reply.body["order"] as Record<string, unknown>;
+          return String(order["id"]);
+        });
+      assert.ok(ids.length >= 1);
+      // Every receipt the book handed out is on disk, in both files, with no
+      // further request needed to get it there.
+      const persisted = JSON.parse(
+        readFileSync(book.dataFile, "utf8"),
+      ) as Array<Record<string, unknown>>;
+      const persistedIds = new Set(persisted.map((row) => String(row["id"])));
+      for (const id of ids) assert.ok(persistedIds.has(id), `${id} is on disk`);
+      const feed = readFileSync(book.federationDataFile, "utf8");
+      assert.ok(feed.length > 0);
+      assert.equal(persisted.length, ids.length);
     },
   );
 });

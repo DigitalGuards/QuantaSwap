@@ -21,6 +21,9 @@ export interface ServerConfig {
   proxyTrust: ProxyTrust;
   requestTimeoutMs: number;
   maxInflightMutations: number;
+  reservedMakerMutations: number;
+  maxInflightBodyReads: number;
+  bodyReadTimeoutMs: number;
   shutdownTimeoutMs: number;
   streamBackpressureMs: number;
 }
@@ -208,6 +211,27 @@ function corsOrigins(env: NodeJS.ProcessEnv): string[] {
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const rawProxyTrust = env["ORDERBOOK_TRUST_PROXY"] ?? "loopback";
+  const inflightMutations = integerEnv(
+    env,
+    "ORDERBOOK_MAX_INFLIGHT_MUTATIONS",
+    32,
+    1,
+    1024,
+  );
+  const reservedMakerMutations = integerEnv(
+    env,
+    "ORDERBOOK_RESERVED_MAKER_MUTATIONS",
+    8,
+    0,
+    1023,
+  );
+  // Reserving the whole bound would leave takers nothing, so the reservation is
+  // strictly smaller than the bound it sits inside.
+  if (reservedMakerMutations >= inflightMutations) {
+    throw new Error(
+      "ORDERBOOK_RESERVED_MAKER_MUTATIONS must be below ORDERBOOK_MAX_INFLIGHT_MUTATIONS",
+    );
+  }
   if (rawProxyTrust !== "none" && rawProxyTrust !== "loopback" && rawProxyTrust !== "all") {
     throw new Error("ORDERBOOK_TRUST_PROXY must be none, loopback, or all");
   }
@@ -302,19 +326,35 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     presenceTtlS: integerEnv(env, "PRESENCE_TTL_S", 90, 1, 3600),
     proxyTrust: rawProxyTrust,
     requestTimeoutMs: integerEnv(env, "ORDERBOOK_REQUEST_TIMEOUT_MS", 15_000, 1000, 120_000),
-    // Concurrent mutating requests admitted at the door. Mutations are the
-    // expensive class: each one verifies an ML-DSA-87 proof and joins a group
-    // commit, and the book is one process, so past a small number of them in
-    // flight extra concurrency only lengthens the queue. The default admits far
-    // more than a live deployment offers while keeping the worst queueing delay
-    // under a second, so a rush is refused honestly and well before it reaches
-    // the request timeout.
-    maxInflightMutations: integerEnv(
+    // Concurrent mutating requests admitted once their body is in hand.
+    // Mutations are the expensive class: each one verifies an ML-DSA-87 proof
+    // and joins a group commit, and the book is one process, so past a small
+    // number of them in flight extra concurrency only lengthens the queue. The
+    // default admits far more than a live deployment offers while keeping the
+    // worst queueing delay under a second, so a rush is refused honestly and
+    // well before it reaches the request timeout.
+    maxInflightMutations: inflightMutations,
+    // Headroom inside that bound that only maker-authenticated routes may use.
+    // A maker must be able to cancel or fill a stale-priced order during a
+    // taker rush, and a taker rush is exactly what fills the bound.
+    reservedMakerMutations,
+    // Concurrent request bodies being read, with its own short deadline below.
+    // Reading a body is cheap, so this bound is wide; the deadline is what
+    // stops a client that promises a body and never sends it from holding
+    // anything. A mutation slot is taken only once the body is in hand.
+    maxInflightBodyReads: integerEnv(
       env,
-      "ORDERBOOK_MAX_INFLIGHT_MUTATIONS",
-      32,
-      1,
-      1024,
+      "ORDERBOOK_MAX_INFLIGHT_BODY_READS",
+      256,
+      8,
+      4096,
+    ),
+    bodyReadTimeoutMs: integerEnv(
+      env,
+      "ORDERBOOK_BODY_READ_TIMEOUT_MS",
+      3000,
+      250,
+      60_000,
     ),
     shutdownTimeoutMs: integerEnv(env, "ORDERBOOK_SHUTDOWN_TIMEOUT_MS", 10_000, 1000, 60_000),
     streamBackpressureMs: integerEnv(

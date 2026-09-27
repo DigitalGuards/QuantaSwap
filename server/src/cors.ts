@@ -14,6 +14,9 @@ export function corsHeaders(
   if (origin === undefined || !allowedOrigins.includes(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
+    // A browser cannot read Retry-After off a cross-origin response without
+    // this, and the mutating routes answer 503 with it when the book sheds.
+    "Access-Control-Expose-Headers": "Retry-After",
     Vary: "Origin",
   };
 }

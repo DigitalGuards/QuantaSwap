@@ -88,7 +88,11 @@ const federationResponseCache = new FederationResponseCache({
 });
 const serializedFederationPages = new WeakMap<FederationPage, string>();
 
-function rateLimited(ip: string, mutation: boolean): boolean {
+function windowFor(ip: string): {
+  windowStart: number;
+  reads: number;
+  mutations: number;
+} {
   const now = Date.now();
   let entry = hits.get(ip);
   if (!entry || now - entry.windowStart > WINDOW_MS) {
@@ -96,14 +100,27 @@ function rateLimited(ip: string, mutation: boolean): boolean {
     hits.set(ip, entry);
     if (hits.size > 10_000) hits.clear();
   }
+  return entry;
+}
+
+/**
+ * Whether this source has already used its class budget. Class-scoped: a burst
+ * of mutations (a full-book reprice) must not starve reads (heartbeats, view
+ * polls), or the maker goes "offline" and stalls in-flight swaps for the rest
+ * of the window. Counting is a separate step, so a request the book never
+ * admitted does not spend the source's budget.
+ */
+function rateLimitExceeded(ip: string, mutation: boolean): boolean {
+  const entry = windowFor(ip);
+  return mutation
+    ? entry.mutations >= MAX_MUTATIONS_PER_WINDOW
+    : entry.reads >= MAX_READS_PER_WINDOW;
+}
+
+function recordRequest(ip: string, mutation: boolean): void {
+  const entry = windowFor(ip);
   if (mutation) entry.mutations += 1;
   else entry.reads += 1;
-  // Class-scoped: a burst of mutations (a full-book reprice) must not
-  // starve reads (heartbeats, view polls), or the maker goes "offline"
-  // and stalls in-flight swaps for the rest of the window.
-  return mutation
-    ? entry.mutations > MAX_MUTATIONS_PER_WINDOW
-    : entry.reads > MAX_READS_PER_WINDOW;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -116,12 +133,36 @@ function sendSerializedJson(
   status: number,
   body: string,
 ): void {
+  // A client that aborted mid-body leaves nothing to answer, and writing to a
+  // destroyed response throws where the caller has no way to recover.
+  if (res.destroyed || res.writableEnded) return;
   res.writeHead(status, {
     "Content-Type": "application/json",
     "X-Content-Type-Options": "nosniff",
     "Cache-Control": "no-store",
   });
   res.end(body);
+}
+
+/**
+ * A refusal the book produced before verifying anything. `Retry-After` names
+ * the delay the client should wait, and `X-Refusal-Stage` says the reply cost
+ * the book almost nothing, which a client or a load harness can read without
+ * parsing the message.
+ */
+function sendShedJson(
+  res: ServerResponse,
+  status: number,
+  message: string,
+  retryAfterS?: number,
+): void {
+  if (!res.destroyed && !res.headersSent) {
+    if (retryAfterS !== undefined) {
+      res.setHeader("Retry-After", String(retryAfterS));
+    }
+    res.setHeader("X-Refusal-Stage", "pre-verification");
+  }
+  sendJson(res, status, { error: message });
 }
 
 function waitForResponse(
@@ -196,8 +237,66 @@ function federationPageBody(page: FederationPage): string {
   }
 }
 
+type BodyOutcome = Buffer | "too-large" | "too-slow" | "aborted";
+
+/**
+ * Collects a request body under its own deadline. A client that promises a
+ * body and sends none, or sends it a byte at a time, is answered and let go
+ * early: the body slot and the loop are freed at the deadline, and the
+ * remaining bytes are discarded without being buffered. The service request
+ * timeout still closes the socket itself.
+ */
+function readRequestBody(
+  req: IncomingMessage,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<BodyOutcome> {
+  return new Promise<BodyOutcome>((resolve) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const finish = (outcome: BodyOutcome): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onFailure);
+      req.off("aborted", onFailure);
+      // Anything still arriving is read and dropped, so a refused body never
+      // grows in memory and never stalls the parser.
+      if (outcome !== "aborted" && !req.readableEnded) req.resume();
+      resolve(outcome);
+    };
+    const onData = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        finish("too-large");
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = (): void => finish(Buffer.concat(chunks));
+    const onFailure = (): void => finish("aborted");
+    const timer = setTimeout(() => finish("too-slow"), timeoutMs);
+    timer.unref();
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onFailure);
+    req.once("aborted", onFailure);
+  });
+}
+
+/**
+ * Reads and parses a JSON request body before any mutation slot is taken. The
+ * body read has its own per-source and global bound, because a half-open
+ * request that holds a mutation slot would refuse every other writer for the
+ * whole request timeout.
+ */
 async function readJsonBody(
   req: IncomingMessage,
+  res: ServerResponse,
+  ip: string,
   maxBytes = MAX_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   const contentType = req.headers["content-type"];
@@ -205,19 +304,35 @@ async function readJsonBody(
     typeof contentType !== "string" ||
     contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
   ) {
-    throw new ApiError(415, "content type must be application/json");
+    throw new ApiError(415, "content type must be application/json").shed();
   }
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    const buf = chunk as Buffer;
-    size += buf.length;
-    if (size > maxBytes) throw new ApiError(413, "body too large");
-    chunks.push(buf);
+  const release = bodyReadLimiter.acquire(ip);
+  if (release === null) {
+    throw new ApiError(
+      503,
+      "order book has too many request bodies in flight, retry shortly",
+    ).shed();
   }
-  if (size === 0) return {};
+  let outcome: BodyOutcome;
   try {
-    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    outcome = await readRequestBody(req, maxBytes, config.bodyReadTimeoutMs);
+  } finally {
+    release();
+  }
+  if (outcome === "too-large") {
+    res.setHeader("Connection", "close");
+    throw new ApiError(413, "body too large").shed();
+  }
+  if (outcome === "too-slow") {
+    res.setHeader("Connection", "close");
+    throw new ApiError(408, "request body was too slow").shed();
+  }
+  if (outcome === "aborted") {
+    throw new ApiError(400, "request body was not received").shed();
+  }
+  if (outcome.byteLength === 0) return {};
+  try {
+    const parsed: unknown = JSON.parse(outcome.toString("utf8"));
     if (
       typeof parsed !== "object" ||
       parsed === null ||
@@ -246,6 +361,14 @@ const bookLease = ((): BookLease => {
     process.exit(1);
   }
 })();
+
+/**
+ * How many times the in-write ownership check re-reads the lease before it
+ * treats an unreadable one as terminal. A commit is refused only when every
+ * attempt fails, because memory is then ahead of the file and the safe
+ * resolution is a restart that reloads it.
+ */
+const LEASE_WRITE_READ_ATTEMPTS = 3;
 
 /** Set once ownership is provably gone. Every write path is refused after it. */
 let leaseLost = false;
@@ -325,32 +448,46 @@ function assertBookOwned(): void {
  * disk.
  */
 function assertBookOwnedForWrite(): void {
-  try {
-    bookLease.assertOwned();
-  } catch (error) {
-    if (error instanceof ProcessLeaseLostError) {
-      onLeaseLost(error.message);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      bookLease.assertOwned();
+      return;
+    } catch (error) {
+      if (error instanceof ProcessLeaseLostError) {
+        onLeaseLost(error.message);
+        throw error;
+      }
+      if (error instanceof ProcessLeaseUnverifiableError) {
+        // A commit runs one event-loop turn or more after the entry point
+        // proved ownership, so a read that fails here may be a moment of
+        // filesystem trouble rather than a real change of holder. Re-read a
+        // bounded number of times before treating it as terminal: the reads
+        // are two small file operations and the window that matters is the
+        // microsecond rename of a taken-over lease.
+        if (attempt < LEASE_WRITE_READ_ATTEMPTS) continue;
+        if (leaseUnverifiableSince === null) {
+          leaseUnverifiableSince = Date.now();
+        }
+        stopForLeaseFailure(
+          "single-writer lease unverifiable mid-write",
+          `${error.message}. The data files were left untouched and this process exits ` +
+            "so its restart reloads them",
+        );
+        throw error;
+      }
       throw error;
     }
-    if (error instanceof ProcessLeaseUnverifiableError) {
-      if (leaseUnverifiableSince === null) leaseUnverifiableSince = Date.now();
-      stopForLeaseFailure(
-        "single-writer lease unverifiable mid-write",
-        `${error.message}. The data files were left untouched and this process exits ` +
-          "so its restart reloads them",
-      );
-      throw error;
-    }
-    throw error;
   }
 }
 
 const store = new OrderStore(config.dataFile, {
   presenceTtlS: config.presenceTtlS,
   assertOwned: assertBookOwnedForWrite,
-  // A group commit that nobody awaited is the expiry sweep on a read path.
-  // Its failure still means memory moved past the file, which is the one
-  // condition this process does not continue through.
+  // Reported for every failed commit, including one nobody awaited, which is
+  // the expiry sweep on a read path. Whatever the caller, a failure means
+  // memory moved past the file, which is the one condition this process does
+  // not continue through. A waiting request is refused through its own
+  // rejected promise as well.
   onPersistenceFailure: (error: unknown) => {
     if (
       error instanceof ProcessLeaseLostError ||
@@ -427,8 +564,12 @@ const peerSync = new FederationPeerSync({
       return "applied";
     } catch (error) {
       if (error instanceof ProcessLeaseUnverifiableError) {
-        // Nothing was applied. The peer cursor stays put and the next sync
-        // pass retries this event once ownership can be proven again.
+        // From the check above, nothing was applied at all. From the commit,
+        // the event is in memory and the file was left untouched, and the
+        // store has stopped accepting further durability requests, so the
+        // process is already stopping. Either way this pass claims nothing:
+        // the peer cursor stays put, and a restart reloads the file and pulls
+        // the event again.
         return "deferred";
       }
       if (error instanceof ProcessLeaseLostError) {
@@ -470,6 +611,8 @@ peerSyncTimer?.unref();
 if (config.federationPeers.length > 0)
   setImmediate(() => void peerSync.syncAll());
 const ORDER_ID_RE = /^(?:[0-9a-f]{16}|[0-9a-f]{64})$/;
+/** Methods that can change durable state. */
+const MUTATION_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function clientIp(req: IncomingMessage): string {
   return resolveClientIp(
@@ -490,6 +633,62 @@ function clientIp(req: IncomingMessage): string {
 
 /** Mutating requests currently admitted by the in-flight gate. */
 let inflightMutations = 0;
+
+/**
+ * Per-source and global bound on bodies being read. A body read is cheap, so
+ * the global bound is wide and the short read deadline does the real work; the
+ * per-source share keeps one address from taking the whole global bound.
+ */
+const MAX_BODY_READS_PER_SOURCE = 8;
+const bodyReadLimiter = new FederationConcurrencyLimiter({
+  perSourceLimit: MAX_BODY_READS_PER_SOURCE,
+  globalLimit: config.maxInflightBodyReads,
+});
+
+/**
+ * Maker-authenticated write routes, recognised from the path alone so the
+ * decision is available before the body is read. A maker must be able to
+ * withdraw or fill a stale-priced order while takers rush it, so these keep
+ * reserved headroom inside the in-flight bound.
+ */
+const MAKER_WRITE_PATH_RE =
+  /^\/api\/orders\/[^/]+\/(?:cancel|cancel\/signed|fill)$/;
+
+/**
+ * Runs the expensive half of a mutating request under the in-flight bound. The
+ * caller has already read the body, so a request that promised a body and
+ * never sent it can never hold one of these slots. The slot is released in a
+ * finally, so a thrown handler, a refused commit and an aborted client all
+ * return it.
+ */
+async function withMutationSlot(
+  res: ServerResponse,
+  ip: string,
+  path: string,
+  run: () => Promise<void>,
+): Promise<void> {
+  const ceiling = MAKER_WRITE_PATH_RE.test(path)
+    ? config.maxInflightMutations
+    : config.maxInflightMutations - config.reservedMakerMutations;
+  if (inflightMutations >= ceiling) {
+    sendShedJson(
+      res,
+      503,
+      "order book has too many requests in flight, retry shortly",
+      1,
+    );
+    return;
+  }
+  inflightMutations += 1;
+  // Counted here, so a request the book refused at the door leaves the
+  // source's mutation budget alone.
+  recordRequest(ip, true);
+  try {
+    await run();
+  } finally {
+    inflightMutations -= 1;
+  }
+}
 
 const MAX_STREAM_CLIENTS = 200;
 const MAX_STREAM_CLIENTS_PER_IP = 4;
@@ -652,49 +851,31 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   );
 
   if (shuttingDown && path !== "/api/health" && path !== "/api/status") {
-    sendJson(res, 503, { error: "order book is shutting down" });
+    sendShedJson(res, 503, "order book is shutting down");
     return;
   }
 
   // Heartbeats are read-class: they mutate nothing durable and a maker
-  // with several listings pings often by design.
-  const mutation = method !== "GET" && !path.endsWith("/heartbeat");
-  if (path !== "/api/federation/v2/events" && rateLimited(ip, mutation)) {
-    sendJson(res, 429, { error: "rate limited, slow down" });
+  // with several listings pings often by design. Every other write method is
+  // mutation-class; GET and HEAD never reach the write path and OPTIONS was
+  // answered above.
+  const mutation =
+    MUTATION_METHODS.has(method) && !path.endsWith("/heartbeat");
+  if (path !== "/api/federation/v2/events" && rateLimitExceeded(ip, mutation)) {
+    sendShedJson(res, 429, "rate limited, slow down");
     return;
   }
-
-  // Admission gate for the expensive class. Every mutation verifies a proof
-  // and joins a group commit on this one process, so past a small number in
-  // flight extra concurrency only lengthens the queue until requests reach the
-  // service's own timeout. Refusing at the door turns that into an immediate,
-  // honest answer and leaves the event loop for reads, the SSE stream and the
-  // health and status probes, none of which are gated. Placed after the
-  // per-source limiter so a flooding source is still metered per source first,
-  // and before the body is read, the lease is proved or the store is touched.
-  // The bound also bounds a group commit: at most this many mutations can be
-  // waiting for one, so the batch latency a mutation can inherit is two
-  // commits.
-  if (!mutation) {
-    await dispatch(req, res, method, url, path, ip);
-    return;
-  }
-  if (inflightMutations >= config.maxInflightMutations) {
-    res.setHeader("Retry-After", "1");
-    sendJson(res, 503, {
-      error: "order book has too many requests in flight, retry shortly",
-    });
-    return;
-  }
-  inflightMutations += 1;
-  try {
-    await dispatch(req, res, method, url, path, ip);
-  } finally {
-    inflightMutations -= 1;
-  }
+  // A read spends its budget here. A mutation spends it when the in-flight
+  // gate admits it, so a refused one costs the source nothing.
+  if (!mutation) recordRequest(ip, false);
+  await dispatch(req, res, method, url, path, ip);
 }
 
-/** Routes one request that the gate above has already admitted. */
+/**
+ * Routes one request. Mutating routes read their body first and then run the
+ * expensive half inside withMutationSlot, so the in-flight bound covers
+ * verification and the group commit and nothing else.
+ */
 async function dispatch(
   req: IncomingMessage,
   res: ServerResponse,
@@ -809,6 +990,15 @@ async function dispatch(
       // expiry sweep, so this route cannot rewrite the orders file even while
       // ownership holds.
       assertBookOwned();
+      if (reset) {
+        // A reset snapshot is a view of memory, and it is cached and served to
+        // peers as this mirror's current state, so it may not contain a row no
+        // commit has written yet. Reset pages are rare and the response is
+        // cached for seconds, so waiting for the pending commit costs a peer
+        // nothing. A store whose commit failed rejects here, and the caller
+        // sees the same 503 every write path returns.
+        await store.flush();
+      }
       const body = federationResponseCache.getOrCreate(cacheKey, () => {
         const page = federationFeed.page(cursor, limit, () =>
           // No expiry sweep on a read path: the sweep persists, and this
@@ -842,45 +1032,53 @@ async function dispatch(
     return;
   }
   if (method === "POST" && path === "/api/orders") {
-    const created = store.create(await readJsonBody(req), ip);
-    await store.flush();
-    sendJson(res, 201, created);
+    const body = await readJsonBody(req, res, ip);
+    await withMutationSlot(res, ip, path, async () => {
+      const created = store.create(body, ip);
+      await store.flush();
+      sendJson(res, 201, created);
+    });
     return;
   }
   if (method === "POST" && path === "/api/orders/signed") {
-    const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
-    const verified = verifyOrderV1(body["order"], body["auth"]);
-    const expectedKeys =
-      verified.terms.visibility === "private"
-        ? ["auth", "makerToken", "order", "shareToken"]
-        : ["auth", "makerToken", "order"];
-    const actualKeys = Object.keys(body).sort();
-    if (
-      actualKeys.length !== expectedKeys.length ||
-      actualKeys.some((key, index) => key !== expectedKeys[index])
-    ) {
-      throw new ApiError(400, "signed create request has unexpected fields");
-    }
-    const created = store.createVerified(
-      verified,
-      {
-        makerToken: body["makerToken"],
-        ...(body["shareToken"] === undefined
-          ? {}
-          : { shareToken: body["shareToken"] }),
-      },
-      ip,
-    );
-    await store.flush();
-    sendJson(res, 201, created);
+    const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
+    await withMutationSlot(res, ip, path, async () => {
+      const verified = verifyOrderV1(body["order"], body["auth"]);
+      const expectedKeys =
+        verified.terms.visibility === "private"
+          ? ["auth", "makerToken", "order", "shareToken"]
+          : ["auth", "makerToken", "order"];
+      const actualKeys = Object.keys(body).sort();
+      if (
+        actualKeys.length !== expectedKeys.length ||
+        actualKeys.some((key, index) => key !== expectedKeys[index])
+      ) {
+        throw new ApiError(400, "signed create request has unexpected fields");
+      }
+      const created = store.createVerified(
+        verified,
+        {
+          makerToken: body["makerToken"],
+          ...(body["shareToken"] === undefined
+            ? {}
+            : { shareToken: body["shareToken"] }),
+        },
+        ip,
+      );
+      await store.flush();
+      sendJson(res, 201, created);
+    });
     return;
   }
   if (method === "POST" && path === "/api/orders/take") {
     // Take by terms: fills the best open order at the caller's bounds or
     // better. Returns the taker token alongside the order, like accept.
-    const taken = store.take(await readJsonBody(req), ip);
-    await store.flush();
-    sendJson(res, 200, taken);
+    const body = await readJsonBody(req, res, ip);
+    await withMutationSlot(res, ip, path, async () => {
+      const taken = store.take(body, ip);
+      await store.flush();
+      sendJson(res, 200, taken);
+    });
     return;
   }
 
@@ -890,16 +1088,18 @@ async function dispatch(
   if (signedCancelMatch && method === "POST") {
     const id = signedCancelMatch[1] ?? "";
     if (!ORDER_ID_RE.test(id)) throw new ApiError(404, "order not found");
-    const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+    const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
     const headerToken = req.headers["x-maker-token"];
-    const order = store.cancelSigned(
-      id,
-      body["cancel"],
-      body["auth"],
-      typeof headerToken === "string" ? headerToken : body["token"],
-    );
-    await store.flush();
-    sendJson(res, 200, { order });
+    await withMutationSlot(res, ip, path, async () => {
+      const order = store.cancelSigned(
+        id,
+        body["cancel"],
+        body["auth"],
+        typeof headerToken === "string" ? headerToken : body["token"],
+      );
+      await store.flush();
+      sendJson(res, 200, { order });
+    });
     return;
   }
 
@@ -919,32 +1119,36 @@ async function dispatch(
       return;
     }
     if (action === "intents" && method === "POST") {
-      const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
       const shareToken = req.headers["x-share-token"];
-      const intent = store.submitFillIntent(
-        id,
-        body["intent"],
-        body["auth"],
-        ip,
-        typeof shareToken === "string" ? shareToken : body["shareToken"],
-      );
-      await store.flush();
-      sendJson(res, 201, { intent });
+      await withMutationSlot(res, ip, path, async () => {
+        const intent = store.submitFillIntent(
+          id,
+          body["intent"],
+          body["auth"],
+          ip,
+          typeof shareToken === "string" ? shareToken : body["shareToken"],
+        );
+        await store.flush();
+        sendJson(res, 201, { intent });
+      });
       return;
     }
     if (action === "fill" && method === "POST") {
-      const body = await readJsonBody(req, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(req, res, ip, MAX_SIGNED_BODY_BYTES);
       const makerToken = req.headers["x-maker-token"];
-      const order = store.fillOrder(
-        id,
-        body["fill"],
-        body["auth"],
-        body["intent"],
-        body["intentAuth"],
-        typeof makerToken === "string" ? makerToken : body["token"],
-      );
-      await store.flush();
-      sendJson(res, 200, { order });
+      await withMutationSlot(res, ip, path, async () => {
+        const order = store.fillOrder(
+          id,
+          body["fill"],
+          body["auth"],
+          body["intent"],
+          body["intentAuth"],
+          typeof makerToken === "string" ? makerToken : body["token"],
+        );
+        await store.flush();
+        sendJson(res, 200, { order });
+      });
       return;
     }
   }
@@ -968,27 +1172,32 @@ async function dispatch(
       return;
     }
     if (method === "POST" && action !== undefined) {
-      const body = await readJsonBody(req);
-      if (action === "accept") {
-        // Returns the taker token alongside the order, like create does
-        // for the maker token.
-        const accepted = store.accept(id, body, ip);
-        await store.flush();
-        sendJson(res, 200, accepted);
+      const body = await readJsonBody(req, res, ip);
+      if (action === "heartbeat") {
+        // Presence only: it writes nothing durable, so it neither takes an
+        // in-flight slot nor waits for a commit that belongs to other
+        // requests. A maker with several listings pings often by design.
+        sendJson(res, 200, { order: store.heartbeat(id, body) });
         return;
       }
-      const order =
-        action === "hashlock"
-          ? store.announceHashlock(id, body)
-          : action === "release"
-            ? store.release(id, body)
-            : action === "heartbeat"
-              ? store.heartbeat(id, body)
+      await withMutationSlot(res, ip, path, async () => {
+        if (action === "accept") {
+          // Returns the taker token alongside the order, like create does
+          // for the maker token.
+          const accepted = store.accept(id, body, ip);
+          await store.flush();
+          sendJson(res, 200, accepted);
+          return;
+        }
+        const order =
+          action === "hashlock"
+            ? store.announceHashlock(id, body)
+            : action === "release"
+              ? store.release(id, body)
               : store.cancel(id, body);
-      // A heartbeat changes no durable state, so this resolves at once unless
-      // the opportunistic expiry sweep left something to write.
-      await store.flush();
-      sendJson(res, 200, { order });
+        await store.flush();
+        sendJson(res, 200, { order });
+      });
       return;
     }
   }
@@ -999,7 +1208,16 @@ async function dispatch(
 const server = createServer((req, res) => {
   route(req, res).catch((err: unknown) => {
     if (err instanceof ApiError) {
-      sendJson(res, err.status, { error: err.message });
+      if (err.shedBeforeVerification) {
+        sendShedJson(
+          res,
+          err.status,
+          err.message,
+          err.status === 503 ? 1 : undefined,
+        );
+      } else {
+        sendJson(res, err.status, { error: err.message });
+      }
     } else if (err instanceof ProcessLeaseLostError) {
       // Nothing durable changed. The shutdown is already running for a loss
       // the checks above detected, and this call is idempotent.
