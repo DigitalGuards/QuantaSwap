@@ -79,10 +79,47 @@ interface Qrlweb3 {
     wallet?: { add(seed: string): void };
     transactionConfirmationBlocks: number;
     getBalance(addr: string): Promise<bigint>;
-    getGasPrice(): Promise<bigint>;
+    getMaxPriorityFeePerGas(): Promise<bigint>;
     estimateGas(tx: Record<string, unknown>): Promise<bigint>;
     sendTransaction(tx: Record<string, unknown>): Promise<{ transactionHash: unknown }>;
   };
+}
+
+/** Bounds on the QRL priority tip. The floor is @theqrl/web3's default
+ *  tip, which every QRL send paid before the leg read the node, so a low
+ *  suggestion never makes a claim slower than it was. The ceiling is 20x
+ *  the devnet's 2.5 gwei suggestion: the daemon signs unattended, so an RPC
+ *  answer can never set an unbounded tip. */
+export const MIN_QRL_TIP_WEI = 2_500_000_000n;
+export const MAX_QRL_TIP_WEI = 50_000_000_000n;
+
+/** The priority tip for a QRL send: the node's suggestion
+ *  (qrl_maxPriorityFeePerGas) clamped to [MIN_QRL_TIP_WEI,
+ *  MAX_QRL_TIP_WEI], or the floor when the node does not answer. The
+ *  library then signs a type-2 transaction with
+ *  maxFeePerGas = 2 * baseFee + tip. A fallback or a cap is logged. */
+export async function suggestedQrlTip(
+  read: () => Promise<unknown>,
+  warn: (message: string) => void = console.warn,
+): Promise<bigint> {
+  let tip: bigint;
+  try {
+    const answer = await read();
+    if (typeof answer !== "bigint" && typeof answer !== "string" && typeof answer !== "number") {
+      throw new Error("unusable answer");
+    }
+    tip = BigInt(answer);
+  } catch (err) {
+    warn(
+      `qrl tip: node suggestion unavailable, using ${MIN_QRL_TIP_WEI} wei (${err instanceof Error ? err.message : "unknown error"})`,
+    );
+    return MIN_QRL_TIP_WEI;
+  }
+  if (tip > MAX_QRL_TIP_WEI) {
+    warn(`qrl tip: node suggested ${tip} wei, capped at ${MAX_QRL_TIP_WEI} wei`);
+    return MAX_QRL_TIP_WEI;
+  }
+  return tip < MIN_QRL_TIP_WEI ? MIN_QRL_TIP_WEI : tip;
 }
 
 const txHashHex = (h: unknown): string =>
@@ -195,7 +232,11 @@ export class QrlLeg implements LegSender {
       chainId: this.chainId,
       ...(valueWei > 0n ? { value: valueWei } : {}),
     };
-    const gasPrice = await withTimeout(this.web3.qrl.getGasPrice(), this.netTimeoutMs, "qrl getGasPrice");
+    // @theqrl/web3 signs type-2 transactions only and has no gasPrice
+    // field, so the tip is the one fee input that reaches the signature.
+    const tip = await suggestedQrlTip(() =>
+      withTimeout(this.web3.qrl.getMaxPriorityFeePerGas(), this.netTimeoutMs, "qrl maxPriorityFeePerGas"),
+    );
     const estimated = await withTimeout(this.web3.qrl.estimateGas(base), this.netTimeoutMs, "qrl estimateGas");
     const gas =
       options.settlement === true
@@ -203,7 +244,7 @@ export class QrlLeg implements LegSender {
         : (BigInt(estimated) * 13n) / 10n;
     await assertQrlRuntime(this.rpc);
     const receipt = await withTimeout(
-      this.web3.qrl.sendTransaction({ ...base, gas, gasPrice }),
+      this.web3.qrl.sendTransaction({ ...base, gas, maxPriorityFeePerGas: tip }),
       this.txTimeoutMs,
       "qrl sendTransaction",
     );

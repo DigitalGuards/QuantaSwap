@@ -74,10 +74,9 @@ async function makeDriver() {
     const method = contract.methods[name](...args);
     const from = acc.address;
     const opts = value > 0n ? { value } : {};
-    const gasPrice = await web3.qrl.getGasPrice();
     const estimated = await method.estimateGas({ from, ...opts });
     const gas = (BigInt(estimated) * 12n) / 10n;
-    const txObj = { from, to: htlcAddress, gas, gasPrice, data: method.encodeABI(), ...opts };
+    const txObj = { from, to: htlcAddress, gas, data: method.encodeABI(), ...opts };
     await new Promise((resolve, reject) => {
       web3.qrl
         .sendTransaction(txObj, undefined, { checkRevertBeforeSending: true })

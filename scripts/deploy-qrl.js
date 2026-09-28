@@ -46,12 +46,11 @@ async function main() {
   const deploy = contract.deploy({ data: bytecode });
   const estimatedGas = await deploy.estimateGas({ from: acc.address });
   const gas = (BigInt(estimatedGas) * 12n) / 10n;
-  const gasPrice = await web3.qrl.getGasPrice();
 
   const address = await new Promise((resolve, reject) => {
     web3.qrl
       .sendTransaction(
-        { from: acc.address, gas, gasPrice, data: deploy.encodeABI(), chainId },
+        { from: acc.address, gas, data: deploy.encodeABI(), chainId },
         undefined,
         { checkRevertBeforeSending: true }
       )
