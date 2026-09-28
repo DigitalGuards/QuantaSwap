@@ -7,7 +7,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { MLDSA87 } from "@theqrl/wallet.js";
-import { MAX_QRL_TIP_WEI, QrlLeg, suggestedQrlTip } from "./chains.js";
+import { MAX_QRL_TIP_WEI, MIN_QRL_TIP_WEI, QrlLeg, suggestedQrlTip } from "./chains.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { canonicalQip55QrlAddress } from "./qip55.js";
 
@@ -125,7 +125,7 @@ async function signedFees(): Promise<ReturnType<typeof decodeType2Head>> {
 describe("QrlLeg fee inputs", () => {
   before(async () => {
     server = createServer((req, res) => {
-      void readBody(req).then((body) => {
+      readBody(req).then((body) => {
         const { id, method, params } = JSON.parse(body) as {
           id: unknown;
           method: string;
@@ -135,13 +135,19 @@ describe("QrlLeg fee inputs", () => {
         const reply = JSON.stringify({ jsonrpc: "2.0", id, ...answer(method, params ?? []) });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(reply);
+      }).catch((err: unknown) => {
+        res.writeHead(500);
+        res.end(String(err));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
-  after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  after(() => {
+    server.closeAllConnections();
+    return new Promise<void>((resolve) => server.close(() => resolve()));
+  });
 
   beforeEach(() => {
     tipAnswer = { result: "0x9502f900" }; // 2.5 gwei
@@ -165,25 +171,58 @@ describe("QrlLeg fee inputs", () => {
     assert.equal(fees.maxFeePerGas, 2n * BASE_FEE + MAX_QRL_TIP_WEI);
   });
 
-  it("falls back to the library default tip on a node without the method", async () => {
+  it("falls back to the floor on a node without the method", async () => {
     tipAnswer = { error: { code: -32601, message: "the method does not exist" } };
     const fees = await signedFees();
-    assert.equal(fees.maxPriorityFeePerGas, 2_500_000_000n, "@theqrl/web3 default");
-    assert.equal(fees.maxFeePerGas, 2n * BASE_FEE + 2_500_000_000n);
+    assert.equal(fees.maxPriorityFeePerGas, MIN_QRL_TIP_WEI, "the @theqrl/web3 default tip");
+    assert.equal(fees.maxFeePerGas, 2n * BASE_FEE + MIN_QRL_TIP_WEI);
+  });
+
+  it("never tips below the floor on a low suggestion", async () => {
+    tipAnswer = { result: "0x0" };
+    const fees = await signedFees();
+    assert.equal(fees.maxPriorityFeePerGas, MIN_QRL_TIP_WEI);
   });
 });
 
 describe("suggestedQrlTip", () => {
-  it("passes a suggestion through and caps it", async () => {
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(3n * GWEI)), 3n * GWEI);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve("0x9502f900")), 2_500_000_000n);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(MAX_QRL_TIP_WEI + 1n)), MAX_QRL_TIP_WEI);
+  const collect = (): { warn: (message: string) => void; lines: string[] } => {
+    const lines: string[] = [];
+    return { warn: (message) => lines.push(message), lines };
+  };
+
+  it("passes a suggestion inside the bounds through silently", async () => {
+    const log = collect();
+    assert.equal(await suggestedQrlTip(() => Promise.resolve(3n * GWEI), log.warn), 3n * GWEI);
+    assert.equal(await suggestedQrlTip(() => Promise.resolve("0x9502f900"), log.warn), 2_500_000_000n);
+    assert.deepEqual(log.lines, []);
   });
 
-  it("returns undefined for a failed read or an unusable answer", async () => {
-    assert.equal(await suggestedQrlTip(() => Promise.reject(new Error("timeout"))), undefined);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve("not a number")), undefined);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(-1n)), undefined);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve({})), undefined);
+  it("raises a low suggestion to the floor", async () => {
+    assert.equal(await suggestedQrlTip(() => Promise.resolve(0n)), MIN_QRL_TIP_WEI);
+    assert.equal(await suggestedQrlTip(() => Promise.resolve(GWEI)), MIN_QRL_TIP_WEI);
+    assert.equal(await suggestedQrlTip(() => Promise.resolve(-1n)), MIN_QRL_TIP_WEI);
+  });
+
+  it("caps a high suggestion and logs it", async () => {
+    const log = collect();
+    assert.equal(await suggestedQrlTip(() => Promise.resolve(MAX_QRL_TIP_WEI + 1n), log.warn), MAX_QRL_TIP_WEI);
+    assert.equal(log.lines.length, 1);
+    assert.match(log.lines[0]!, /capped/);
+  });
+
+  it("falls back to the floor and logs on a failed read or an unusable answer", async () => {
+    const log = collect();
+    for (const read of [
+      () => Promise.reject(new Error("qrl maxPriorityFeePerGas timed out after 5000ms")),
+      () => Promise.resolve("not a number"),
+      () => Promise.resolve(1.5),
+      () => Promise.resolve({}),
+      () => Promise.resolve(null),
+    ]) {
+      assert.equal(await suggestedQrlTip(read, log.warn), MIN_QRL_TIP_WEI);
+    }
+    assert.equal(log.lines.length, 5);
+    assert.match(log.lines[0]!, /timed out/);
   });
 });
