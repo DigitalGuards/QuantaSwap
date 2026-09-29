@@ -45,7 +45,7 @@ import {
   OrderGoneError,
   type OrderView,
 } from "./orderbook.js";
-import { COINGECKO_URL, PriceFeed, needsReprice } from "./price.js";
+import { PriceFeed, coingeckoSource, coinpaprikaSource, needsReprice } from "./price.js";
 import {
   MAX_CREDIT_ATTEMPTS,
   canContinueWithoutBook,
@@ -135,7 +135,7 @@ const fmtUnits = (value: bigint, decimals: number): string => {
 };
 
 const feed = new PriceFeed({
-  url: COINGECKO_URL,
+  sources: [coingeckoSource(), coinpaprikaSource(cfg.priceFallbackIntervalS)],
   refreshS: cfg.priceRefreshS,
   maxAgeS: cfg.priceMaxAgeS,
   staticMilli: cfg.priceFeed === "off" ? cfg.midPriceMilli : null,
@@ -1335,7 +1335,7 @@ async function main(): Promise<void> {
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
       `max inflight ${cfg.maxInflight}, ${cfg.ordersPerLevel} listing(s)/rung, ` +
-      `price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli (ETH pair only)` : `${cfg.priceFeed} feed, reprice > ${cfg.repriceThresholdBps} bps drift`}`,
+      `price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli (ETH pair only)` : `${cfg.priceFeed} feed (coinpaprika fallback, >= ${cfg.priceFallbackIntervalS}s apart), reprice > ${cfg.repriceThresholdBps} bps drift`}`,
   );
   for (const asset of cfg.assets) {
     const info = assetInfo(asset);

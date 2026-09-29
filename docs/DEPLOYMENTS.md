@@ -289,7 +289,8 @@ Shipped 2026-07-12: contracts, tUSDT, and inventory are live (tables above);
 the frontend, order book, and market maker carry the asset dimension (symbol
 strings `ETH | USDC | tUSDT` on the wire, base-unit amounts, registry-resolved
 token addresses verified on-chain by every client). The MM stocks QRL/USDC
-(CoinGecko usd-coin/qrl cross mid); QRL/tUSDT has no MM liquidity, the tUSDT
+(CoinGecko usd-coin/qrl cross mid, CoinPaprika as fallback since 2026-09-29,
+see `marketmaker/.env.example`); QRL/tUSDT has no MM liquidity, the tUSDT
 faucet (`faucet()` on the token, 10,000 per call) makes it self-serve for
 testing the USDT approval-race path.
 
