@@ -27,9 +27,15 @@ export interface AssetInfo {
   /** Dust floor for a lock, in the asset's base units. */
   minBaseUnits: bigint;
   quirks: AssetQuirks;
-  /** CoinGecko id for the USD price feed; null means no feed exists and
-   *  the asset cannot be stocked (enforced at config load). */
-  coingeckoId: string | null;
+  /** Ids for the USD price sources (CoinGecko primary, CoinPaprika
+   *  fallback); null means no feed exists and the asset cannot be stocked
+   *  (enforced at config load). */
+  priceIds: PriceIds | null;
+}
+
+export interface PriceIds {
+  coingecko: string;
+  coinpaprika: string;
 }
 
 const NO_QUIRKS: AssetQuirks = {
@@ -45,7 +51,7 @@ export const ASSETS: Record<AssetSymbol, AssetInfo> = {
     decimals: 18,
     minBaseUnits: 10n ** 15n, // 0.001 ETH
     quirks: NO_QUIRKS,
-    coingeckoId: "ethereum",
+    priceIds: { coingecko: "ethereum", coinpaprika: "eth-ethereum" },
   },
   USDC: {
     symbol: "USDC",
@@ -53,7 +59,7 @@ export const ASSETS: Record<AssetSymbol, AssetInfo> = {
     decimals: 6,
     minBaseUnits: 10n ** 6n, // 1 USDC
     quirks: { ...NO_QUIRKS, issuerBlocklist: true },
-    coingeckoId: "usd-coin",
+    priceIds: { coingecko: "usd-coin", coinpaprika: "usdc-usd-coin" },
   },
   tUSDT: {
     symbol: "tUSDT",
@@ -61,7 +67,7 @@ export const ASSETS: Record<AssetSymbol, AssetInfo> = {
     decimals: 6,
     minBaseUnits: 10n ** 6n, // 1 tUSDT
     quirks: { ...NO_QUIRKS, approvalRace: true, noReturnValue: true },
-    coingeckoId: null, // test-only faucet token; no feed, not stockable
+    priceIds: null, // test-only faucet token; no feed, not stockable
   },
 };
 

@@ -40,7 +40,8 @@ Run a client against the order book API. You have two starting points:
   TypeScript with direct QRL signing and verification dependencies. It signs
   portable orders, independently verifies taker intents, and runs the whole
   lifecycle unattended: fill, lock, depth-verified
-  claim, refund, repost, plus a price ladder tracking a CoinGecko cross rate,
+  claim, refund, repost, plus a price ladder tracking a CoinGecko cross rate
+  (CoinPaprika as fallback),
   inventory reserves and reprice-on-drift. Every irreversible action flows
   through the pure decision core in `marketmaker/src/policy.ts` (tested by
   `npm test`). Configuration is documented in `marketmaker/.env.example`; the

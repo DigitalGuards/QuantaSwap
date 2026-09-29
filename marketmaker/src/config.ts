@@ -52,6 +52,9 @@ export interface Config {
   /** "coingecko" tracks the live cross rate; "off" pins midPriceMilli. */
   priceFeed: "coingecko" | "off";
   priceRefreshS: number;
+  /** Minimum gap between CoinPaprika fallback attempts (keyless budget
+   *  is 20,000 calls a month; each attempt costs up to three). */
+  priceFallbackIntervalS: number;
   /** Stop posting when the cached price is older than this. */
   priceMaxAgeS: number;
   /** Cancel-and-repost open listings when the mid drifts beyond this. */
@@ -169,7 +172,7 @@ function parseAssets(raw: string): AssetSymbol[] {
     if (!isAssetSymbol(sym)) {
       throw new Error(`MM_ASSETS: unknown asset "${sym}" (valid: ${ASSET_SYMBOLS.join(", ")})`);
     }
-    if (assetInfo(sym).coingeckoId === null) {
+    if (assetInfo(sym).priceIds === null) {
       throw new Error(`MM_ASSETS: ${sym} has no price feed and cannot be stocked`);
     }
     if (out.includes(sym)) throw new Error(`MM_ASSETS: duplicate asset "${sym}"`);
@@ -242,6 +245,7 @@ export function loadConfig(): Config {
     midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
     priceFeed: env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
     priceRefreshS: envInt("MM_PRICE_REFRESH_S", 300),
+    priceFallbackIntervalS: envInt("MM_PRICE_FALLBACK_INTERVAL_S", 900),
     priceMaxAgeS: envInt("MM_PRICE_MAX_AGE_S", 1800),
     repriceThresholdBps: envWei("MM_REPRICE_THRESHOLD_BPS", 100n), // 1%
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung
