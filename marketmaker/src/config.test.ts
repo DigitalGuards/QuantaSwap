@@ -87,3 +87,30 @@ describe("file-backed signing secrets", () => {
       }
     }));
 });
+
+describe("CoinPaprika fallback interval", () => {
+  it("defaults to the budget floor and rejects anything below it", () => {
+    const keys = ["MM_PRICE_FALLBACK_INTERVAL_S", "MM_ETH_PRIVATE_KEY", "MM_ETH_PRIVATE_KEY_FILE",
+      "MM_QRL_HEXSEED", "MM_QRL_HEXSEED_FILE"];
+    const before = new Map(keys.map(key => [key, process.env[key]]));
+    try {
+      process.env.MM_ETH_PRIVATE_KEY = "test-only-unused-key";
+      process.env.MM_QRL_HEXSEED = "test-only-unused-seed";
+      delete process.env.MM_ETH_PRIVATE_KEY_FILE;
+      delete process.env.MM_QRL_HEXSEED_FILE;
+      delete process.env.MM_PRICE_FALLBACK_INTERVAL_S;
+      assert.equal(loadConfig().priceFallbackIntervalS, 900);
+      process.env.MM_PRICE_FALLBACK_INTERVAL_S = "3600";
+      assert.equal(loadConfig().priceFallbackIntervalS, 3600);
+      for (const value of ["0", "60", "899"]) {
+        process.env.MM_PRICE_FALLBACK_INTERVAL_S = value;
+        assert.throws(() => loadConfig(), /MM_PRICE_FALLBACK_INTERVAL_S/);
+      }
+    } finally {
+      for (const [key, value] of before) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});

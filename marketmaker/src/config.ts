@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { DEFAULT_ORDER_LIFETIME_S } from "./admission.js";
 import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
+import { MIN_FALLBACK_INTERVAL_S } from "./price.js";
 
 /** Ladder policy for one ETH-leg asset. */
 export interface AssetPolicy {
@@ -52,7 +53,7 @@ export interface Config {
   /** "coingecko" tracks the live cross rate; "off" pins midPriceMilli. */
   priceFeed: "coingecko" | "off";
   priceRefreshS: number;
-  /** Minimum gap between CoinPaprika fallback attempts (keyless budget
+  /** Minimum gap between CoinPaprika fallback attempts, at least 900 (budget
    *  is 20,000 calls a month; each attempt costs up to three). */
   priceFallbackIntervalS: number;
   /** Stop posting when the cached price is older than this. */
@@ -220,6 +221,10 @@ export function loadConfig(): Config {
     throw new Error("MM_ORDER_LIFETIME_S must be an integer between 180 and 1800");
   }
   if (healthPort > 65_535) throw new Error("MM_HEALTH_PORT must be at most 65535");
+  const priceFallbackIntervalS = envInt("MM_PRICE_FALLBACK_INTERVAL_S", MIN_FALLBACK_INTERVAL_S);
+  if (priceFallbackIntervalS < MIN_FALLBACK_INTERVAL_S) {
+    throw new Error(`MM_PRICE_FALLBACK_INTERVAL_S must be at least ${MIN_FALLBACK_INTERVAL_S}`);
+  }
   return {
     assets,
     assetPolicies: loadAssetPolicies(assets, {
@@ -245,7 +250,7 @@ export function loadConfig(): Config {
     midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
     priceFeed: env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
     priceRefreshS: envInt("MM_PRICE_REFRESH_S", 300),
-    priceFallbackIntervalS: envInt("MM_PRICE_FALLBACK_INTERVAL_S", 900),
+    priceFallbackIntervalS,
     priceMaxAgeS: envInt("MM_PRICE_MAX_AGE_S", 1800),
     repriceThresholdBps: envWei("MM_REPRICE_THRESHOLD_BPS", 100n), // 1%
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung

@@ -135,7 +135,6 @@ const fmtUnits = (value: bigint, decimals: number): string => {
 };
 
 const feed = new PriceFeed({
-  assets: cfg.assets,
   sources: [coingeckoSource(), coinpaprikaSource(cfg.priceFallbackIntervalS)],
   refreshS: cfg.priceRefreshS,
   maxAgeS: cfg.priceMaxAgeS,
