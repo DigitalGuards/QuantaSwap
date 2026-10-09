@@ -88,10 +88,11 @@ afterEach(() => {
 });
 
 function mockWalletConnect() {
+  const sessionState: { session: object | undefined } = { session: {} };
   const client = Object.assign(new FakeProvider(), {
     enable: vi.fn(async () => [accountA]),
     disconnect: vi.fn(async () => undefined),
-    session: {} as object | undefined,
+    ...sessionState,
   });
   vi.mocked(getWalletConnectClient).mockResolvedValue(client as unknown as WalletConnectClient);
   return client;

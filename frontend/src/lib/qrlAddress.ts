@@ -1,8 +1,5 @@
-import {
-  canonicalQip55QrlAddress,
-  isQip55QrlAddress,
-  isQrvmAddress,
-} from "./qip55";
+import { isArray } from "@/utils/guards";
+import { canonicalQip55QrlAddress, isQip55QrlAddress, isQrvmAddress } from "./qip55";
 
 const HEX_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const DISPLAYABLE_QRL_ADDRESS_RE = /^Q(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{128})$/;
@@ -52,14 +49,10 @@ export function hexToQ(address: string): string {
 }
 
 export function requireQrlAccount(accounts: unknown): string {
-  if (
-    !Array.isArray(accounts) ||
-    accounts.length !== 1 ||
-    !accounts.every(isQrlAddress)
-  ) {
+  if (!isArray(accounts) || accounts.length !== 1 || !isQrlAddress(accounts[0])) {
     throw new Error("Wallet returned an invalid QRL account");
   }
-  return accounts[0] as string;
+  return accounts[0];
 }
 
 /** Preserve the wallet's exact authorized spelling after full identity validation. */
@@ -68,15 +61,17 @@ export function bindAuthorizedMessageSigner(
   account: string | null,
 ): { method: string; params?: unknown[] } {
   if (request.method !== "qrl_signMessage") return request;
-  const signer = request.params?.[0];
+  const params = request.params;
+  const signer = params?.[0];
   if (
+    params === undefined ||
     !isQrlAddress(account) ||
     !isQrlAddress(signer) ||
     signer.toLowerCase() !== account.toLowerCase()
   ) {
     throw new Error("Message signer does not match the authorized QRL account");
   }
-  return { ...request, params: [account, ...request.params!.slice(1)] };
+  return { ...request, params: [account, ...params.slice(1)] };
 }
 
 export interface QrlAccountProvider {
@@ -87,7 +82,7 @@ export interface QrlAccountProvider {
 /** Reconnects use the persisted authorized cache. Fresh pairings prompt once. */
 export async function getAuthorizedQrlAccount(provider: QrlAccountProvider): Promise<string> {
   const cached = provider.getAccounts();
-  if (!Array.isArray(cached)) throw new Error("Wallet returned an invalid QRL account cache");
+  if (!isArray(cached)) throw new Error("Wallet returned an invalid QRL account cache");
   if (cached.length > 0) return requireQrlAccount(cached);
   return requireQrlAccount(await provider.request({ method: "qrl_requestAccounts" }));
 }

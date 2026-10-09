@@ -88,9 +88,7 @@ export function creditViews(
 ): CreditView[] {
   const views: CreditView[] = [];
   for (const candidate of candidates) {
-    const reading = readings.get(
-      creditKey(candidate.leg, candidate.token, candidate.account),
-    );
+    const reading = readings.get(creditKey(candidate.leg, candidate.token, candidate.account));
     if (reading === undefined) continue;
     const amount = reading.credited < reading.global ? reading.credited : reading.global;
     if (amount <= 0n) continue;
@@ -119,8 +117,4 @@ export const creditExit = (
   view: CreditView,
   connected: string | null,
 ): "withdraw" | "push" | "connect" =>
-  connected === null
-    ? "connect"
-    : sameAddr(connected, view.account)
-      ? "withdraw"
-      : "push";
+  connected === null ? "connect" : sameAddr(connected, view.account) ? "withdraw" : "push";

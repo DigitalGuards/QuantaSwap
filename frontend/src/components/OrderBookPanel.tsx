@@ -51,10 +51,7 @@ import {
   verifyOrderV1Auth,
 } from "@/lib/orderSigning";
 import { generateSecret } from "@/lib/secrets";
-import {
-  buildSignedTakerSwap,
-  sameSignedIntent,
-} from "@/components/signedOrderFlow";
+import { buildSignedTakerSwap, sameSignedIntent } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
@@ -236,8 +233,7 @@ export function OrderBookPanel({
       pending !== null &&
       book !== null &&
       !book.orders.some(
-        (order) =>
-          order.id === pending.id && order.orderDigest === pending.orderDigest,
+        (order) => order.id === pending.id && order.orderDigest === pending.orderDigest,
       )
     ) {
       setPending(null);
@@ -259,7 +255,9 @@ export function OrderBookPanel({
     const stream = openBookStream(setBook);
     void refresh();
     const t = setInterval(() => {
-      void refreshDisconnectedOrderBooks().then(setBook).catch(() => undefined);
+      void refreshDisconnectedOrderBooks()
+        .then(setBook)
+        .catch(() => undefined);
     }, 5000);
     return () => {
       stream.close();
@@ -302,11 +300,7 @@ export function OrderBookPanel({
           releaseSecret,
         });
         saveActiveSwap(recovery);
-        const submitted = await submitFillIntent(
-          routedOrder.id,
-          signed,
-          routedOrder.bookId,
-        );
+        const submitted = await submitFillIntent(routedOrder.id, signed, routedOrder.bookId);
         if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
           throw new Error("The order book did not preserve the signed FillIntentV1 request.");
         }
@@ -444,7 +438,7 @@ export function OrderBookPanel({
         .map((o) => toRow(o, asset))
         .sort((a, b) => b.price - a.price),
     );
-    const top = [askRows.at(-1)?.cumUnits ?? 0n, bidRows.at(-1)?.cumUnits ?? 0n];
+    const [askTop, bidTop] = [askRows.at(-1)?.cumUnits ?? 0n, bidRows.at(-1)?.cumUnits ?? 0n];
     const bestAsk = askRows[0]?.price;
     const bestBid = bidRows[0]?.price;
     const m =
@@ -456,7 +450,7 @@ export function OrderBookPanel({
     return {
       asks: askRows,
       bids: bidRows,
-      maxCum: top[0]! > top[1]! ? top[0]! : top[1]!,
+      maxCum: askTop > bidTop ? askTop : bidTop,
       mid: m,
       spreadPct: s,
     };
@@ -513,7 +507,9 @@ export function OrderBookPanel({
           )}
           style={{ width: `${depth}%` }}
         />
-        <span className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}>
+        <span
+          className={cn("relative text-left", side === "ask" ? "text-red-400" : "text-success")}
+        >
           {busyId === row.order.id ? "requesting…" : fmtPrice(row.price, asset.decimals)}
           {own ? (
             <span className="ml-1.5 rounded-sm bg-identity-accent/15 px-1 py-px text-[10px] font-medium text-identity-accent">
@@ -672,8 +668,7 @@ export function OrderBookPanel({
             </p>
             {pending.makerAuth !== undefined && signingScheme === null ? (
               <p className="text-xs text-amber-400">
-                Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2
-                orders.
+                Connect MyQRLWallet Extension or the MyQRLWallet web wallet for portable V2 orders.
               </p>
             ) : null}
             <div className="flex flex-wrap gap-2">
@@ -745,8 +740,7 @@ export function OrderBookPanel({
           <div className="space-y-1 px-2 py-3 text-sm">
             <p className="text-destructive">Order discovery unavailable.</p>
             <p className="text-muted-foreground">
-              Existing swaps remain governed by their on-chain HTLCs and can still settle or
-              refund.
+              Existing swaps remain governed by their on-chain HTLCs and can still settle or refund.
             </p>
           </div>
         ) : asks.length === 0 && bids.length === 0 ? (

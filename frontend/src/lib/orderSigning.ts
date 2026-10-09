@@ -1,3 +1,5 @@
+import { isCreateOrderBody, isFillBody } from "./wireGuards";
+import { isArray, InvalidInputError } from "@/utils/guards";
 import {
   ORDER_V2_DOMAIN,
   ORDER_V2_DEPLOYMENT,
@@ -12,11 +14,7 @@ import {
   type QrlTypedDataPayload,
 } from "@qrlwallet/connect";
 import { getBytes, toUtf8Bytes, hexlify } from "ethers";
-import type {
-  CreateOrderBody,
-  MakerOrderAuthV1,
-  OrderView,
-} from "@/lib/orderbook";
+import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "@/lib/orderbook";
 import { assertPortableOrderV1CanSign, isQip55QrlAddress } from "@/lib/qip55";
 
 /** Source compatibility name; the wire domain is exclusively V2. */
@@ -137,8 +135,7 @@ export interface FillIntentV1Body {
   releaseCommitment: string;
 }
 
-export interface FillIntentV1Terms
-  extends FillIntentV1Body, ProtocolDeploymentTerms {
+export interface FillIntentV1Terms extends FillIntentV1Body, ProtocolDeploymentTerms {
   requestNonce: string;
   issuedAt: string;
   expiresAt: string;
@@ -160,9 +157,7 @@ export interface FillV1Body {
 }
 
 export interface FillV1Terms
-  extends
-    Omit<FillV1Body, "initiatorTimeout" | "responderTimeout">,
-    ProtocolDeploymentTerms {
+  extends Omit<FillV1Body, "initiatorTimeout" | "responderTimeout">, ProtocolDeploymentTerms {
   orderNonce: string;
   fillNonce: string;
   initiatorTimeout: string;
@@ -210,10 +205,7 @@ interface SigningRequest {
   params?: unknown[];
 }
 
-const CUSTOM_SIGNING_RDNS = new Set([
-  "com.qrlwallet.connect",
-  "com.qrlwallet.extension",
-]);
+const CUSTOM_SIGNING_RDNS = new Set(["com.qrlwallet.connect", "com.qrlwallet.extension"]);
 const SIGNATURE_BYTES = 4627;
 const PUBLIC_KEY_BYTES = 2592;
 const ORDER_LIFETIME_S = 48 * 3600;
@@ -250,12 +242,8 @@ const CAPABILITY_RE = /^[0-9a-f]{64}$/;
 
 type TypedField = { readonly name: string; readonly type: string };
 
-export function orderSigningSchemeForWallet(
-  rdns: string | null,
-): OrderSigningScheme | null {
-  return rdns !== null && CUSTOM_SIGNING_RDNS.has(rdns)
-    ? "qrl-sign-message-v2"
-    : null;
+export function orderSigningSchemeForWallet(rdns: string | null): OrderSigningScheme | null {
+  return rdns !== null && CUSTOM_SIGNING_RDNS.has(rdns) ? "qrl-sign-message-v2" : null;
 }
 
 export function orderSigningLabel(rdns: string | null): string {
@@ -321,39 +309,24 @@ function normalizeOrderBody(body: CreateOrderBody): CreateOrderBody {
     asset: body.asset,
     fromAmount: canonicalAmount(body.fromAmount, "order.fromAmount"),
     toAmount: canonicalAmount(body.toAmount, "order.toAmount"),
-    makerEthAccount: canonicalEthAddress(
-      body.makerEthAccount,
-      "order.makerEthAccount",
-    ),
-    makerQrlAccount: canonicalQrlAddress(
-      body.makerQrlAccount,
-      "order.makerQrlAccount",
-    ),
+    makerEthAccount: canonicalEthAddress(body.makerEthAccount, "order.makerEthAccount"),
+    makerQrlAccount: canonicalQrlAddress(body.makerQrlAccount, "order.makerQrlAccount"),
     visibility,
     ...(body.allowedTakerEth === undefined
       ? {}
       : {
-          allowedTakerEth: canonicalEthAddress(
-            body.allowedTakerEth,
-            "order.allowedTakerEth",
-          ),
+          allowedTakerEth: canonicalEthAddress(body.allowedTakerEth, "order.allowedTakerEth"),
         }),
     ...(body.allowedTakerQrl === undefined
       ? {}
       : {
-          allowedTakerQrl: canonicalQrlAddress(
-            body.allowedTakerQrl,
-            "order.allowedTakerQrl",
-          ),
+          allowedTakerQrl: canonicalQrlAddress(body.allowedTakerQrl, "order.allowedTakerQrl"),
         }),
     ...(body.prelock === undefined
       ? {}
       : {
           prelock: {
-            hashlock: canonicalBytes32(
-              body.prelock.hashlock,
-              "order.prelock.hashlock",
-            ),
+            hashlock: canonicalBytes32(body.prelock.hashlock, "order.prelock.hashlock"),
             initiatorTimeout: safeUint(
               body.prelock.initiatorTimeout,
               "order.prelock.initiatorTimeout",
@@ -375,18 +348,13 @@ function capabilityToken(): string {
   }
 }
 
-export function capabilityCommitment(
-  domain: "maker" | "share",
-  token: string,
-): string {
+export function capabilityCommitment(domain: "maker" | "share", token: string): string {
   if (!CAPABILITY_RE.test(token)) {
     throw new Error("Capability token must be 32 raw bytes as lowercase hex");
   }
-  const prefix =
-    domain === "maker" ? MAKER_CAPABILITY_DOMAIN : SHARE_CAPABILITY_DOMAIN;
-  return `0x${Array.from(
-    sha256(concatBytes(prefix, getBytes(`0x${token}`))),
-    (byte) => byte.toString(16).padStart(2, "0"),
+  const prefix = domain === "maker" ? MAKER_CAPABILITY_DOMAIN : SHARE_CAPABILITY_DOMAIN;
+  return `0x${Array.from(sha256(concatBytes(prefix, getBytes(`0x${token}`))), (byte) =>
+    byte.toString(16).padStart(2, "0"),
   ).join("")}`;
 }
 
@@ -405,10 +373,7 @@ export function verifyOrderCapabilities(
       return false;
     }
     if ((order.visibility ?? "public") === "public") {
-      return (
-        shareToken === undefined &&
-        auth.shareTokenCommitment === EMPTY_CAPABILITY_COMMITMENT
-      );
+      return shareToken === undefined && auth.shareTokenCommitment === EMPTY_CAPABILITY_COMMITMENT;
     }
     return (
       shareToken !== undefined &&
@@ -427,8 +392,7 @@ function typedDataPayload(
   message: Record<string, unknown>,
   scheme: OrderSigningScheme,
 ): QrlTypedDataPayload {
-  if (scheme !== "qrl-sign-message-v2")
-    throw new Error("Unsupported portable V2 scheme");
+  if (scheme !== "qrl-sign-message-v2") throw new Error("Unsupported portable V2 scheme");
   return {
     types: { [primaryType]: [...fields] },
     primaryType,
@@ -444,9 +408,7 @@ function semanticDigest(
 ): string {
   return hexlify(
     sha256(
-      protocolMessageBytes(
-        typedDataPayload(primaryType, fields, terms, "qrl-sign-message-v2"),
-      ),
+      protocolMessageBytes(typedDataPayload(primaryType, fields, terms, "qrl-sign-message-v2")),
     ),
   );
 }
@@ -511,9 +473,7 @@ export function computeReleaseCommitment(
     !BYTES32_RE.test(requestNonce) ||
     !RELEASE_SECRET_RE.test(releaseSecret)
   ) {
-    throw new Error(
-      "Release commitment inputs must be lowercase bytes32 values",
-    );
+    throw new Error("Release commitment inputs must be lowercase bytes32 values");
   }
   return `0x${Array.from(
     sha256(
@@ -528,22 +488,13 @@ export function computeReleaseCommitment(
   ).join("")}`;
 }
 
-export function deriveOrderV1Id(
-  makerQrlAccount: string,
-  nonce: string,
-): string {
+export function deriveOrderV1Id(makerQrlAccount: string, nonce: string): string {
   if (!QRL_ADDR_RE.test(makerQrlAccount) || !BYTES32_RE.test(nonce)) {
-    throw new Error(
-      "OrderV1 id inputs must use canonical QRL and bytes32 values",
-    );
+    throw new Error("OrderV1 id inputs must use canonical QRL and bytes32 values");
   }
   return Array.from(
     sha256(
-      concatBytes(
-        ORDER_ID_DOMAIN,
-        getBytes(`0x${makerQrlAccount.slice(1)}`),
-        getBytes(nonce),
-      ),
+      concatBytes(ORDER_ID_DOMAIN, getBytes(`0x${makerQrlAccount.slice(1)}`), getBytes(nonce)),
     ),
     (byte) => byte.toString(16).padStart(2, "0"),
   ).join("");
@@ -553,11 +504,7 @@ function signedOrderTerms(
   order: CreateOrderBody,
   auth: Pick<
     MakerOrderAuthV1,
-    | "issuedAt"
-    | "expiresAt"
-    | "nonce"
-    | "makerTokenCommitment"
-    | "shareTokenCommitment"
+    "issuedAt" | "expiresAt" | "nonce" | "makerTokenCommitment" | "shareTokenCommitment"
   >,
 ): SignedOrderTerms {
   return {
@@ -568,8 +515,7 @@ function signedOrderTerms(
     makerEthAccount: ethCaip(order.makerEthAccount),
     makerQrlAccount: order.makerQrlAccount,
     visibility: order.visibility ?? "public",
-    allowedTakerEth:
-      order.allowedTakerEth === undefined ? "" : ethCaip(order.allowedTakerEth),
+    allowedTakerEth: order.allowedTakerEth === undefined ? "" : ethCaip(order.allowedTakerEth),
     allowedTakerQrl: order.allowedTakerQrl ?? "",
     prelocked: order.prelock !== undefined,
     hashlock: order.prelock?.hashlock ?? ZERO_HASHLOCK,
@@ -583,6 +529,21 @@ function signedOrderTerms(
   };
 }
 
+function requireOrderBody(value: unknown): CreateOrderBody {
+  if (!isCreateOrderBody(value)) throw new InvalidInputError("Invalid order body");
+  return value;
+}
+
+function requireFillBody(value: unknown): FillV1Body {
+  if (!isFillBody(value)) throw new InvalidInputError("Invalid fill body");
+  return value;
+}
+
+function requireSigningAuth<T>(auth: T | undefined): T {
+  if (auth === undefined) throw new InvalidInputError("Missing signing authorization");
+  return auth;
+}
+
 export function buildOrderV1Payload(
   terms: SignedOrderTerms,
   scheme: OrderSigningScheme,
@@ -591,12 +552,7 @@ export function buildOrderV1Payload(
   order: CreateOrderBody,
   auth: Pick<
     MakerOrderAuthV1,
-    | "scheme"
-    | "issuedAt"
-    | "expiresAt"
-    | "nonce"
-    | "makerTokenCommitment"
-    | "shareTokenCommitment"
+    "scheme" | "issuedAt" | "expiresAt" | "nonce" | "makerTokenCommitment" | "shareTokenCommitment"
   >,
 ): QrlTypedDataPayload;
 export function buildOrderV1Payload(
@@ -615,10 +571,9 @@ export function buildOrderV1Payload(
 ): QrlTypedDataPayload {
   const terms =
     typeof authOrScheme === "string"
-      ? (orderOrTerms as SignedOrderTerms)
-      : signedOrderTerms(orderOrTerms as CreateOrderBody, authOrScheme);
-  const scheme =
-    typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
+      ? { ...orderOrTerms }
+      : signedOrderTerms(requireOrderBody(orderOrTerms), authOrScheme);
+  const scheme = typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
   return typedDataPayload("OrderV2", ORDER_V1_FIELDS, terms, scheme);
 }
 
@@ -633,15 +588,13 @@ export function buildFillIntentV1Payload(
 export function buildFillIntentV1Payload(
   intentOrTerms: FillIntentV1Body | FillIntentV1Terms,
   authOrScheme:
-    | Pick<ProtocolAuthV1, "scheme" | "issuedAt" | "expiresAt" | "nonce">
-    | OrderSigningScheme,
+    Pick<ProtocolAuthV1, "scheme" | "issuedAt" | "expiresAt" | "nonce"> | OrderSigningScheme,
 ): QrlTypedDataPayload {
   const terms =
     typeof authOrScheme === "string"
-      ? (intentOrTerms as FillIntentV1Terms)
-      : fillIntentTerms(intentOrTerms as FillIntentV1Body, authOrScheme);
-  const scheme =
-    typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
+      ? { ...intentOrTerms }
+      : fillIntentTerms(intentOrTerms, authOrScheme);
+  const scheme = typeof authOrScheme === "string" ? authOrScheme : authOrScheme.scheme;
   return typedDataPayload("FillIntentV2", FILL_INTENT_V1_FIELDS, terms, scheme);
 }
 
@@ -661,10 +614,10 @@ export function buildFillV1Payload(
 ): QrlTypedDataPayload {
   const terms =
     typeof orderAuthOrScheme === "string"
-      ? (fillOrTerms as FillV1Terms)
-      : fillTerms(fillOrTerms as FillV1Body, orderAuthOrScheme, auth!);
+      ? { ...fillOrTerms }
+      : fillTerms(requireFillBody(fillOrTerms), orderAuthOrScheme, requireSigningAuth(auth));
   const scheme =
-    typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : auth!.scheme;
+    typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : requireSigningAuth(auth).scheme;
   return typedDataPayload("FillV2", FILL_V1_FIELDS, terms, scheme);
 }
 
@@ -684,10 +637,10 @@ export function buildCancelV1Payload(
 ): QrlTypedDataPayload {
   const terms =
     typeof orderAuthOrScheme === "string"
-      ? (cancelOrTerms as CancelV1Terms)
-      : cancelTerms(cancelOrTerms as CancelV1Body, orderAuthOrScheme, auth!);
+      ? { ...cancelOrTerms }
+      : cancelTerms(cancelOrTerms, orderAuthOrScheme, requireSigningAuth(auth));
   const scheme =
-    typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : auth!.scheme;
+    typeof orderAuthOrScheme === "string" ? orderAuthOrScheme : requireSigningAuth(auth).scheme;
   return typedDataPayload("CancelV2", CANCEL_V1_FIELDS, terms, scheme);
 }
 
@@ -696,28 +649,20 @@ export function orderDigest(
   order: CreateOrderBody,
   auth: Pick<
     MakerOrderAuthV1,
-    | "issuedAt"
-    | "expiresAt"
-    | "nonce"
-    | "makerTokenCommitment"
-    | "shareTokenCommitment"
+    "issuedAt" | "expiresAt" | "nonce" | "makerTokenCommitment" | "shareTokenCommitment"
   >,
 ): string;
 export function orderDigest(
   orderOrTerms: CreateOrderBody | SignedOrderTerms,
   auth?: Pick<
     MakerOrderAuthV1,
-    | "issuedAt"
-    | "expiresAt"
-    | "nonce"
-    | "makerTokenCommitment"
-    | "shareTokenCommitment"
+    "issuedAt" | "expiresAt" | "nonce" | "makerTokenCommitment" | "shareTokenCommitment"
   >,
 ): string {
   const terms =
     auth === undefined
-      ? (orderOrTerms as SignedOrderTerms)
-      : signedOrderTerms(orderOrTerms as CreateOrderBody, auth);
+      ? { ...orderOrTerms }
+      : signedOrderTerms(requireOrderBody(orderOrTerms), auth);
   return semanticDigest("OrderV2", ORDER_V1_FIELDS, terms);
 }
 
@@ -730,10 +675,7 @@ export function intentDigest(
   intentOrTerms: FillIntentV1Body | FillIntentV1Terms,
   auth?: Pick<ProtocolAuthV1, "issuedAt" | "expiresAt" | "nonce">,
 ): string {
-  const terms =
-    auth === undefined
-      ? (intentOrTerms as FillIntentV1Terms)
-      : fillIntentTerms(intentOrTerms as FillIntentV1Body, auth);
+  const terms = auth === undefined ? { ...intentOrTerms } : fillIntentTerms(intentOrTerms, auth);
   return semanticDigest("FillIntentV2", FILL_INTENT_V1_FIELDS, terms);
 }
 
@@ -750,8 +692,8 @@ export function fillDigest(
 ): string {
   const terms =
     orderAuth === undefined || auth === undefined
-      ? (fillOrTerms as FillV1Terms)
-      : fillTerms(fillOrTerms as FillV1Body, orderAuth, auth);
+      ? { ...fillOrTerms }
+      : fillTerms(requireFillBody(fillOrTerms), orderAuth, auth);
   return semanticDigest("FillV2", FILL_V1_FIELDS, terms);
 }
 
@@ -768,8 +710,8 @@ export function cancelDigest(
 ): string {
   const terms =
     orderAuth === undefined || auth === undefined
-      ? (cancelOrTerms as CancelV1Terms)
-      : cancelTerms(cancelOrTerms as CancelV1Body, orderAuth, auth);
+      ? { ...cancelOrTerms }
+      : cancelTerms(cancelOrTerms, orderAuth, auth);
   return semanticDigest("CancelV2", CANCEL_V1_FIELDS, terms);
 }
 
@@ -812,17 +754,11 @@ export async function signOrderV1({
     now + ORDER_LIFETIME_S,
     order.prelock?.initiatorTimeout ?? Number.POSITIVE_INFINITY,
   );
-  if (
-    !Number.isSafeInteger(expiresAt) ||
-    expiresAt - now < MIN_ORDER_LIFETIME_S
-  ) {
-    throw new Error(
-      "A signed order must provide at least 60 seconds of safe validity",
-    );
+  if (!Number.isSafeInteger(expiresAt) || expiresAt - now < MIN_ORDER_LIFETIME_S) {
+    throw new Error("A signed order must provide at least 60 seconds of safe validity");
   }
   const makerToken = capabilityToken();
-  const shareToken =
-    order.visibility === "private" ? capabilityToken() : undefined;
+  const shareToken = order.visibility === "private" ? capabilityToken() : undefined;
   const unsignedAuth = {
     scheme,
     issuedAt: now,
@@ -912,8 +848,7 @@ async function requestMessageProof(
     !isQrlSignedMessageResult(result) ||
     result.descriptor === undefined ||
     result.signer.toLowerCase() !== signer.toLowerCase() ||
-    result.digest.toLowerCase() !==
-      hexlify(computeMessageDigest(messageBytes)) ||
+    result.digest.toLowerCase() !== hexlify(computeMessageDigest(messageBytes)) ||
     !verifyMessageForSigner({
       expectedSigner: signer,
       descriptor: result.descriptor,
@@ -922,9 +857,7 @@ async function requestMessageProof(
       messageBytes,
     })
   )
-    throw new Error(
-      "Wallet returned a signature that does not match this V2 message",
-    );
+    throw new Error("Wallet returned a signature that does not match this V2 message");
   return { ...result, descriptor: result.descriptor };
 }
 
@@ -960,10 +893,7 @@ export async function signFillIntentV1({
     throw new Error("This order is not valid yet");
   }
   const expectedOrderDigest = verifiedOrderDigest(order, now, false);
-  const canonicalOrderDigest = canonicalBytes32(
-    body.orderDigest,
-    "intent.orderDigest",
-  );
+  const canonicalOrderDigest = canonicalBytes32(body.orderDigest, "intent.orderDigest");
   if (
     orderAuth === undefined ||
     expectedOrderDigest === null ||
@@ -978,14 +908,8 @@ export async function signFillIntentV1({
   const requestNonce = nonceHex();
   const intent: FillIntentV1Body = {
     orderDigest: canonicalOrderDigest,
-    takerEthAccount: canonicalEthAddress(
-      body.takerEthAccount,
-      "intent.takerEthAccount",
-    ),
-    takerQrlAccount: canonicalQrlAddress(
-      body.takerQrlAccount,
-      "intent.takerQrlAccount",
-    ),
+    takerEthAccount: canonicalEthAddress(body.takerEthAccount, "intent.takerEthAccount"),
+    takerQrlAccount: canonicalQrlAddress(body.takerQrlAccount, "intent.takerQrlAccount"),
     releaseCommitment: computeReleaseCommitment(
       canonicalOrderDigest,
       requestNonce,
@@ -1023,8 +947,7 @@ export async function signFillV1({
 }): Promise<{ fill: FillV1Body; auth: ProtocolAuthV1 }> {
   assertPortableOrderV1CanSign(order.makerQrlAccount);
   const orderAuth = order.makerAuth;
-  if (orderAuth === undefined)
-    throw new Error("This order has no portable maker proof");
+  if (orderAuth === undefined) throw new Error("This order has no portable maker proof");
   if (
     !Number.isSafeInteger(now) ||
     Object.is(now, -0) ||
@@ -1033,43 +956,24 @@ export async function signFillV1({
     respondBy - now > MAX_FILL_RESPONSE_S ||
     respondBy > orderAuth.expiresAt
   ) {
-    throw new Error(
-      "Fill responses must allow 60 to 900 seconds and end before the order expires",
-    );
+    throw new Error("Fill responses must allow 60 to 900 seconds and end before the order expires");
   }
   const fill: FillV1Body = {
     orderDigest: canonicalBytes32(body.orderDigest, "fill.orderDigest"),
     intentDigest: canonicalBytes32(body.intentDigest, "fill.intentDigest"),
-    takerEthAccount: canonicalEthAddress(
-      body.takerEthAccount,
-      "fill.takerEthAccount",
-    ),
-    takerQrlAccount: canonicalQrlAddress(
-      body.takerQrlAccount,
-      "fill.takerQrlAccount",
-    ),
-    releaseCommitment: canonicalBytes32(
-      body.releaseCommitment,
-      "fill.releaseCommitment",
-    ),
+    takerEthAccount: canonicalEthAddress(body.takerEthAccount, "fill.takerEthAccount"),
+    takerQrlAccount: canonicalQrlAddress(body.takerQrlAccount, "fill.takerQrlAccount"),
+    releaseCommitment: canonicalBytes32(body.releaseCommitment, "fill.releaseCommitment"),
     hashlock: canonicalBytes32(body.hashlock, "fill.hashlock"),
     initiatorTimeout: safeUint(body.initiatorTimeout, "fill.initiatorTimeout"),
     responderTimeout: safeUint(body.responderTimeout, "fill.responderTimeout"),
   };
-  if (fill.hashlock === ZERO_HASHLOCK)
-    throw new Error("fill.hashlock cannot be zero");
+  if (fill.hashlock === ZERO_HASHLOCK) throw new Error("fill.hashlock cannot be zero");
   if (fill.responderTimeout - now > MAX_RESPONDER_TIMEOUT_WINDOW_S) {
-    throw new Error(
-      "Fill responder timeout cannot exceed 2 hours after issuance",
-    );
+    throw new Error("Fill responder timeout cannot exceed 2 hours after issuance");
   }
-  if (
-    order.prelocked !== true &&
-    fill.initiatorTimeout - now > MAX_INITIATOR_TIMEOUT_WINDOW_S
-  ) {
-    throw new Error(
-      "Fill initiator timeout cannot exceed 4 hours after issuance",
-    );
+  if (order.prelocked !== true && fill.initiatorTimeout - now > MAX_INITIATOR_TIMEOUT_WINDOW_S) {
+    throw new Error("Fill initiator timeout cannot exceed 4 hours after issuance");
   }
   const auth = await signProtocolAuth({
     signer: order.makerQrlAccount,
@@ -1100,21 +1004,15 @@ export async function signCancelV1({
 }): Promise<{ cancel: CancelV1Body; auth: ProtocolAuthV1 }> {
   assertPortableOrderV1CanSign(order.makerQrlAccount);
   const orderAuth = order.makerAuth;
-  if (orderAuth === undefined)
-    throw new Error("This order has no portable maker proof");
-  if (
-    !Number.isSafeInteger(now) ||
-    Object.is(now, -0) ||
-    now >= orderAuth.expiresAt
-  ) {
+  if (orderAuth === undefined) throw new Error("This order has no portable maker proof");
+  if (!Number.isSafeInteger(now) || Object.is(now, -0) || now >= orderAuth.expiresAt) {
     throw new Error("This order has already expired");
   }
   const cancel: CancelV1Body = {
     orderDigest: canonicalBytes32(body.orderDigest, "cancel.orderDigest"),
     reasonCode: safeUint(body.reasonCode, "cancel.reasonCode"),
   };
-  if (cancel.reasonCode > 255)
-    throw new Error("cancel.reasonCode must fit uint8");
+  if (cancel.reasonCode > 255) throw new Error("cancel.reasonCode must fit uint8");
   const auth = await signProtocolAuth({
     signer: order.makerQrlAccount,
     walletRdns,
@@ -1130,9 +1028,7 @@ export async function signCancelV1({
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(
-    parts.reduce((length, part) => length + part.length, 0),
-  );
+  const result = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
   let offset = 0;
   for (const part of parts) {
     result.set(part, offset);
@@ -1181,7 +1077,7 @@ export function verifyOrderV1Auth(
       auth === undefined ||
       typeof auth !== "object" ||
       auth === null ||
-      Array.isArray(auth) ||
+      isArray(auth) ||
       !hasExactKeys(auth, [
         "version",
         "scheme",
@@ -1214,9 +1110,7 @@ export function verifyOrderV1Auth(
       !PUBLIC_KEY_RE.test(auth.publicKey) ||
       !DESCRIPTOR_RE.test(auth.descriptor) ||
       (order.direction !== "eth->qrl" && order.direction !== "qrl->eth") ||
-      (order.asset !== "ETH" &&
-        order.asset !== "USDC" &&
-        order.asset !== "tUSDT") ||
+      (order.asset !== "ETH" && order.asset !== "USDC" && order.asset !== "tUSDT") ||
       !AMOUNT_RE.test(order.fromAmount) ||
       !AMOUNT_RE.test(order.toAmount) ||
       !ETH_ADDR_RE.test(order.makerEthAccount) ||
@@ -1231,22 +1125,15 @@ export function verifyOrderV1Auth(
     ) {
       return false;
     }
-    if (
-      order.allowedTakerEth !== undefined &&
-      !ETH_ADDR_RE.test(order.allowedTakerEth)
-    ) {
+    if (order.allowedTakerEth !== undefined && !ETH_ADDR_RE.test(order.allowedTakerEth)) {
       return false;
     }
-    if (
-      order.allowedTakerQrl !== undefined &&
-      !QRL_ADDR_RE.test(order.allowedTakerQrl)
-    ) {
+    if (order.allowedTakerQrl !== undefined && !QRL_ADDR_RE.test(order.allowedTakerQrl)) {
       return false;
     }
     if (
       order.visibility === "public" &&
-      (order.allowedTakerEth !== undefined ||
-        order.allowedTakerQrl !== undefined)
+      (order.allowedTakerEth !== undefined || order.allowedTakerQrl !== undefined)
     ) {
       return false;
     }
@@ -1259,12 +1146,8 @@ export function verifyOrderV1Auth(
       makerEthAccount: order.makerEthAccount,
       makerQrlAccount: order.makerQrlAccount,
       visibility: order.visibility,
-      ...(order.allowedTakerEth !== undefined
-        ? { allowedTakerEth: order.allowedTakerEth }
-        : {}),
-      ...(order.allowedTakerQrl !== undefined
-        ? { allowedTakerQrl: order.allowedTakerQrl }
-        : {}),
+      ...(order.allowedTakerEth !== undefined ? { allowedTakerEth: order.allowedTakerEth } : {}),
+      ...(order.allowedTakerQrl !== undefined ? { allowedTakerQrl: order.allowedTakerQrl } : {}),
     };
     if (order.prelocked === true) {
       if (
@@ -1289,13 +1172,7 @@ export function verifyOrderV1Auth(
     }
 
     const payload = buildOrderV1Payload(body, auth);
-    return protocolProofIsValid(
-      order.makerQrlAccount,
-      auth,
-      payload,
-      "OrderV2",
-      ORDER_V1_FIELDS,
-    );
+    return protocolProofIsValid(order.makerQrlAccount, auth, payload, "OrderV2", ORDER_V1_FIELDS);
   } catch {
     return false;
   }
@@ -1337,9 +1214,7 @@ function authShapeIsValid(
 
 function hasExactKeys(value: object, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
-  return (
-    actual.length === keys.length && keys.every((key) => actual.includes(key))
-  );
+  return actual.length === keys.length && keys.every((key) => actual.includes(key));
 }
 
 function orderBodyFromView(order: OrderView): CreateOrderBody {
@@ -1351,36 +1226,29 @@ function orderBodyFromView(order: OrderView): CreateOrderBody {
     makerEthAccount: order.makerEthAccount,
     makerQrlAccount: order.makerQrlAccount,
     visibility: order.visibility ?? "public",
-    ...(order.allowedTakerEth === undefined
-      ? {}
-      : { allowedTakerEth: order.allowedTakerEth }),
-    ...(order.allowedTakerQrl === undefined
-      ? {}
-      : { allowedTakerQrl: order.allowedTakerQrl }),
+    ...(order.allowedTakerEth === undefined ? {} : { allowedTakerEth: order.allowedTakerEth }),
+    ...(order.allowedTakerQrl === undefined ? {} : { allowedTakerQrl: order.allowedTakerQrl }),
   };
   if (order.prelocked === true) {
+    if (typeof order.hashlock !== "string" || typeof order.initiatorTimeout !== "number") {
+      throw new InvalidInputError("Prelocked order requires escrow terms");
+    }
     body.prelock = {
-      hashlock: order.hashlock as string,
-      initiatorTimeout: order.initiatorTimeout as number,
+      hashlock: order.hashlock,
+      initiatorTimeout: order.initiatorTimeout,
     };
   }
   return body;
 }
 
-function verifiedOrderDigest(
-  order: OrderView,
-  now: number,
-  allowExpired: boolean,
-): string | null {
+function verifiedOrderDigest(order: OrderView, now: number, allowExpired: boolean): string | null {
   const auth = order.makerAuth;
   if (auth === undefined) return null;
   if (!verifyOrderV1Auth(order, now, allowExpired)) return null;
   return orderDigest(orderBodyFromView(order), auth);
 }
 
-type ProtocolVerificationOptions =
-  | number
-  | { now?: number; allowExpired?: boolean };
+type ProtocolVerificationOptions = number | { now?: number; allowExpired?: boolean };
 
 function protocolVerificationOptions(options: ProtocolVerificationOptions): {
   now: number;
@@ -1434,15 +1302,10 @@ function fillBodyIsCanonical(fill: FillV1Body): boolean {
   );
 }
 
-function privateTakerMatches(
-  order: OrderView,
-  intent: FillIntentV1Body,
-): boolean {
+function privateTakerMatches(order: OrderView, intent: FillIntentV1Body): boolean {
   return (
-    (order.allowedTakerEth === undefined ||
-      order.allowedTakerEth === intent.takerEthAccount) &&
-    (order.allowedTakerQrl === undefined ||
-      order.allowedTakerQrl === intent.takerQrlAccount)
+    (order.allowedTakerEth === undefined || order.allowedTakerEth === intent.takerEthAccount) &&
+    (order.allowedTakerQrl === undefined || order.allowedTakerQrl === intent.takerQrlAccount)
   );
 }
 
@@ -1510,42 +1373,31 @@ export function verifyFillV1(
         allowExpired,
       }) ||
       fill.orderDigest !== expectedOrderDigest ||
-      fill.intentDigest !==
-        intentDigest(signedIntent.intent, signedIntent.auth) ||
+      fill.intentDigest !== intentDigest(signedIntent.intent, signedIntent.auth) ||
       fill.takerEthAccount !== signedIntent.intent.takerEthAccount ||
       fill.takerQrlAccount !== signedIntent.intent.takerQrlAccount ||
       fill.releaseCommitment !== signedIntent.intent.releaseCommitment ||
       auth.expiresAt > orderAuth.expiresAt ||
       auth.issuedAt < signedIntent.auth.issuedAt ||
       auth.issuedAt >= signedIntent.auth.expiresAt ||
-      fill.responderTimeout - auth.expiresAt <=
-        MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S ||
+      fill.responderTimeout - auth.expiresAt <= MIN_RESPONDER_RUNWAY_AFTER_RESPONSE_S ||
       fill.responderTimeout - auth.issuedAt <= 0 ||
       fill.responderTimeout - auth.issuedAt > MAX_RESPONDER_TIMEOUT_WINDOW_S ||
-      fill.initiatorTimeout - auth.issuedAt <
-        fill.responderTimeout - auth.issuedAt ||
+      fill.initiatorTimeout - auth.issuedAt < fill.responderTimeout - auth.issuedAt ||
       (order.prelocked !== true &&
-        fill.initiatorTimeout - auth.issuedAt >
-          MAX_INITIATOR_TIMEOUT_WINDOW_S) ||
+        fill.initiatorTimeout - auth.issuedAt > MAX_INITIATOR_TIMEOUT_WINDOW_S) ||
       fill.responderTimeout - auth.issuedAt >
         Math.floor((fill.initiatorTimeout - auth.issuedAt) / 2) ||
       (order.prelocked === true &&
         (fill.hashlock !== order.hashlock ||
           fill.initiatorTimeout !== order.initiatorTimeout ||
           fill.initiatorTimeout - auth.issuedAt < MIN_PRELOCK_RUNWAY_S ||
-          (!allowExpired &&
-            fill.initiatorTimeout - now < MIN_PRELOCK_RUNWAY_S)))
+          (!allowExpired && fill.initiatorTimeout - now < MIN_PRELOCK_RUNWAY_S)))
     ) {
       return false;
     }
     const payload = buildFillV1Payload(fill, orderAuth, auth);
-    return protocolProofIsValid(
-      order.makerQrlAccount,
-      auth,
-      payload,
-      "FillV2",
-      FILL_V1_FIELDS,
-    );
+    return protocolProofIsValid(order.makerQrlAccount, auth, payload, "FillV2", FILL_V1_FIELDS);
   } catch {
     return false;
   }
@@ -1582,13 +1434,7 @@ export function verifyCancelV1(
       return false;
     }
     const payload = buildCancelV1Payload(cancel, orderAuth, auth);
-    return protocolProofIsValid(
-      order.makerQrlAccount,
-      auth,
-      payload,
-      "CancelV2",
-      CANCEL_V1_FIELDS,
-    );
+    return protocolProofIsValid(order.makerQrlAccount, auth, payload, "CancelV2", CANCEL_V1_FIELDS);
   } catch {
     return false;
   }

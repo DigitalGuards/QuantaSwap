@@ -218,7 +218,13 @@ export function PostOrderCard({
   // estimate*1.3 both defer every time.
   const settleOnLeg = useMemo(
     () =>
-      makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+      makeSettlementSender({
+        browserProvider,
+        ensureSepolia,
+        qrlAccount,
+        qrlTransport,
+        qrlRequest,
+      }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
   /** A released escrow whose payout deferred. The staging record stays until
@@ -260,7 +266,6 @@ export function PostOrderCard({
     // record appears or when activePost flips false (a post ended).
     if (!staged || activePost) return;
     void probeStaged(staged);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stagedKey, activePost, probeStaged]);
 
   // Load an explicit draft over whatever is in the form (each request is
@@ -283,14 +288,7 @@ export function PostOrderCard({
   const signingScheme = orderSigningSchemeForWallet(qrlWalletRdns);
 
   const publishSignedStage = async (stage: SignedOrderStage) => {
-    if (
-      !verifyOrderCapabilities(
-        stage.order,
-        stage.auth,
-        stage.makerToken,
-        stage.shareToken,
-      )
-    ) {
+    if (!verifyOrderCapabilities(stage.order, stage.auth, stage.makerToken, stage.shareToken)) {
       throw new Error("The saved order capabilities do not match its signed commitments");
     }
     setStageLabel("Publishing the signed order");
@@ -440,7 +438,9 @@ export function PostOrderCard({
           throw new Error("Taker ETH address must be a 0x-prefixed 20-byte address");
         }
         if (restrictQrl && !isQip55QrlAddress(restrictQrl)) {
-          throw new Error("Taker QRL address must be a Q-prefixed 64-byte address with a valid checksum");
+          throw new Error(
+            "Taker QRL address must be a Q-prefixed 64-byte address with a valid checksum",
+          );
         }
       }
 
@@ -577,7 +577,9 @@ export function PostOrderCard({
           prelockStage.fromAmount !== stage.order.fromAmount ||
           prelockStage.toAmount !== stage.order.toAmount
         ) {
-          throw new Error("The pending pre-funded order has lost its matching escrow recovery record");
+          throw new Error(
+            "The pending pre-funded order has lost its matching escrow recovery record",
+          );
         }
         const chain = await getLegState(prelockStage.leg, prelockStage.hashlock);
         if (chain.status !== SwapStatus.Open) {
@@ -921,17 +923,17 @@ export function PostOrderCard({
           <div className="flex items-start justify-between gap-4">
             <span className="text-muted-foreground">Receive {toSymbol} to</span>
             <span className="min-w-0 text-right text-xs text-blue-accent">
-              {direction === "eth->qrl"
-                ? qrlAccount
-                  ? (
-                      <AddressFingerprint address={qrlAccount} />
-                    )
-                  : "connect QRL wallet"
-                : ethAccount
-                  ? (
-                      <AddressFingerprint address={ethAccount} />
-                    )
-                  : "connect ETH wallet"}
+              {direction === "eth->qrl" ? (
+                qrlAccount ? (
+                  <AddressFingerprint address={qrlAccount} />
+                ) : (
+                  "connect QRL wallet"
+                )
+              ) : ethAccount ? (
+                <AddressFingerprint address={ethAccount} />
+              ) : (
+                "connect ETH wallet"
+              )}
             </span>
           </div>
           <div className="flex items-start justify-between gap-4">
@@ -1057,10 +1059,10 @@ export function PostOrderCard({
             : "Posting is free and holds no funds. When a taker accepts, you lock first and the swap settles atomically through the HTLCs, or refunds after the timelocks."}
         </p>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          MyQRLWallet signs the complete OrderV2 terms with ML-DSA-87 before publishing.
-          Connect MyQRLWallet Extension or the MyQRLWallet web wallet. The signed message binds
-          both chains, the private v3 genesis, and this deployment's contracts. Your browser
-          verifies the proof. No transaction or funds move during signing.
+          MyQRLWallet signs the complete OrderV2 terms with ML-DSA-87 before publishing. Connect
+          MyQRLWallet Extension or the MyQRLWallet web wallet. The signed message binds both chains,
+          the private v3 genesis, and this deployment's contracts. Your browser verifies the proof.
+          No transaction or funds move during signing.
         </p>
       </CardContent>
     </Card>

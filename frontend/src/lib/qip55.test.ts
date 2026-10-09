@@ -49,18 +49,22 @@ describe("QIP-55 capability boundaries", () => {
 
   it("accepts QIP-55 for portable V2 and rejects legacy accounts", () => {
     expect(() => assertPortableOrderV1CanSign(account)).not.toThrow();
-    expect(() => assertPortableOrderV1CanSign(`Q${"12".repeat(20)}`)).toThrow(QIP55_PORTABLE_ORDER_ERROR);
+    expect(() => assertPortableOrderV1CanSign(`Q${"12".repeat(20)}`)).toThrow(
+      QIP55_PORTABLE_ORDER_ERROR,
+    );
   });
 
   it("blocks the current Q40 HTLC before any QRL RPC or wallet send", () => {
-    expect(() =>
-      assertQip55ExecutionReady(account, `Q${"34".repeat(20)}`),
-    ).toThrow(QIP55_DEPLOYMENT_ERROR);
+    expect(() => assertQip55ExecutionReady(account, `Q${"34".repeat(20)}`)).toThrow(
+      QIP55_DEPLOYMENT_ERROR,
+    );
   });
 
   it("allows validated full-width accounts and a fresh Q+128 deployment", () => {
     expect(() => assertQip55ExecutionReady(account, `Q${"34".repeat(64)}`)).not.toThrow();
     expect(() => assertQip55ExecutionReady(account, "")).toThrow(QIP55_DEPLOYMENT_ERROR);
-    expect(() => assertQip55ExecutionReady(account, `Q${"0".repeat(128)}`)).toThrow(QIP55_DEPLOYMENT_ERROR);
+    expect(() => assertQip55ExecutionReady(account, `Q${"0".repeat(128)}`)).toThrow(
+      QIP55_DEPLOYMENT_ERROR,
+    );
   });
 });

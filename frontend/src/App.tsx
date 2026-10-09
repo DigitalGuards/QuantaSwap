@@ -126,7 +126,7 @@ export default function App() {
           uri={qrl.uri}
           statusDetail={qrl.statusDetail}
           onNewConnection={() => void qrl.newConnection()}
-          onCancel={qrl.cancelPairing}
+          onCancel={() => void qrl.cancelPairing()}
         />
       ) : null}
     </BrowserRouter>

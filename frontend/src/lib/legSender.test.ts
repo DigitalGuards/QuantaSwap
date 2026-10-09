@@ -15,10 +15,13 @@ import {
   type LegSenderHandles,
 } from "./legSender";
 
-vi.mock("../config", async importOriginal => {
+vi.mock("../config", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../config")>();
-  return { ...actual, QRL_LEG: { ...actual.QRL_LEG, htlc: `Q${"ab".repeat(64)}` },
-    ETH_LEG: { ...actual.ETH_LEG, htlc: `0x${"34".repeat(20)}` } };
+  return {
+    ...actual,
+    QRL_LEG: { ...actual.QRL_LEG, htlc: `Q${"ab".repeat(64)}` },
+    ETH_LEG: { ...actual.ETH_LEG, htlc: `0x${"34".repeat(20)}` },
+  };
 });
 
 const DATA = `0x${"12".repeat(68)}`;
@@ -29,6 +32,9 @@ const GAS_POLICY = htlcInterface.encodeFunctionResult("deliveryGasPolicy", [
   DELIVERY_GAS_LIMIT,
   DELIVERY_GAS_RESERVE,
 ]);
+const QRL_GAS_POLICY = `0x${[DELIVERY_GAS_LIMIT, DELIVERY_GAS_RESERVE]
+  .map((value) => value.toString(16).padStart(128, "0"))
+  .join("")}`;
 
 /** A JSON-RPC fetch stub serving the reads a settlement makes directly:
  *  the leg's deliveryGasPolicy(), the QRL identity checks and, on the QRL
@@ -45,7 +51,7 @@ function settlementFetch(
           ? { number: "0x0", hash: QRL_LEG.genesisHash }
           : method === "qrl_estimateGas"
             ? (options.qrlEstimate ?? "0x10000")
-            : (options.policy ?? GAS_POLICY);
+            : (options.policy ?? (method === "qrl_call" ? QRL_GAS_POLICY : GAS_POLICY));
     return { ok: true, json: async () => ({ result }) };
   });
 }
@@ -160,12 +166,7 @@ describe("secret-bearing claim preflight", () => {
       resetDeliveryGasPolicyCache();
       vi.stubGlobal("fetch", settlementFetch({ qrlEstimate: "0x10000" }));
       const qrlRequest = vi.fn(
-        async ({
-          method,
-        }: {
-          method: string;
-          params?: unknown[];
-        }): Promise<unknown> => {
+        async ({ method }: { method: string; params?: unknown[] }): Promise<unknown> => {
           if (method === "qrl_chainId") return QRL_LEG.chainIdHex;
           if (method === "qrl_getBlockByNumber")
             return { number: "0x0", hash: QRL_LEG.genesisHash };
@@ -238,7 +239,9 @@ describe("secret-bearing claim preflight", () => {
   it("refuses a provider on the previous network before simulation", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const qrlRequest = vi.fn(async ({ method }: { method: string }) => method === "qrl_chainId" ? "0x539" : { number: "0x0", hash: QRL_LEG.genesisHash });
+    const qrlRequest = vi.fn(async ({ method }: { method: string }) =>
+      method === "qrl_chainId" ? "0x539" : { number: "0x0", hash: QRL_LEG.genesisHash },
+    );
     const send = makePreflightedClaimSender({
       browserProvider: null,
       ensureSepolia: vi.fn(),
@@ -284,26 +287,55 @@ describe("refund and credit settlement", () => {
 });
 
 describe("qualified QRL sends", () => {
-  it.each([false, true])("pins the chain and rechecks after gas estimation, provider changed: %s", async change => {
-    let providerChain = QRL_LEG.chainIdHex;
-    const qrlRequest = vi.fn(async ({ method }: { method: string }): Promise<unknown> => {
-      if (method === "qrl_chainId") return providerChain;
-      if (method === "qrl_getBlockByNumber") return { number: "0x0", hash: QRL_LEG.genesisHash };
-      if (method === "qrl_sendTransaction") return `0x${"12".repeat(32)}`;
-      throw new Error("Unexpected wallet request");
-    });
-    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
-      const { method } = JSON.parse(init.body as string);
-      if (method === "qrl_estimateGas" && change) providerChain = "0x539";
-      return { ok: true, json: async () => ({ result: method === "qrl_chainId" ? QRL_LEG.chainIdHex : method === "qrl_getBlockByNumber" ? { number: "0x0", hash: QRL_LEG.genesisHash } : "0x10000" }) };
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const handles: LegSenderHandles = { browserProvider: null, ensureSepolia: vi.fn(), qrlAccount: QRL_ACCOUNT, qrlTransport: "extension", qrlRequest };
-    const result = makeLegSender(handles)("qrl", DATA, 1n);
-    if (change) await expect(result).rejects.toThrow(/identity mismatch/);
-    else await result;
-    const sends = qrlRequest.mock.calls.filter(([args]) => args.method === "qrl_sendTransaction");
-    expect(sends).toHaveLength(change ? 0 : 1);
-    if (!change) expect(qrlRequest).toHaveBeenCalledWith({ method: "qrl_sendTransaction", params: [expect.objectContaining({ chainId: QRL_LEG.chainIdHex, from: QRL_ACCOUNT, to: QRL_LEG.htlc })] });
-  });
+  it.each([false, true])(
+    "pins the chain and rechecks after gas estimation, provider changed: %s",
+    async (change) => {
+      let providerChain = QRL_LEG.chainIdHex;
+      const qrlRequest = vi.fn(async ({ method }: { method: string }): Promise<unknown> => {
+        if (method === "qrl_chainId") return providerChain;
+        if (method === "qrl_getBlockByNumber") return { number: "0x0", hash: QRL_LEG.genesisHash };
+        if (method === "qrl_sendTransaction") return `0x${"12".repeat(32)}`;
+        throw new Error("Unexpected wallet request");
+      });
+      const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+        const { method } = JSON.parse(init.body as string);
+        if (method === "qrl_estimateGas" && change) providerChain = "0x539";
+        return {
+          ok: true,
+          json: async () => ({
+            result:
+              method === "qrl_chainId"
+                ? QRL_LEG.chainIdHex
+                : method === "qrl_getBlockByNumber"
+                  ? { number: "0x0", hash: QRL_LEG.genesisHash }
+                  : "0x10000",
+          }),
+        };
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const handles: LegSenderHandles = {
+        browserProvider: null,
+        ensureSepolia: vi.fn(),
+        qrlAccount: QRL_ACCOUNT,
+        qrlTransport: "extension",
+        qrlRequest,
+      };
+      const result = makeLegSender(handles)("qrl", DATA, 1n);
+      if (change) await expect(result).rejects.toThrow(/identity mismatch/);
+      else await result;
+      const sends = qrlRequest.mock.calls.filter(([args]) => args.method === "qrl_sendTransaction");
+      expect(sends).toHaveLength(change ? 0 : 1);
+      if (!change)
+        expect(qrlRequest).toHaveBeenCalledWith({
+          method: "qrl_sendTransaction",
+          params: [
+            expect.objectContaining({
+              chainId: QRL_LEG.chainIdHex,
+              from: QRL_ACCOUNT,
+              to: QRL_LEG.htlc,
+            }),
+          ],
+        });
+    },
+  );
 });

@@ -57,21 +57,23 @@ export function buildSignedTakerSwap({
     BigInt(order.toAmount) === 0n ||
     signedIntent.intent.orderDigest !== order.orderDigest ||
     signedIntent.intent.takerEthAccount !== accounts.takerEthAccount.toLowerCase() ||
-    signedIntent.intent.takerQrlAccount !==
-      `Q${accounts.takerQrlAccount.slice(1).toLowerCase()}` ||
+    signedIntent.intent.takerQrlAccount !== `Q${accounts.takerQrlAccount.slice(1).toLowerCase()}` ||
     intentDigestHex !== intentDigest(signedIntent.intent, signedIntent.auth)
   ) {
     throw new Error("The signed order request does not match the displayed order.");
   }
   const prelocked = order.prelocked === true;
-  if (
-    prelocked &&
-    (order.hashlock === null ||
+  let acceptedPrelock = null;
+  if (prelocked) {
+    if (
+      typeof order.hashlock !== "string" ||
       !HASHLOCK_RE.test(order.hashlock) ||
-      order.initiatorTimeout === null ||
-      !Number.isSafeInteger(order.initiatorTimeout))
-  ) {
-    throw new Error("The pre-funded order has incomplete escrow terms.");
+      typeof order.initiatorTimeout !== "number" ||
+      !Number.isSafeInteger(order.initiatorTimeout)
+    ) {
+      throw new Error("The pre-funded order has incomplete escrow terms.");
+    }
+    acceptedPrelock = { hashlock: order.hashlock, initiatorTimeout: order.initiatorTimeout };
   }
   return {
     role: "taker",
@@ -85,12 +87,7 @@ export function buildSignedTakerSwap({
     takerToken: null,
     shareToken,
     ...(prelocked ? { prelocked: true } : {}),
-    acceptedPrelock: prelocked
-      ? {
-          hashlock: order.hashlock as string,
-          initiatorTimeout: order.initiatorTimeout as number,
-        }
-      : null,
+    acceptedPrelock,
     direction: order.direction,
     ethAsset: asset,
     fromAmount: order.fromAmount,
@@ -118,10 +115,7 @@ interface FillVerificationOptions {
   verify?: typeof verifyFillV1;
 }
 
-export function sameSignedIntent(
-  left: SignedFillIntentV1,
-  right: SignedFillIntentV1,
-): boolean {
+export function sameSignedIntent(left: SignedFillIntentV1, right: SignedFillIntentV1): boolean {
   return (
     left.intent.orderDigest === right.intent.orderDigest &&
     left.intent.takerEthAccount === right.intent.takerEthAccount &&

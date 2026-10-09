@@ -283,7 +283,9 @@ describe("step 3: secret reveal (maker's irreversible commit)", () => {
     const shortLived = rOpen({ timeout: NOW + CLAIM_MARGIN_S - 1 });
     const m = derive("maker", { eth: iOpen(), qrl: shortLived }, { eth: iOpen(), qrl: shortLived });
     expect(m.steps[2].canRun).toBe(false);
-    expect(m.steps[2].issue).toBe("its timeout leaves too little window to reveal the secret safely");
+    expect(m.steps[2].issue).toBe(
+      "its timeout leaves too little window to reveal the secret safely",
+    );
   });
 
   it("never reveals the secret before the maker's own leg is locked", () => {
@@ -572,7 +574,12 @@ describe("prelocked swaps: assign step, awaiting-assign, release", () => {
 
   it("keeps assigned-to-someone-else a hard issue for the taker", () => {
     const bad = iOpen({ recipient: MAKER_ETH });
-    const m = derive("taker", { eth: bad, qrl: none() }, { eth: bad, qrl: none() }, { swap: prelockSwap });
+    const m = derive(
+      "taker",
+      { eth: bad, qrl: none() },
+      { eth: bad, qrl: none() },
+      { swap: prelockSwap },
+    );
     expect(m.awaitingAssign).toBe(false);
     expect(m.steps[1].canRun).toBe(false);
     expect(m.steps[1].issue).toBe("its recipient is not your address");

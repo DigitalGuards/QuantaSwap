@@ -13,8 +13,8 @@
   --font-mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", monospace;
   /* Numeric voice: balances, amounts, fees, counts. Inter matches the
      extension surface and the wider wallet ecosystem. */
-  --font-numeric: "Inter Variable", "Instrument Sans Variable", ui-sans-serif,
-    system-ui, sans-serif;
+  --font-numeric:
+    "Inter Variable", "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
 
   /* Border radius */
   --radius-lg: var(--radius);
@@ -269,8 +269,7 @@
      cleanly; the values are now QRL Blue. */
   .surface-ember {
     background:
-      linear-gradient(180deg, hsl(var(--hero-top) / 0.85), transparent 46%),
-      hsl(var(--card) / 0.86);
+      linear-gradient(180deg, hsl(var(--hero-top) / 0.85), transparent 46%), hsl(var(--card) / 0.86);
     border: 1px solid hsl(var(--primary) / 0.22);
     box-shadow:
       0 1px 0 hsl(var(--primary) / 0.14) inset,

@@ -97,9 +97,7 @@ describe("useQrlWallet extension lifecycle", () => {
       provider,
     };
     const announce = () => {
-      window.dispatchEvent(
-        new CustomEvent("eip6963:announceProvider", { detail }),
-      );
+      window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail }));
     };
     window.addEventListener("eip6963:requestProvider", announce);
 
@@ -197,9 +195,7 @@ describe("useQrlWallet picker rows", () => {
     };
     const announce = () => {
       for (const detail of [relay, extension, qrlExtension]) {
-        window.dispatchEvent(
-          new CustomEvent("eip6963:announceProvider", { detail }),
-        );
+        window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail }));
       }
     };
     window.addEventListener("eip6963:requestProvider", announce);
@@ -241,9 +237,7 @@ describe("useQrlWallet picker rows", () => {
       provider: new FakeQrlProvider(async () => []),
     };
     const announce = () => {
-      window.dispatchEvent(
-        new CustomEvent("eip6963:announceProvider", { detail: relay }),
-      );
+      window.dispatchEvent(new CustomEvent("eip6963:announceProvider", { detail: relay }));
     };
     window.addEventListener("eip6963:requestProvider", announce);
 

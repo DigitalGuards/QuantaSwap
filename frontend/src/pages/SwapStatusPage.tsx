@@ -256,7 +256,7 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
           onDiscard={() => {
             releaseTake(swap);
             setSwap(null);
-            navigate("/");
+            void navigate("/");
           }}
         />
         <NetworkPanel />

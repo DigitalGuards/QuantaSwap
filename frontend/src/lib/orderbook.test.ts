@@ -80,16 +80,14 @@ describe("untrusted order term binding", () => {
   it("rejects a direction flip with identical raw amounts", () => {
     const displayed = order({ status: "open" });
     const flipped = order({ direction: "eth->qrl" });
-    expect(() => acceptedTerms(displayed, flipped)).toThrow(
-      /different swap semantics/,
-    );
+    expect(() => acceptedTerms(displayed, flipped)).toThrow(/different swap semantics/);
   });
 
   it("rejects asset and prelock semantic changes", () => {
     const displayed = order({ status: "open" });
-    expect(() =>
-      acceptedTerms(displayed, order({ asset: "ETH" })),
-    ).toThrow(/different swap semantics/);
+    expect(() => acceptedTerms(displayed, order({ asset: "ETH" }))).toThrow(
+      /different swap semantics/,
+    );
     expect(() =>
       acceptedTerms(
         displayed,
@@ -116,23 +114,17 @@ describe("untrusted order term binding", () => {
     });
     expect(() => acceptedTerms(displayed, accepted)).not.toThrow();
     expect(() =>
-      acceptedTerms(
-        displayed,
-        { ...accepted, hashlock: `0x${"34".repeat(32)}` },
-      ),
+      acceptedTerms(displayed, { ...accepted, hashlock: `0x${"34".repeat(32)}` }),
     ).toThrow(/different swap semantics/);
   });
 
   it("rejects identity substitution on an accept-by-id response", () => {
     const displayed = order({ status: "open" });
+    expect(() => acceptedTerms(displayed, order({ id: "other-order" }))).toThrow(
+      /different swap semantics/,
+    );
     expect(() =>
-      acceptedTerms(displayed, order({ id: "other-order" })),
-    ).toThrow(/different swap semantics/);
-    expect(() =>
-      acceptedTerms(
-        displayed,
-        order({ makerQrlAccount: `Q${"5".repeat(128)}` }),
-      ),
+      acceptedTerms(displayed, order({ makerQrlAccount: `Q${"5".repeat(128)}` })),
     ).toThrow(/different swap semantics/);
   });
 
@@ -159,15 +151,15 @@ describe("untrusted order term binding", () => {
 
   it("rejects hidden H/T fields on classic rows and T2 on pre-funded rows", () => {
     const displayed = order({ status: "open" });
-    expect(() =>
-      acceptedTerms(displayed, order({ hashlock: `0x${"12".repeat(32)}` })),
-    ).toThrow(/different swap semantics/);
-    expect(() =>
-      acceptedTerms(displayed, order({ initiatorTimeout: 1_800_000_000 })),
-    ).toThrow(/different swap semantics/);
-    expect(() =>
-      acceptedTerms(displayed, order({ responderTimeout: 1_799_996_400 })),
-    ).toThrow(/different swap semantics/);
+    expect(() => acceptedTerms(displayed, order({ hashlock: `0x${"12".repeat(32)}` }))).toThrow(
+      /different swap semantics/,
+    );
+    expect(() => acceptedTerms(displayed, order({ initiatorTimeout: 1_800_000_000 }))).toThrow(
+      /different swap semantics/,
+    );
+    expect(() => acceptedTerms(displayed, order({ responderTimeout: 1_799_996_400 }))).toThrow(
+      /different swap semantics/,
+    );
 
     const prelocked = order({
       status: "open",
@@ -280,9 +272,9 @@ describe("untrusted order term binding", () => {
       createdAt: 1,
     };
     expect(() => assertStoredMakerSwapTerms(local, stored)).not.toThrow();
-    expect(() =>
-      assertStoredMakerSwapTerms(local, { ...stored, direction: "eth->qrl" }),
-    ).toThrow(/saved swap does not match/);
+    expect(() => assertStoredMakerSwapTerms(local, { ...stored, direction: "eth->qrl" })).toThrow(
+      /saved swap does not match/,
+    );
 
     const locking = order({
       status: "locking",
@@ -347,17 +339,13 @@ describe("untrusted order term binding", () => {
       responderTimeout: 1_799_996_400,
     });
     expect(() =>
-      announcedOrderTerms(
-        stored,
-        { ...locking, hashlock: `0x${"34".repeat(32)}` },
-        now,
-      ),
+      announcedOrderTerms(stored, { ...locking, hashlock: `0x${"34".repeat(32)}` }, now),
     ).toThrow(/unsafe or changed/);
-    expect(() =>
-      announcedOrderTerms({ ...stored, acceptedPrelock: null }, locking, now),
-    ).toThrow(/unsafe or changed/);
-    expect(() =>
-      announcedOrderTerms(stored, { ...locking, direction: "eth->qrl" }, now),
-    ).toThrow(/unsafe or changed/);
+    expect(() => announcedOrderTerms({ ...stored, acceptedPrelock: null }, locking, now)).toThrow(
+      /unsafe or changed/,
+    );
+    expect(() => announcedOrderTerms(stored, { ...locking, direction: "eth->qrl" }, now)).toThrow(
+      /unsafe or changed/,
+    );
   });
 });

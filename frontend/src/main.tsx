@@ -17,5 +17,5 @@ if (!rootEl) throw new Error("missing #root");
 createRoot(rootEl).render(
   <StrictMode>
     <App />
-  </StrictMode>
+  </StrictMode>,
 );

@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { encodeFunctionCall, encodeParameters } from "@theqrl/web3-qrl-abi";
-import {
-  decodeQrvmSwap,
-  decodeQrvmUints,
-  encodeQrvmHtlc,
-  type QrvmHtlcMethod,
-} from "./qrvmHtlc";
+import { decodeQrvmSwap, decodeQrvmUints, encodeQrvmHtlc, type QrvmHtlcMethod } from "./qrvmHtlc";
 import { QRVM_ZERO_ADDRESS } from "./qip55";
 
 const hash = `0x${"12".repeat(32)}`;
@@ -31,16 +26,22 @@ const cases: [QrvmHtlcMethod, string[], (string | number | bigint)[]][] = [
 
 describe("bounded QRVM HTLC codec", () => {
   it.each(cases)("matches official web3 ABI for %s", (method, types, values) => {
-    const reference = encodeFunctionCall({
-      type: "function", name: method,
-      inputs: types.map((type, index) => ({ name: `arg${index}`, type })),
-    }, values.map(String));
+    const reference = encodeFunctionCall(
+      {
+        type: "function",
+        name: method,
+        inputs: types.map((type, index) => ({ name: `arg${index}`, type })),
+      },
+      values.map(String),
+    );
     expect(encodeQrvmHtlc(method, values).toLowerCase()).toBe(reference.toLowerCase());
   });
 
   it("keeps all 64 address bytes significant", () => {
     const other = `Q${"ab".repeat(63)}cd`;
-    expect(encodeQrvmHtlc("assign", [hash, account])).not.toBe(encodeQrvmHtlc("assign", [hash, other]));
+    expect(encodeQrvmHtlc("assign", [hash, account])).not.toBe(
+      encodeQrvmHtlc("assign", [hash, other]),
+    );
     expect(encodeQrvmHtlc("assign", [hash, account]).slice(-128)).toBe(account.slice(1));
   });
 
@@ -53,16 +54,29 @@ describe("bounded QRVM HTLC codec", () => {
     expect(() => encodeQrvmHtlc("getSwap", [hash, hash])).toThrow();
   });
 
-  const encodedSwap = () => encodeParameters(
-    ["address", "address", "address", "uint256", "uint256", "uint8", "bytes32"],
-    [account, `Q${"cd".repeat(64)}`, `Q${"0".repeat(128)}`, "1000000000000000000", String(timeout), "1", secret],
-  );
+  const encodedSwap = () =>
+    encodeParameters(
+      ["address", "address", "address", "uint256", "uint256", "uint8", "bytes32"],
+      [
+        account,
+        `Q${"cd".repeat(64)}`,
+        `Q${"0".repeat(128)}`,
+        "1000000000000000000",
+        String(timeout),
+        "1",
+        secret,
+      ],
+    );
 
   it("decodes the official ABI getSwap result without address truncation", () => {
     expect(decodeQrvmSwap(encodedSwap())).toEqual({
-      initiator: `0x${"ab".repeat(64)}`, recipient: `0x${"cd".repeat(64)}`,
-      token: `0x${"0".repeat(128)}`, amount: 10n ** 18n, timeout,
-      status: 1, preimage: secret,
+      initiator: `0x${"ab".repeat(64)}`,
+      recipient: `0x${"cd".repeat(64)}`,
+      token: `0x${"0".repeat(128)}`,
+      amount: 10n ** 18n,
+      timeout,
+      status: 1,
+      preimage: secret,
     });
   });
 
@@ -88,8 +102,12 @@ describe("bounded QRVM HTLC codec", () => {
     const raw = encodedSwap();
     expect(() => decodeQrvmSwap(raw.slice(0, -2))).toThrow();
     expect(() => decodeQrvmSwap(raw + "00")).toThrow();
-    expect(() => decodeQrvmSwap(raw.slice(0, 2 + 3 * 128) + "1" + raw.slice(3 + 3 * 128))).toThrow(/padding/);
-    expect(() => decodeQrvmSwap(raw.slice(0, 2 + 5 * 128) + "4".padStart(128, "0") + raw.slice(2 + 6 * 128))).toThrow(/status/);
+    expect(() => decodeQrvmSwap(raw.slice(0, 2 + 3 * 128) + "1" + raw.slice(3 + 3 * 128))).toThrow(
+      /padding/,
+    );
+    expect(() =>
+      decodeQrvmSwap(raw.slice(0, 2 + 5 * 128) + "4".padStart(128, "0") + raw.slice(2 + 6 * 128)),
+    ).toThrow(/status/);
     expect(() => decodeQrvmSwap(raw.slice(0, -1) + "1")).toThrow(/padding/);
   });
 });

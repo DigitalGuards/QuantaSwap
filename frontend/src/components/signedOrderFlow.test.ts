@@ -12,11 +12,7 @@ const order = {
   status: "open",
 } as OrderView;
 
-const candidate = (
-  receivedAt: number,
-  digest: string,
-  issuedAt = receivedAt,
-): FillIntentView =>
+const candidate = (receivedAt: number, digest: string, issuedAt = receivedAt): FillIntentView =>
   ({
     intent: { orderDigest: digest },
     auth: { issuedAt },
@@ -28,8 +24,8 @@ describe("signed order UI flow", () => {
   const select = (candidates: FillIntentView[], now: number) =>
     selectEarliestFillIntent(order, candidates, {
       now,
-      verify: (() => true) as never,
-      digest: ((intent: { orderDigest: string }) => intent.orderDigest) as never,
+      verify: () => true,
+      digest: (intent: { orderDigest: string }) => intent.orderDigest,
     });
 
   it("selects the proposal that reached the book first", () => {

@@ -80,7 +80,13 @@ export function DeferredPayoutPanel({
 
   const settleOnLeg = useMemo(
     () =>
-      makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+      makeSettlementSender({
+        browserProvider,
+        ensureSepolia,
+        qrlAccount,
+        qrlTransport,
+        qrlRequest,
+      }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
 
@@ -113,7 +119,6 @@ export function DeferredPayoutPanel({
     });
     // The target list is identified by `key`, and onCleared is a caller
     // callback whose identity must not restart the poll.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
   useEffect(() => {

@@ -37,9 +37,7 @@ describe("authorized message signer binding", () => {
   );
   it("rejects a malformed mixed-case signer instead of repairing it", () => {
     const malformed = authorized.replace(/[a-fA-F]/, (character) =>
-      character === character.toLowerCase()
-        ? character.toUpperCase()
-        : character.toLowerCase(),
+      character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase(),
     );
     expect(() =>
       bindAuthorizedMessageSigner(
@@ -76,17 +74,17 @@ describe("hexToQ checksum enforcement", () => {
 describe("QRL wallet account authorization", () => {
   it("uses the authorized cache on reconnect without prompting", async () => {
     const request = vi.fn();
-    await expect(
-      getAuthorizedQrlAccount({ getAccounts: () => [ACCOUNT], request }),
-    ).resolves.toBe(ACCOUNT);
+    await expect(getAuthorizedQrlAccount({ getAccounts: () => [ACCOUNT], request })).resolves.toBe(
+      ACCOUNT,
+    );
     expect(request).not.toHaveBeenCalled();
   });
 
   it("requests authorization when a fresh pairing has no cached account", async () => {
     const request = vi.fn().mockResolvedValue([ACCOUNT]);
-    await expect(
-      getAuthorizedQrlAccount({ getAccounts: () => [], request }),
-    ).resolves.toBe(ACCOUNT);
+    await expect(getAuthorizedQrlAccount({ getAccounts: () => [], request })).resolves.toBe(
+      ACCOUNT,
+    );
     expect(request).toHaveBeenCalledOnce();
     expect(request).toHaveBeenCalledWith({ method: "qrl_requestAccounts" });
   });
@@ -98,9 +96,9 @@ describe("QRL wallet account authorization", () => {
     ).rejects.toThrow(/account cache/);
     expect(request).not.toHaveBeenCalled();
 
-    await expect(
-      getAuthorizedQrlAccount({ getAccounts: () => [], request }),
-    ).rejects.toThrow(/invalid QRL account/);
+    await expect(getAuthorizedQrlAccount({ getAccounts: () => [], request })).rejects.toThrow(
+      /invalid QRL account/,
+    );
   });
 
   it("requires exactly one valid account in a provider response", () => {
@@ -115,8 +113,8 @@ describe("QRL wallet account authorization", () => {
 
 describe("QRL address display fingerprint", () => {
   it.each([
-    `Q${"11111111"}${"2".repeat(52)}${"33333333"}${"4".repeat(52)}${"55555555"}`,
-    `Q${"11111111"}${"2".repeat(8)}${"33333333"}${"4".repeat(8)}${"55555555"}`,
+    `Q11111111${"2".repeat(52)}33333333${"4".repeat(52)}55555555`,
+    `Q11111111${"2".repeat(8)}33333333${"4".repeat(8)}55555555`,
   ])("shows the first, middle, and final 8 hex characters", (address) => {
     expect(formatQrlAddressFingerprint(address)).toBe("Q11111111...33333333...55555555");
   });
@@ -133,12 +131,9 @@ describe("QRL address display fingerprint", () => {
     `q${"1".repeat(128)}`,
     `Q${"1".repeat(127)}`,
     `Q${"1".repeat(129)}`,
-  ])(
-    "leaves invalid and short values unchanged",
-    (address) => {
-      expect(formatQrlAddressFingerprint(address)).toBe(address);
-    },
-  );
+  ])("leaves invalid and short values unchanged", (address) => {
+    expect(formatQrlAddressFingerprint(address)).toBe(address);
+  });
 });
 
 describe("QIP-55 address predicates", () => {

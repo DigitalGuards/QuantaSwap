@@ -13,12 +13,7 @@ interface Props {
  * replacing the hand-copied QR modal. Attributes sync via effects; the
  * element's qrl-new-connection / qrl-cancel events map onto the wallet hook.
  */
-export function PairingModal({
-  uri,
-  statusDetail,
-  onNewConnection,
-  onCancel,
-}: Props) {
+export function PairingModal({ uri, statusDetail, onNewConnection, onCancel }: Props) {
   const hostRef = useRef<HTMLSpanElement | null>(null);
   const elRef = useRef<QrlPairingModal | null>(null);
   const handlers = useRef({ onNewConnection, onCancel });
@@ -28,7 +23,7 @@ export function PairingModal({
     defineQrlPairingModal();
     const el = new QrlPairingModal();
     const onNew = () => handlers.current.onNewConnection();
-    const onDismiss = () => void handlers.current.onCancel();
+    const onDismiss = () => handlers.current.onCancel();
     el.addEventListener("qrl-new-connection", onNew);
     el.addEventListener("qrl-cancel", onDismiss);
     hostRef.current?.append(el);

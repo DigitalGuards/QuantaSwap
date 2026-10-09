@@ -110,8 +110,7 @@ function assertPortableMakerOrder(
     !verifyOrderV1Auth(current, Math.floor(Date.now() / 1000), true) ||
     current.id !== local.id ||
     (local.orderDigest !== undefined && current.orderDigest !== local.orderDigest) ||
-    (local.orderAuth !== undefined &&
-      current.makerAuth.nonce !== local.orderAuth.nonce) ||
+    (local.orderAuth !== undefined && current.makerAuth.nonce !== local.orderAuth.nonce) ||
     current.direction !== local.direction ||
     (current.asset ?? "ETH") !== local.asset ||
     current.fromAmount !== local.fromAmount ||
@@ -157,9 +156,7 @@ export function MyOrderCard({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [terminalProofSaved, setTerminalProofSaved] = useState(
-    myOrder.fill !== undefined,
-  );
+  const [terminalProofSaved, setTerminalProofSaved] = useState(myOrder.fill !== undefined);
   /** The listing is gone (cancelled or swept) but this is a pre-funded
    *  order: the escrow may still sit on-chain, so the handle must not be
    *  cleared until the funds are released. */
@@ -170,7 +167,13 @@ export function MyOrderCard({
   // the reclaim always defers into a credit.
   const settleOnLeg = useMemo(
     () =>
-      makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+      makeSettlementSender({
+        browserProvider,
+        ensureSepolia,
+        qrlAccount,
+        qrlTransport,
+        qrlRequest,
+      }),
     [browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest],
   );
   /** A released escrow whose payout deferred. The order handle stays open
@@ -281,20 +284,20 @@ export function MyOrderCard({
         assertMakerOrderProgress(myOrder, swap, current);
         let announced: OrderView;
         try {
-          announced = await announceHashlock(current.id, {
-            token: myOrder.token,
-            hashlock: swap.hashlock ?? "",
-            initiatorTimeout: swap.initiatorTimeout ?? 0,
-            responderTimeout: swap.responderTimeout ?? 0,
-          }, myOrder.bookId);
+          announced = await announceHashlock(
+            current.id,
+            {
+              token: myOrder.token,
+              hashlock: swap.hashlock ?? "",
+              initiatorTimeout: swap.initiatorTimeout ?? 0,
+              responderTimeout: swap.responderTimeout ?? 0,
+            },
+            myOrder.bookId,
+          );
         } catch (err) {
           // The announce may have applied even though we saw an error
           // (lost response, or a 409 on retry). Converge via the book.
-          const after = await getOrder(
-            current.id,
-            myOrder.shareToken ?? undefined,
-            myOrder.bookId,
-          );
+          const after = await getOrder(current.id, myOrder.shareToken ?? undefined, myOrder.bookId);
           if (after.status === "open") {
             // The taker released before we announced; nothing published,
             // the listing is back on the book. Drop the provisional swap
@@ -340,11 +343,7 @@ export function MyOrderCard({
           if (!ethAccount || !qrlAccount) {
             throw new Error("Connect both wallets before selecting a fill request.");
           }
-          const current = await getOrder(
-            saved.id,
-            saved.shareToken ?? undefined,
-            saved.bookId,
-          );
+          const current = await getOrder(saved.id, saved.shareToken ?? undefined, saved.bookId);
           setOrder(current);
           assertPortableMakerOrder(saved, current);
           const makerAuth = current.makerAuth;
@@ -374,11 +373,8 @@ export function MyOrderCard({
           if (saved.fill === undefined) {
             const intents = await listFillIntents(saved.id, saved.bookId, saved.token);
             const savedStillValid =
-              selected === undefined
-                ? null
-                : selectEarliestFillIntent(current, [selected]);
-            selected =
-              savedStillValid ?? selectEarliestFillIntent(current, intents) ?? undefined;
+              selected === undefined ? null : selectEarliestFillIntent(current, [selected]);
+            selected = savedStillValid ?? selectEarliestFillIntent(current, intents) ?? undefined;
           }
           if (selected === undefined) return null;
 
@@ -386,10 +382,7 @@ export function MyOrderCard({
             intent: selected.intent,
             auth: selected.auth,
           };
-          const selectedDigest = protocolIntentDigest(
-            selectedSigned.intent,
-            selectedSigned.auth,
-          );
+          const selectedDigest = protocolIntentDigest(selectedSigned.intent, selectedSigned.auth);
           if (selected.intentDigest !== selectedDigest) {
             throw new Error("The selected FillIntentV1 digest is invalid.");
           }
@@ -406,27 +399,21 @@ export function MyOrderCard({
             (saved.fill !== undefined || respondBy - now >= 60);
           if (!canReuseDraft) {
             const secret =
-              saved.prelock === null ? await generateSecret() : {
-                preimage: saved.prelock.preimage,
-                hashlock: saved.prelock.hashlock,
-              };
+              saved.prelock === null
+                ? await generateSecret()
+                : {
+                    preimage: saved.prelock.preimage,
+                    hashlock: saved.prelock.hashlock,
+                  };
             preimage = secret.preimage;
             const initiatorTimeout =
-              saved.prelock === null
-                ? now + INITIATOR_TIMEOUT_S
-                : saved.prelock.initiatorTimeout;
-            if (
-              saved.prelock !== null &&
-              initiatorTimeout - now < SIGNED_PRELOCK_RUNWAY_S
-            ) {
+              saved.prelock === null ? now + INITIATOR_TIMEOUT_S : saved.prelock.initiatorTimeout;
+            if (saved.prelock !== null && initiatorTimeout - now < SIGNED_PRELOCK_RUNWAY_S) {
               throw new Error(
                 "Too little time remains on the pre-funded escrow for a signed fill.",
               );
             }
-            respondBy = Math.min(
-              now + SIGNED_FILL_RESPONSE_S,
-              makerAuth.expiresAt,
-            );
+            respondBy = Math.min(now + SIGNED_FILL_RESPONSE_S, makerAuth.expiresAt);
             if (respondBy - now < 60) {
               throw new Error("This OrderV1 expires too soon to publish a safe FillV1.");
             }
@@ -465,11 +452,7 @@ export function MyOrderCard({
               request: qrlRequest,
               respondBy,
             }));
-          const digest = protocolFillDigest(
-            signed.fill,
-            makerAuth,
-            signed.auth,
-          );
+          const digest = protocolFillDigest(signed.fill, makerAuth, signed.auth);
           if (staged.fillDigest !== undefined && staged.fillDigest !== digest) {
             throw new Error("The saved FillV1 digest does not match its proof.");
           }
@@ -512,13 +495,10 @@ export function MyOrderCard({
             terminal.fillDigest !== digest ||
             terminal.selectedIntent.intentDigest !== selectedDigest ||
             !sameSignedIntent(terminal.selectedIntent, selectedSigned) ||
-            !verifyFillV1(
-              terminal.fill,
-              terminal.fillAuth,
-              terminal,
-              selectedSigned,
-              { now: Math.floor(Date.now() / 1000), allowExpired: true },
-            ) ||
+            !verifyFillV1(terminal.fill, terminal.fillAuth, terminal, selectedSigned, {
+              now: Math.floor(Date.now() / 1000),
+              allowExpired: true,
+            }) ||
             Math.floor(Date.now() / 1000) >= terminal.fillAuth.expiresAt
           ) {
             throw new Error("The terminal FillV1 response failed local verification.");
@@ -528,9 +508,7 @@ export function MyOrderCard({
             role: "maker",
             termsBindingVersion: 1,
             orderId: terminal.id,
-            ...(signedHandle.bookId === undefined
-              ? {}
-              : { bookId: signedHandle.bookId }),
+            ...(signedHandle.bookId === undefined ? {} : { bookId: signedHandle.bookId }),
             orderDigest: currentOrderDigest,
             intent: selectedSigned,
             intentDigest: selectedDigest,
@@ -576,11 +554,7 @@ export function MyOrderCard({
     let stop = false;
     const poll = async () => {
       try {
-        const current = await getOrder(
-          myOrder.id,
-          myOrder.shareToken ?? undefined,
-          myOrder.bookId,
-        );
+        const current = await getOrder(myOrder.id, myOrder.shareToken ?? undefined, myOrder.bookId);
         if (stop) return;
         setOrder(current);
         if (current.makerAuth !== undefined) {
@@ -609,23 +583,14 @@ export function MyOrderCard({
       stop = true;
       clearInterval(t);
     };
-  }, [
-    myOrder.id,
-    myOrder.shareToken,
-    myOrder.bookId,
-    startLegacySwap,
-    startSignedSwap,
-    close,
-  ]);
+  }, [myOrder.id, myOrder.shareToken, myOrder.bookId, startLegacySwap, startSignedSwap, close]);
 
   // Maker liveness: while this card is mounted the listing stays in the
   // takeable set; a closed tab ages out after the book's presence TTL, so
   // takers stop reserving orders whose maker cannot respond.
   useEffect(() => {
     const beat = () =>
-      void heartbeatOrder(myOrder.id, myOrder.token, myOrder.bookId).catch(
-        () => undefined,
-      );
+      void heartbeatOrder(myOrder.id, myOrder.token, myOrder.bookId).catch(() => undefined);
     beat();
     const t = setInterval(beat, 30_000);
     return () => clearInterval(t);
@@ -635,12 +600,7 @@ export function MyOrderCard({
     async (current?: OrderView): Promise<void> => {
       const saved = loadMyOrder() ?? myOrder;
       const view =
-        current ??
-        (await getOrder(
-          saved.id,
-          saved.shareToken ?? undefined,
-          saved.bookId,
-        ));
+        current ?? (await getOrder(saved.id, saved.shareToken ?? undefined, saved.bookId));
       if (view.makerAuth === undefined) {
         await cancelOrder(saved.id, saved.token, saved.bookId);
         return;
@@ -662,31 +622,19 @@ export function MyOrderCard({
           walletRdns: qrlWalletRdns,
           request: qrlRequest,
         }));
-      const digest = protocolCancelDigest(
-        signed.cancel,
-        makerAuth,
-        signed.auth,
-      );
+      const digest = protocolCancelDigest(signed.cancel, makerAuth, signed.auth);
       if (saved.cancelDigest !== undefined && saved.cancelDigest !== digest) {
         throw new Error("The saved CancelV1 digest does not match its proof.");
       }
       saveMyOrder({ ...saved, cancel: signed, cancelDigest: digest });
-      const cancelled = await cancelSignedOrder(
-        saved.id,
-        signed,
-        saved.bookId,
-        saved.token,
-      );
+      const cancelled = await cancelSignedOrder(saved.id, signed, saved.bookId, saved.token);
       if (
         cancelled.cancelDigest !== digest ||
         cancelled.cancelProof === undefined ||
         cancelled.cancelAuth === undefined ||
-        !verifyCancelV1(
-          cancelled.cancelProof,
-          cancelled.cancelAuth,
-          cancelled,
-          { allowExpired: true },
-        )
+        !verifyCancelV1(cancelled.cancelProof, cancelled.cancelAuth, cancelled, {
+          allowExpired: true,
+        })
       ) {
         throw new Error("The CancelV1 response failed local verification.");
       }

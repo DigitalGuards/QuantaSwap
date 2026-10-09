@@ -23,12 +23,7 @@ import {
   settlementGasLimit,
 } from "./htlc";
 import { encodeQrvmHtlc } from "./qrvmHtlc";
-import {
-  creditCandidates,
-  creditExit,
-  creditKey,
-  creditViews,
-} from "./payoutCredits";
+import { creditCandidates, creditExit, creditKey, creditViews } from "./payoutCredits";
 import { deriveSwapMachine, type LegStates } from "./swapMachine";
 import type { ActiveSwap } from "./activeSwap";
 
@@ -82,9 +77,7 @@ describe("credit candidates", () => {
     ];
     for (const role of ["maker", "taker"] as const) {
       const candidates = creditCandidates(machineFor(role));
-      expect(candidates.map((candidate) => [candidate.leg, candidate.account])).toEqual(
-        expected,
-      );
+      expect(candidates.map((candidate) => [candidate.leg, candidate.account])).toEqual(expected);
       // `own` marks this browser's own role, whichever side that is.
       expect(candidates.filter((candidate) => candidate.own)).toHaveLength(2);
     }
@@ -292,5 +285,20 @@ describe("credit and gas-policy reads", () => {
       vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) })),
     );
     await expect(assertDeliveryGasPolicy("eth")).resolves.toBeUndefined();
+  });
+
+  it.each(["eth", "qrl"] as const)("rejects malformed delivery policies on %s", async (leg) => {
+    vi.stubGlobal("fetch", qrlFetch("0x01"));
+    await expect(assertDeliveryGasPolicy(leg)).rejects.toThrow(/Invalid ABI|64-byte word/);
+  });
+
+  it("rejects malformed policy response envelopes", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve<unknown>(null),
+      }),
+    );
+    await expect(assertDeliveryGasPolicy("eth")).rejects.toThrow(/Invalid RPC response/);
   });
 });
