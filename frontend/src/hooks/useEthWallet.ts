@@ -1,3 +1,5 @@
+import { isArray, requireHex } from "@/utils/guards";
+import { isEip1193Provider, isProviderDetail } from "@/lib/providerGuards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserProvider } from "ethers";
 import { ETH_LEG } from "@/config";
@@ -25,12 +27,12 @@ export interface ProviderDetail {
 
 declare global {
   interface WindowEventMap {
-    "eip6963:announceProvider": CustomEvent<ProviderDetail>;
+    "eip6963:announceProvider": CustomEvent<unknown>;
   }
 }
 
 function firstAccount(value: unknown): string | null {
-  if (!Array.isArray(value)) return null;
+  if (!isArray(value)) return null;
   const account: unknown = value[0];
   return typeof account === "string" && /^0x[\da-f]{40}$/i.test(account) ? account : null;
 }
@@ -61,7 +63,8 @@ function onEthLegChain(chainId: unknown): boolean {
       return false;
     }
   }
-  if (typeof chainId === "number") return Number.isSafeInteger(chainId) && BigInt(chainId) === expected;
+  if (typeof chainId === "number")
+    return Number.isSafeInteger(chainId) && BigInt(chainId) === expected;
   return typeof chainId === "bigint" && chainId === expected;
 }
 
@@ -86,15 +89,9 @@ export function useEthWallet() {
   const walletConnectRef = useRef<WalletConnectClient | null>(null);
 
   useEffect(() => {
-    const onAnnounce = (event: CustomEvent<ProviderDetail>) => {
-      const detail = event.detail;
-      if (!detail?.info || typeof detail.provider?.request !== "function") return;
-      if (
-        ![detail.info.uuid, detail.info.name, detail.info.rdns, detail.info.icon].every(
-          (value) => typeof value === "string",
-        )
-      )
-        return;
+    const onAnnounce = (event: CustomEvent<unknown>) => {
+      const detail: unknown = event.detail;
+      if (!isProviderDetail(detail)) return;
       if (/qrl/i.test(detail.info.rdns) || /qrl/i.test(detail.info.name)) {
         qrlProvidersRef.current.add(detail.provider);
         setLegacy((previous) => (previous?.provider === detail.provider ? null : previous));
@@ -138,9 +135,9 @@ export function useEthWallet() {
     // Older extensions may expose only window.ethereum. Offer it as an
     // explicit choice after asking EIP-6963 wallets to announce again.
     window.dispatchEvent(new Event("eip6963:requestProvider"));
-    const provider = (window as Window & { ethereum?: Eip1193Provider }).ethereum;
+    const provider = "ethereum" in window ? window.ethereum : undefined;
     setLegacy(
-      provider && typeof provider.request === "function" && !qrlProvidersRef.current.has(provider)
+      isEip1193Provider(provider) && !qrlProvidersRef.current.has(provider)
         ? {
             info: { uuid: "window.ethereum", name: "Browser wallet", icon: "", rdns: "" },
             provider,
@@ -307,7 +304,7 @@ export function useEthWallet() {
       metaMaskRef.current = client;
       if (generation !== generationRef.current) return;
       const { accounts } = await client.connect({
-        chainIds: [ETH_LEG.chainIdHex as `0x${string}`],
+        chainIds: [requireHex(ETH_LEG.chainIdHex)],
       });
       if (generation !== generationRef.current) {
         await client.disconnect();

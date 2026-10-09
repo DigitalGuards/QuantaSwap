@@ -118,14 +118,13 @@ async function qrlTransport() {
   };
 
   const submit = async (tx) => {
-    const gasPrice = await web3.qrl.getGasPrice();
     let hash = null;
     try {
       // The returned PromiEvent is also a promise that rejects on a reverted
       // receipt. Awaiting it directly keeps that rejection handled; a revert
       // is an expected outcome here, so its receipt is read off the error.
       const pending = web3.qrl.sendTransaction(
-        { ...tx, from: account.address, gasPrice },
+        { ...tx, from: account.address },
         undefined,
         { checkRevertBeforeSending: false },
       );

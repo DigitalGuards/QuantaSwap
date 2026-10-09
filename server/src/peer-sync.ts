@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "./guards.js";
 // Pull-based mirror synchronization. Peers are explicit operator
 // configuration. Every received protocol event is still verified by the
 // supplied apply callback before it enters local state or the relay feed.
@@ -73,11 +74,7 @@ interface ParsedCursor {
 }
 
 export type FederationPeerState =
-  | "pending"
-  | "syncing"
-  | "healthy"
-  | "degraded"
-  | "stale";
+  "pending" | "syncing" | "healthy" | "degraded" | "stale";
 
 export interface FederationPeerStatus {
   id: string;
@@ -117,14 +114,15 @@ function assertExactKeys(
 function parseCursor(cursor: string, label: string): ParsedCursor {
   const match = CURSOR_RE.exec(cursor);
   const rawSequence = match?.[2];
-  if (match === null || rawSequence === undefined) {
+  const feedId = match?.[1];
+  if (feedId === undefined || rawSequence === undefined) {
     throw new Error(`${label} has an invalid cursor`);
   }
   const sequence = Number(rawSequence);
   if (!Number.isSafeInteger(sequence)) {
     throw new Error(`${label} has an invalid cursor`);
   }
-  return { feedId: match[1]!, sequence };
+  return { feedId, sequence };
 }
 
 function peerBackoffMs(streak: number): number {
@@ -180,7 +178,10 @@ export async function readFederationJson(
     reader.releaseLock();
   }
   try {
-    return JSON.parse(Buffer.concat(chunks, size).toString("utf8")) as unknown;
+    const parsed: unknown = JSON.parse(
+      Buffer.concat(chunks, size).toString("utf8"),
+    );
+    return parsed;
   } catch {
     throw new Error("federation peer returned invalid JSON");
   }
@@ -193,10 +194,10 @@ function parseRecord(
   collectionLabel: string,
   minimumSequence: 0 | 1,
 ): FederationRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`${label} must be an object`);
   }
-  const row = raw as Record<string, unknown>;
+  const row = raw;
   assertExactKeys(row, ["seq", "eventId", "event"], label);
   const seq = row["seq"];
   const eventId = row["eventId"];
@@ -215,14 +216,10 @@ function parseRecord(
     throw new Error(`${collectionLabel} contains a duplicate event id`);
   }
   eventIds.add(eventId);
-  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+  if (!isRecord(event)) {
     throw new Error(`${label} has an invalid event`);
   }
-  assertExactKeys(
-    event as Record<string, unknown>,
-    ["kind", "payload"],
-    `${label} event`,
-  );
+  assertExactKeys(event, ["kind", "payload"], `${label} event`);
   const parsed = parseFederationEvent(event, label);
   if (federationEventId(parsed) !== eventId) {
     throw new Error(`${label} content hash does not match`);
@@ -231,10 +228,10 @@ function parseRecord(
 }
 
 export function parseFederationPage(raw: unknown): FederationPage {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error("federation peer returned an invalid page");
   }
-  const row = raw as Record<string, unknown>;
+  const row = raw;
   if (typeof row["reset"] !== "boolean") {
     throw new Error("federation peer returned an invalid reset flag");
   }
@@ -259,7 +256,7 @@ export function parseFederationPage(raw: unknown): FederationPage {
   if (typeof row["hasMore"] !== "boolean") {
     throw new Error("federation peer returned an invalid continuation flag");
   }
-  if (!Array.isArray(row["events"]) || row["events"].length > 256) {
+  if (!isArray(row["events"]) || row["events"].length > 256) {
     throw new Error("federation peer returned an invalid event batch");
   }
   if (row["reset"] && row["hasMore"]) {
@@ -284,7 +281,7 @@ export function parseFederationPage(raw: unknown): FederationPage {
   let snapshot: FederationRecord[] | undefined;
   if (hasSnapshot) {
     if (
-      !Array.isArray(row["snapshot"]) ||
+      !isArray(row["snapshot"]) ||
       row["snapshot"].length > MAX_SNAPSHOT_EVENTS
     ) {
       throw new Error("federation peer returned an invalid snapshot");
@@ -789,7 +786,10 @@ export class FederationPeerSync {
       if (deferred.sources.size === 0) {
         this.deferred.delete(eventId);
       } else if (deferred.peer === peer) {
-        deferred.peer = deferred.sources.values().next().value as string;
+        const source = deferred.sources.values().next().value;
+        if (source === undefined)
+          throw new Error("Deferred event has no source");
+        deferred.peer = source;
       }
     }
     this.forceResetPeers.add(peer);
@@ -822,9 +822,10 @@ export class FederationPeerSync {
           (peer) =>
             (rejectedThisSync.get(peer) ?? 0) < MAX_REJECTED_EVENTS_PER_SYNC,
         );
-        if (eligibleSources.length === 0) continue;
+        const firstSource = eligibleSources[0];
+        if (firstSource === undefined) continue;
         if (!eligibleSources.includes(deferred.peer)) {
-          deferred.peer = eligibleSources[0]!;
+          deferred.peer = firstSource;
         }
         deferred.attempts += 1;
         try {

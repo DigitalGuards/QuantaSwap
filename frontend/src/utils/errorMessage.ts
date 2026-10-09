@@ -1,3 +1,4 @@
+import { isRecord } from "./guards";
 /** Human-readable message from anything a wallet/provider can throw.
  *  Injected providers reject with plain objects ({ code, message, data }),
  *  sometimes nesting the real cause under data; ethers wraps them in an
@@ -10,40 +11,34 @@
  *  time BEFORE any broadcast, so callers may safely treat it as
  *  "nothing happened on-chain". */
 export function isUserRejection(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as {
-    code?: unknown;
-    info?: { error?: { code?: unknown } };
-    cause?: { code?: unknown };
-    data?: { cause?: unknown };
-  };
+  if (!isRecord(err)) return false;
+  const nested = isRecord(err.info) && isRecord(err.info.error) ? err.info.error : undefined;
   return (
-    e.code === "ACTION_REJECTED" ||
-    e.code === 4001 ||
-    e.info?.error?.code === 4001 ||
-    e.cause?.code === 4001
+    err.code === "ACTION_REJECTED" ||
+    err.code === 4001 ||
+    nested?.code === 4001 ||
+    (isRecord(err.cause) && err.cause.code === 4001)
   );
 }
 
 // Provider rejections that do not carry a machine code but are still plainly
 // a user decline (some relays/extensions only send a message). Used for
 // friendlier DISPLAY only, never to decide that nothing broadcast.
-const REJECT_TEXT = /user (rejected|denied)|denied .*signature|action[_ ]rejected|ethers-user-denied/i;
+const REJECT_TEXT =
+  /user (rejected|denied)|denied .*signature|action[_ ]rejected|ethers-user-denied/i;
 
 const MAX_LEN = 200;
 const clip = (s: string): string => (s.length > MAX_LEN ? `${s.slice(0, MAX_LEN - 1)}…` : s);
 
 export function errorMessage(err: unknown): string {
   if (isUserRejection(err)) return "Transaction rejected in your wallet.";
-  if (typeof err === "object" && err !== null) {
+  if (isRecord(err)) {
     // ethers v6 errors carry a concise `shortMessage`; prefer it over the
     // verbose `message` that embeds the full request payload.
-    const rec = err as {
-      shortMessage?: unknown;
-      message?: unknown;
-      data?: { message?: unknown };
-    };
-    if (typeof rec.data?.message === "string" && rec.data.message) return clip(rec.data.message);
+    const rec = err;
+    if (isRecord(rec.data) && typeof rec.data.message === "string" && rec.data.message) {
+      return clip(rec.data.message);
+    }
     if (typeof rec.shortMessage === "string" && rec.shortMessage) {
       return REJECT_TEXT.test(rec.shortMessage)
         ? "Transaction rejected in your wallet."

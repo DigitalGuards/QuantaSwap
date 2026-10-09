@@ -146,7 +146,8 @@ export const creditLedgerKey = (line: {
   leg: LegKey;
   token: string;
   account: string;
-}): string => `${line.leg}:${line.token.toLowerCase()}:${line.account.toLowerCase()}`;
+}): string =>
+  `${line.leg}:${line.token.toLowerCase()}:${line.account.toLowerCase()}`;
 
 function bookFor(cfg: TakerReadConfig): TakerBookClient {
   return new TakerBookClient(cfg.orderbookUrl, cfg.netTimeoutMs);
@@ -222,7 +223,9 @@ async function signingSession(
                 "this session is read-only and holds no state lease, so it must not write state",
               );
             }
-          : () => lease.assertOwned(),
+          : () => {
+              lease.assertOwned();
+            },
       identity,
       // A reporting session must survive one unreadable record.
       ...(readOnly ? { tolerateUnverifiableSwaps: true } : {}),
@@ -318,7 +321,7 @@ async function commandList(args: ParsedArgs): Promise<number> {
     console.log(
       [
         quote.id.slice(0, 12),
-        `${quote.direction}`,
+        quote.direction,
         `pay ${quote.pay.display}`,
         `receive ${quote.receive.display}`,
         `price ${quote.price} ${quote.receive.symbol}/${quote.pay.symbol}`,
@@ -468,7 +471,9 @@ async function commandResume(args: ParsedArgs): Promise<number> {
     const remaining = session.engine.status();
     if (remaining.length > 0) {
       for (const line of remaining) {
-        console.log(`still in flight: ${line.orderId.slice(0, 12)}  ${line.phase}`);
+        console.log(
+          `still in flight: ${line.orderId.slice(0, 12)}  ${line.phase}`,
+        );
       }
       return EXIT_IN_FLIGHT;
     }
@@ -510,7 +515,9 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
     if (credits === null) {
       console.error("deferred payouts could not be read from chain");
     } else if (credits.length > 0) {
-      console.log(`Deferred payouts (${credits.length}), run \`taker withdraw\`:`);
+      console.log(
+        `Deferred payouts (${credits.length}), run \`taker withdraw\`:`,
+      );
       for (const line of credits) {
         console.log(
           [
@@ -524,9 +531,7 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
     const history = session.engine.history();
     if (lines.length === 0) {
       console.log(
-        history.length === 0
-          ? "No takes recorded yet."
-          : "No takes in flight.",
+        history.length === 0 ? "No takes recorded yet." : "No takes in flight.",
       );
     }
     for (const line of lines) {
@@ -537,7 +542,9 @@ async function commandStatus(args: ParsedArgs): Promise<number> {
           `pay ${line.pay}`,
           `receive ${line.receive}`,
           line.phase,
-          line.hashlock === null ? "" : `hashlock ${line.hashlock.slice(0, 10)}`,
+          line.hashlock === null
+            ? ""
+            : `hashlock ${line.hashlock.slice(0, 10)}`,
           line.responderTimeout === null
             ? ""
             : `our deadline ${new Date(line.responderTimeout * 1000).toISOString()}`,
@@ -605,7 +612,8 @@ async function commandWithdraw(args: ParsedArgs): Promise<number> {
         // --to names one address, and the two legs use different address
         // formats, so it applies only where it fits. A credit it cannot
         // describe is left where it is, fully collectible, and reported.
-        const scoped = line.own && destination !== null ? destination : undefined;
+        const scoped =
+          line.own && destination !== null ? destination : undefined;
         if (scoped !== undefined && !destinationFitsLeg(scoped, line.leg)) {
           console.error(
             `skipping ${line.display} on the ${line.leg} leg: --to is not an address that leg can pay. Run withdraw once per leg, or leave --to out to pay your own address.`,
@@ -691,7 +699,9 @@ export async function confirm(prompt: string): Promise<boolean> {
   process.stdout.write(prompt);
   const answer = await new Promise<string>((resolve) => {
     process.stdin.setEncoding("utf8");
-    process.stdin.once("data", (chunk: string) => resolve(chunk.trim()));
+    process.stdin.once("data", (chunk: string) => {
+      resolve(chunk.trim());
+    });
   });
   process.stdin.pause();
   return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";

@@ -6,9 +6,7 @@ import { QRL_LEG } from "@/config";
 import { Header } from "./Header";
 
 const ETH_ADDRESS = `0x${"12".repeat(20)}`;
-const QRL_ADDRESS =
-  `Q${"11111111"}${"2".repeat(52)}${"33333333"}` +
-  `${"4".repeat(52)}${"55555555"}`;
+const QRL_ADDRESS = `Q11111111${"2".repeat(52)}33333333` + `${"4".repeat(52)}55555555`;
 
 afterEach(cleanup);
 

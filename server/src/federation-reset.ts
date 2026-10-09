@@ -37,7 +37,10 @@ export function federationBearerAuthorized(
   if (match === null) return false;
   const supplied = Buffer.from(match[1] ?? "", "hex");
   const expected = Buffer.from(expectedToken, "hex");
-  return supplied.byteLength === expected.byteLength && timingSafeEqual(supplied, expected);
+  return (
+    supplied.byteLength === expected.byteLength &&
+    timingSafeEqual(supplied, expected)
+  );
 }
 
 export function federationResponseCacheKey(
@@ -219,7 +222,7 @@ export class FederationResponseCache {
       this.entries.size >= this.maxEntries ||
       this.retainedBytes + body.byteLength > this.maxBytes
     ) {
-      const oldestKey = this.entries.keys().next().value as string | undefined;
+      const oldestKey = this.entries.keys().next().value;
       if (oldestKey === undefined) break;
       this.remove(oldestKey);
     }

@@ -40,7 +40,9 @@ const htlcInterface = new Interface(HTLC_ABI);
 const erc20Interface = new Interface(ERC20_ABI);
 
 export const sha256Hex = (hex: string): string =>
-  `0x${createHash("sha256").update(Buffer.from(hex.slice(2), "hex")).digest("hex")}`;
+  `0x${createHash("sha256")
+    .update(Buffer.from(hex.slice(2), "hex"))
+    .digest("hex")}`;
 
 export interface FakeSwap {
   initiator: string;
@@ -124,7 +126,10 @@ export class FakeHtlcChain {
   /** Test-only: a balance on the same ledger entry from a different swap,
    *  with no PayoutCredited log for the swap under test. */
   addForeignCredit(token: string, account: string, amount: bigint): void {
-    this.credits.set(creditKey(token, account), this.creditOf(token, account) + amount);
+    this.credits.set(
+      creditKey(token, account),
+      this.creditOf(token, account) + amount,
+    );
     const tokenKey = qToHex(token).toLowerCase();
     this.outstanding.set(tokenKey, this.outstandingCredit(token) + amount);
   }
@@ -139,15 +144,29 @@ export class FakeHtlcChain {
 
   /** The payout half of a settlement: deliver, or credit the payee. Exactly
    *  one of the two happens, so value is conserved either way. */
-  private settle(token: string, payee: string, amount: bigint, hashlock: string): void {
+  private settle(
+    token: string,
+    payee: string,
+    amount: bigint,
+    hashlock: string,
+  ): void {
     const tokenKey = qToHex(token).toLowerCase();
-    if (this.deliveryFails(payee) || (this.deferWithoutGasBuffer && !this.suppliedGasBuffer)) {
+    if (
+      this.deliveryFails(payee) ||
+      (this.deferWithoutGasBuffer && !this.suppliedGasBuffer)
+    ) {
       this.creditedLogs.push({ token, account: payee, hashlock, amount });
-      this.credits.set(creditKey(token, payee), this.creditOf(token, payee) + amount);
+      this.credits.set(
+        creditKey(token, payee),
+        this.creditOf(token, payee) + amount,
+      );
       this.outstanding.set(tokenKey, this.outstandingCredit(token) + amount);
       return;
     }
-    if (tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() && tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()) {
+    if (
+      tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() &&
+      tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()
+    ) {
       const holder = qToHex(payee).toLowerCase();
       this.balances.set(holder, (this.balances.get(holder) ?? 0n) + amount);
     }
@@ -177,8 +196,14 @@ export class FakeHtlcChain {
     const tokenKey = qToHex(token).toLowerCase();
     this.outstanding.set(tokenKey, this.outstandingCredit(token) - moved);
     const destination = qToHex(to).toLowerCase();
-    if (tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() && tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()) {
-      this.balances.set(destination, (this.balances.get(destination) ?? 0n) + moved);
+    if (
+      tokenKey !== qToHex(NATIVE_TOKEN).toLowerCase() &&
+      tokenKey !== qToHex(QRL_NATIVE_TOKEN).toLowerCase()
+    ) {
+      this.balances.set(
+        destination,
+        (this.balances.get(destination) ?? 0n) + moved,
+      );
     }
   }
 
@@ -212,7 +237,9 @@ export class FakeHtlcChain {
       return this.history[this.history.length - 1] ?? new Map();
     }
     const height = Number(BigInt(blockTag));
-    return this.history[Math.min(Math.max(height, 0), this.height)] ?? new Map();
+    return (
+      this.history[Math.min(Math.max(height, 0), this.height)] ?? new Map()
+    );
   }
 
   getSwap(hashlock: string, blockTag: string): FakeSwap {
@@ -232,7 +259,8 @@ export class FakeHtlcChain {
     this.swaps.set(key, {
       initiator: args.from,
       recipient: args.recipient,
-      token: args.token ?? (this.leg === "qrl" ? QRL_NATIVE_TOKEN : NATIVE_TOKEN),
+      token:
+        args.token ?? (this.leg === "qrl" ? QRL_NATIVE_TOKEN : NATIVE_TOKEN),
       amount: args.amount,
       timeout: args.timeout,
       status: SwapStatus.Open,
@@ -295,7 +323,8 @@ export class FakeHtlcChain {
   release(from: string, hashlock: string): void {
     const key = hashlock.toLowerCase();
     const swap = this.swaps.get(key);
-    if (swap === undefined || swap.status !== SwapStatus.Open) throw new Error("NotOpen");
+    if (swap === undefined || swap.status !== SwapStatus.Open)
+      throw new Error("NotOpen");
     if (qToHex(swap.initiator).toLowerCase() !== qToHex(from).toLowerCase()) {
       throw new Error("NotInitiator");
     }
@@ -321,7 +350,9 @@ export class FakeHtlcChain {
         ? value.toString(16).padStart(128, "0")
         : value.toString(16).padStart(64, "0");
     const hashTopic = (value: string): string =>
-      this.leg === "qrl" ? `${value.toLowerCase()}${"0".repeat(64)}` : value.toLowerCase();
+      this.leg === "qrl"
+        ? `${value.toLowerCase()}${"0".repeat(64)}`
+        : value.toLowerCase();
     return this.creditedLogs
       .map((entry) => ({
         data: `0x${word(entry.amount)}`,
@@ -350,7 +381,9 @@ export function payoutCreditedTopicFor(leg: LegKey): string {
 
 function addressTopicFor(leg: LegKey, address: string): string {
   const hex = qToHex(address).slice(2).toLowerCase();
-  return leg === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+  return leg === "qrl"
+    ? `0x${hex.padStart(128, "0")}`
+    : `0x${hex.padStart(64, "0")}`;
 }
 
 const qrvmWordFromAddress = (value: string): string =>
@@ -428,7 +461,11 @@ export async function startFakeChainRpc(
         params?: unknown[];
       };
       const reply = (result: unknown): void => {
-        const body = JSON.stringify({ jsonrpc: "2.0", id: request.id ?? 1, result });
+        const body = JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id ?? 1,
+          result,
+        });
         res.writeHead(200, {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
@@ -450,7 +487,9 @@ export async function startFakeChainRpc(
       const method = request.method ?? "";
       if (method === `${ns}_chainId`) {
         const id =
-          ns === "eth" ? protocolV2Config.ethChainId : protocolV2Config.qrlChainId;
+          ns === "eth"
+            ? protocolV2Config.ethChainId
+            : protocolV2Config.qrlChainId;
         reply(`0x${BigInt(id).toString(16)}`);
         return;
       }
@@ -466,7 +505,7 @@ export async function startFakeChainRpc(
         const filter = (request.params?.[0] ?? {}) as { topics?: unknown };
         const topics = Array.isArray(filter.topics) ? filter.topics : [];
         const wanted = (index: number): string | undefined =>
-          typeof topics[index] === "string" ? (topics[index] as string) : undefined;
+          typeof topics[index] === "string" ? topics[index] : undefined;
         // Only PayoutCredited is served, which is the only log the clients
         // query by hashlock.
         if (wanted(0) !== payoutCreditedTopicFor(chain.leg)) {
@@ -477,7 +516,10 @@ export async function startFakeChainRpc(
         return;
       }
       if (method === `${ns}_call`) {
-        const call = (request.params?.[0] ?? {}) as { to?: string; data?: string };
+        const call = (request.params?.[0] ?? {}) as {
+          to?: string;
+          data?: string;
+        };
         const blockTag = (request.params?.[1] as string) ?? "latest";
         const data = call.data ?? "";
         try {
@@ -497,7 +539,9 @@ export async function startFakeChainRpc(
     url,
     close: () =>
       new Promise<void>((resolve) => {
-        server.close(() => resolve());
+        server.close(() => {
+          resolve();
+        });
       }),
     unref: () => {
       server.unref();
@@ -601,7 +645,12 @@ function selectorOf(signature: string): string {
 /** A LegSender that applies calldata straight to a FakeHtlcChain, so a
  *  test exercises the engine without a node or a real signer. */
 export class FakeLegSender implements LegSender {
-  readonly sent: { data: string; value: bigint; to?: string; settlement?: boolean }[] = [];
+  readonly sent: {
+    data: string;
+    value: bigint;
+    to?: string;
+    settlement?: boolean;
+  }[] = [];
   private nativeBalance: bigint;
 
   constructor(
@@ -660,7 +709,10 @@ export class FakeLegSender implements LegSender {
       return;
     }
     if (selector === selectorOf("claim(bytes32,bytes32)")) {
-      this.chain.claim(`0x${word(0).slice(0, 64)}`, `0x${word(1).slice(0, 64)}`);
+      this.chain.claim(
+        `0x${word(0).slice(0, 64)}`,
+        `0x${word(1).slice(0, 64)}`,
+      );
       return;
     }
     if (selector === selectorOf("refund(bytes32)")) {
@@ -698,7 +750,7 @@ export class FakeLegSender implements LegSender {
         hashlock: parsed.args[0] as string,
         recipient: parsed.args[1] as string,
         amount: valueWei,
-        timeout: Number(parsed.args[2] as bigint),
+        timeout: Number(parsed.args[2]),
       });
       return;
     }
@@ -720,7 +772,7 @@ export class FakeLegSender implements LegSender {
         recipient: parsed.args[1] as string,
         token: parsed.args[2] as string,
         amount,
-        timeout: Number(parsed.args[4] as bigint),
+        timeout: Number(parsed.args[4]),
       });
       return;
     }
@@ -783,8 +835,8 @@ export class FakeBookServer {
   private server: Server | null = null;
   url = "";
   /** Force one response shape for a negative test. */
-  mutateRow: ((row: Record<string, unknown>) => Record<string, unknown>) | null =
-    null;
+  mutateRow:
+    ((row: Record<string, unknown>) => Record<string, unknown>) | null = null;
   /** Reject the next intent submission with 409. */
   conflictOnIntent = false;
 
@@ -809,7 +861,9 @@ export class FakeBookServer {
     const server = this.server;
     if (server === null) return;
     await new Promise<void>((resolve) => {
-      server.close(() => resolve());
+      server.close(() => {
+        resolve();
+      });
     });
   }
 
@@ -845,12 +899,20 @@ export class FakeBookServer {
     this.orders.delete(orderId);
   }
 
-  applyFill(orderId: string, fill: SignedFillV1, selected: SelectedFillIntentV1): void {
+  applyFill(
+    orderId: string,
+    fill: SignedFillV1,
+    selected: SelectedFillIntentV1,
+  ): void {
     const record = this.orders.get(orderId);
     if (record === undefined) throw new Error("unknown order");
     record.fill = fill;
     record.selected = selected;
-    record.fillDigest = computeFillDigest(fill.fill, record.order.auth, fill.auth);
+    record.fillDigest = computeFillDigest(
+      fill.fill,
+      record.order.auth,
+      fill.auth,
+    );
     record.status = "locking";
     record.updatedAt = this.clock();
   }
@@ -875,7 +937,9 @@ export class FakeBookServer {
       takerQrlAccount: record.fill?.fill.takerQrlAccount ?? null,
       hashlock: record.fill?.fill.hashlock ?? order.prelock?.hashlock ?? null,
       initiatorTimeout:
-        record.fill?.fill.initiatorTimeout ?? order.prelock?.initiatorTimeout ?? null,
+        record.fill?.fill.initiatorTimeout ??
+        order.prelock?.initiatorTimeout ??
+        null,
       responderTimeout: record.fill?.fill.responderTimeout ?? null,
       released: record.releasedFlag,
       makerSeen: true,
@@ -919,9 +983,8 @@ export class FakeBookServer {
       });
       return;
     }
-    const idMatch = /^\/orders\/([0-9a-f]{64})(?:\/(intents|fill|release))?$/.exec(
-      path,
-    );
+    const idMatch =
+      /^\/orders\/([0-9a-f]{64})(?:\/(intents|fill|release))?$/.exec(path);
     if (idMatch === null) {
       send(404, { error: "unknown route" });
       return;
@@ -969,7 +1032,8 @@ export class FakeBookServer {
         intentDigest?: string;
         fillDigest?: string;
       };
-      if (body.intentDigest !== undefined) record.released.add(body.intentDigest);
+      if (body.intentDigest !== undefined)
+        record.released.add(body.intentDigest);
       record.releasedFlag = true;
       send(200, { order: this.row(record) });
       return;

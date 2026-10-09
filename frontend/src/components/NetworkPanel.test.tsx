@@ -18,9 +18,7 @@ describe("NetworkPanel", () => {
   it("describes target-specific builds and keeps complete explorer destinations", () => {
     render(<NetworkPanel />);
 
-    expect(
-      screen.getByText(/One reviewed Hyperion source, compiled for each chain/),
-    ).toBeTruthy();
+    expect(screen.getByText(/One reviewed Hyperion source, compiled for each chain/)).toBeTruthy();
     expect(screen.queryByText(/byte-identical bytecode/)).toBeNull();
     expect(
       screen

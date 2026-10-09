@@ -48,7 +48,9 @@ async function freePort(): Promise<number> {
         return;
       }
       const { port } = address;
-      probe.close(() => resolve(port));
+      probe.close(() => {
+        resolve(port);
+      });
     });
   });
 }
@@ -95,9 +97,9 @@ function startBook(
     out += chunk.toString("utf8");
   });
   const exited = new Promise<number>((resolve) => {
-    child.once("exit", (code, signal) =>
-      resolve(code ?? (signal === null ? -1 : 128)),
-    );
+    child.once("exit", (code, signal) => {
+      resolve(code ?? (signal === null ? -1 : 128));
+    });
   });
   return { child, port, stderr: () => err, stdout: () => out, exited };
 }
@@ -175,11 +177,7 @@ describe("two order book processes on one data directory", () => {
       };
       assert.match(first.stdout(), /single-writer lease held on/);
 
-      const second = startBook(
-        dataFile,
-        federationDataFile,
-        await freePort(),
-      );
+      const second = startBook(dataFile, federationDataFile, await freePort());
       const exitCode = await second.exited;
       assert.notEqual(exitCode, 0);
       assert.match(
@@ -345,9 +343,7 @@ describe("two order book processes on one data directory", () => {
       assert.deepEqual(await feedRead.json(), {
         error: "order book storage ownership is unverifiable, retry shortly",
       });
-      const readRoute = await fetch(
-        `http://127.0.0.1:${book.port}/api/orders`,
-      );
+      const readRoute = await fetch(`http://127.0.0.1:${book.port}/api/orders`);
       assert.equal(readRoute.status, 503);
       await readRoute.json();
 
@@ -376,8 +372,9 @@ describe("two order book processes on one data directory", () => {
       const resumed = await postOrder(book.port, 2);
       assert.equal(resumed.status, 201);
       await resumed.json();
-      const after = (await fetch(`http://127.0.0.1:${book.port}/api/orders`)
-        .then((res) => res.json())) as { orders: unknown[] };
+      const after = (await fetch(
+        `http://127.0.0.1:${book.port}/api/orders`,
+      ).then((res) => res.json())) as { orders: unknown[] };
       // The deferred create left no phantom row behind, so the resumed create
       // is the second order and not a duplicate of a half-applied one.
       assert.equal(after.orders.length, 2);

@@ -13,7 +13,11 @@ import type { Server } from "node:http";
 import { assetInfo, type AssetSymbol } from "./assets.js";
 import { loadConfig, type Config } from "./config.js";
 import { EthLeg, QrlLeg } from "./chains.js";
-import { assertPortableDeployment, assertRuntimeChainIds, makeDeploymentIdentity } from "./deployment.js";
+import {
+  assertPortableDeployment,
+  assertRuntimeChainIds,
+  makeDeploymentIdentity,
+} from "./deployment.js";
 import { cancelOpenListing } from "./drain.js";
 import {
   NATIVE_TOKEN,
@@ -45,7 +49,12 @@ import {
   OrderGoneError,
   type OrderView,
 } from "./orderbook.js";
-import { COINGECKO_URL, PriceFeed, needsReprice } from "./price.js";
+import {
+  PriceFeed,
+  coingeckoSource,
+  coinpaprikaSource,
+  needsReprice,
+} from "./price.js";
 import {
   MAX_CREDIT_ATTEMPTS,
   canContinueWithoutBook,
@@ -75,7 +84,11 @@ import {
   StateProcessLease,
 } from "./state.js";
 import { listenHealthServer, MakerHealth } from "./health.js";
-import { AdmissionBackoff, canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
+import {
+  AdmissionBackoff,
+  canRetireExpiredUnfundedQuote,
+  LOCAL_RETAINED_ORDER_BUDGET,
+} from "./admission.js";
 
 const cfg: Config = loadConfig();
 const deployment = makeDeploymentIdentity(cfg);
@@ -94,9 +107,9 @@ let leaseLost = false;
 stateLease.startHeartbeat((reason) => void exitOnLostLease(reason));
 let state: StateFile;
 try {
-  state = new StateFile(cfg.stateFile, deployment, undefined, () =>
-    stateLease.assertOwned(),
-  );
+  state = new StateFile(cfg.stateFile, deployment, undefined, () => {
+    stateLease.assertOwned();
+  });
 } catch (error) {
   stateLease.close();
   protocolSigner.close();
@@ -110,18 +123,33 @@ const health = new MakerHealth({
 });
 
 const legRpc: Record<LegKey, LegRpc> = {
-  eth: { url: cfg.ethRpcUrl, ns: "eth", htlc: cfg.ethHtlc, timeoutMs: cfg.netTimeoutMs },
-  qrl: { url: cfg.qrlRpcUrl, ns: "qrl", htlc: cfg.qrlHtlc, timeoutMs: cfg.netTimeoutMs },
+  eth: {
+    url: cfg.ethRpcUrl,
+    ns: "eth",
+    htlc: cfg.ethHtlc,
+    timeoutMs: cfg.netTimeoutMs,
+  },
+  qrl: {
+    url: cfg.qrlRpcUrl,
+    ns: "qrl",
+    htlc: cfg.qrlHtlc,
+    timeoutMs: cfg.netTimeoutMs,
+  },
 };
 
-const initiatorLeg = (d: Direction): LegKey => (d === "eth->qrl" ? "eth" : "qrl");
-const responderLeg = (d: Direction): LegKey => (d === "eth->qrl" ? "qrl" : "eth");
+const initiatorLeg = (d: Direction): LegKey =>
+  d === "eth->qrl" ? "eth" : "qrl";
+const responderLeg = (d: Direction): LegKey =>
+  d === "eth->qrl" ? "qrl" : "eth";
 const sender = (leg: LegKey) => (leg === "eth" ? eth : qrl);
-const myAddress = (leg: LegKey): string => (leg === "eth" ? eth.address : qrl.address);
+const myAddress = (leg: LegKey): string =>
+  leg === "eth" ? eth.address : qrl.address;
 
 const nowS = (): number => Math.floor(Date.now() / 1000);
 const short = (id: string): string => id.slice(0, 8);
-const log = (...args: unknown[]) => console.log(`[mm ${new Date().toISOString()}]`, ...args);
+const log = (...args: unknown[]) => {
+  console.log(`[mm ${new Date().toISOString()}]`, ...args);
+};
 const CANCEL_REASON_OPERATOR = 1;
 const FILL_RESPONSE_TARGET_S = 5 * 60;
 const admissionBackoff = new AdmissionBackoff();
@@ -135,7 +163,7 @@ const fmtUnits = (value: bigint, decimals: number): string => {
 };
 
 const feed = new PriceFeed({
-  url: COINGECKO_URL,
+  sources: [coingeckoSource(), coinpaprikaSource(cfg.priceFallbackIntervalS)],
   refreshS: cfg.priceRefreshS,
   maxAgeS: cfg.priceMaxAgeS,
   staticMilli: cfg.priceFeed === "off" ? cfg.midPriceMilli : null,
@@ -193,8 +221,13 @@ async function cancelManaged(managed: ManagedOrder): Promise<OrderView> {
 
 async function publishFill(managed: ManagedOrder): Promise<OrderView> {
   const protocol = managed.protocol;
-  if (protocol?.selectedIntent === undefined || protocol.fillProof === undefined) {
-    throw new Error(`order ${short(managed.id)} has incomplete signed fill state`);
+  if (
+    protocol?.selectedIntent === undefined ||
+    protocol.fillProof === undefined
+  ) {
+    throw new Error(
+      `order ${short(managed.id)} has incomplete signed fill state`,
+    );
   }
   const filled = await book.fill(
     managed.id,
@@ -233,7 +266,9 @@ function persistAuthenticatedFillObservation(
   // funding authority for this process tick.
   const staged = structuredClone(managed);
   if (staged.protocol === undefined) {
-    throw new Error(`order ${short(managed.id)} lost its portable protocol state`);
+    throw new Error(
+      `order ${short(managed.id)} lost its portable protocol state`,
+    );
   }
   staged.protocol.fillAcknowledged = fillAcknowledged;
   staged.protocol.releaseObserved = releaseObserved;
@@ -242,14 +277,21 @@ function persistAuthenticatedFillObservation(
   protocol.releaseObserved = releaseObserved;
 }
 
-async function publishSignedOrder(managed: ManagedOrder): Promise<OrderView | null> {
+async function publishSignedOrder(
+  managed: ManagedOrder,
+): Promise<OrderView | null> {
   const protocol = managed.protocol;
-  if (protocol === undefined) throw new Error("portable order state is missing");
-  if (managed.token === null) throw new Error("portable order maker capability is missing");
+  if (protocol === undefined)
+    throw new Error("portable order state is missing");
+  if (managed.token === null)
+    throw new Error("portable order maker capability is missing");
   if (!admissionBackoff.canAttempt(nowS())) return null;
   let created;
   try {
-    created = await book.createSigned({ order: protocol.order, auth: protocol.orderAuth }, managed.token);
+    created = await book.createSigned(
+      { order: protocol.order, auth: protocol.orderAuth },
+      managed.token,
+    );
     admissionBackoff.succeeded();
   } catch (error) {
     if (!(error instanceof OrderBookUnavailableError)) throw error;
@@ -258,27 +300,33 @@ async function publishSignedOrder(managed: ManagedOrder): Promise<OrderView | nu
     return null;
   }
   if (created.order.id !== managed.id) {
-    throw new Error("signed order book response changed the deterministic order id");
+    throw new Error(
+      "signed order book response changed the deterministic order id",
+    );
   }
   managed.token = created.makerToken;
   state.upsert(managed);
   return created.order;
 }
 
-async function fetchBook(managed: ManagedOrder): Promise<{ status: BookStatus; view: OrderView | null }> {
+async function fetchBook(
+  managed: ManagedOrder,
+): Promise<{ status: BookStatus; view: OrderView | null }> {
   try {
     const protocol = managed.protocol;
-    const view = protocol === undefined
-      ? await book.get(managed.id)
-      : await book.getSigned(
-          managed.id,
-          { order: protocol.order, auth: protocol.orderAuth },
-          protocol.fillProof !== undefined && protocol.selectedIntent !== undefined
-            ? { fill: protocol.fillProof, intent: protocol.selectedIntent }
-            : protocol.cancelProof !== undefined
-              ? { cancel: protocol.cancelProof }
-              : undefined,
-        );
+    const view =
+      protocol === undefined
+        ? await book.get(managed.id)
+        : await book.getSigned(
+            managed.id,
+            { order: protocol.order, auth: protocol.orderAuth },
+            protocol.fillProof !== undefined &&
+              protocol.selectedIntent !== undefined
+              ? { fill: protocol.fillProof, intent: protocol.selectedIntent }
+              : protocol.cancelProof !== undefined
+                ? { cancel: protocol.cancelProof }
+                : undefined,
+          );
     return { status: view.status, view };
   } catch (err) {
     if (err instanceof OrderGoneError) return { status: "gone", view: null };
@@ -304,7 +352,9 @@ async function legStateOrNull(
  *  on the Ethereum leg, the native sentinel on QRL. Never book-provided.
  *  Payout credits are per token, so this is also the credit's key. */
 function legToken(leg: LegKey, asset: AssetSymbol): string {
-  return leg === "eth" ? (assetInfo(asset).tokenAddress ?? NATIVE_TOKEN) : QRL_NATIVE_TOKEN;
+  return leg === "eth"
+    ? (assetInfo(asset).tokenAddress ?? NATIVE_TOKEN)
+    : QRL_NATIVE_TOKEN;
 }
 
 /**
@@ -324,7 +374,9 @@ async function creditOrNull(
   if (account === null) return null;
   try {
     const reading = await readSwapCredit(leg, token, account, hashlock);
-    return reading.credited < reading.global ? reading.credited : reading.global;
+    return reading.credited < reading.global
+      ? reading.credited
+      : reading.global;
   } catch {
     return null; // fail closed; decide() never retires a record on an unknown credit
   }
@@ -357,31 +409,46 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   // settlement is invisible in getSwap, which reports Claimed either way.
   const takerOnInitiatorLeg =
     iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
-  const [iState, rState, rConfirmed, ourResponderCredit, ourInitiatorCredit, takerCredit] =
-    hashlock
-      ? await Promise.all([
-          legStateOrNull(legRpc[iLeg], hashlock, false),
-          legStateOrNull(legRpc[rLeg], hashlock, false),
-          legStateOrNull(legRpc[rLeg], hashlock, true),
-          creditOrNull(legRpc[rLeg], legToken(rLeg, managed.asset), myAddress(rLeg), hashlock),
-          creditOrNull(legRpc[iLeg], legToken(iLeg, managed.asset), myAddress(iLeg), hashlock),
-          creditOrNull(
-            legRpc[iLeg],
-            legToken(iLeg, managed.asset),
-            takerOnInitiatorLeg,
-            hashlock,
-          ),
-        ])
-      : [null, null, null, null, null, null];
+  const [
+    iState,
+    rState,
+    rConfirmed,
+    ourResponderCredit,
+    ourInitiatorCredit,
+    takerCredit,
+  ] = hashlock
+    ? await Promise.all([
+        legStateOrNull(legRpc[iLeg], hashlock, false),
+        legStateOrNull(legRpc[rLeg], hashlock, false),
+        legStateOrNull(legRpc[rLeg], hashlock, true),
+        creditOrNull(
+          legRpc[rLeg],
+          legToken(rLeg, managed.asset),
+          myAddress(rLeg),
+          hashlock,
+        ),
+        creditOrNull(
+          legRpc[iLeg],
+          legToken(iLeg, managed.asset),
+          myAddress(iLeg),
+          hashlock,
+        ),
+        creditOrNull(
+          legRpc[iLeg],
+          legToken(iLeg, managed.asset),
+          takerOnInitiatorLeg,
+          hashlock,
+        ),
+      ])
+    : [null, null, null, null, null, null];
 
-  if (
-    bookError !== undefined &&
-    !canContinueWithoutBook(managed, iState)
-  ) {
+  if (bookError !== undefined && !canContinueWithoutBook(managed, iState)) {
     throw bookError;
   }
   if (bookError !== undefined) {
-    log(`order ${short(managed.id)} book unavailable; continuing from durable settlement state`);
+    log(
+      `order ${short(managed.id)} book unavailable; continuing from durable settlement state`,
+    );
   }
   let newLockBlockedByBook = false;
 
@@ -393,7 +460,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     !canContinueWithoutBook(managed, iState)
   ) {
     state.delete(managed.id);
-    log(`portable order ${short(managed.id)} expired before a signed terminal decision`);
+    log(
+      `portable order ${short(managed.id)} expired before a signed terminal decision`,
+    );
     return view;
   }
 
@@ -412,7 +481,10 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       return null;
     }
     const published = await publishSignedOrder(managed);
-    if (published !== null) log(`recovered portable order ${short(managed.id)} with its original proof`);
+    if (published !== null)
+      log(
+        `recovered portable order ${short(managed.id)} with its original proof`,
+      );
     return published;
   }
 
@@ -426,7 +498,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     }
     if (bookStatus === "gone") return view;
     if (bookStatus !== "open") {
-      throw new Error(`order ${short(managed.id)} conflicts with its signed cancellation`);
+      throw new Error(
+        `order ${short(managed.id)} conflicts with its signed cancellation`,
+      );
     }
     await book.cancelSigned(
       managed.id,
@@ -451,7 +525,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         throw error;
       }
       newLockBlockedByBook = true;
-      log(`order ${short(managed.id)} fill publication unavailable; continuing settlement checks`);
+      log(
+        `order ${short(managed.id)} fill publication unavailable; continuing settlement checks`,
+      );
     }
   }
 
@@ -488,7 +564,11 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     if (
       mid !== null &&
       (managed.quotedMidMilli === null ||
-        needsReprice(BigInt(managed.quotedMidMilli), mid, cfg.repriceThresholdBps))
+        needsReprice(
+          BigInt(managed.quotedMidMilli),
+          mid,
+          cfg.repriceThresholdBps,
+        ))
     ) {
       try {
         await cancelManaged(managed);
@@ -526,7 +606,11 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
     protocol.fillProof === undefined
   ) {
     let selected = protocol.selectedIntent;
-    if (selected !== undefined && protocol.fillProof === undefined && selected.auth.expiresAt <= nowS()) {
+    if (
+      selected !== undefined &&
+      protocol.fillProof === undefined &&
+      selected.auth.expiresAt <= nowS()
+    ) {
       delete protocol.selectedIntent;
       managed.preimage = null;
       managed.hashlock = null;
@@ -545,11 +629,16 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         protocol.orderDigest,
         nowS(),
         (candidate) =>
-          verifyFillIntentV1(candidate.intent, candidate.auth, protocol.orderDigest, {
-            now: nowS(),
-            orderIssuedAt: protocol.orderAuth.issuedAt,
-            orderExpiresAt: protocol.orderAuth.expiresAt,
-          }),
+          verifyFillIntentV1(
+            candidate.intent,
+            candidate.auth,
+            protocol.orderDigest,
+            {
+              now: nowS(),
+              orderIssuedAt: protocol.orderAuth.issuedAt,
+              orderExpiresAt: protocol.orderAuth.expiresAt,
+            },
+          ),
       );
       if (selectedNow === null) return view;
 
@@ -584,7 +673,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       if (respondBy - issuedAt < 60) {
         const cancelled = await cancelManaged(managed);
         state.delete(managed.id);
-        log(`order ${short(managed.id)} cancelled before fill: signed order expiry is too near`);
+        log(
+          `order ${short(managed.id)} cancelled before fill: signed order expiry is too near`,
+        );
         return cancelled;
       }
       if (
@@ -592,7 +683,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         managed.initiatorTimeout === null ||
         managed.responderTimeout === null
       ) {
-        throw new Error(`order ${short(managed.id)} lost its persisted fill terms`);
+        throw new Error(
+          `order ${short(managed.id)} lost its persisted fill terms`,
+        );
       }
       protocol.fillProof = protocolSigner.signFillV1(
         {
@@ -625,7 +718,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
   const lifecycleBookStatus: BookStatus =
     protocol?.fillProof === undefined ? bookStatus : "locking";
   const fillResponseExpired =
-    protocol?.fillProof !== undefined && nowS() >= protocol.fillProof.auth.expiresAt;
+    protocol?.fillProof !== undefined &&
+    nowS() >= protocol.fillProof.auth.expiresAt;
   const sponsorMarginS = Math.ceil(cfg.txTimeoutMs / 1000) + 60;
   const decision = decide({
     bookStatus: lifecycleBookStatus,
@@ -659,7 +753,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
     case "announce": {
       if (protocol !== undefined) {
-        throw new Error(`portable order ${short(managed.id)} entered the legacy accepted state`);
+        throw new Error(
+          `portable order ${short(managed.id)} entered the legacy accepted state`,
+        );
       }
       if (view === null) break;
       if (managed.preimage === null || managed.hashlock === null) {
@@ -681,20 +777,30 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
       // Taker addresses come from the announce response, not the earlier
       // view: the pairing is only frozen once the order is locking, and a
       // release + re-accept in between could have swapped takers.
-      managed.takerEthAccount = announced.takerEthAccount ?? view.takerEthAccount;
-      managed.takerQrlAccount = announced.takerQrlAccount ?? view.takerQrlAccount;
+      managed.takerEthAccount =
+        announced.takerEthAccount ?? view.takerEthAccount;
+      managed.takerQrlAccount =
+        announced.takerQrlAccount ?? view.takerQrlAccount;
       managed.initiatorTimeout = t1;
       managed.responderTimeout = t2;
       managed.announcedAt = nowS();
       state.upsert(managed);
-      log(`order ${short(managed.id)} taken; hashlock announced, t2 in ${cfg.responderWindowS}s`);
+      log(
+        `order ${short(managed.id)} taken; hashlock announced, t2 in ${cfg.responderWindowS}s`,
+      );
       break;
     }
 
     case "lock": {
       if (newLockBlockedByBook) break;
-      const recipient = iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
-      if (!recipient || managed.hashlock === null || managed.initiatorTimeout === null) break;
+      const recipient =
+        iLeg === "eth" ? managed.takerEthAccount : managed.takerQrlAccount;
+      if (
+        !recipient ||
+        managed.hashlock === null ||
+        managed.initiatorTimeout === null
+      )
+        break;
       // Final walk-away check against a release that landed since the tick's
       // book read. An acknowledged portable fill may keep progressing during
       // a coordination outage because its exact terminal proof is durable.
@@ -709,7 +815,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         persistAuthenticatedFillObservation(managed, fresh.view);
       }
       if (
-        (protocol?.fillProof !== undefined && nowS() >= protocol.fillProof.auth.expiresAt) ||
+        (protocol?.fillProof !== undefined &&
+          nowS() >= protocol.fillProof.auth.expiresAt) ||
         protocol?.releaseObserved === true ||
         fresh?.view?.released ||
         (protocol?.fillProof !== undefined &&
@@ -720,10 +827,13 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           fresh !== null &&
           (fresh.status === "gone" || fresh.status === "cancelled"))
       ) {
-        log(`order ${short(managed.id)} not locking: response window closed or taker released`);
+        log(
+          `order ${short(managed.id)} not locking: response window closed or taker released`,
+        );
         break;
       }
-      const token = iLeg === "eth" ? assetInfo(managed.asset).tokenAddress : null;
+      const token =
+        iLeg === "eth" ? assetInfo(managed.asset).tokenAddress : null;
       if (token !== null) {
         // ERC-20 leg: exact-amount approve, then lockToken with value 0.
         // The allowance read happens before lockSentAt is persisted (it is
@@ -732,11 +842,19 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         // allowance already equal to the amount skips the approve, and a
         // landed lockToken flips iState so decide() never re-locks.
         const amount = BigInt(managed.fromAmount);
-        const allowance = await erc20Allowance(legRpc.eth, token, eth.address, cfg.ethHtlc);
+        const allowance = await erc20Allowance(
+          legRpc.eth,
+          token,
+          eth.address,
+          cfg.ethHtlc,
+        );
         managed.lockSentAt = nowS();
         state.upsert(managed);
         if (allowance !== amount) {
-          if (allowance !== 0n && assetInfo(managed.asset).quirks.approvalRace) {
+          if (
+            allowance !== 0n &&
+            assetInfo(managed.asset).quirks.approvalRace
+          ) {
             // USDT-style tokens revert on nonzero -> nonzero approve;
             // reset to 0 first and wait for it to land.
             await eth.send(encodeApprove(cfg.ethHtlc, 0n), 0n, token);
@@ -744,10 +862,18 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           await eth.send(encodeApprove(cfg.ethHtlc, amount), 0n, token);
         }
         const hash = await eth.send(
-          encodeLockToken(managed.hashlock, recipient, token, amount, managed.initiatorTimeout),
+          encodeLockToken(
+            managed.hashlock,
+            recipient,
+            token,
+            amount,
+            managed.initiatorTimeout,
+          ),
           0n,
         );
-        log(`order ${short(managed.id)} locked ${managed.asset} on ${iLeg} leg, tx ${hash}`);
+        log(
+          `order ${short(managed.id)} locked ${managed.asset} on ${iLeg} leg, tx ${hash}`,
+        );
         break;
       }
       managed.lockSentAt = nowS();
@@ -776,7 +902,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         async () => {
           managed.claimSentAt = nowS();
           state.upsert(managed);
-          return sender(rLeg).send(claimData, 0n, undefined, { settlement: true });
+          return sender(rLeg).send(claimData, 0n, undefined, {
+            settlement: true,
+          });
         },
         // The claim cutoff, re-checked against a fresh read of the escrow's
         // own deadline immediately before the secret goes out. A margin
@@ -784,7 +912,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         // (docs/FINALITY.md section 3.3).
         { hashlock: managed.hashlock, marginS: cfg.claimSafetyS, nowS },
       );
-      log(`order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`);
+      log(
+        `order ${short(managed.id)} claimed ${rLeg} leg (secret revealed), tx ${hash}`,
+      );
       break;
     }
 
@@ -806,10 +936,13 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           // A sponsored claim carries the settlement buffer above all: the
           // taker holds no gas on this chain, so a payout deferred into a
           // credit would leave them behind a withdrawal they cannot send.
-          () => sender(iLeg).send(claimData, 0n, undefined, { settlement: true }),
+          () =>
+            sender(iLeg).send(claimData, 0n, undefined, { settlement: true }),
           { hashlock: managed.hashlock, marginS: sponsorMarginS, nowS },
         );
-        log(`order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`);
+        log(
+          `order ${short(managed.id)} claimed ${iLeg} leg for the taker (sponsored gas), tx ${hash}`,
+        );
       } catch (err) {
         log(
           `order ${short(managed.id)} sponsored claim skipped:`,
@@ -829,7 +962,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         undefined,
         { settlement: true },
       );
-      log(`order ${short(managed.id)} refunded ${iLeg} leg (taker never finished), tx ${hash}`);
+      log(
+        `order ${short(managed.id)} refunded ${iLeg} leg (taker never finished), tx ${hash}`,
+      );
       break;
     }
 
@@ -849,7 +984,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           undefined,
           { settlement: true },
         );
-        log(`order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`);
+        log(
+          `order ${short(managed.id)} withdrew a deferred payout on the ${leg} leg, tx ${hash}`,
+        );
       } catch (err) {
         // A credit that will not move is conserved on chain. Throwing here
         // would abort the whole tick and flip health to degraded on a
@@ -859,7 +996,8 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         const rejected = isContractRejection(err);
         if (rejected) {
           managed.withdrawAttempts = (managed.withdrawAttempts ?? 0) + 1;
-          managed.withdrawFirstRejectedAt = managed.withdrawFirstRejectedAt ?? nowS();
+          managed.withdrawFirstRejectedAt =
+            managed.withdrawFirstRejectedAt ?? nowS();
           state.upsert(managed);
         }
         log(
@@ -908,7 +1046,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           undefined,
           { settlement: true },
         );
-        log(`order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`);
+        log(
+          `order ${short(managed.id)} pushed the taker's deferred payout on the ${iLeg} leg, tx ${hash}`,
+        );
       } catch (err) {
         const rejected = isContractRejection(err);
         if (rejected) {
@@ -948,7 +1088,11 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 
     case "finish":
     case "abort": {
-      if (decision === "abort" && bookStatus !== "gone" && bookStatus !== "cancelled") {
+      if (
+        decision === "abort" &&
+        bookStatus !== "gone" &&
+        bookStatus !== "cancelled"
+      ) {
         try {
           if (protocol?.fillProof === undefined) {
             await cancelManaged(managed);
@@ -966,7 +1110,9 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
         }
       }
       state.delete(managed.id);
-      log(`order ${short(managed.id)} ${decision === "finish" ? "settled" : "dropped"}`);
+      log(
+        `order ${short(managed.id)} ${decision === "finish" ? "settled" : "dropped"}`,
+      );
       break;
     }
   }
@@ -974,7 +1120,12 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
 }
 
 async function refill(views: Map<string, OrderView | null>): Promise<void> {
-  if (cfg.drain || leaseLost || stopping || !admissionBackoff.canAttempt(nowS()))
+  if (
+    cfg.drain ||
+    leaseLost ||
+    stopping ||
+    !admissionBackoff.canAttempt(nowS())
+  )
     return;
   const managed = state.all();
   const inflight = managed.filter((m) => {
@@ -982,7 +1133,9 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
     return (
       m.lockSentAt !== null ||
       m.protocol?.fillProof !== undefined ||
-      (v !== null && v !== undefined && (v.status === "accepted" || v.status === "locking"))
+      (v !== null &&
+        v !== undefined &&
+        (v.status === "accepted" || v.status === "locking"))
     );
   }).length;
 
@@ -994,7 +1147,10 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
   for (const symbol of cfg.assets) {
     const address = assetInfo(symbol).tokenAddress;
     if (address !== null) {
-      tokenBalances.set(symbol, await erc20BalanceOf(legRpc.eth, address, eth.address));
+      tokenBalances.set(
+        symbol,
+        await erc20BalanceOf(legRpc.eth, address, eth.address),
+      );
     }
   }
 
@@ -1053,14 +1209,18 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
       // lockToken, claim), so it must hold its reserve even when the
       // listed inventory is a token.
       const fromToken = direction === "eth->qrl" && info.tokenAddress !== null;
-      const balanceWei = fromToken ? (tokenBalances.get(asset) ?? 0n) : balances[fromLeg];
+      const balanceWei = fromToken
+        ? (tokenBalances.get(asset) ?? 0n)
+        : balances[fromLeg];
       const reserveWei = fromToken
         ? policy.reserveUnits
         : fromLeg === "eth"
           ? cfg.ethReserveWei
           : cfg.qrlReserveWei;
       const [gasBalanceWei, gasReserveWei] =
-        info.tokenAddress !== null ? [balances.eth, cfg.ethReserveWei] : [balanceWei, reserveWei];
+        info.tokenAddress !== null
+          ? [balances.eth, cfg.ethReserveWei]
+          : [balanceWei, reserveWei];
       const refillInput = {
         direction,
         myOpenCount,
@@ -1093,13 +1253,16 @@ async function refill(views: Map<string, OrderView | null>): Promise<void> {
               `ETH gas ${fmtUnits(gasBalanceWei, 18)} below reserve ${fmtUnits(gasReserveWei, 18)}`,
             );
           }
-          log(`${shortKey} not quoting: ${reasons.join("; ")}; fund the wallet or lower the order size`);
+          log(
+            `${shortKey} not quoting: ${reasons.join("; ")}; fund the wallet or lower the order size`,
+          );
         }
       } else if (!fundsShort(refillInput) && underfunded.delete(shortKey)) {
         log(`${shortKey} funded again; quoting resumes`);
       }
       if (!shouldPost(refillInput)) continue;
-      if (state.retainedAdmissionCount(nowS()) >= LOCAL_RETAINED_ORDER_BUDGET) return;
+      if (state.retainedAdmissionCount(nowS()) >= LOCAL_RETAINED_ORDER_BUDGET)
+        return;
 
       const makerToken = randomBytes(32).toString("hex");
       const issuedAt = nowS();
@@ -1180,7 +1343,11 @@ async function recheckStrandedCredits(): Promise<void> {
   strandedCheckedAt = Date.now();
   for (const entry of parked) {
     try {
-      const balance = await getCredit(legRpc[entry.leg], entry.token, entry.account);
+      const balance = await getCredit(
+        legRpc[entry.leg],
+        entry.token,
+        entry.account,
+      );
       if (balance === 0n) {
         state.clearStrandedCredit(entry);
         log(
@@ -1224,7 +1391,10 @@ async function tick(): Promise<void> {
           log(`order ${short(managed.id)} deferred:`, err.message);
           continue;
         }
-        log(`order ${short(managed.id)} tick error:`, err instanceof Error ? err.message : err);
+        log(
+          `order ${short(managed.id)} tick error:`,
+          err instanceof Error ? err.message : err,
+        );
       }
     }
     await refill(views);
@@ -1253,8 +1423,13 @@ async function tick(): Promise<void> {
       // documented cutover procedure forever, which one hostile take could
       // arrange.
       health.markStrandedCredits(state.ownStrandedCredits().length);
-      health.markParkedCounterpartyCredits(state.counterpartyStrandedCredits().length);
-      health.markQuoteAdmission(state.retainedAdmissionCount(nowS()), admissionBackoff.nextAttemptAt());
+      health.markParkedCounterpartyCredits(
+        state.counterpartyStrandedCredits().length,
+      );
+      health.markQuoteAdmission(
+        state.retainedAdmissionCount(nowS()),
+        admissionBackoff.nextAttemptAt(),
+      );
     } catch {
       // A poisoned state file is already forcing process shutdown.
     }
@@ -1265,7 +1440,9 @@ async function tick(): Promise<void> {
 
 async function main(): Promise<void> {
   if (protocolSigner.address.toLowerCase() !== qrl.address.toLowerCase()) {
-    throw new Error("protocol signer address does not match the QRL transaction signer");
+    throw new Error(
+      "protocol signer address does not match the QRL transaction signer",
+    );
   }
   assertPortableDeployment(deployment);
   for (const managed of state.all()) {
@@ -1273,14 +1450,19 @@ async function main(): Promise<void> {
     if (
       order !== undefined &&
       (order.makerEthAccount.toLowerCase() !== eth.address.toLowerCase() ||
-        order.makerQrlAccount.toLowerCase() !== protocolSigner.address.toLowerCase())
+        order.makerQrlAccount.toLowerCase() !==
+          protocolSigner.address.toLowerCase())
     ) {
       throw new Error(
         `portable order ${short(managed.id)} belongs to different operator keys`,
       );
     }
   }
-  healthServer = await listenHealthServer(health, cfg.healthHost, cfg.healthPort);
+  healthServer = await listenHealthServer(
+    health,
+    cfg.healthHost,
+    cfg.healthPort,
+  );
   log(`health endpoint listening on ${cfg.healthHost}:${cfg.healthPort}`);
   const [ethRpcChainId, qrlRpcChainId] = await Promise.all([
     getChainId(legRpc.eth),
@@ -1296,7 +1478,10 @@ async function main(): Promise<void> {
     assertDeliveryGasPolicy(legRpc.qrl),
   ]);
   health.markRuntimeVerified();
-  if (cfg.drain) log("drain mode active: cancelling open listings and posting no replacements");
+  if (cfg.drain)
+    log(
+      "drain mode active: cancelling open listings and posting no replacements",
+    );
   // A record this state file could not read points at money in the contract,
   // so a silent drop is the one outcome an operator must never get. The next
   // persist erases the row, and this line is the only trace left.
@@ -1335,7 +1520,7 @@ async function main(): Promise<void> {
   log(
     `balances eth=${await eth.balance()} qrl=${await qrl.balance()} | ` +
       `max inflight ${cfg.maxInflight}, ${cfg.ordersPerLevel} listing(s)/rung, ` +
-      `price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli (ETH pair only)` : `${cfg.priceFeed} feed, reprice > ${cfg.repriceThresholdBps} bps drift`}`,
+      `price ${cfg.priceFeed === "off" ? `static ${cfg.midPriceMilli} milli (ETH pair only)` : `${cfg.priceFeed} feed (coinpaprika fallback, >= ${cfg.priceFallbackIntervalS}s apart), reprice > ${cfg.repriceThresholdBps} bps drift`}`,
   );
   for (const asset of cfg.assets) {
     const info = assetInfo(asset);
@@ -1386,7 +1571,11 @@ async function stop(reason: string, exitCode: number): Promise<void> {
   }
   protocolSigner.close();
   if (healthServer !== undefined) {
-    await new Promise<void>((resolve) => healthServer?.close(() => resolve()));
+    await new Promise<void>((resolve) =>
+      healthServer?.close(() => {
+        resolve();
+      }),
+    );
   }
   stateLease.close();
 }
@@ -1394,7 +1583,7 @@ async function stop(reason: string, exitCode: number): Promise<void> {
 process.once("SIGTERM", () => void stop("SIGTERM", 0));
 process.once("SIGINT", () => void stop("SIGINT", 0));
 
-main().catch((err) => {
+main().catch((err: unknown) => {
   console.error("[mm] fatal:", err);
   void stop("fatal error", 1);
 });

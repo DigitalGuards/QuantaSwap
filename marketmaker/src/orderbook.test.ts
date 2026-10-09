@@ -95,8 +95,7 @@ async function withFetch(
   run: () => Promise<void>,
 ): Promise<void> {
   const original = globalThis.fetch;
-  globalThis.fetch = (async (input, init) =>
-    handler(String(input), init ?? {})) as typeof fetch;
+  globalThis.fetch = async (input, init) => handler(String(input), init ?? {});
   try {
     await run();
   } finally {
@@ -107,14 +106,21 @@ async function withFetch(
 describe("portable order book client", () => {
   it("classifies quota rejection as admission backpressure without reflecting the response", async () => {
     await withFetch(
-      () => new Response(JSON.stringify({ error: "sensitive upstream detail" }), {
-        status: 429, headers: { "Content-Type": "application/json" },
-      }),
+      () =>
+        new Response(JSON.stringify({ error: "sensitive upstream detail" }), {
+          status: 429,
+          headers: { "Content-Type": "application/json" },
+        }),
       async () => {
         await assert.rejects(
-          new OrderBookClient("https://book.test/api").createSigned(signedOrder, MAKER_TOKEN),
-          (error: unknown) => error instanceof OrderBookCapacityError &&
-            error instanceof OrderBookUnavailableError && !error.message.includes("sensitive"),
+          new OrderBookClient("https://book.test/api").createSigned(
+            signedOrder,
+            MAKER_TOKEN,
+          ),
+          (error: unknown) =>
+            error instanceof OrderBookCapacityError &&
+            error instanceof OrderBookUnavailableError &&
+            !error.message.includes("sensitive"),
         );
       },
     );
@@ -507,5 +513,69 @@ describe("portable order book client", () => {
         },
       );
     }
+  });
+});
+
+describe("legacy response shape validation", () => {
+  it("keeps valid legacy fields and rejects malformed core or optional fields", async () => {
+    const legacy = { ...orderView, id: "legacy-order" };
+    await withFetch(
+      () =>
+        new Response(JSON.stringify({ order: legacy }), {
+          headers: { "content-type": "application/json" },
+        }),
+      async () => {
+        assert.deepEqual(
+          await new OrderBookClient("https://book.invalid").get(legacy.id),
+          legacy,
+        );
+      },
+    );
+    for (const override of [
+      { direction: "bad" },
+      { fromAmount: 1 },
+      { takerQrlAccount: [] },
+      { initiatorTimeout: "100" },
+      { makerSeen: "true" },
+      { fillAuth: {} },
+      { selectedIntent: [] },
+      { conflictDigests: [1] },
+    ]) {
+      await withFetch(
+        () =>
+          new Response(JSON.stringify({ order: { ...legacy, ...override } }), {
+            headers: { "content-type": "application/json" },
+          }),
+        async () => {
+          await assert.rejects(
+            new OrderBookClient("https://book.invalid").get(legacy.id),
+            /Malformed order response/,
+          );
+        },
+      );
+    }
+  });
+
+  it("cancels an invalid body stream before interpreting the response", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue("unencoded JSON");
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    await withFetch(
+      () =>
+        new Response(body, { headers: { "content-type": "application/json" } }),
+      async () => {
+        await assert.rejects(
+          new OrderBookClient("https://book.invalid").get("legacy-order"),
+          /malformed chunk/,
+        );
+        assert.equal(cancelled, true);
+      },
+    );
   });
 });

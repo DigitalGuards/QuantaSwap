@@ -22,8 +22,7 @@ const AMOUNT = 11_000n;
 
 /** The four topics that log actually carries. */
 const OBSERVED = {
-  topic0:
-    "0xf2697db9906dec024a78bb07c851ec99b2ff405724ae7ed468537578f6030109" + "0".repeat(64),
+  topic0: "0xf2697db9906dec024a78bb07c851ec99b2ff405724ae7ed468537578f6030109" + "0".repeat(64),
   token: `0x${"0".repeat(128)}`,
   account: `0x${ACCOUNT_HEX}`,
   hashlock: `0x${HASHLOCK.slice(2)}${"0".repeat(64)}`,
@@ -48,9 +47,7 @@ describe("PayoutCredited filter on the QRL leg", () => {
     expect(frag?.topicHash).toBe(
       "0xf2697db9906dec024a78bb07c851ec99b2ff405724ae7ed468537578f6030109",
     );
-    expect(frag?.format("sighash")).toBe(
-      "PayoutCredited(address,address,bytes32,uint256)",
-    );
+    expect(frag?.format("sighash")).toBe("PayoutCredited(address,address,bytes32,uint256)");
   });
 
   it("puts a 32-byte value in the high half and fills a word with an address", () => {

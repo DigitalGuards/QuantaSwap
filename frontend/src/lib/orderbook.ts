@@ -9,11 +9,7 @@ import {
   type EthAssetSymbol,
 } from "../config";
 import type { ActiveSwap, Direction, MyOrderRef } from "./activeSwap";
-import {
-  authenticateDirectOrder,
-  federatedOrderBook,
-  type MirrorBookResult,
-} from "./mirrorBook";
+import { authenticateDirectOrder, federatedOrderBook, type MirrorBookResult } from "./mirrorBook";
 import {
   OrderGoneError,
   type FillIntentView,
@@ -146,8 +142,7 @@ const TERMS_CHANGED = "The order book returned different swap semantics; the tak
 const sameAccount = (left: string | null, right: string): boolean =>
   typeof left === "string" && left.toLowerCase() === right.toLowerCase();
 
-const bookIdOf = (value: { bookId?: string }): string =>
-  value.bookId ?? PRIMARY_ORDERBOOK_ID;
+const bookIdOf = (value: { bookId?: string }): string => value.bookId ?? PRIMARY_ORDERBOOK_ID;
 
 /** Parse the untrusted book's economic terms into a bounded runtime shape. */
 function baseOrderTerms(order: OrderView): BaseOrderTerms {
@@ -233,8 +228,7 @@ export function acceptedOrderTerms(
     filled.direction === shown.direction &&
     filled.prelocked === shown.prelocked &&
     (!shown.prelocked ||
-      (filled.hashlock === shown.hashlock &&
-        filled.initiatorTimeout === shown.initiatorTimeout));
+      (filled.hashlock === shown.hashlock && filled.initiatorTimeout === shown.initiatorTimeout));
   const sameOrder =
     accepted.id === displayed.id &&
     accepted.makerEthAccount.toLowerCase() === displayed.makerEthAccount.toLowerCase() &&
@@ -276,7 +270,9 @@ export function assertMakerOrderTerms(
   toAmount: string;
 } {
   if (local.direction === null || local.fromAmount === null || local.toAmount === null) {
-    throw new Error("This saved order predates local term binding; cancel or release it and relist.");
+    throw new Error(
+      "This saved order predates local term binding; cancel or release it and relist.",
+    );
   }
   const terms = baseOrderTerms(current);
   const expectedPrelocked = local.prelock !== null;
@@ -344,7 +340,9 @@ export function assertStoredMakerSwapTerms(local: MyOrderRef, stored: ActiveSwap
       (stored.hashlock !== local.prelock.hashlock ||
         stored.initiatorTimeout !== local.prelock.initiatorTimeout))
   ) {
-    throw new Error("The saved swap does not match your locally anchored order; refusing to continue.");
+    throw new Error(
+      "The saved swap does not match your locally anchored order; refusing to continue.",
+    );
   }
 }
 
@@ -368,7 +366,9 @@ export function assertMakerOrderProgress(
       current.initiatorTimeout === stored.initiatorTimeout &&
       current.responderTimeout === stored.responderTimeout);
   if (!accountsMatch || !announcementMatches) {
-    throw new Error("The order book changed the matched parties or announcement; refusing to continue.");
+    throw new Error(
+      "The order book changed the matched parties or announcement; refusing to continue.",
+    );
   }
 }
 
@@ -458,14 +458,12 @@ const localResult = <T extends { order: OrderView }>(result: T, bookId: string):
   order: authenticateDirectOrder(result.order, bookId),
 });
 
-export const refreshOrderBook = async (): Promise<MirrorBookResult> =>
-  federatedOrderBook.refresh();
+export const refreshOrderBook = async (): Promise<MirrorBookResult> => federatedOrderBook.refresh();
 
 export const refreshDisconnectedOrderBooks = async (): Promise<MirrorBookResult> =>
   federatedOrderBook.refreshDisconnected();
 
-export const listOrders = async (): Promise<OrderView[]> =>
-  (await refreshOrderBook()).orders;
+export const listOrders = async (): Promise<OrderView[]> => (await refreshOrderBook()).orders;
 
 export const routeSignedOrder = (order: OrderView): OrderView =>
   federatedOrderBook.routeSignedOrder(order);
@@ -479,10 +477,7 @@ export const getOrder = async (
   shareToken?: string,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<OrderView> =>
-  authenticateDirectOrder(
-    await federatedOrderBook.client(bookId).get(id, shareToken),
-    bookId,
-  );
+  authenticateDirectOrder(await federatedOrderBook.client(bookId).get(id, shareToken), bookId);
 
 /** Legacy/local-liquidity compatibility path. Interactive makers use
  *  createSignedOrder so their listing can be authenticated by mirrors. */
@@ -556,10 +551,7 @@ export const heartbeatOrder = async (
   token: string,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<OrderView> =>
-  authenticateDirectOrder(
-    await federatedOrderBook.client(bookId).heartbeat(id, token),
-    bookId,
-  );
+  authenticateDirectOrder(await federatedOrderBook.client(bookId).heartbeat(id, token), bookId);
 
 /** Live book subscription (SSE). Each mirror reports its own availability,
  *  and disconnected mirrors retain an independent polling recovery path. */
@@ -578,10 +570,7 @@ export const releaseOrder = async (
   token: string,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<OrderView> =>
-  authenticateDirectOrder(
-    await federatedOrderBook.client(bookId).release(id, token),
-    bookId,
-  );
+  authenticateDirectOrder(await federatedOrderBook.client(bookId).release(id, token), bookId);
 
 export const releaseSignedOrder = async (
   id: string,
@@ -642,8 +631,7 @@ export const listFillIntents = async (
   id: string,
   bookId = PRIMARY_ORDERBOOK_ID,
   makerToken?: string,
-): Promise<FillIntentView[]> =>
-  federatedOrderBook.client(bookId).intents(id, makerToken);
+): Promise<FillIntentView[]> => federatedOrderBook.client(bookId).intents(id, makerToken);
 
 export const fillOrder = async (
   id: string,
@@ -685,7 +673,4 @@ export const cancelOrder = async (
   token: string,
   bookId = PRIMARY_ORDERBOOK_ID,
 ): Promise<OrderView> =>
-  authenticateDirectOrder(
-    await federatedOrderBook.client(bookId).cancel(id, token),
-    bookId,
-  );
+  authenticateDirectOrder(await federatedOrderBook.client(bookId).cancel(id, token), bookId);

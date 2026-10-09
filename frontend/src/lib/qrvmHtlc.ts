@@ -1,3 +1,4 @@
+import { InvalidInputError } from "@/utils/guards";
 // Bounded QRVM-512 ABI codec for the static HTLC surface. Ethereum keeps
 // its separate ethers codec. Each QRVM argument occupies one 64-byte word.
 import { id } from "ethers";
@@ -66,11 +67,11 @@ export function encodeQrvmHtlc(
  *  never be read as a smaller number. */
 export function decodeQrvmUints(raw: unknown, count: number): bigint[] {
   if (typeof raw !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${count * 128}}$`).test(raw)) {
-    throw new Error(`QRVM call must return exactly ${count} 64-byte word(s)`);
+    throw new InvalidInputError(`QRVM call must return exactly ${count} 64-byte word(s)`);
   }
   return Array.from({ length: count }, (_unused, index) => {
     const word = raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
-    if (!/^0{64}/.test(word)) throw new Error("Noncanonical QRVM uint256 padding");
+    if (!/^0{64}/.test(word)) throw new InvalidInputError("Noncanonical QRVM uint256 padding");
     return BigInt(`0x${word}`);
   });
 }
@@ -89,17 +90,19 @@ export function decodeQrvmSwap(raw: unknown): QrvmSwap {
   if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{896}$/.test(raw)) {
     throw new Error("QRVM getSwap must return exactly seven 64-byte words");
   }
-  const word = (index: number): string => raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
+  const word = (index: number): string =>
+    raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
   const uint256 = (index: number): bigint => {
     const value = word(index);
-    if (!/^0{64}/.test(value)) throw new Error("Noncanonical QRVM uint256 padding");
+    if (!/^0{64}/.test(value)) throw new InvalidInputError("Noncanonical QRVM uint256 padding");
     return BigInt(`0x${value}`);
   };
   const amount = uint256(3);
   const timeout = uint256(4);
-  const status = uint256(5);
+  const status = Number(uint256(5));
   if (timeout > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Unsafe QRVM timeout");
-  if (status > 3n) throw new Error("Unknown QRVM swap status");
+  if (status !== 0 && status !== 1 && status !== 2 && status !== 3)
+    throw new Error("Unknown QRVM swap status");
   const preimage = word(6);
   if (!/0{64}$/.test(preimage)) throw new Error("Noncanonical QRVM bytes32 padding");
   return {
@@ -108,7 +111,7 @@ export function decodeQrvmSwap(raw: unknown): QrvmSwap {
     token: `0x${word(2)}`,
     amount,
     timeout: Number(timeout),
-    status: Number(status) as QrvmSwap["status"],
+    status,
     preimage: `0x${preimage.slice(0, 64)}`,
   };
 }

@@ -1,3 +1,5 @@
+import { isArray } from "@/utils/guards";
+import { isProviderDetail } from "@/lib/providerGuards";
 // QRL leg wallet with an EIP-6963 picker across the two QRL-capable
 // transports: the QRL browser extension (injected provider) and MyQRLWallet
 // via @qrlwallet/connect (post-quantum encrypted relay, QR pairing).
@@ -90,7 +92,7 @@ export function useQrlWallet() {
   const userDisconnectedRef = useRef(false);
   const wasConnectedRef = useRef(false);
   const authorizationGuardRef = useRef(new ChannelTaskGuard());
-  const disconnectInFlightRef = useRef<Promise<unknown | null> | null>(null);
+  const disconnectInFlightRef = useRef<Promise<unknown> | null>(null);
   const relayResetGuardRef = useRef(new RelayResetGuard());
   const connectionAttemptGuardRef = useRef(new ConnectionAttemptGuard());
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
@@ -107,11 +109,7 @@ export function useQrlWallet() {
     kindRef.current = next;
     setKind(next);
     setRdns(
-      next === "relay"
-        ? QRL_CONNECT_RDNS
-        : next === "extension"
-          ? (extensionRdns ?? null)
-          : null,
+      next === "relay" ? QRL_CONNECT_RDNS : next === "extension" ? (extensionRdns ?? null) : null,
     );
   }, []);
 
@@ -132,11 +130,11 @@ export function useQrlWallet() {
   }, []);
 
   /** Returns the retirement error, keeping UI state intact until confirmation. */
-  const retireRelay = useCallback((): Promise<unknown | null> => {
+  const retireRelay = useCallback((): Promise<unknown> => {
     if (disconnectInFlightRef.current) return disconnectInFlightRef.current;
     userDisconnectedRef.current = true;
 
-    const retirement = (async (): Promise<unknown | null> => {
+    const retirement = (async (): Promise<unknown> => {
       try {
         await sdk().disconnect();
         extensionRef.current = null;
@@ -153,8 +151,7 @@ export function useQrlWallet() {
         return err;
       }
     })();
-    let tracked: Promise<unknown | null>;
-    tracked = retirement.finally(() => {
+    const tracked = retirement.finally(() => {
       if (disconnectInFlightRef.current === tracked) disconnectInFlightRef.current = null;
     });
     disconnectInFlightRef.current = tracked;
@@ -211,33 +208,33 @@ export function useQrlWallet() {
   useEffect(() => {
     sdk(); // constructing the SDK makes it announce over EIP-6963
     const onAnnounce = (event: Event) => {
-      const detail = (event as CustomEvent<Eip6963Detail>).detail;
-      const info = detail?.info;
-      if (!info?.uuid) return;
+      if (!(event instanceof CustomEvent)) return;
+      const detail: unknown = event.detail;
+      if (!isProviderDetail(detail) || !detail.info.uuid) return;
+      const info = detail.info;
       if (info.rdns !== QRL_CONNECT_RDNS && !QRL_EXTENSION_RDNS.has(info.rdns)) return;
       if (detailMapRef.current.has(info.uuid)) return;
       detailMapRef.current.set(info.uuid, detail);
       setWallets(
-        groupMyQrlWallet(detailMapRef.current.values()).map(
-          (entry): DiscoveredQrlWallet =>
-            entry.kind === "myqrlwallet"
-              ? {
-                  kind: "myqrlwallet",
-                  uuid: entry.uuid,
-                  name: entry.name,
-                  icon: entry.icon,
-                  primaryLabel: entry.primaryLabel,
-                  secondaryUuid:
-                    entry.secondary === "relay" ? (entry.relay?.info.uuid ?? null) : null,
-                  secondaryLabel: entry.secondaryLabel,
-                }
-              : {
-                  kind: "wallet",
-                  uuid: entry.uuid,
-                  name: entry.name,
-                  icon: entry.icon,
-                  rdns: entry.rdns,
-                },
+        groupMyQrlWallet(detailMapRef.current.values()).map((entry): DiscoveredQrlWallet =>
+          entry.kind === "myqrlwallet"
+            ? {
+                kind: "myqrlwallet",
+                uuid: entry.uuid,
+                name: entry.name,
+                icon: entry.icon,
+                primaryLabel: entry.primaryLabel,
+                secondaryUuid:
+                  entry.secondary === "relay" ? (entry.relay?.info.uuid ?? null) : null,
+                secondaryLabel: entry.secondaryLabel,
+              }
+            : {
+                kind: "wallet",
+                uuid: entry.uuid,
+                name: entry.name,
+                icon: entry.icon,
+                rdns: entry.rdns,
+              },
         ),
       );
     };
@@ -261,10 +258,7 @@ export function useQrlWallet() {
       let connectionUri: string;
       try {
         connectionUri = fresh ? await qrl.newConnection() : await qrl.getConnectionURI();
-        if (
-          !attemptIsCurrent() ||
-          !relayResetGuardRef.current.isCurrent(resetGeneration)
-        ) {
+        if (!attemptIsCurrent() || !relayResetGuardRef.current.isCurrent(resetGeneration)) {
           return;
         }
         extensionRef.current = null;
@@ -294,7 +288,7 @@ export function useQrlWallet() {
       if (!attemptIsCurrent()) return;
       setUri(connectionUri);
       setStatus("pairing");
-      setStatusDetail(String(qrl.getStatus()));
+      setStatusDetail(qrl.getStatus());
       if (qrl.isMobile()) {
         // Deep-link into the app; if nothing handles the protocol (app not
         // installed, or chooser dismissed) fall back to the pairing modal
@@ -330,7 +324,7 @@ export function useQrlWallet() {
       if (kindRef.current === "extension" || userDisconnectedRef.current) return;
       if (connectionAttemptGuardRef.current.isPending("extension")) return;
       if (shouldIgnoreRelayResetEvent(relayResetGuardRef.current, "accounts")) return;
-      if (Array.isArray(accounts) && accounts.length === 0) {
+      if (isArray(accounts) && accounts.length === 0) {
         void retireRelay().then((retirementError) => {
           if (retirementError !== null) {
             const message = `Could not retire pairing: ${errorMessage(retirementError)}`;
@@ -363,7 +357,7 @@ export function useQrlWallet() {
     const onStatus = (s: ConnectionStatus) => {
       if (connectionAttemptGuardRef.current.isPending("extension")) return;
       if (shouldIgnoreRelayResetEvent(relayResetGuardRef.current, "status")) return;
-      setStatusDetail(String(s));
+      setStatusDetail(s);
     };
     const onDisconnect = () => {
       if (kindRef.current === "extension") return;
@@ -386,7 +380,7 @@ export function useQrlWallet() {
       // re-pair immediately (reference-example behavior).
       if (wasConnectedRef.current && !userDisconnectedRef.current) {
         wasConnectedRef.current = false;
-        void showPairing(false).catch(async (err) => {
+        void showPairing(false).catch(async (err: unknown) => {
           const retirementError = await retireRelay();
           const pairingError = errorMessage(err);
           const message =
@@ -425,8 +419,7 @@ export function useQrlWallet() {
     async (uuid: string) => {
       const detail = detailMapRef.current.get(uuid);
       if (!detail) return;
-      const selectionKind =
-        detail.info.rdns === QRL_CONNECT_RDNS ? "relay" : "extension";
+      const selectionKind = detail.info.rdns === QRL_CONNECT_RDNS ? "relay" : "extension";
       if (relayResetGuardRef.current.active) return;
       const attemptGeneration = connectionAttemptGuardRef.current.begin(selectionKind);
       if (attemptGeneration === null) return;
@@ -474,13 +467,10 @@ export function useQrlWallet() {
             if (!wiredExtensionProvidersRef.current.has(detail.provider)) {
               wiredExtensionProvidersRef.current.add(detail.provider);
               detail.provider.on?.("accountsChanged", (accs) => {
-                if (
-                  kindRef.current !== "extension" ||
-                  extensionRef.current !== detail.provider
-                ) {
+                if (kindRef.current !== "extension" || extensionRef.current !== detail.provider) {
                   return;
                 }
-                if (Array.isArray(accs) && accs.length === 0) {
+                if (isArray(accs) && accs.length === 0) {
                   extensionRef.current = null;
                   setTransport(null);
                   setAccount(null);
@@ -522,10 +512,7 @@ export function useQrlWallet() {
   // Explicit reset: tears down the existing relay pairing and rotates
   // channel/keys. Relay-only concept.
   const newConnection = useCallback(async () => {
-    if (
-      relayResetGuardRef.current.active ||
-      connectionAttemptGuardRef.current.isPending()
-    ) {
+    if (relayResetGuardRef.current.active || connectionAttemptGuardRef.current.isPending()) {
       return;
     }
     try {
@@ -538,10 +525,7 @@ export function useQrlWallet() {
   }, [showPairing]);
 
   const cancelPairing = useCallback(async () => {
-    if (
-      relayResetGuardRef.current.active ||
-      connectionAttemptGuardRef.current.isPending()
-    ) {
+    if (relayResetGuardRef.current.active || connectionAttemptGuardRef.current.isPending()) {
       return;
     }
     if (kindRef.current !== "relay") {
@@ -560,10 +544,7 @@ export function useQrlWallet() {
   }, [retireRelay]);
 
   const disconnect = useCallback(async () => {
-    if (
-      relayResetGuardRef.current.active ||
-      connectionAttemptGuardRef.current.isPending()
-    ) {
+    if (relayResetGuardRef.current.active || connectionAttemptGuardRef.current.isPending()) {
       return;
     }
     if (kindRef.current === "extension") {
@@ -598,7 +579,7 @@ export function useQrlWallet() {
         if (!provider) throw new Error("QRL extension not connected");
         return provider.request(authorizedRequest);
       }
-      return sdk().request(authorizedRequest as never);
+      return sdk().request(authorizedRequest);
     },
     [sdk, account],
   );

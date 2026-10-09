@@ -416,10 +416,9 @@ describe("order book single-writer lease", () => {
         ttlMs: 100,
       }),
     );
-    assert.throws(
-      () => lease.startHeartbeat(() => undefined, 40),
-      /no detection margin/,
-    );
+    assert.throws(() => {
+      lease.startHeartbeat(() => undefined, 40);
+    }, /no detection margin/);
     lease.startHeartbeat(() => undefined, 30);
   });
 
@@ -432,9 +431,13 @@ describe("order book single-writer lease", () => {
     lease.assertOwned();
     // No heartbeat runs here, so only a fresh read can catch this.
     writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
-    assert.throws(() => lease.assertOwned(), ProcessLeaseLostError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseLostError);
     writeFileSync(`${file}.lock`, held, { mode: 0o600 });
-    assert.throws(() => lease.assertOwned(), ProcessLeaseLostError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseLostError);
     // A lost lease is never removed: the path belongs to its new holder.
     lease.close();
     assert.equal(existsSync(`${file}.lock`), true);
@@ -454,11 +457,15 @@ describe("order book single-writer lease", () => {
 
     rmSync(`${file}.lock`);
     mkdirSync(`${file}.lock`);
-    assert.throws(() => lease.assertOwned(), ProcessLeaseUnverifiableError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseUnverifiableError);
 
     rmSync(`${file}.lock`, { recursive: true });
     writeFileSync(`${file}.lock`, "half a record", { mode: 0o600 });
-    assert.throws(() => lease.assertOwned(), ProcessLeaseUnverifiableError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseUnverifiableError);
 
     writeFileSync(`${file}.lock`, held, { mode: 0o600 });
     lease.assertOwned();
@@ -473,7 +480,9 @@ describe("order book single-writer lease", () => {
       ProcessLease.acquire(file, DIGEST, { pidNamespace: LOCAL_NS }),
     );
     rmSync(`${file}.lock`);
-    assert.throws(() => lease.assertOwned(), ProcessLeaseLostError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseLostError);
   });
 
   it("refuses writes after release, so a shutdown cannot be raced", () => {
@@ -482,7 +491,9 @@ describe("order book single-writer lease", () => {
       pidNamespace: LOCAL_NS,
     });
     lease.close();
-    assert.throws(() => lease.assertOwned(), ProcessLeaseLostError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseLostError);
   });
 });
 
@@ -536,7 +547,9 @@ describe("book lease over the protected file set", () => {
     const lease = track(BookLease.acquire([orders, feed]));
     lease.assertOwned();
     writeLock(feed, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
-    assert.throws(() => lease.assertOwned(), ProcessLeaseLostError);
+    assert.throws(() => {
+      lease.assertOwned();
+    }, ProcessLeaseLostError);
   });
 
   it("reports a loss once for the whole file set", async () => {
@@ -582,7 +595,9 @@ describe("protected writes under the lease", () => {
     );
     const failures: unknown[] = [];
     const store = new OrderStore(dataFile, {
-      assertOwned: () => lease.assertOwned(),
+      assertOwned: () => {
+        lease.assertOwned();
+      },
       onPersistenceFailure: (error) => failures.push(error),
     });
     store.create(orderBody(), "203.0.113.1");
@@ -607,7 +622,9 @@ describe("protected writes under the lease", () => {
     );
     const held = readFileSync(`${dataFile}.lock`, "utf8");
     const store = new OrderStore(dataFile, {
-      assertOwned: () => lease.assertOwned(),
+      assertOwned: () => {
+        lease.assertOwned();
+      },
     });
     store.create(orderBody(), "203.0.113.1");
     await store.flush();
@@ -634,9 +651,9 @@ describe("protected writes under the lease", () => {
     const lease = track(
       ProcessLease.acquire(feedFile, DIGEST, { pidNamespace: LOCAL_NS }),
     );
-    const feed = new FederationFeed(feedFile, 8, undefined, () =>
-      lease.assertOwned(),
-    );
+    const feed = new FederationFeed(feedFile, 8, undefined, () => {
+      lease.assertOwned();
+    });
     feed.append(feedEvent("one"), 1_000);
     const log = readFileSync(feedFile, "utf8");
     const before = feed.status();
@@ -657,9 +674,9 @@ describe("protected writes under the lease", () => {
     const lease = track(
       ProcessLease.acquire(feedFile, DIGEST, { pidNamespace: LOCAL_NS }),
     );
-    const feed = new FederationFeed(feedFile, 8, undefined, () =>
-      lease.assertOwned(),
-    );
+    const feed = new FederationFeed(feedFile, 8, undefined, () => {
+      lease.assertOwned();
+    });
     feed.append(feedEvent("one"), 1_000);
     const log = readFileSync(feedFile, "utf8");
 

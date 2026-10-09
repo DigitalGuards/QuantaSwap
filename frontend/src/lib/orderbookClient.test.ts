@@ -87,6 +87,61 @@ function response(body: unknown, status = 200): Response {
 }
 
 describe("endpoint-bound order book client", () => {
+  it.each([
+    null,
+    [],
+    {},
+    { order: null },
+    { order: { ...order, makerAuth: {} } },
+    { order: { ...order, fill: { ...fill.fill, responderTimeout: "500" } } },
+    { order: { ...order, selectedIntent: { ...intent, receivedAt: 10 } } },
+    { order: { ...order, conflictDigests: [null] } },
+  ])("rejects malformed direct-order responses: %j", async (value) => {
+    const client = new OrderbookClient(
+      { id: "primary", apiBase: "/api" },
+      {
+        fetch: () => Promise.resolve(response(value)),
+      },
+    );
+    await expect(client.get(order.id)).rejects.toThrow(/invalid response/);
+  });
+
+  it("requires a taker capability on a successful accept response", async () => {
+    const client = new OrderbookClient(
+      { id: "primary", apiBase: "/api" },
+      {
+        fetch: () => Promise.resolve(response({ order, takerToken: [] })),
+      },
+    );
+    await expect(
+      client.accept(order.id, {
+        takerEthAccount: intent.intent.takerEthAccount,
+        takerQrlAccount: intent.intent.takerQrlAccount,
+      }),
+    ).rejects.toThrow(/invalid response/);
+  });
+
+  it("requires every intent in a response to carry its complete proof shape", async () => {
+    const client = new OrderbookClient(
+      { id: "primary", apiBase: "/api" },
+      {
+        fetch: () =>
+          Promise.resolve(
+            response({
+              intents: [
+                {
+                  ...intent,
+                  auth: { ...auth, signature: [] },
+                  intentDigest: "digest",
+                  receivedAt: 10,
+                },
+              ],
+            }),
+          ),
+      },
+    );
+    await expect(client.intents(order.id)).rejects.toThrow(/invalid response/);
+  });
   it("preserves the browser receiver when using the native fetch", async () => {
     const originalFetch = globalThis.fetch;
     let receiver: unknown;
@@ -112,9 +167,9 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("sends client-committed capabilities in the signed create envelope", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async () => response({ order }));
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => response({ order }),
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
@@ -141,9 +196,9 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("rejects a wrong raw capability before contacting the origin", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async () => response({ order }));
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => response({ order }),
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
@@ -168,9 +223,9 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("keeps private reads on the selected origin without a preflight content type", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async () => response({ order }));
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => response({ order }),
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
@@ -186,17 +241,17 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("routes signed intent, fill, cancel and release operations to one origin", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/intents")) {
-        return response({
-          intent: { ...intent, intentDigest: fill.fill.intentDigest, receivedAt: 11 },
-        });
-      }
-      return response({ order });
-    });
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async (input) => {
+        const url = String(input);
+        if (url.endsWith("/intents")) {
+          return response({
+            intent: { ...intent, intentDigest: fill.fill.intentDigest, receivedAt: 11 },
+          });
+        }
+        return response({ order });
+      },
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
@@ -234,9 +289,9 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("presents the maker capability in a header on every maker write", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async () => response({ order }));
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => response({ order }),
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
@@ -273,18 +328,16 @@ describe("endpoint-bound order book client", () => {
   });
 
   it("keeps private maker intent reads on their origin and token header", async () => {
-    const request = vi.fn<
-      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
-    >(async () => response({ intents: [] }));
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () => response({ intents: [] }),
+    );
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       { fetch: request },
     );
 
     await expect(client.intents("order-1", "maker-token")).resolves.toEqual([]);
-    expect(request.mock.calls[0]?.[0]).toBe(
-      "https://mirror.test/api/orders/order-1/intents",
-    );
+    expect(request.mock.calls[0]?.[0]).toBe("https://mirror.test/api/orders/order-1/intents");
     expect(request.mock.calls[0]?.[1]?.headers).toEqual({
       "X-Maker-Token": "maker-token",
     });
@@ -338,8 +391,7 @@ describe("endpoint-bound order book client", () => {
     const client = new OrderbookClient(
       { id: "community", apiBase: "https://mirror.test/api" },
       {
-        fetch: async () =>
-          response({ error: "order book storage is unavailable" }, 503),
+        fetch: async () => response({ error: "order book storage is unavailable" }, 503),
       },
     );
     // No pre-verification stage, so the mirror is reporting a fault of its own

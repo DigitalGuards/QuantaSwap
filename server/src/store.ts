@@ -1,3 +1,4 @@
+import { isRecord, isArray, hasErrorCode } from "./guards.js";
 // Order store for protocol-mode swaps. Coordination only, never custody:
 // the service carries order parameters, the taker's addresses and the
 // maker's hashlock announcement. Every fact that moves funds is verified
@@ -409,14 +410,10 @@ function referencedSignedOrderVariant(
   order: Order,
   rawTerminal: unknown,
 ): VerifiedOrderV1 {
-  if (
-    typeof rawTerminal !== "object" ||
-    rawTerminal === null ||
-    Array.isArray(rawTerminal)
-  ) {
+  if (!isRecord(rawTerminal)) {
     throw new ApiError(400, "terminal proof must be an object");
   }
-  const digest = (rawTerminal as Record<string, unknown>)["orderDigest"];
+  const digest = rawTerminal["orderDigest"];
   if (typeof digest !== "string" || !BYTES32_RE.test(digest)) {
     throw new ApiError(400, "terminal proof has an invalid orderDigest");
   }
@@ -565,10 +562,10 @@ function persistedObject(
   index: number,
   field: string,
 ): Record<string, unknown> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     invalidPersisted(index, field);
   }
-  return raw as Record<string, unknown>;
+  return raw;
 }
 
 function exactPayload(
@@ -662,10 +659,10 @@ function hydrateIntentProof(
 }
 
 function hydratePersistedOrder(raw: unknown, index: number): Order {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     invalidPersisted(index, "record");
   }
-  const row = raw as Record<string, unknown>;
+  const row = raw;
   const direction = row["direction"];
   if (direction !== "eth->qrl" && direction !== "qrl->eth") {
     invalidPersisted(index, "direction");
@@ -845,7 +842,7 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     const rawIntents = row["fillIntents"];
     if (rawIntents !== undefined) {
       if (
-        !Array.isArray(rawIntents) ||
+        !isArray(rawIntents) ||
         rawIntents.length > MAX_FILL_INTENTS_PER_ORDER
       ) {
         invalidPersisted(index, "fill intents");
@@ -951,7 +948,7 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     const rawTerminalConflicts = row["conflicts"];
     if (rawTerminalConflicts !== undefined) {
       if (
-        !Array.isArray(rawTerminalConflicts) ||
+        !isArray(rawTerminalConflicts) ||
         rawTerminalConflicts.length > MAX_CONFLICT_PROOFS
       ) {
         invalidPersisted(index, "terminal conflicts");
@@ -1033,7 +1030,7 @@ function hydratePersistedOrder(raw: unknown, index: number): Order {
     const rawOrderConflicts = row["orderConflicts"];
     if (rawOrderConflicts !== undefined) {
       if (
-        !Array.isArray(rawOrderConflicts) ||
+        !isArray(rawOrderConflicts) ||
         rawOrderConflicts.length > MAX_CONFLICT_PROOFS
       ) {
         invalidPersisted(index, "order conflicts");
@@ -1408,7 +1405,7 @@ export class OrderStore {
     try {
       raw = readFileSync(this.dataFile, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if (hasErrorCode(error, "ENOENT")) return;
       throw new Error(`order data file could not be read: ${this.dataFile}`);
     }
 
@@ -1418,7 +1415,7 @@ export class OrderStore {
     } catch {
       throw new Error(`order data file is not valid JSON: ${this.dataFile}`);
     }
-    if (!Array.isArray(parsed)) {
+    if (!isArray(parsed)) {
       throw new Error(
         `order data file must contain an array: ${this.dataFile}`,
       );
@@ -1994,10 +1991,10 @@ export class OrderStore {
     let prelock: { hashlock: string; initiatorTimeout: number } | undefined;
     const rawPrelock = body["prelock"];
     if (rawPrelock !== undefined) {
-      if (typeof rawPrelock !== "object" || rawPrelock === null) {
+      if (!isRecord(rawPrelock)) {
         throw new ApiError(400, "prelock must be an object");
       }
-      const p = rawPrelock as Record<string, unknown>;
+      const p = rawPrelock;
       const hashlock = p["hashlock"];
       if (typeof hashlock !== "string" || !HASHLOCK_RE.test(hashlock)) {
         throw new ApiError(
@@ -2042,11 +2039,9 @@ export class OrderStore {
         : (capabilities?.makerToken ?? "");
     const id = verified?.orderId ?? randomBytes(8).toString("hex");
     if (this.orders.has(id)) throw new ApiError(409, "order already exists");
-    const signedMakerCommitment = verified?.auth.makerTokenCommitment;
-    const signedShareCommitment = verified?.auth.shareTokenCommitment;
     if (!federated && verified !== undefined) {
-      const makerHash = signedMakerCommitment!.slice(2);
-      const shareHash = signedShareCommitment!.slice(2);
+      const makerHash = verified.auth.makerTokenCommitment.slice(2);
+      const shareHash = verified.auth.shareTokenCommitment.slice(2);
       if (
         retainedOrders.some(
           (candidate) =>
@@ -2061,19 +2056,22 @@ export class OrderStore {
         );
       }
     }
+    let shareTokenHash: string | undefined;
+    if (visibility === "private") {
+      if (verified !== undefined)
+        shareTokenHash = verified.auth.shareTokenCommitment.slice(2);
+      else {
+        if (shareToken === undefined)
+          throw new ApiError(400, "private order shareToken is missing");
+        shareTokenHash = sha256Hex(shareToken);
+      }
+    }
     const order: Order = {
       id,
       direction,
       asset: asset.symbol,
       visibility,
-      ...(visibility === "private"
-        ? {
-            shareTokenHash:
-              verified === undefined
-                ? sha256Hex(shareToken!)
-                : signedShareCommitment!.slice(2),
-          }
-        : {}),
+      ...(shareTokenHash === undefined ? {} : { shareTokenHash }),
       ...(allowedTakerEth !== undefined ? { allowedTakerEth } : {}),
       ...(allowedTakerQrl !== undefined ? { allowedTakerQrl } : {}),
       fromAmount,
@@ -2092,7 +2090,7 @@ export class OrderStore {
       makerTokenHash:
         verified === undefined
           ? sha256Hex(makerToken)
-          : signedMakerCommitment!.slice(2),
+          : verified.auth.makerTokenCommitment.slice(2),
       creatorIpHash,
       ...(federated
         ? {
@@ -2211,10 +2209,7 @@ export class OrderStore {
     takerIp: string,
   ): void {
     const intents = order.fillIntents ?? [];
-    const claimedNonce =
-      typeof rawAuth === "object" && rawAuth !== null && !Array.isArray(rawAuth)
-        ? (rawAuth as Record<string, unknown>)["nonce"]
-        : undefined;
+    const claimedNonce = isRecord(rawAuth) ? rawAuth["nonce"] : undefined;
     if (
       typeof claimedNonce === "string" &&
       intents.some((intent) => intent.auth.nonce === claimedNonce)

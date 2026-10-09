@@ -31,10 +31,9 @@ web3.qrl.transactionConfirmationBlocks = 1;
 // with the added wallet, so build the tx explicitly.
 async function send(method, opts = {}) {
   const from = acc.address;
-  const gasPrice = await web3.qrl.getGasPrice();
   const estimated = await method.estimateGas({ from, ...opts });
   const gas = (BigInt(estimated) * 12n) / 10n;
-  const txObj = { from, to: htlcAddress, gas, gasPrice, data: method.encodeABI(), ...opts };
+  const txObj = { from, to: htlcAddress, gas, data: method.encodeABI(), ...opts };
   return new Promise((resolve, reject) => {
     web3.qrl
       .sendTransaction(txObj, undefined, { checkRevertBeforeSending: true })

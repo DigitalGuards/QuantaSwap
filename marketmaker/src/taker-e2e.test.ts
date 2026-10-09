@@ -27,11 +27,7 @@ import { V2_TEST_EXTENDED_SEED } from "./protocol-v2-test-helper.js";
 import type { TakerReadConfig } from "./taker-config.js";
 import { TakerBookClient } from "./taker-orderbook.js";
 import { TakerEngine, hasSendMarker, takePhase } from "./taker.js";
-import {
-  EXIT_IN_FLIGHT,
-  EXIT_UNFUNDED,
-  takeExitCode,
-} from "./taker-cli.js";
+import { EXIT_IN_FLIGHT, EXIT_UNFUNDED, takeExitCode } from "./taker-cli.js";
 import { TakerStateFile, type TakerSwapRecord } from "./taker-state.js";
 import {
   FakeBookServer,
@@ -119,8 +115,18 @@ async function harness(options: {
     qrl: build("qrl", chains.qrl, taker.address),
   };
   const legRpc: Record<LegKey, LegRpc> = {
-    eth: { url: rpc.eth.url, ns: "eth", htlc: protocolV2Config.ethHtlc, timeoutMs: 5_000 },
-    qrl: { url: rpc.qrl.url, ns: "qrl", htlc: protocolV2Config.qrlHtlc, timeoutMs: 5_000 },
+    eth: {
+      url: rpc.eth.url,
+      ns: "eth",
+      htlc: protocolV2Config.ethHtlc,
+      timeoutMs: 5_000,
+    },
+    qrl: {
+      url: rpc.qrl.url,
+      ns: "qrl",
+      htlc: protocolV2Config.qrlHtlc,
+      timeoutMs: 5_000,
+    },
   };
   const stateFile = join(
     mkdtempSync(join(tmpdir(), "quantaswap-taker-e2e-")),
@@ -209,13 +215,15 @@ async function makerLocks(h: Harness): Promise<void> {
   const fill = h.maker.fill;
   assert.notEqual(fill, null);
   if (fill === null) return;
-  const iLeg: LegKey = h.maker.order?.order.direction === "eth->qrl" ? "eth" : "qrl";
+  const iLeg: LegKey =
+    h.maker.order?.order.direction === "eth->qrl" ? "eth" : "qrl";
   const recipient =
     iLeg === "eth" ? fill.fill.takerEthAccount : fill.fill.takerQrlAccount;
   const asset = h.maker.order?.order.asset ?? "ETH";
   const amount = BigInt(h.maker.order?.order.fromAmount ?? "0");
   const token = iLeg === "eth" ? assetInfo(asset).tokenAddress : null;
-  if (token !== null) throw new Error("this harness escrows the maker leg natively");
+  if (token !== null)
+    throw new Error("this harness escrows the maker leg natively");
   await h.makerSenders[iLeg].send(
     encodeLock(iLeg, fill.fill.hashlock, recipient, fill.fill.initiatorTimeout),
     amount,
@@ -227,7 +235,8 @@ async function makerLocks(h: Harness): Promise<void> {
 async function makerClaims(h: Harness): Promise<void> {
   const fill = h.maker.fill;
   if (fill === null) throw new Error("no fill");
-  const rLeg: LegKey = h.maker.order?.order.direction === "eth->qrl" ? "qrl" : "eth";
+  const rLeg: LegKey =
+    h.maker.order?.order.direction === "eth->qrl" ? "qrl" : "eth";
   await h.makerSenders[rLeg].send(
     encodeClaim(rLeg, fill.fill.hashlock, h.maker.preimage),
     0n,
@@ -1123,10 +1132,7 @@ describe("scripted taker end to end", () => {
       assert.equal(quote.pay.symbol, "QRL");
       assert.equal(quote.receive.symbol, "ETH");
       assert.equal(quote.issue, null);
-      await assert.rejects(
-        readOnly.begin(orderId),
-        /needs taker keys/,
-      );
+      await assert.rejects(readOnly.begin(orderId), /needs taker keys/);
     } finally {
       await h.close();
     }
@@ -1136,10 +1142,7 @@ describe("scripted taker end to end", () => {
     const h = await harness({ direction: "eth->qrl" });
     try {
       const orderId = h.maker.publishOrder();
-      await assert.rejects(
-        h.engine.begin(orderId, { maxIn: 10n }),
-        /max-in/,
-      );
+      await assert.rejects(h.engine.begin(orderId, { maxIn: 10n }), /max-in/);
       assert.deepEqual(h.state.all(), []);
     } finally {
       await h.close();
@@ -1150,10 +1153,7 @@ describe("scripted taker end to end", () => {
     const h = await harness({ direction: "eth->qrl" });
     try {
       const orderId = h.maker.publishOrder(600);
-      await assert.rejects(
-        h.engine.begin(orderId),
-        /TAKER_MIN_ORDER_RUNWAY_S/,
-      );
+      await assert.rejects(h.engine.begin(orderId), /TAKER_MIN_ORDER_RUNWAY_S/);
     } finally {
       await h.close();
     }

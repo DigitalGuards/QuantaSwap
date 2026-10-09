@@ -46,8 +46,8 @@ export function WalletPickerModal({ open, wallets, onSelect, onClose }: Props) {
         <CardContent className="space-y-2">
           {wallets.length === 0 ? (
             <p className="rounded-md border border-border bg-muted/40 p-3 text-center text-sm text-muted-foreground">
-              No QRL wallets detected. Install MyQRLWallet Extension or connect the MyQRLWallet
-              web wallet.
+              No QRL wallets detected. Install MyQRLWallet Extension or connect the MyQRLWallet web
+              wallet.
             </p>
           ) : (
             wallets.map((w) => {

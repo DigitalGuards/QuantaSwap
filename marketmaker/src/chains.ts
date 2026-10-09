@@ -2,7 +2,8 @@
 // (local ML-DSA-87 signing from the hexseed, the nft-deploy pattern).
 
 import { FetchRequest, JsonRpcProvider, Wallet } from "ethers";
-import * as qrlweb3 from "@theqrl/web3";
+import { isRecord } from "./guards.js";
+import { Web3, type Transaction } from "@theqrl/web3";
 import type { Config } from "./config.js";
 import { assertQip55ExecutionReady } from "./qip55.js";
 import { assertQrlRuntime, settlementGasLimit, type LegRpc } from "./htlc.js";
@@ -14,7 +15,9 @@ import { assertQrlRuntime, settlementGasLimit, type LegRpc } from "./htlc.js";
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
     timer.unref();
   });
   return Promise.race([p, timeout]).finally(() => {
@@ -22,28 +25,26 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
-interface Web3Ctor {
-  new (provider: unknown): Qrlweb3;
-  providers: { HttpProvider: new (url: string) => unknown };
-}
-
-// CJS/ESM interop: depending on the loader the class sits on the
-// namespace or on its default export.
-const ns = qrlweb3 as unknown as { Web3?: Web3Ctor; default?: { Web3?: Web3Ctor } };
-const resolvedWeb3 = ns.Web3 ?? ns.default?.Web3;
-if (!resolvedWeb3) throw new Error("@theqrl/web3 did not expose Web3");
-const Web3: Web3Ctor = resolvedWeb3;
-
 /** The slice of configuration a leg sender needs. Both the maker Config
  *  and the taker config satisfy it, so one sender serves both roles. */
 export type EthLegConfig = Pick<
   Config,
-  "ethRpcUrl" | "ethPrivateKey" | "ethHtlc" | "ethChainId" | "netTimeoutMs" | "txTimeoutMs"
+  | "ethRpcUrl"
+  | "ethPrivateKey"
+  | "ethHtlc"
+  | "ethChainId"
+  | "netTimeoutMs"
+  | "txTimeoutMs"
 >;
 
 export type QrlLegConfig = Pick<
   Config,
-  "qrlRpcUrl" | "qrlHexseed" | "qrlHtlc" | "qrlChainId" | "netTimeoutMs" | "txTimeoutMs"
+  | "qrlRpcUrl"
+  | "qrlHexseed"
+  | "qrlHtlc"
+  | "qrlChainId"
+  | "netTimeoutMs"
+  | "txTimeoutMs"
 >;
 
 /** Per-send options. `settlement` applies the HTLCv3 gas rule
@@ -69,24 +70,80 @@ export interface LegSender {
   ): Promise<string>;
 }
 
-interface QrlAccount {
-  address: string;
+/** Bounds on the QRL priority tip. The floor is @theqrl/web3's default
+ *  tip, which every QRL send paid before the leg read the node, so a low
+ *  suggestion never makes a claim slower than it was. The ceiling is 20x
+ *  the devnet's 2.5 gwei suggestion: the daemon signs unattended, so an RPC
+ *  answer can never set an unbounded tip. */
+export const MIN_QRL_TIP_WEI = 2_500_000_000n;
+export const MAX_QRL_TIP_WEI = 50_000_000_000n;
+
+/** The priority tip for a QRL send: the node's suggestion
+ *  (qrl_maxPriorityFeePerGas) clamped to [MIN_QRL_TIP_WEI,
+ *  MAX_QRL_TIP_WEI], or the floor when the node does not answer. The
+ *  library then signs a type-2 transaction with
+ *  maxFeePerGas = 2 * baseFee + tip. A fallback or a cap is logged. */
+export async function suggestedQrlTip(
+  read: () => Promise<unknown>,
+  warn: (message: string) => void = console.warn,
+): Promise<bigint> {
+  let tip: bigint;
+  try {
+    const answer = await read();
+    if (
+      typeof answer !== "bigint" &&
+      typeof answer !== "string" &&
+      typeof answer !== "number"
+    ) {
+      throw new Error("unusable answer");
+    }
+    tip = BigInt(answer);
+  } catch (err) {
+    warn(
+      `qrl tip: node suggestion unavailable, using ${MIN_QRL_TIP_WEI} wei (${err instanceof Error ? err.message : "unknown error"})`,
+    );
+    return MIN_QRL_TIP_WEI;
+  }
+  if (tip > MAX_QRL_TIP_WEI) {
+    warn(
+      `qrl tip: node suggested ${tip} wei, capped at ${MAX_QRL_TIP_WEI} wei`,
+    );
+    return MAX_QRL_TIP_WEI;
+  }
+  return tip < MIN_QRL_TIP_WEI ? MIN_QRL_TIP_WEI : tip;
 }
 
-interface Qrlweb3 {
-  qrl: {
-    accounts: { seedToAccount(seed: string): QrlAccount };
-    wallet?: { add(seed: string): void };
-    transactionConfirmationBlocks: number;
-    getBalance(addr: string): Promise<bigint>;
-    getGasPrice(): Promise<bigint>;
-    estimateGas(tx: Record<string, unknown>): Promise<bigint>;
-    sendTransaction(tx: Record<string, unknown>): Promise<{ transactionHash: unknown }>;
-  };
+function qrlUint(value: unknown): bigint {
+  if (
+    typeof value !== "bigint" &&
+    typeof value !== "string" &&
+    typeof value !== "number"
+  ) {
+    throw new TypeError("QRL RPC returned a malformed quantity");
+  }
+  if (
+    typeof value === "number" &&
+    (!Number.isSafeInteger(value) || value < 0)
+  ) {
+    throw new TypeError("QRL RPC returned an unsafe quantity");
+  }
+  if (typeof value === "string" && !/^(?:[0-9]+|0x[0-9a-fA-F]+)$/.test(value)) {
+    throw new TypeError("QRL RPC returned a malformed quantity");
+  }
+  const quantity = BigInt(value);
+  if (quantity < 0n)
+    throw new TypeError("QRL RPC returned a negative quantity");
+  return quantity;
 }
 
-const txHashHex = (h: unknown): string =>
-  typeof h === "string" ? h : `0x${Buffer.from(h as Uint8Array).toString("hex")}`;
+const txHashHex = (value: unknown): string => {
+  if (typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value))
+    return value;
+  if (value instanceof Uint8Array && value.length === 32) {
+    return `0x${Buffer.from(value).toString("hex")}`;
+  }
+  throw new TypeError("QRL transaction response has a malformed hash");
+};
 
 export class EthLeg implements LegSender {
   readonly address: string;
@@ -155,7 +212,7 @@ export class EthLeg implements LegSender {
 
 export class QrlLeg implements LegSender {
   readonly address: string;
-  private readonly web3: Qrlweb3;
+  private readonly web3: Web3;
   private readonly htlc: string;
   private readonly netTimeoutMs: number;
   private readonly txTimeoutMs: number;
@@ -173,12 +230,22 @@ export class QrlLeg implements LegSender {
     this.netTimeoutMs = cfg.netTimeoutMs;
     this.txTimeoutMs = cfg.txTimeoutMs;
     this.chainId = BigInt(cfg.qrlChainId);
-    this.rpc = { ns: "qrl", url: cfg.qrlRpcUrl, htlc: cfg.qrlHtlc, timeoutMs: cfg.netTimeoutMs };
+    this.rpc = {
+      ns: "qrl",
+      url: cfg.qrlRpcUrl,
+      htlc: cfg.qrlHtlc,
+      timeoutMs: cfg.netTimeoutMs,
+    };
   }
 
   async balance(): Promise<bigint> {
     await assertQrlRuntime(this.rpc);
-    return BigInt(await withTimeout(this.web3.qrl.getBalance(this.address), this.netTimeoutMs, "qrl getBalance"));
+    const balance: unknown = await withTimeout(
+      this.web3.qrl.getBalance(this.address),
+      this.netTimeoutMs,
+      "qrl getBalance",
+    );
+    return qrlUint(balance);
   }
 
   async send(
@@ -188,25 +255,43 @@ export class QrlLeg implements LegSender {
     options: SendOptions = {},
   ): Promise<string> {
     await assertQrlRuntime(this.rpc);
-    const base: Record<string, unknown> = {
+    const base: Transaction = {
       from: this.address,
       to: this.htlc,
       data,
       chainId: this.chainId,
       ...(valueWei > 0n ? { value: valueWei } : {}),
     };
-    const gasPrice = await withTimeout(this.web3.qrl.getGasPrice(), this.netTimeoutMs, "qrl getGasPrice");
-    const estimated = await withTimeout(this.web3.qrl.estimateGas(base), this.netTimeoutMs, "qrl estimateGas");
+    // @theqrl/web3 signs type-2 transactions only and has no gasPrice
+    // field, so the tip is the one fee input that reaches the signature.
+    const tip = await suggestedQrlTip(() =>
+      withTimeout(
+        this.web3.qrl.getMaxPriorityFeePerGas(),
+        this.netTimeoutMs,
+        "qrl maxPriorityFeePerGas",
+      ),
+    );
+    const estimated: unknown = await withTimeout(
+      this.web3.qrl.estimateGas(base),
+      this.netTimeoutMs,
+      "qrl estimateGas",
+    );
     const gas =
       options.settlement === true
-        ? settlementGasLimit(BigInt(estimated))
-        : (BigInt(estimated) * 13n) / 10n;
+        ? settlementGasLimit(qrlUint(estimated))
+        : (qrlUint(estimated) * 13n) / 10n;
     await assertQrlRuntime(this.rpc);
-    const receipt = await withTimeout(
-      this.web3.qrl.sendTransaction({ ...base, gas, gasPrice }),
+    const receipt: unknown = await withTimeout(
+      this.web3.qrl.sendTransaction({
+        ...base,
+        gas,
+        maxPriorityFeePerGas: tip,
+      }),
       this.txTimeoutMs,
       "qrl sendTransaction",
     );
+    if (!isRecord(receipt))
+      throw new TypeError("QRL transaction response is malformed");
     return txHashHex(receipt.transactionHash);
   }
 }

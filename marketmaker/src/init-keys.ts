@@ -1,3 +1,4 @@
+import { hasErrorCode } from "./guards.js";
 import {
   chmodSync,
   lstatSync,
@@ -28,7 +29,7 @@ function existing(path: string): Stats | null {
   try {
     return lstatSync(path);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (hasErrorCode(err, "ENOENT")) return null;
     throw err;
   }
 }
@@ -44,16 +45,16 @@ export function generateOperatorKeys(): OperatorKeys {
       qrlAddress: canonicalQip55QrlAddress(qrl.getAddressStr()),
     };
   } finally {
-    // wallet.js 2.0.2 implements zeroize(), but its generated declaration
-    // omits the method. Keep the runtime cleanup while the upstream type
-    // definition catches up.
-    (qrl as typeof qrl & { zeroize(): void }).zeroize();
+    qrl.zeroize();
   }
 }
 
 /** Write both secrets with exclusive creation. If either target exists or
  *  a write fails, no newly created half-pair is left behind. */
-export function writeOperatorSecrets(directory: string, keys: OperatorKeys): SecretPaths {
+export function writeOperatorSecrets(
+  directory: string,
+  keys: OperatorKeys,
+): SecretPaths {
   if (!/^0x[0-9a-fA-F]{64}$/.test(keys.ethPrivateKey)) {
     throw new Error("generated Ethereum private key has an unexpected format");
   }
@@ -80,7 +81,11 @@ export function writeOperatorSecrets(directory: string, keys: OperatorKeys): Sec
       [paths.ethPrivateKey, keys.ethPrivateKey],
       [paths.qrlHexseed, keys.qrlHexseed],
     ] as const) {
-      writeFileSync(path, `${value}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      writeFileSync(path, `${value}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
       created.push(path);
       chmodSync(path, 0o600);
     }
@@ -95,16 +100,24 @@ async function main(): Promise<void> {
   const directory = process.argv[2] ?? "./secrets";
   const keys = generateOperatorKeys();
   const paths = writeOperatorSecrets(directory, keys);
-  console.log("Generated independent testnet LP wallets. Secret values were not printed.");
+  console.log(
+    "Generated independent testnet LP wallets. Secret values were not printed.",
+  );
   console.log(`Ethereum address: ${keys.ethAddress}`);
   console.log(`QRL address: ${keys.qrlAddress}`);
   console.log(`Ethereum key file: ${paths.ethPrivateKey}`);
   console.log(`QRL seed file: ${paths.qrlHexseed}`);
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
-    console.error("Key initialization failed:", err instanceof Error ? err.message : err);
+if (
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main().catch((err: unknown) => {
+    console.error(
+      "Key initialization failed:",
+      err instanceof Error ? err.message : err,
+    );
     process.exit(1);
   });
 }

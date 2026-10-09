@@ -297,7 +297,8 @@ describe("federation event feed", () => {
   it("keeps an append that succeeded when the following compaction fails", () => {
     withTempFile((file) => {
       const feed = new FederationFeed(file, 2);
-      for (const id of ["one", "two", "three"]) feed.append(orderEvent(id), 100);
+      for (const id of ["one", "two", "three"])
+        feed.append(orderEvent(id), 100);
       // The fourth event line exceeds 2 + 1 and triggers compaction.
       const failing = feed as unknown as { compact: () => void };
       failing.compact = () => {
@@ -310,7 +311,8 @@ describe("federation event feed", () => {
         feed.append(orderEvent("six"), 103);
       });
       assert.equal(
-        failureLines.filter((line) => line.includes("compaction failed")).length,
+        failureLines.filter((line) => line.includes("compaction failed"))
+          .length,
         1,
       );
       assert.equal(feed.status().latestSequence, 6);
@@ -497,9 +499,10 @@ describe("federation event feed", () => {
         const preserved = quarantinedFiles(file);
         assert.equal(preserved.length, 1);
         assert.ok(
-          readFileSync(join(dirname(file), preserved[0] ?? ""), "utf8").includes(
-            marker,
-          ),
+          readFileSync(
+            join(dirname(file), preserved[0] ?? ""),
+            "utf8",
+          ).includes(marker),
         );
 
         // The fresh feed serves and persists like a new one.
@@ -600,7 +603,10 @@ describe("federation event feed", () => {
         1,
       );
       assert.equal(readFileSync(file, "utf8"), successorLog);
-      assert.deepEqual(new FederationFeed(file, 8).status(), successor.status());
+      assert.deepEqual(
+        new FederationFeed(file, 8).status(),
+        successor.status(),
+      );
     });
   });
 
@@ -637,7 +643,10 @@ describe("federation event feed", () => {
       // the checkpoint and the digest stays unknown.
       feed.append(orderEvent("grown"), 100);
       const restarted = new FederationFeed(file, 8);
-      assert.equal(restarted.reconcileSnapshot([...base, orderEvent("grown")]), true);
+      assert.equal(
+        restarted.reconcileSnapshot([...base, orderEvent("grown")]),
+        true,
+      );
       assert.equal(restarted.requiresReset(cursor), true);
     });
   });
@@ -686,7 +695,10 @@ describe("federation event feed", () => {
       ) as { type: string; version: number };
       assert.equal(header.type, "header");
       assert.equal(header.version, 3);
-      assert.equal(new FederationFeed(file, 8).requiresReset(`${feedId}:1`), false);
+      assert.equal(
+        new FederationFeed(file, 8).requiresReset(`${feedId}:1`),
+        false,
+      );
     });
   });
 

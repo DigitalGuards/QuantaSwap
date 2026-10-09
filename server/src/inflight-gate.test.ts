@@ -51,7 +51,9 @@ async function freePort(): Promise<number> {
         return;
       }
       const { port } = address;
-      probe.close(() => resolve(port));
+      probe.close(() => {
+        resolve(port);
+      });
     });
   });
 }
@@ -161,7 +163,9 @@ async function halfOpenPost(
   const socket = connect(port, "127.0.0.1");
   sockets.push(socket);
   await new Promise<void>((resolve, reject) => {
-    socket.once("connect", () => resolve());
+    socket.once("connect", () => {
+      resolve();
+    });
     socket.once("error", reject);
   });
   socket.write(
@@ -214,8 +218,12 @@ function readSocket(socket: Socket): Promise<string> {
       text += chunk.toString("utf8");
       if (text.includes("\r\n\r\n")) resolve(text);
     });
-    socket.once("close", () => resolve(text));
-    socket.once("error", () => resolve(text));
+    socket.once("close", () => {
+      resolve(text);
+    });
+    socket.once("error", () => {
+      resolve(text);
+    });
   });
 }
 
@@ -309,7 +317,9 @@ describe("write admission over HTTP", () => {
       assert.equal(legitimate.status, 201);
 
       // Each half-open request is answered at the read deadline and lets go.
-      const replies = await Promise.all(held.map((socket) => readSocket(socket)));
+      const replies = await Promise.all(
+        held.map((socket) => readSocket(socket)),
+      );
       for (const reply of replies) {
         assert.match(reply, /^HTTP\/1\.1 408 /);
         assert.match(reply, /request body was too slow/);

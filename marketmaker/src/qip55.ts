@@ -17,7 +17,9 @@ const ML_DSA_87_PUBLIC_KEY_BYTES = 2592;
 
 /** Current Connect checksum semantics for mixed-case QIP-55 input. */
 function checksummedHex(lowerHex: string): string {
-  const hash = createHash("shake256", { outputLength: 64 }).update(lowerHex).digest();
+  const hash = createHash("shake256", { outputLength: 64 })
+    .update(lowerHex)
+    .digest();
   let result = "";
   for (let index = 0; index < lowerHex.length; index += 1) {
     const char = lowerHex[index] ?? "";
@@ -33,15 +35,21 @@ function checksummedHex(lowerHex: string): string {
 }
 
 export function isQip55QrlAddress(value: unknown): value is string {
-  if (typeof value !== "string" || !QIP55_QRL_ADDRESS_RE.test(value)) return false;
+  if (typeof value !== "string" || !QIP55_QRL_ADDRESS_RE.test(value))
+    return false;
   const body = value.slice(1);
   const lower = body.toLowerCase();
-  return body === lower || body === body.toUpperCase() || body === checksummedHex(lower);
+  return (
+    body === lower ||
+    body === body.toUpperCase() ||
+    body === checksummedHex(lower)
+  );
 }
 
 export function canonicalQip55QrlAddress(value: string): string {
   if (!isQip55QrlAddress(value)) {
-    if (LEGACY_QRL_ADDRESS_RE.test(value)) throw new Error(QIP55_DEPLOYMENT_ERROR);
+    if (LEGACY_QRL_ADDRESS_RE.test(value))
+      throw new Error(QIP55_DEPLOYMENT_ERROR);
     throw new Error(
       "QRL address must use an uppercase Q prefix followed by 64 bytes with a valid checksum",
     );
@@ -49,13 +57,18 @@ export function canonicalQip55QrlAddress(value: string): string {
   return `Q${checksummedHex(value.slice(1).toLowerCase())}`;
 }
 
-export function deriveQip55Address(descriptor: Uint8Array, publicKey: Uint8Array): string {
+export function deriveQip55Address(
+  descriptor: Uint8Array,
+  publicKey: Uint8Array,
+): string {
   if (
     descriptor.length !== ML_DSA_DESCRIPTOR_BYTES ||
     descriptor[0] !== 1 ||
     publicKey.length !== ML_DSA_87_PUBLIC_KEY_BYTES
   ) {
-    throw new Error("QIP-55 identity binding requires an ML-DSA-87 descriptor and public key");
+    throw new Error(
+      "QIP-55 identity binding requires an ML-DSA-87 descriptor and public key",
+    );
   }
   const digest = createHash("shake256", { outputLength: 64 })
     .update(descriptor)
@@ -83,6 +96,9 @@ export function assertQip55Deployment(htlc: string): void {
 
 export function qrlOrEthHex(address: string): string {
   if (isQip55QrlAddress(address)) return `0x${address.slice(1)}`;
-  if (QRVM_ADDRESS_RE.test(address) || ETH_ADDRESS_RE.test(address)) return address;
-  throw new Error("address must be QRL 64-byte, QRVM 64-byte, or Ethereum 20-byte hex");
+  if (QRVM_ADDRESS_RE.test(address) || ETH_ADDRESS_RE.test(address))
+    return address;
+  throw new Error(
+    "address must be QRL 64-byte, QRVM 64-byte, or Ethereum 20-byte hex",
+  );
 }

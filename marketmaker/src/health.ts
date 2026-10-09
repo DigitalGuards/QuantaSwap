@@ -117,7 +117,8 @@ export class MakerHealth {
       : this.lastTickCompletedAtMs;
     if (
       (progressAt !== null && now - progressAt > this.opts.staleAfterMs) ||
-      this.lastTickErrorCount > 0 || this.admissionRetryAt * 1000 > now
+      this.lastTickErrorCount > 0 ||
+      this.admissionRetryAt * 1000 > now
     ) {
       status = "degraded";
     }
@@ -136,11 +137,18 @@ export class MakerHealth {
       lastTickErrorCount: this.lastTickErrorCount,
       consecutiveFailedTicks: this.consecutiveFailedTicks,
       quoteAdmission: {
-        state: this.admissionRetryAt * 1000 > now ? "backoff"
-          : this.retainedOrders >= LOCAL_RETAINED_ORDER_BUDGET ? "waiting-retention" : "active",
+        state:
+          this.admissionRetryAt * 1000 > now
+            ? "backoff"
+            : this.retainedOrders >= LOCAL_RETAINED_ORDER_BUDGET
+              ? "waiting-retention"
+              : "active",
         retainedOrders: this.retainedOrders,
         budget: LOCAL_RETAINED_ORDER_BUDGET,
-        retryAt: this.admissionRetryAt === 0 ? null : iso(this.admissionRetryAt * 1000),
+        retryAt:
+          this.admissionRetryAt === 0
+            ? null
+            : iso(this.admissionRetryAt * 1000),
       },
       strandedCredits: this.strandedCredits,
       parkedCounterpartyCredits: this.parkedCounterpartyCredits,
@@ -155,7 +163,10 @@ export class MakerHealth {
 export function createHealthServer(health: MakerHealth): Server {
   return createServer((req, res) => {
     if (req.method !== "GET" || req.url !== "/health") {
-      res.writeHead(404, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.writeHead(404, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
       res.end('{"error":"not found"}\n');
       return;
     }

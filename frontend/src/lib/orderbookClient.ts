@@ -1,3 +1,14 @@
+import { isArray, isRecord, isString, InvalidInputError } from "@/utils/guards";
+import {
+  optionalField,
+  isMakerAuth,
+  isProtocolAuth,
+  isFillBody,
+  isCancelBody,
+  isFillIntentView,
+  isBoolean,
+  isStringArray,
+} from "./wireGuards";
 // Endpoint-bound transport for one order book origin. Authentication and
 // mirror reconciliation live above this layer so private capabilities and
 // mutations always stay attached to the origin selected by the browser.
@@ -5,16 +16,8 @@
 import type { OrderbookMirror } from "../config";
 import type { Direction } from "./activeSwap";
 import type { EthAssetSymbol } from "./assetRegistry";
-import type {
-  CreateOrderBody,
-  MakerOrderAuthV1,
-  OrderView,
-} from "./orderbook";
-import type {
-  SignedCancelV1,
-  SignedFillIntentV1,
-  SignedFillV1,
-} from "./orderSigning";
+import type { CreateOrderBody, MakerOrderAuthV1, OrderView } from "./orderbook";
+import type { SignedCancelV1, SignedFillIntentV1, SignedFillV1 } from "./orderSigning";
 import { verifyOrderCapabilities } from "./orderSigning";
 
 export class OrderGoneError extends Error {}
@@ -81,7 +84,7 @@ export interface OrderbookStreamObserver {
 
 export interface EventSourcePort {
   readonly readyState: number;
-  addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void;
+  addEventListener(type: string, listener: (event: { data?: unknown }) => void): void;
   close(): void;
 }
 
@@ -101,13 +104,26 @@ const QRL_ADDR_RE = /^Q[0-9a-f]{128}$/;
 const AMOUNT_RE = /^(?:0|[1-9][0-9]{0,29})$/;
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 
-const defaultEventSource = (url: string): EventSourcePort =>
-  new EventSource(url) as unknown as EventSourcePort;
+const defaultEventSource = (url: string): EventSourcePort => {
+  const source = new EventSource(url);
+  return {
+    get readyState() {
+      return source.readyState;
+    },
+    addEventListener(type, listener) {
+      source.addEventListener(type, (event) => {
+        const data: unknown = event instanceof MessageEvent ? event.data : undefined;
+        listener({ data });
+      });
+    },
+    close() {
+      source.close();
+    },
+  };
+};
 
-const defaultFetch = (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> => globalThis.fetch(input, init);
+const defaultFetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+  globalThis.fetch(input, init);
 
 function privateHeader(shareToken: string | undefined): Record<string, string> | undefined {
   return shareToken === undefined ? undefined : { "X-Share-Token": shareToken };
@@ -144,13 +160,11 @@ async function boundedJson(response: Response): Promise<unknown> {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+  return parsed;
 }
 
-function optionalCanonicalAddress(
-  value: unknown,
-  pattern: RegExp,
-): boolean {
+function optionalCanonicalAddress(value: unknown, pattern: RegExp): boolean {
   return value === undefined || (typeof value === "string" && pattern.test(value));
 }
 
@@ -163,8 +177,8 @@ function nullableSafeUint(value: unknown): boolean {
 }
 
 function isOrderView(value: unknown): value is OrderView {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const order = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const order = value;
   return (
     typeof order["id"] === "string" &&
     ID_RE.test(order["id"]) &&
@@ -205,15 +219,51 @@ function isOrderView(value: unknown): value is OrderView {
     (order["released"] === undefined || typeof order["released"] === "boolean") &&
     (order["makerSeen"] === undefined || typeof order["makerSeen"] === "boolean") &&
     (order["prelocked"] === undefined || typeof order["prelocked"] === "boolean") &&
-    (order["makerAuth"] === undefined ||
-      (typeof order["makerAuth"] === "object" &&
-        order["makerAuth"] !== null &&
-        !Array.isArray(order["makerAuth"])))
+    optionalField(order, "makerAuth", isMakerAuth) &&
+    optionalField(order, "orderDigest", isString) &&
+    optionalField(order, "bookId", isString) &&
+    optionalField(order, "sources", isStringArray) &&
+    optionalField(order, "fill", isFillBody) &&
+    optionalField(order, "fillAuth", isProtocolAuth) &&
+    optionalField(order, "fillDigest", isString) &&
+    optionalField(order, "selectedIntent", isFillIntentView) &&
+    optionalField(order, "cancelProof", isCancelBody) &&
+    optionalField(order, "cancelAuth", isProtocolAuth) &&
+    optionalField(order, "cancelDigest", isString) &&
+    optionalField(order, "equivocated", isBoolean) &&
+    optionalField(order, "conflictDigests", isStringArray)
   );
 }
 
+function isOrderEnvelope(value: unknown): value is { order: OrderView } {
+  return isRecord(value) && isOrderView(value.order);
+}
+
+function isCreatedEnvelope(
+  value: unknown,
+): value is { order: OrderView; makerToken: string; shareToken?: string } {
+  return (
+    isRecord(value) &&
+    isString(value.makerToken) &&
+    optionalField(value, "shareToken", isString) &&
+    isOrderEnvelope(value)
+  );
+}
+
+function isTakenEnvelope(value: unknown): value is { order: OrderView; takerToken: string } {
+  return isRecord(value) && isString(value.takerToken) && isOrderEnvelope(value);
+}
+
+function isIntentEnvelope(value: unknown): value is { intent: FillIntentView } {
+  return isRecord(value) && isFillIntentView(value.intent);
+}
+
+function isIntentsEnvelope(value: unknown): value is { intents: FillIntentView[] } {
+  return isRecord(value) && isArray(value.intents) && value.intents.every(isFillIntentView);
+}
+
 function parseOrderList(raw: unknown): OrderView[] {
-  if (!Array.isArray(raw)) throw new Error("order book returned an invalid order list");
+  if (!isArray(raw)) throw new Error("order book returned an invalid order list");
   if (raw.length > MAX_LIST_ORDERS) {
     throw new Error("order book returned too many orders");
   }
@@ -237,9 +287,7 @@ function parseOrderList(raw: unknown): OrderView[] {
  * the book. The same token stays in the body, which is what a mirror from
  * before that reservation authenticates against.
  */
-function makerTokenHeader(
-  token: string | undefined,
-): Record<string, string> | undefined {
+function makerTokenHeader(token: string | undefined): Record<string, string> | undefined {
   return token === undefined ? undefined : { "X-Maker-Token": token };
 }
 
@@ -247,7 +295,10 @@ export class OrderbookClient {
   readonly bookId: string;
   readonly apiBase: string;
 
-  private readonly requestFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  private readonly requestFetch: (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => Promise<Response>;
   private readonly makeEventSource: (url: string) => EventSourcePort;
   private readonly timeoutMs: number;
 
@@ -260,6 +311,7 @@ export class OrderbookClient {
   }
 
   private async api<T>(
+    guard: (value: unknown) => value is T,
     method: string,
     path: string,
     body?: unknown,
@@ -294,12 +346,8 @@ export class OrderbookClient {
         payload = {};
       }
     }
-    const errorPayload =
-      typeof payload === "object" && payload !== null && !Array.isArray(payload)
-        ? (payload as { error?: unknown })
-        : {};
-    const error =
-      typeof errorPayload.error === "string" ? errorPayload.error : undefined;
+    const errorPayload = isRecord(payload) ? payload : {};
+    const error = typeof errorPayload.error === "string" ? errorPayload.error : undefined;
     if (response.status === 404) {
       throw new OrderGoneError(error ?? "order not found");
     }
@@ -310,8 +358,7 @@ export class OrderbookClient {
     // reporting a problem of its own, such as storage it cannot write or data
     // it no longer owns, and retrying that on a timer helps nobody.
     const shed =
-      response.headers.get("X-Refusal-Stage") === "pre-verification" ||
-      response.status === 429;
+      response.headers.get("X-Refusal-Stage") === "pre-verification" || response.status === 429;
     if (shed && (response.status === 503 || response.status === 429)) {
       throw new OrderBookBusyError(
         error ?? "order book is busy, retry shortly",
@@ -321,17 +368,19 @@ export class OrderbookClient {
     if (!response.ok) {
       throw new Error(error ?? `order book request failed (HTTP ${response.status})`);
     }
-    return payload as T;
+    if (!guard(payload)) throw new InvalidInputError("order book returned an invalid response");
+    return payload;
   }
 
   async list(): Promise<OrderView[]> {
-    const payload = await this.api<{ orders?: unknown }>("GET", "/orders");
+    const payload = await this.api(isRecord, "GET", "/orders");
     return parseOrderList(payload.orders);
   }
 
   async get(id: string, shareToken?: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
+      await this.api(
+        isOrderEnvelope,
         "GET",
         `/orders/${encodeURIComponent(id)}`,
         undefined,
@@ -343,30 +392,23 @@ export class OrderbookClient {
   async create(
     body: CreateOrderBody,
   ): Promise<{ order: OrderView; makerToken: string; shareToken?: string }> {
-    return this.api("POST", "/orders", body);
+    return this.api(isCreatedEnvelope, "POST", "/orders", body);
   }
 
-  async createSigned(
-    request: SignedOrderCreateRequest,
-  ): Promise<{ order: OrderView }> {
+  async createSigned(request: SignedOrderCreateRequest): Promise<{ order: OrderView }> {
     if (
-      !verifyOrderCapabilities(
-        request.order,
-        request.auth,
-        request.makerToken,
-        request.shareToken,
-      )
+      !verifyOrderCapabilities(request.order, request.auth, request.makerToken, request.shareToken)
     ) {
       throw new Error("signed order capabilities do not match their commitments");
     }
-    return this.api("POST", "/orders/signed", request);
+    return this.api(isOrderEnvelope, "POST", "/orders/signed", request);
   }
 
   async accept(
     id: string,
     body: { takerEthAccount: string; takerQrlAccount: string; shareToken?: string },
   ): Promise<{ order: OrderView; takerToken: string }> {
-    return this.api("POST", `/orders/${encodeURIComponent(id)}/accept`, body);
+    return this.api(isTakenEnvelope, "POST", `/orders/${encodeURIComponent(id)}/accept`, body);
   }
 
   async take(body: {
@@ -377,16 +419,14 @@ export class OrderbookClient {
     takerEthAccount: string;
     takerQrlAccount: string;
   }): Promise<{ order: OrderView; takerToken: string }> {
-    return this.api("POST", "/orders/take", body);
+    return this.api(isTakenEnvelope, "POST", "/orders/take", body);
   }
 
   async heartbeat(id: string, token: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
-        "POST",
-        `/orders/${encodeURIComponent(id)}/heartbeat`,
-        { token },
-      )
+      await this.api(isOrderEnvelope, "POST", `/orders/${encodeURIComponent(id)}/heartbeat`, {
+        token,
+      })
     ).order;
   }
 
@@ -396,7 +436,8 @@ export class OrderbookClient {
     shareToken?: string,
   ): Promise<FillIntentView> {
     return (
-      await this.api<{ intent: FillIntentView }>(
+      await this.api(
+        isIntentEnvelope,
         "POST",
         `/orders/${encodeURIComponent(id)}/intents`,
         signed,
@@ -408,7 +449,8 @@ export class OrderbookClient {
   async intents(id: string, makerToken?: string): Promise<FillIntentView[]> {
     const headers = makerTokenHeader(makerToken);
     return (
-      await this.api<{ intents: FillIntentView[] }>(
+      await this.api(
+        isIntentsEnvelope,
         "GET",
         `/orders/${encodeURIComponent(id)}/intents`,
         undefined,
@@ -424,7 +466,8 @@ export class OrderbookClient {
     makerToken?: string,
   ): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
+      await this.api(
+        isOrderEnvelope,
         "POST",
         `/orders/${encodeURIComponent(id)}/fill`,
         {
@@ -438,13 +481,10 @@ export class OrderbookClient {
     ).order;
   }
 
-  async cancelSigned(
-    id: string,
-    signed: SignedCancelV1,
-    makerToken?: string,
-  ): Promise<OrderView> {
+  async cancelSigned(id: string, signed: SignedCancelV1, makerToken?: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
+      await this.api(
+        isOrderEnvelope,
         "POST",
         `/orders/${encodeURIComponent(id)}/cancel/signed`,
         {
@@ -458,21 +498,15 @@ export class OrderbookClient {
 
   async release(id: string, token: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
-        "POST",
-        `/orders/${encodeURIComponent(id)}/release`,
-        { token },
-      )
+      await this.api(isOrderEnvelope, "POST", `/orders/${encodeURIComponent(id)}/release`, {
+        token,
+      })
     ).order;
   }
 
   async releasePortable(id: string, request: PortableReleaseRequest): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
-        "POST",
-        `/orders/${encodeURIComponent(id)}/release`,
-        request,
-      )
+      await this.api(isOrderEnvelope, "POST", `/orders/${encodeURIComponent(id)}/release`, request)
     ).order;
   }
 
@@ -481,7 +515,8 @@ export class OrderbookClient {
     body: { token: string; hashlock: string; initiatorTimeout: number; responderTimeout: number },
   ): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
+      await this.api(
+        isOrderEnvelope,
         "POST",
         `/orders/${encodeURIComponent(id)}/hashlock`,
         body,
@@ -492,7 +527,8 @@ export class OrderbookClient {
 
   async cancel(id: string, token: string): Promise<OrderView> {
     return (
-      await this.api<{ order: OrderView }>(
+      await this.api(
+        isOrderEnvelope,
         "POST",
         `/orders/${encodeURIComponent(id)}/cancel`,
         { token },
@@ -521,13 +557,14 @@ export class OrderbookClient {
     eventSource.addEventListener("error", markClosed);
     eventSource.addEventListener("book", (event) => {
       try {
-        if (event.data.length > MAX_API_RESPONSE_BYTES) {
+        if (typeof event.data !== "string" || event.data.length > MAX_API_RESPONSE_BYTES) {
           eventSource.close();
           markClosed();
           observer.onInvalid?.();
           return;
         }
-        const payload = JSON.parse(event.data) as { orders?: unknown };
+        const payload: unknown = JSON.parse(event.data);
+        if (!isRecord(payload)) throw new InvalidInputError("Invalid order book event");
         onBook(parseOrderList(payload.orders));
       } catch {
         // Close on malformed input. The caller keeps a bounded poll fallback

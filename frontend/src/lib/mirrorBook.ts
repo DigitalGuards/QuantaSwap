@@ -1,3 +1,4 @@
+import { isArray, isRecord } from "@/utils/guards";
 // Reconcile full snapshots from independent order book origins. Portable
 // OrderV1 proofs define identity; mirror-local fields only select a transport
 // source and never enter the signed payload.
@@ -57,12 +58,8 @@ export function summarizeMirrorAvailability(
   mirrors: readonly MirrorStatus[],
 ): MirrorAvailabilitySummary {
   const total = mirrors.length;
-  const available = mirrors.filter(
-    (mirror) => mirror.availability === "available",
-  ).length;
-  const checking = mirrors.filter(
-    (mirror) => mirror.availability === "checking",
-  ).length;
+  const available = mirrors.filter((mirror) => mirror.availability === "available").length;
+  const checking = mirrors.filter((mirror) => mirror.availability === "checking").length;
   const state: MirrorDiscoveryState =
     total > 0 && available === total
       ? "all"
@@ -90,10 +87,7 @@ export interface QuarantineStorageEvent {
 }
 
 export interface QuarantineEventSource {
-  addEventListener(
-    type: "storage",
-    listener: (event: QuarantineStorageEvent) => void,
-  ): void;
+  addEventListener(type: "storage", listener: (event: QuarantineStorageEvent) => void): void;
 }
 
 export const QUARANTINE_STORAGE_KEY = `${DEPLOYMENT_STORAGE_PREFIX}.orderbook-quarantines`;
@@ -109,9 +103,7 @@ type QuarantineMap = Map<string, number>;
 
 function browserStorage(): QuarantineStorage | null {
   try {
-    return typeof globalThis.localStorage === "undefined"
-      ? null
-      : globalThis.localStorage;
+    return typeof globalThis.localStorage === "undefined" ? null : globalThis.localStorage;
   } catch {
     return null;
   }
@@ -122,9 +114,9 @@ function browserQuarantineEvents(): QuarantineEventSource | null {
     if (typeof globalThis.addEventListener !== "function") return null;
     return {
       addEventListener: (_type, listener) => {
-        globalThis.addEventListener("storage", (event) =>
-          listener({ key: (event as StorageEvent).key }),
-        );
+        globalThis.addEventListener("storage", (event) => {
+          if (event instanceof StorageEvent) listener({ key: event.key });
+        });
       },
     };
   } catch {
@@ -132,10 +124,7 @@ function browserQuarantineEvents(): QuarantineEventSource | null {
   }
 }
 
-function pruneQuarantines(
-  entries: ReadonlyMap<string, number>,
-  now = Date.now(),
-): QuarantineMap {
+function pruneQuarantines(entries: ReadonlyMap<string, number>, now = Date.now()): QuarantineMap {
   return new Map(
     [...entries]
       .filter(
@@ -147,45 +136,39 @@ function pruneQuarantines(
           observedAt <= now + MAX_STORAGE_CLOCK_SKEW_MS,
       )
       .sort(
-        ([leftId, leftAt], [rightId, rightAt]) =>
-          rightAt - leftAt || leftId.localeCompare(rightId),
+        ([leftId, leftAt], [rightId, rightAt]) => rightAt - leftAt || leftId.localeCompare(rightId),
       )
       .slice(0, MAX_RETAINED_QUARANTINES),
   );
 }
 
-function loadQuarantines(
-  storage: QuarantineStorage | null,
-  now = Date.now(),
-): QuarantineMap {
+function loadQuarantines(storage: QuarantineStorage | null, now = Date.now()): QuarantineMap {
   if (storage === null) return new Map();
   try {
-    const parsed = JSON.parse(storage.getItem(QUARANTINE_STORAGE_KEY) ?? "null") as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    const parsed: unknown = JSON.parse(storage.getItem(QUARANTINE_STORAGE_KEY) ?? "null");
+    if (!isRecord(parsed)) {
       return new Map();
     }
-    const record = parsed as Record<string, unknown>;
-    if (record["version"] === 1 && Array.isArray(record["quarantinedIds"])) {
+    const record = parsed;
+    if (record["version"] === 1 && isArray(record["quarantinedIds"])) {
       return pruneQuarantines(
         new Map(
           record["quarantinedIds"]
             .slice(0, MAX_RETAINED_QUARANTINES * 4)
             .flatMap((id) =>
-              typeof id === "string" && PORTABLE_ORDER_ID_RE.test(id)
-                ? [[id, now] as const]
-                : [],
+              typeof id === "string" && PORTABLE_ORDER_ID_RE.test(id) ? [[id, now] as const] : [],
             ),
         ),
         now,
       );
     }
-    if (record["version"] !== 2 || !Array.isArray(record["entries"])) {
+    if (record["version"] !== 2 || !isArray(record["entries"])) {
       return new Map();
     }
     const entries = new Map<string, number>();
     record["entries"].slice(0, MAX_RETAINED_QUARANTINES * 4).forEach((entry) => {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return;
-      const candidate = entry as Record<string, unknown>;
+      if (!isRecord(entry)) return;
+      const candidate = entry;
       const id = candidate["id"];
       const observedAt = candidate["observedAt"];
       if (typeof id !== "string" || typeof observedAt !== "number") return;
@@ -203,9 +186,7 @@ function saveQuarantines(
   now = Date.now(),
 ): QuarantineMap {
   const merged = loadQuarantines(storage, now);
-  entries.forEach((observedAt, id) =>
-    merged.set(id, Math.max(merged.get(id) ?? 0, observedAt)),
-  );
+  entries.forEach((observedAt, id) => merged.set(id, Math.max(merged.get(id) ?? 0, observedAt)));
   const retained = pruneQuarantines(merged, now);
   if (storage === null) return retained;
   try {
@@ -248,12 +229,8 @@ function signedOrderBody(order: OrderView): CreateOrderBody {
     makerEthAccount: order.makerEthAccount,
     makerQrlAccount: order.makerQrlAccount,
     visibility: order.visibility ?? "public",
-    ...(order.allowedTakerEth === undefined
-      ? {}
-      : { allowedTakerEth: order.allowedTakerEth }),
-    ...(order.allowedTakerQrl === undefined
-      ? {}
-      : { allowedTakerQrl: order.allowedTakerQrl }),
+    ...(order.allowedTakerEth === undefined ? {} : { allowedTakerEth: order.allowedTakerEth }),
+    ...(order.allowedTakerQrl === undefined ? {} : { allowedTakerQrl: order.allowedTakerQrl }),
   };
   if (order.prelocked === true) {
     if (order.hashlock === null || order.initiatorTimeout === null) {
@@ -299,9 +276,9 @@ function localOrder(
 
 function isLapsedSignedOrder(order: OrderView, now: number): boolean {
   const auth: unknown = order.makerAuth;
-  if (typeof auth !== "object" || auth === null || Array.isArray(auth)) return false;
-  const expiresAt = (auth as { expiresAt?: unknown }).expiresAt;
-  return Number.isSafeInteger(expiresAt) && (expiresAt as number) <= now;
+  if (!isRecord(auth)) return false;
+  const expiresAt = auth.expiresAt;
+  return typeof expiresAt === "number" && Number.isSafeInteger(expiresAt) && expiresAt <= now;
 }
 
 /**
@@ -323,7 +300,7 @@ export function aggregateMirrorOrders(
       if (
         typeof order !== "object" ||
         order === null ||
-        Array.isArray(order) ||
+        isArray(order) ||
         order.status !== "open" ||
         order.visibility === "private"
       ) {
@@ -380,9 +357,7 @@ export function aggregateMirrorOrders(
       quarantinedIds.add(id);
       continue;
     }
-    const entry = variants.entries().next().value as
-      | [string, SignedCandidate[]]
-      | undefined;
+    const entry = variants.entries().next().value;
     if (entry === undefined) continue;
     const [digest, candidates] = entry;
     const representative = candidates[0];
@@ -391,12 +366,10 @@ export function aggregateMirrorOrders(
     combined.push(localOrder(representative.order, digest, sources));
   }
 
-  const primary = validSnapshots.find(
-    (snapshot) => snapshot.bookId === PRIMARY_ORDERBOOK_ID,
-  );
+  const primary = validSnapshots.find((snapshot) => snapshot.bookId === PRIMARY_ORDERBOOK_ID);
   if (primary !== undefined) {
     for (const order of primary.orders) {
-      if (typeof order !== "object" || order === null || Array.isArray(order)) continue;
+      if (typeof order !== "object" || order === null || isArray(order)) continue;
       if (
         order.makerAuth !== undefined ||
         order.visibility === "private" ||
@@ -456,9 +429,7 @@ export class FederatedOrderBook {
     quarantineEvents: QuarantineEventSource | null = browserQuarantineEvents(),
     private readonly now: () => number = Date.now,
   ) {
-    this.clients = mirrors.map(
-      (mirror) => new OrderbookClient(mirror, optionsForMirror?.(mirror)),
-    );
+    this.clients = mirrors.map((mirror) => new OrderbookClient(mirror, optionsForMirror?.(mirror)));
     this.clientsById = new Map(this.clients.map((client) => [client.bookId, client]));
     this.mirrorStatuses = new Map(
       this.clients.map((client) => [
@@ -496,10 +467,7 @@ export class FederatedOrderBook {
     return status;
   }
 
-  private updateStatus(
-    bookId: string,
-    update: Partial<Omit<MirrorStatus, "bookId">>,
-  ): void {
+  private updateStatus(bookId: string, update: Partial<Omit<MirrorStatus, "bookId">>): void {
     this.mirrorStatuses.set(bookId, { ...this.status(bookId), ...update });
   }
 
@@ -591,7 +559,7 @@ export class FederatedOrderBook {
           return false;
         }
         if (this.verifiedProofs.size >= MAX_VERIFIED_PROOFS) {
-          const oldest = this.verifiedProofs.keys().next().value as string | undefined;
+          const oldest = this.verifiedProofs.keys().next().value;
           if (oldest !== undefined) this.verifiedProofs.delete(oldest);
         }
         this.verifiedProofs.set(key, {
@@ -615,14 +583,10 @@ export class FederatedOrderBook {
 
   private mergeRetainedQuarantines(incoming: ReadonlyMap<string, number>): void {
     const merged = new Map(this.retainedQuarantines);
-    incoming.forEach((observedAt, id) =>
-      merged.set(id, Math.max(merged.get(id) ?? 0, observedAt)),
-    );
+    incoming.forEach((observedAt, id) => merged.set(id, Math.max(merged.get(id) ?? 0, observedAt)));
     const retained = pruneQuarantines(merged);
     this.retainedQuarantines.clear();
-    retained.forEach((observedAt, id) =>
-      this.retainedQuarantines.set(id, observedAt),
-    );
+    retained.forEach((observedAt, id) => this.retainedQuarantines.set(id, observedAt));
   }
 
   client(bookId = PRIMARY_ORDERBOOK_ID): OrderbookClient {
@@ -643,9 +607,7 @@ export class FederatedOrderBook {
     if (result.invalidBookIds.length > 0) {
       const invalid = new Set(result.invalidBookIds);
       invalid.forEach((bookId) => this.markUnavailable(bookId));
-      result = this.aggregate(
-        snapshots.filter((snapshot) => !invalid.has(snapshot.bookId)),
-      );
+      result = this.aggregate(snapshots.filter((snapshot) => !invalid.has(snapshot.bookId)));
     }
     let changed = false;
     result.quarantinedIds.forEach((id) => {
@@ -656,11 +618,7 @@ export class FederatedOrderBook {
     });
     if (changed) {
       this.mergeRetainedQuarantines(
-        saveQuarantines(
-          this.quarantineStorage,
-          this.retainedQuarantines,
-          observedAt,
-        ),
+        saveQuarantines(this.quarantineStorage, this.retainedQuarantines, observedAt),
       );
     }
     return {
@@ -670,15 +628,12 @@ export class FederatedOrderBook {
     };
   }
 
-  private async refreshClients(
-    clients: readonly OrderbookClient[],
-  ): Promise<MirrorBookResult> {
+  private async refreshClients(clients: readonly OrderbookClient[]): Promise<MirrorBookResult> {
     const requests = clients.map((client) => {
       const existing = this.inFlightRefreshes.get(client.bookId);
       if (existing !== undefined) return existing;
       const generation = this.nextGeneration(client.bookId);
-      let request: Promise<void>;
-      request = client
+      const request = client
         .list()
         .then((orders) => {
           if (this.generation(client.bookId) !== generation) return;
@@ -713,21 +668,14 @@ export class FederatedOrderBook {
 
   async refreshDisconnected(): Promise<MirrorBookResult> {
     const now = this.now();
-    const disconnected = this.clients.filter(
-      (client) => {
-        const status = this.status(client.bookId);
-        if (
-          status.availability === "unavailable" &&
-          this.retry(client.bookId).nextAttemptAt > now
-        ) {
-          return false;
-        }
-        return status.stream !== "open" || status.availability !== "available";
-      },
-    );
-    return disconnected.length === 0
-      ? this.current()
-      : this.refreshClients(disconnected);
+    const disconnected = this.clients.filter((client) => {
+      const status = this.status(client.bookId);
+      if (status.availability === "unavailable" && this.retry(client.bookId).nextAttemptAt > now) {
+        return false;
+      }
+      return status.stream !== "open" || status.availability !== "available";
+    });
+    return disconnected.length === 0 ? this.current() : this.refreshClients(disconnected);
   }
 
   routeSignedOrder(order: OrderView): OrderView {
@@ -774,9 +722,7 @@ export class FederatedOrderBook {
     // Native EventSource buffers a complete event before application code can
     // enforce a byte limit. Keep SSE on the trusted same-origin primary and
     // use the bounded HTTP snapshot parser for independent mirrors.
-    const streamClients = this.clients.filter(
-      (client) => client.bookId === PRIMARY_ORDERBOOK_ID,
-    );
+    const streamClients = this.clients.filter((client) => client.bookId === PRIMARY_ORDERBOOK_ID);
     const streams = streamClients.flatMap((client) => {
       this.updateStatus(client.bookId, {
         stream: "connecting",

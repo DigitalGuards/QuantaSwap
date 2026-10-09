@@ -1,0 +1,79 @@
+{
+  "src/chains.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/config.test.ts": {
+    "@typescript-eslint/no-dynamic-delete": 2
+  },
+  "src/config.ts": {
+    "preserve-caught-error": 1
+  },
+  "src/credits-cli.ts": {
+    "@typescript-eslint/require-await": 1
+  },
+  "src/deployment.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/drain.test.ts": {
+    "@typescript-eslint/require-await": 4
+  },
+  "src/htlc.test.ts": {
+    "@typescript-eslint/no-base-to-string": 1,
+    "@typescript-eslint/no-unnecessary-condition": 1,
+    "@typescript-eslint/require-await": 6
+  },
+  "src/index.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 5,
+    "@typescript-eslint/only-throw-error": 1
+  },
+  "src/init-keys.ts": {
+    "@typescript-eslint/require-await": 1
+  },
+  "src/orderbook.test.ts": {
+    "@typescript-eslint/no-base-to-string": 1
+  },
+  "src/protocol-signing.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 5
+  },
+  "src/qrvmHtlc.test.ts": {
+    "@typescript-eslint/no-base-to-string": 1,
+    "@typescript-eslint/require-await": 1
+  },
+  "src/state.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 7,
+    "@typescript-eslint/no-unsafe-member-access": 2
+  },
+  "src/state.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 5
+  },
+  "src/taker-cli.ts": {
+    "@typescript-eslint/only-throw-error": 1
+  },
+  "src/taker-e2e.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 5,
+    "@typescript-eslint/require-await": 5
+  },
+  "src/taker-policy.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/taker-policy.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 2
+  },
+  "src/taker-proofs.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 2
+  },
+  "src/taker-proofs.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 2
+  },
+  "src/taker-state.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 7
+  },
+  "src/taker-test-harness.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1,
+    "@typescript-eslint/no-unsafe-return": 2,
+    "@typescript-eslint/require-await": 2
+  },
+  "src/taker.ts": {
+    "preserve-caught-error": 1
+  }
+}

@@ -7,9 +7,14 @@ import { loadConfig, readRequiredSecret } from "./config.js";
 
 describe("bounded signed quote lifetime", () => {
   it("uses five minutes by default and rejects unsafe or noninteger bounds", () => {
-    const keys = ["MM_ORDER_LIFETIME_S", "MM_ETH_PRIVATE_KEY", "MM_ETH_PRIVATE_KEY_FILE",
-      "MM_QRL_HEXSEED", "MM_QRL_HEXSEED_FILE"];
-    const before = new Map(keys.map(key => [key, process.env[key]]));
+    const keys = [
+      "MM_ORDER_LIFETIME_S",
+      "MM_ETH_PRIVATE_KEY",
+      "MM_ETH_PRIVATE_KEY_FILE",
+      "MM_QRL_HEXSEED",
+      "MM_QRL_HEXSEED_FILE",
+    ];
+    const before = new Map(keys.map((key) => [key, process.env[key]]));
     try {
       process.env.MM_ETH_PRIVATE_KEY = "test-only-unused-key";
       process.env.MM_QRL_HEXSEED = "test-only-unused-seed";
@@ -50,7 +55,7 @@ function withSecretEnv(run: () => void): void {
 }
 
 describe("file-backed signing secrets", () => {
-  it("reads a secret file and strips its trailing newline", () =>
+  it("reads a secret file and strips its trailing newline", () => {
     withSecretEnv(() => {
       const dir = mkdtempSync(join(tmpdir(), "mm-secret-test-"));
       try {
@@ -61,9 +66,10 @@ describe("file-backed signing secrets", () => {
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
-    }));
+    });
+  });
 
-  it("rejects ambiguous direct and file sources", () =>
+  it("rejects ambiguous direct and file sources", () => {
     withSecretEnv(() => {
       process.env.TEST_SIGNING_SECRET = "direct";
       process.env.TEST_SIGNING_SECRET_FILE = "/not/read";
@@ -71,19 +77,59 @@ describe("file-backed signing secrets", () => {
         () => readRequiredSecret("TEST_SIGNING_SECRET"),
         /mutually exclusive/,
       );
-    }));
+    });
+  });
 
-  it("rejects missing and empty secrets", () =>
+  it("rejects missing and empty secrets", () => {
     withSecretEnv(() => {
-      assert.throws(() => readRequiredSecret("TEST_SIGNING_SECRET"), /is required/);
+      assert.throws(
+        () => readRequiredSecret("TEST_SIGNING_SECRET"),
+        /is required/,
+      );
       const dir = mkdtempSync(join(tmpdir(), "mm-secret-test-"));
       try {
         const file = join(dir, "key");
         writeFileSync(file, "\n", { mode: 0o600 });
         process.env.TEST_SIGNING_SECRET_FILE = file;
-        assert.throws(() => readRequiredSecret("TEST_SIGNING_SECRET"), /empty secret file/);
+        assert.throws(
+          () => readRequiredSecret("TEST_SIGNING_SECRET"),
+          /empty secret file/,
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
-    }));
+    });
+  });
+});
+
+describe("CoinPaprika fallback interval", () => {
+  it("defaults to the budget floor and rejects anything below it", () => {
+    const keys = [
+      "MM_PRICE_FALLBACK_INTERVAL_S",
+      "MM_ETH_PRIVATE_KEY",
+      "MM_ETH_PRIVATE_KEY_FILE",
+      "MM_QRL_HEXSEED",
+      "MM_QRL_HEXSEED_FILE",
+    ];
+    const before = new Map(keys.map((key) => [key, process.env[key]]));
+    try {
+      process.env.MM_ETH_PRIVATE_KEY = "test-only-unused-key";
+      process.env.MM_QRL_HEXSEED = "test-only-unused-seed";
+      delete process.env.MM_ETH_PRIVATE_KEY_FILE;
+      delete process.env.MM_QRL_HEXSEED_FILE;
+      delete process.env.MM_PRICE_FALLBACK_INTERVAL_S;
+      assert.equal(loadConfig().priceFallbackIntervalS, 900);
+      process.env.MM_PRICE_FALLBACK_INTERVAL_S = "3600";
+      assert.equal(loadConfig().priceFallbackIntervalS, 3600);
+      for (const value of ["0", "60", "899"]) {
+        process.env.MM_PRICE_FALLBACK_INTERVAL_S = value;
+        assert.throws(() => loadConfig(), /MM_PRICE_FALLBACK_INTERVAL_S/);
+      }
+    } finally {
+      for (const [key, value] of before) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });

@@ -5,7 +5,13 @@
 import { readFileSync } from "node:fs";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { DEFAULT_ORDER_LIFETIME_S } from "./admission.js";
-import { assetInfo, isAssetSymbol, ASSET_SYMBOLS, type AssetSymbol } from "./assets.js";
+import {
+  assetInfo,
+  isAssetSymbol,
+  ASSET_SYMBOLS,
+  type AssetSymbol,
+} from "./assets.js";
+import { MIN_FALLBACK_INTERVAL_S } from "./price.js";
 
 /** Ladder policy for one ETH-leg asset. */
 export interface AssetPolicy {
@@ -52,6 +58,9 @@ export interface Config {
   /** "coingecko" tracks the live cross rate; "off" pins midPriceMilli. */
   priceFeed: "coingecko" | "off";
   priceRefreshS: number;
+  /** Minimum gap between CoinPaprika fallback attempts, at least 900 (budget
+   *  is 20,000 calls a month; each attempt costs up to three). */
+  priceFallbackIntervalS: number;
   /** Stop posting when the cached price is older than this. */
   priceMaxAgeS: number;
   /** Cancel-and-repost open listings when the mid drifts beyond this. */
@@ -102,19 +111,22 @@ export function env(name: string, fallback: string): string {
 
 export function envInt(name: string, fallback: number): number {
   const v = Number(env(name, String(fallback)));
-  if (!Number.isFinite(v) || v <= 0) throw new Error(`${name} must be a positive number`);
+  if (!Number.isFinite(v) || v <= 0)
+    throw new Error(`${name} must be a positive number`);
   return Math.floor(v);
 }
 
 export function envBool(name: string, fallback: boolean): boolean {
   const raw = env(name, String(fallback)).toLowerCase();
-  if (raw !== "true" && raw !== "false") throw new Error(`${name} must be true or false`);
+  if (raw !== "true" && raw !== "false")
+    throw new Error(`${name} must be true or false`);
   return raw === "true";
 }
 
 export function envWei(name: string, fallback: bigint): bigint {
   const raw = env(name, fallback.toString());
-  if (!/^[0-9]{1,30}$/.test(raw)) throw new Error(`${name} must be a decimal wei string`);
+  if (!/^[0-9]{1,30}$/.test(raw))
+    throw new Error(`${name} must be a decimal wei string`);
   return BigInt(raw);
 }
 
@@ -147,7 +159,8 @@ export function readRequiredSecret(name: string): string {
     const reason = err instanceof Error ? err.message : "unknown read error";
     throw new Error(`${fileName} could not be read: ${reason}`);
   }
-  if (value === "") throw new Error(`${fileName} points to an empty secret file`);
+  if (value === "")
+    throw new Error(`${fileName} points to an empty secret file`);
   return value;
 }
 
@@ -156,7 +169,9 @@ function envUnits(name: string, fallback: string, decimals: number): bigint {
   const raw = env(name, fallback);
   const m = /^([0-9]{1,15})(?:\.([0-9]+))?$/.exec(raw);
   if (m === null || (m[2] !== undefined && m[2].length > decimals)) {
-    throw new Error(`${name} must be a decimal amount with at most ${decimals} fractional digits`);
+    throw new Error(
+      `${name} must be a decimal amount with at most ${decimals} fractional digits`,
+    );
   }
   return BigInt((m[1] ?? "0") + (m[2] ?? "").padEnd(decimals, "0"));
 }
@@ -167,15 +182,21 @@ function parseAssets(raw: string): AssetSymbol[] {
     const sym = part.trim();
     if (sym === "") continue;
     if (!isAssetSymbol(sym)) {
-      throw new Error(`MM_ASSETS: unknown asset "${sym}" (valid: ${ASSET_SYMBOLS.join(", ")})`);
+      throw new Error(
+        `MM_ASSETS: unknown asset "${sym}" (valid: ${ASSET_SYMBOLS.join(", ")})`,
+      );
     }
-    if (assetInfo(sym).coingeckoId === null) {
-      throw new Error(`MM_ASSETS: ${sym} has no price feed and cannot be stocked`);
+    if (assetInfo(sym).priceIds === null) {
+      throw new Error(
+        `MM_ASSETS: ${sym} has no price feed and cannot be stocked`,
+      );
     }
-    if (out.includes(sym)) throw new Error(`MM_ASSETS: duplicate asset "${sym}"`);
+    if (out.includes(sym))
+      throw new Error(`MM_ASSETS: duplicate asset "${sym}"`);
     out.push(sym);
   }
-  if (out.length === 0) throw new Error("MM_ASSETS must list at least one asset");
+  if (out.length === 0)
+    throw new Error("MM_ASSETS must list at least one asset");
   return out;
 }
 
@@ -199,7 +220,9 @@ function loadAssetPolicies(
       ordersPerDirection: envInt(`${prefix}_ORDERS_PER_DIRECTION`, 2),
     };
     if (policy.baseUnits < info.minBaseUnits) {
-      throw new Error(`${prefix}_BASE is below the ${symbol} minimum lock amount`);
+      throw new Error(
+        `${prefix}_BASE is below the ${symbol} minimum lock amount`,
+      );
     }
     policies.set(symbol, policy);
   }
@@ -212,11 +235,29 @@ export function loadConfig(): Config {
   const ethOrderWei = envWei("MM_ETH_ORDER_WEI", 2n * 10n ** 16n); // 0.02 ETH base size
   const ethReserveWei = envWei("MM_ETH_RESERVE_WEI", 5n * 10n ** 16n);
   const healthPort = envInt("MM_HEALTH_PORT", 8092);
-  const orderLifetimeS = Number(env("MM_ORDER_LIFETIME_S", String(DEFAULT_ORDER_LIFETIME_S)));
-  if (!Number.isSafeInteger(orderLifetimeS) || orderLifetimeS < 180 || orderLifetimeS > 1800) {
-    throw new Error("MM_ORDER_LIFETIME_S must be an integer between 180 and 1800");
+  const orderLifetimeS = Number(
+    env("MM_ORDER_LIFETIME_S", String(DEFAULT_ORDER_LIFETIME_S)),
+  );
+  if (
+    !Number.isSafeInteger(orderLifetimeS) ||
+    orderLifetimeS < 180 ||
+    orderLifetimeS > 1800
+  ) {
+    throw new Error(
+      "MM_ORDER_LIFETIME_S must be an integer between 180 and 1800",
+    );
   }
-  if (healthPort > 65_535) throw new Error("MM_HEALTH_PORT must be at most 65535");
+  if (healthPort > 65_535)
+    throw new Error("MM_HEALTH_PORT must be at most 65535");
+  const priceFallbackIntervalS = envInt(
+    "MM_PRICE_FALLBACK_INTERVAL_S",
+    MIN_FALLBACK_INTERVAL_S,
+  );
+  if (priceFallbackIntervalS < MIN_FALLBACK_INTERVAL_S) {
+    throw new Error(
+      `MM_PRICE_FALLBACK_INTERVAL_S must be at least ${MIN_FALLBACK_INTERVAL_S}`,
+    );
+  }
   return {
     assets,
     assetPolicies: loadAssetPolicies(assets, {
@@ -225,8 +266,14 @@ export function loadConfig(): Config {
       ordersPerDirection,
     }),
     orderbookUrl: env("MM_ORDERBOOK_URL", "http://127.0.0.1:8091/api"),
-    ethRpcUrl: env("MM_ETH_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com"),
-    qrlRpcUrl: env("MM_QRL_RPC_URL", "https://qrlwallet.com/api/qrl-rpc/testnet"),
+    ethRpcUrl: env(
+      "MM_ETH_RPC_URL",
+      "https://ethereum-sepolia-rpc.publicnode.com",
+    ),
+    qrlRpcUrl: env(
+      "MM_QRL_RPC_URL",
+      "https://qrlwallet.com/api/qrl-rpc/testnet",
+    ),
     ethChainId: envChainId("MM_ETH_CHAIN_ID", protocolV2Config.ethChainId),
     qrlChainId: envChainId("MM_QRL_CHAIN_ID", protocolV2Config.qrlChainId),
     ethHtlc: env("MM_ETH_HTLC", protocolV2Config.ethHtlc),
@@ -240,8 +287,10 @@ export function loadConfig(): Config {
     ethOrderWei,
     // Fallback for MM_PRICE_FEED=off (roughly the mid-2026 cross rate).
     midPriceMilli: envWei("MM_MID_PRICE_MILLI", 1_700_000n), // 1700 QRL/ETH
-    priceFeed: env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
+    priceFeed:
+      env("MM_PRICE_FEED", "coingecko") === "off" ? "off" : "coingecko",
     priceRefreshS: envInt("MM_PRICE_REFRESH_S", 300),
+    priceFallbackIntervalS,
     priceMaxAgeS: envInt("MM_PRICE_MAX_AGE_S", 1800),
     repriceThresholdBps: envWei("MM_REPRICE_THRESHOLD_BPS", 100n), // 1%
     levelStepBps: envWei("MM_LEVEL_STEP_BPS", 50n), // 0.5% per rung
@@ -256,7 +305,10 @@ export function loadConfig(): Config {
     lockGraceS: envInt("MM_LOCK_GRACE_S", 30),
     initiatorWindowS: envInt("MM_INITIATOR_WINDOW_S", 7200),
     responderWindowS: envInt("MM_RESPONDER_WINDOW_S", 3600),
-    stateFile: env("MM_STATE_FILE", new URL("../data/v3-private-state.json", import.meta.url).pathname),
+    stateFile: env(
+      "MM_STATE_FILE",
+      new URL("../data/v3-private-state.json", import.meta.url).pathname,
+    ),
     healthHost: env("MM_HEALTH_HOST", "127.0.0.1"),
     healthPort,
     healthStaleS: envInt("MM_HEALTH_STALE_S", 600),

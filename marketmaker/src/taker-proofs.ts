@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "./guards.js";
 // Taker-side parsing and verification of untrusted order book rows. The
 // book is coordination only: every economic field a taker acts on is
 // reconstructed here from the row and re-authenticated against the
@@ -96,10 +97,10 @@ export interface VerifiedTakerOrder {
 }
 
 function object(raw: unknown, field: string): Record<string, unknown> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`${field} is malformed`);
   }
-  return raw as Record<string, unknown>;
+  return raw;
 }
 
 function onlyKeys(
@@ -118,7 +119,10 @@ function exactly(
   field: string,
 ): void {
   const actual = Object.keys(value);
-  if (actual.length !== keys.length || actual.some((key) => !keys.includes(key))) {
+  if (
+    actual.length !== keys.length ||
+    actual.some((key) => !keys.includes(key))
+  ) {
     throw new Error(`${field} has unsupported or missing fields`);
   }
 }
@@ -388,12 +392,13 @@ export function parseBookOrderRow(
   ) {
     throw new Error(`${field}.status is malformed`);
   }
-  const visibility = row["visibility"] === undefined ? "public" : row["visibility"];
+  const visibility =
+    row["visibility"] === undefined ? "public" : row["visibility"];
   if (visibility !== "public" && visibility !== "private") {
     throw new Error(`${field}.visibility is malformed`);
   }
   const conflictRaw = row["conflictDigests"];
-  if (conflictRaw !== undefined && !Array.isArray(conflictRaw)) {
+  if (conflictRaw !== undefined && !isArray(conflictRaw)) {
     throw new Error(`${field}.conflictDigests is malformed`);
   }
   const conflictDigests = (conflictRaw ?? []).map((value, index) =>
@@ -465,7 +470,12 @@ export function parseBookOrderRow(
     prelocked: boolOr(row["prelocked"], false, `${field}.prelocked`),
     ...(row["makerAuth"] === undefined
       ? {}
-      : { makerAuth: parseMakerOrderAuth(row["makerAuth"], `${field}.makerAuth`) }),
+      : {
+          makerAuth: parseMakerOrderAuth(
+            row["makerAuth"],
+            `${field}.makerAuth`,
+          ),
+        }),
     ...(row["orderDigest"] === undefined
       ? {}
       : {
@@ -500,7 +510,12 @@ export function parseBookOrderRow(
         }),
     ...(row["cancelProof"] === undefined
       ? {}
-      : { cancelProof: parseCancelBody(row["cancelProof"], `${field}.cancelProof`) }),
+      : {
+          cancelProof: parseCancelBody(
+            row["cancelProof"],
+            `${field}.cancelProof`,
+          ),
+        }),
     ...(row["cancelAuth"] === undefined
       ? {}
       : {
@@ -543,7 +558,12 @@ export function orderBodyFromRow(row: BookOrderRow): CanonicalOrderV1Body {
       ? {}
       : { allowedTakerQrl: row.allowedTakerQrl }),
     ...(row.prelocked && row.hashlock !== null && row.initiatorTimeout !== null
-      ? { prelock: { hashlock: row.hashlock, initiatorTimeout: row.initiatorTimeout } }
+      ? {
+          prelock: {
+            hashlock: row.hashlock,
+            initiatorTimeout: row.initiatorTimeout,
+          },
+        }
       : {}),
   };
 }
@@ -591,7 +611,8 @@ export function verifyMakerOrder(
     ) {
       return null;
     }
-    if (row.id !== deriveOrderV1Id(row.makerQrlAccount, auth.nonce)) return null;
+    if (row.id !== deriveOrderV1Id(row.makerQrlAccount, auth.nonce))
+      return null;
     if (row.prelocked) {
       // A pre-funded listing anchors its escrow at create time, so its
       // window is bounded on both sides and the proof cannot outlive the
@@ -856,7 +877,8 @@ export function fillBindingIsValid(x: FillBindingInput): boolean {
       limits.minResponderRunwayAfterResponseS &&
     initiatorWindow >= responderWindow &&
     responderWindow <= Math.floor(initiatorWindow / 2) &&
-    (x.prelock !== undefined || initiatorWindow <= limits.maxInitiatorWindowS) &&
+    (x.prelock !== undefined ||
+      initiatorWindow <= limits.maxInitiatorWindowS) &&
     (x.prelock === undefined ||
       (fill.hashlock === x.prelock.hashlock &&
         fill.initiatorTimeout === x.prelock.initiatorTimeout &&

@@ -70,8 +70,12 @@ export class FederationPeerTransport {
   private readonly connectTimeoutMs: number;
   private closed = false;
 
-  constructor(onionProxy: string | null, options: FederationPeerTransportOptions = {}) {
-    this.onionProxy = onionProxy === null ? null : validatedProxyUrl(onionProxy);
+  constructor(
+    onionProxy: string | null,
+    options: FederationPeerTransportOptions = {},
+  ) {
+    this.onionProxy =
+      onionProxy === null ? null : validatedProxyUrl(onionProxy);
     this.directFetch = options.directFetch ?? globalThis.fetch.bind(globalThis);
     this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
     if (
@@ -93,7 +97,9 @@ export class FederationPeerTransport {
       throw new Error("federation onion peer has no SOCKS route");
     }
     if (init?.body !== undefined && init.body !== null) {
-      throw new Error("federation onion transport does not accept request bodies");
+      throw new Error(
+        "federation onion transport does not accept request bodies",
+      );
     }
     if (init?.method !== undefined && init.method.toUpperCase() !== "GET") {
       throw new Error("federation onion transport only accepts GET requests");
@@ -114,7 +120,9 @@ export class FederationPeerTransport {
 
     try {
       return await new Promise<Response>((resolve, reject) => {
-        const request = (url.protocol === "https:" ? requestHttps : requestHttp)(
+        const request = (
+          url.protocol === "https:" ? requestHttps : requestHttp
+        )(
           url,
           {
             agent,
@@ -128,14 +136,23 @@ export class FederationPeerTransport {
             const status = incoming.statusCode;
             if (status === undefined || status < 200 || status > 599) {
               incoming.destroy();
-              reject(new Error("federation onion peer returned an invalid HTTP status"));
+              reject(
+                new Error(
+                  "federation onion peer returned an invalid HTTP status",
+                ),
+              );
               return;
             }
             try {
-              const body =
+              const body: unknown =
                 status === 204 || status === 304
                   ? null
-                  : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
+                  : Readable.toWeb(incoming);
+              if (body !== null && !(body instanceof ReadableStream)) {
+                throw new TypeError(
+                  "Federation transport returned an invalid stream",
+                );
+              }
               resolve(
                 new Response(body, {
                   headers: responseHeaders(incoming.rawHeaders),

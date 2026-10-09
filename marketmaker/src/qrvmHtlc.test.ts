@@ -20,15 +20,23 @@ describe("market-maker QRVM codec", () => {
       ["getSwap", ["bytes32"], [h]],
     ] as const;
     for (const [name, types, values] of vectors) {
-      const official = web3.qrl.abi.encodeFunctionCall({
-        name, type: "function", inputs: types.map((type, i) => ({ type, name: `v${i}` })),
-      }, [...values]);
+      const official = web3.qrl.abi.encodeFunctionCall(
+        {
+          name,
+          type: "function",
+          inputs: types.map((type, i) => ({ type, name: `v${i}` })),
+        },
+        [...values],
+      );
       assert.equal(encodeQrvmHtlc(name, values), official);
     }
   });
   it("keeps both address halves and rejects legacy identities", () => {
     const first = encodeQrvmHtlc("assign", [h, a]);
-    const second = encodeQrvmHtlc("assign", [h, `Q${"22".repeat(32)}${"c3".repeat(32)}`]);
+    const second = encodeQrvmHtlc("assign", [
+      h,
+      `Q${"22".repeat(32)}${"c3".repeat(32)}`,
+    ]);
     assert.notEqual(first, second);
     assert.throws(() => encodeQrvmHtlc("assign", [h, `Q${"11".repeat(20)}`]));
     assert.throws(() => encodeQrvmHtlc("lockNativeOpen", [h, -1]));
@@ -36,7 +44,15 @@ describe("market-maker QRVM codec", () => {
   });
   it("decodes the seven-word struct and refuses truncated or noncanonical data", () => {
     const raw = web3.qrl.abi.encodeParameters(
-      ["address", "address", "address", "uint256", "uint256", "uint8", "bytes32"],
+      [
+        "address",
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "uint8",
+        "bytes32",
+      ],
       [a, a, `Q${"0".repeat(128)}`, "9", "123", "1", h],
     );
     const result = decodeQrvmSwap(raw);
@@ -59,11 +75,18 @@ describe("market-maker v3 network identity", () => {
     try {
       globalThis.fetch = async (_url, init) => {
         const request = JSON.parse(String(init?.body)) as { method: string };
-        return new Response(JSON.stringify({ result: request.method === "qrl_chainId" ? "0x301825" : { hash: genesis } }));
+        return new Response(
+          JSON.stringify({
+            result:
+              request.method === "qrl_chainId" ? "0x301825" : { hash: genesis },
+          }),
+        );
       };
       await assertQrlRuntime(leg);
       genesis = `0x${"0".repeat(64)}`;
       await assert.rejects(assertQrlRuntime(leg), /chain or genesis mismatch/);
-    } finally { globalThis.fetch = original; }
+    } finally {
+      globalThis.fetch = original;
+    }
   });
 });

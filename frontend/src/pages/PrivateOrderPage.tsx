@@ -23,10 +23,7 @@ import {
   verifyOrderV1Auth,
 } from "@/lib/orderSigning";
 import { generateSecret } from "@/lib/secrets";
-import {
-  buildSignedTakerSwap,
-  sameSignedIntent,
-} from "@/components/signedOrderFlow";
+import { buildSignedTakerSwap, sameSignedIntent } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { ChainAddressPair } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
@@ -55,9 +52,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
   const [gone, setGone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [proof, setProof] = useState<"checking" | "valid" | "invalid" | "legacy" | null>(
-    null,
-  );
+  const [proof, setProof] = useState<"checking" | "valid" | "invalid" | "legacy" | null>(null);
   // On-chain check of a pre-funded order's escrow claim (the book cannot
   // prove funding; the hard gate stays the at-depth verification).
   const [escrow, setEscrow] = useState<{
@@ -136,7 +131,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     };
     // Polling replaces the row object every five seconds. Re-check only if
     // signed OrderV1 material changed, so the proof badge does not flicker.
-  }, [orderProofKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [orderProofKey]);
 
   useEffect(() => {
     if (!order || !orderIsPrelocked) {
@@ -159,7 +154,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     };
     // Re-check when the order identity or its escrow anchors move, not on
     // every poll echo of the same object.
-  }, [order?.id, orderIsPrelocked, order?.hashlock, orderAssetRaw]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [order?.id, orderIsPrelocked, order?.hashlock, orderAssetRaw]);
 
   // An active swap always wins: the home route forwards to the waiting
   // room or the canonical /swap/<hashlock> flow.
@@ -209,12 +204,7 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
           shareToken,
         });
         setSwap(recovery);
-        const submitted = await submitFillIntent(
-          order.id,
-          signed,
-          order.bookId,
-          shareToken,
-        );
+        const submitted = await submitFillIntent(order.id, signed, order.bookId, shareToken);
         if (submitted.intentDigest !== digest || !sameSignedIntent(submitted, signed)) {
           throw new Error("The order book did not preserve the signed FillIntentV1 request.");
         }
@@ -300,8 +290,8 @@ export function PrivateOrderPage({ eth, qrl, swap, setSwap }: Props) {
     if (invalid || gone) {
       return (
         <p className="text-sm text-muted-foreground">
-          This private order does not exist, was cancelled or taken, or the link is incomplete.
-          Ask your counterparty for a fresh link.
+          This private order does not exist, was cancelled or taken, or the link is incomplete. Ask
+          your counterparty for a fresh link.
         </p>
       );
     }

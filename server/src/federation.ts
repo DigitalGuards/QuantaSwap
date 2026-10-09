@@ -1,3 +1,4 @@
+import { isRecord, isArray, hasErrorCode } from "./guards.js";
 // Durable, content-addressed event feed for order-book federation. The
 // transport cursor is local to one mirror. Protocol validity is checked by
 // OrderStore before an event is appended, so this module only handles stable
@@ -26,11 +27,7 @@ import {
 import { dirname, join } from "node:path";
 
 export type FederationEventKind =
-  | "order-v2"
-  | "fill-intent-v2"
-  | "fill-v2"
-  | "cancel-v2"
-  | "release-v2";
+  "order-v2" | "fill-intent-v2" | "fill-v2" | "cancel-v2" | "release-v2";
 
 export interface FederationEvent {
   kind: FederationEventKind;
@@ -168,15 +165,15 @@ function canonicalValue(value: unknown): string {
     }
     return String(value);
   }
-  if (Array.isArray(value)) {
+  if (isArray(value)) {
     return `[${value.map((entry) => canonicalValue(entry)).join(",")}]`;
   }
-  if (typeof value === "object") {
-    const prototype = Object.getPrototypeOf(value);
+  if (isRecord(value)) {
+    const prototype: unknown = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) {
       throw new Error("federation events may contain only plain objects");
     }
-    const object = value as Record<string, unknown>;
+    const object = value;
     const keys = Object.keys(object).sort();
     return `{${keys
       .map((key) => {
@@ -243,26 +240,22 @@ export function parseFederationEvent(
   raw: unknown,
   label = "federation event",
 ): FederationEvent {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`${label} must be an object`);
   }
-  const row = raw as Record<string, unknown>;
+  const row = raw;
   if (!hasExactKeys(row, ["kind", "payload"])) {
     throw new Error(`${label} has unexpected fields`);
   }
   if (!isEventKind(row["kind"]))
     throw new Error(`${label} has an invalid kind`);
   const payload = row["payload"];
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    Array.isArray(payload)
-  ) {
+  if (!isRecord(payload)) {
     throw new Error(`${label} has an invalid payload`);
   }
   const event: FederationEvent = {
     kind: row["kind"],
-    payload: payload as Record<string, unknown>,
+    payload: payload,
   };
   if (
     Buffer.byteLength(canonicalFederationJson(event), "utf8") > MAX_EVENT_BYTES
@@ -273,10 +266,10 @@ export function parseFederationEvent(
 }
 
 function parseRecord(raw: unknown, index: number): PersistedFederationRecord {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`persisted federation event ${index} is invalid`);
   }
-  const row = raw as Record<string, unknown>;
+  const row = raw;
   const seq = row["seq"];
   const eventId = row["eventId"];
   const receivedAt = row["receivedAt"];
@@ -664,7 +657,7 @@ export class FederationFeed {
     try {
       raw = readFileSync(this.file, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      if (hasErrorCode(error, "ENOENT")) return;
       throw new Error(`federation data file could not be read: ${this.file}`);
     }
     let rewrite: boolean;
@@ -824,16 +817,12 @@ export class FederationFeed {
         `federation data file ${label} is not valid JSON: ${this.file}`,
       );
     }
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
+    if (!isRecord(parsed)) {
       throw new Error(
         `federation data file ${label} must contain an object: ${this.file}`,
       );
     }
-    return parsed as Record<string, unknown>;
+    return parsed;
   }
 
   private parseDigest(value: unknown): string | null {
@@ -864,7 +853,7 @@ export class FederationFeed {
         `federation data file has an invalid sequence: ${this.file}`,
       );
     }
-    if (!Array.isArray(rawEvents) || rawEvents.length > this.maxEvents) {
+    if (!isArray(rawEvents) || rawEvents.length > this.maxEvents) {
       throw new Error(
         `federation data file has an invalid event list: ${this.file}`,
       );
