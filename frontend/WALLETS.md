@@ -8,7 +8,6 @@ Only Ethereum Sepolia is requested. RPC reads keep using the existing Sepolia pr
 
 The QRL pairing component is `@qrlwallet/connect-ui`. Its release version and artifact integrity are pinned separately from the core `@qrlwallet/connect` SDK.
 
-
 ## HTLCv3 settlement gas, per wallet
 
 A settlement (claim, refund, release, or a credit move) has to carry
@@ -20,20 +19,19 @@ estimate * 1.3 both defer every time.
 
 The browser sends the field on every transport. What the wallet does with it:
 
-| Wallet | Honours the dApp gas limit | Effect on a settlement |
-|---|---|---|
-| MyQRLWallet web | yes | delivered |
-| MyQRLWallet mobile | yes | delivered |
-| MyQRLWallet browser extension | yes | delivered |
-| MyQRLWallet desktop | no, it re-estimates at 1.2x | always deferred into a credit |
-| QRL extension from theqrl.org | unverified | unknown |
+| Wallet                        | Honours the dApp gas limit  | Effect on a settlement        |
+| ----------------------------- | --------------------------- | ----------------------------- |
+| MyQRLWallet web               | yes                         | delivered                     |
+| MyQRLWallet mobile            | yes                         | delivered                     |
+| MyQRLWallet browser extension | yes                         | delivered                     |
+| MyQRLWallet desktop           | no, it re-estimates at 1.2x | always deferred into a credit |
+| QRL extension from theqrl.org | unverified                  | unknown                       |
 
 A deferred payout loses nothing: the swap stays terminal, the credit is fully
 backed, only the payee can redirect it, and the app surfaces it with a
 withdrawal action as soon as the settlement lands. It costs the user one extra
 transaction. The desktop fix is a change in the wallet and desktop
 repositories, tracked outside this one.
-
 
 ## How a credit is attributed to one swap
 

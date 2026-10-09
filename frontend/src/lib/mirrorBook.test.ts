@@ -47,8 +47,7 @@ const row = (overrides: Partial<OrderView> = {}): OrderView => ({
 });
 
 const verify = (order: OrderView): boolean => order.makerAuth?.signature === "valid";
-const digest = (order: OrderView): string =>
-  order.fromAmount === "1" ? DIGEST_A : DIGEST_B;
+const digest = (order: OrderView): string => (order.fromAmount === "1" ? DIGEST_A : DIGEST_B);
 
 const listResponse = (orders: readonly OrderView[]): Response =>
   new Response(JSON.stringify({ orders }), {
@@ -63,10 +62,7 @@ function streamHarness(): {
   book: (url: string, orders: readonly OrderView[]) => void;
   invalid: (url: string) => void;
 } {
-  const listeners = new Map<
-    string,
-    Map<string, (event: MessageEvent<string>) => void>
-  >();
+  const listeners = new Map<string, Map<string, (event: MessageEvent<string>) => void>>();
   const states = new Map<string, number>();
   const emit = (url: string, type: string, data = "") => {
     listeners.get(url)?.get(type)?.({ data } as MessageEvent<string>);
@@ -128,10 +124,7 @@ describe("mirror snapshot aggregation", () => {
 
     expect(result.quarantinedIds).toEqual([]);
     expect(result.invalidBookIds).toEqual([]);
-    expect(result.orders.map((order) => order.id)).toEqual([
-      "order-a",
-      "primary-unsigned",
-    ]);
+    expect(result.orders.map((order) => order.id)).toEqual(["order-a", "primary-unsigned"]);
     expect(result.orders[0]).toMatchObject({
       orderDigest: DIGEST_A,
       bookId: "primary",
@@ -165,10 +158,7 @@ describe("mirror snapshot aggregation", () => {
     );
 
     expect(result.invalidBookIds).toEqual([]);
-    expect(result.orders.map((order) => order.id)).toEqual([
-      "order-live",
-      "primary-unsigned",
-    ]);
+    expect(result.orders.map((order) => order.id)).toEqual(["order-live", "primary-unsigned"]);
   });
 
   it("still invalidates a book that serves a forged unexpired proof", () => {
@@ -344,16 +334,13 @@ describe("federated snapshot and SSE transport", () => {
     const portable = row({ id: "strict-mode-order" });
     const streams = streamHarness();
     const pending: Array<(response: Response) => void> = [];
-    const book = new FederatedOrderBook(
-      [{ id: "primary", apiBase: "/api" }],
-      () => ({
-        fetch: async () =>
-          new Promise<Response>((resolve) => {
-            pending.push(resolve);
-          }),
-        eventSource: streams.eventSource,
-      }),
-    );
+    const book = new FederatedOrderBook([{ id: "primary", apiBase: "/api" }], () => ({
+      fetch: async () =>
+        new Promise<Response>((resolve) => {
+          pending.push(resolve);
+        }),
+      eventSource: streams.eventSource,
+    }));
 
     const firstSubscription = book.subscribe(vi.fn());
     const firstRefresh = book.refresh();
@@ -387,9 +374,7 @@ describe("federated snapshot and SSE transport", () => {
       (mirror) => ({
         fetch: async () =>
           listResponse([
-            mirror.id === "primary"
-              ? portable
-              : { ...portable, makerAuth: auth("invalid") },
+            mirror.id === "primary" ? portable : { ...portable, makerAuth: auth("invalid") },
           ]),
       }),
       null,
@@ -438,9 +423,7 @@ describe("federated snapshot and SSE transport", () => {
       ],
       (mirror) => ({
         fetch: async () =>
-          listResponse([
-            mirror.id === "primary" ? portable : { ...portable, id: "tampered-id" },
-          ]),
+          listResponse([mirror.id === "primary" ? portable : { ...portable, id: "tampered-id" }]),
       }),
       null,
       { now: 15, verifyOrder: verifyBoundId, digestOrder: digest },
@@ -529,14 +512,10 @@ describe("federated snapshot and SSE transport", () => {
     await book.refresh();
     const subscription = book.subscribe(vi.fn());
     streams.open("/api/orders/stream");
-    streams.book("/api/orders/stream", [
-      { ...portable, makerAuth: auth("invalid") },
-    ]);
+    streams.book("/api/orders/stream", [{ ...portable, makerAuth: auth("invalid") }]);
 
     expect(book.current()).toMatchObject({
-      orders: [
-        expect.objectContaining({ bookId: "community", sources: ["community"] }),
-      ],
+      orders: [expect.objectContaining({ bookId: "community", sources: ["community"] })],
       mirrors: [
         expect.objectContaining({ bookId: "primary", availability: "unavailable" }),
         expect.objectContaining({ bookId: "community", availability: "available" }),
@@ -752,12 +731,7 @@ describe("federated snapshot and SSE transport", () => {
     });
     const aggregationOptions = { verifyOrder: verify, digestOrder: digest };
 
-    const first = new FederatedOrderBook(
-      mirrors,
-      optionsForMirror,
-      storage,
-      aggregationOptions,
-    );
+    const first = new FederatedOrderBook(mirrors, optionsForMirror, storage, aggregationOptions);
     await expect(first.refresh()).resolves.toMatchObject({
       orders: [],
       quarantinedIds: [conflictId],
@@ -790,10 +764,7 @@ describe("federated snapshot and SSE transport", () => {
       },
     };
     const events = {
-      addEventListener: (
-        _type: "storage",
-        listener: (event: { key: string | null }) => void,
-      ) => {
+      addEventListener: (_type: "storage", listener: (event: { key: string | null }) => void) => {
         listeners.push(listener);
       },
     };
@@ -849,9 +820,7 @@ describe("federated snapshot and SSE transport", () => {
       observedAt: now - index,
     }));
     entries.push({ id: expiredId, observedAt: now - 50 * 60 * 60 * 1_000 });
-    const stored = new Map<string, string>([
-      [storageKey, JSON.stringify({ version: 2, entries })],
-    ]);
+    const stored = new Map<string, string>([[storageKey, JSON.stringify({ version: 2, entries })]]);
     const storage = {
       getItem: (key: string) => stored.get(key) ?? null,
       setItem: (key: string, value: string) => {

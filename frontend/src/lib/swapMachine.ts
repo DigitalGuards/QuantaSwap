@@ -26,11 +26,8 @@ export const ZERO32 = `0x${"0".repeat(64)}`;
  *  refusal: a client inside it abandons the claim and falls back to the
  *  refund path. Checked when a step is derived and again at broadcast,
  *  because a margin checked at compose time is not a margin at broadcast. */
-export const claimCutoffBlocked = (
-  timeout: number,
-  nowS: number,
-  marginS: number,
-): boolean => nowS >= timeout - marginS;
+export const claimCutoffBlocked = (timeout: number, nowS: number, marginS: number): boolean =>
+  nowS >= timeout - marginS;
 
 export const CLAIM_CUTOFF_ISSUE =
   "the claim window is inside its safety margin; the refund path takes over";
@@ -46,11 +43,7 @@ export const sameAddr = (a: string, b: string): boolean => {
 };
 
 export type StepKey =
-  | "lock-initiator"
-  | "assign-initiator"
-  | "lock-responder"
-  | "claim-responder"
-  | "claim-initiator";
+  "lock-initiator" | "assign-initiator" | "lock-responder" | "claim-responder" | "claim-initiator";
 
 export interface StepModel {
   key: StepKey;
@@ -170,10 +163,16 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         }
       : { expectedToken: QRL_NATIVE_TOKEN, symbol: QRL_LEG.display, decimals: 18 };
 
-  const legPlan = {
-    [iLeg]: { recipient: addrOn(iLeg, "taker"), amount: BigInt(swap.fromAmount), ...assetOn(iLeg) },
-    [rLeg]: { recipient: addrOn(rLeg, "maker"), amount: BigInt(swap.toAmount), ...assetOn(rLeg) },
-  } as Record<LegKey, LegPlan>;
+  const planFor = (leg: LegKey): LegPlan => ({
+    recipient: addrOn(leg, leg === iLeg ? "taker" : "maker"),
+    amount: BigInt(leg === iLeg ? swap.fromAmount : swap.toAmount),
+    ...assetOn(leg),
+  });
+  const legPlan: Record<LegKey, LegPlan> = { eth: planFor("eth"), qrl: planFor("qrl") };
+  const payeesFor = (leg: LegKey) => ({
+    claim: addrOn(leg, leg === iLeg ? "taker" : "maker"),
+    refund: addrOn(leg, leg === iLeg ? "maker" : "taker"),
+  });
 
   // The token identity check on a counterparty lock. A lockToken() record
   // shares the getSwap struct with lockNative(), so without this a lock
@@ -182,7 +181,8 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
   // (native sentinel or the agreed asset's registry address) is honest.
   const tokenIssue = (confirmedToken: string, plan: LegPlan): string | null => {
     if (sameAddr(confirmedToken, plan.expectedToken)) return null;
-    return sameAddr(plan.expectedToken, NATIVE_TOKEN) || sameAddr(plan.expectedToken, QRL_NATIVE_TOKEN)
+    return sameAddr(plan.expectedToken, NATIVE_TOKEN) ||
+      sameAddr(plan.expectedToken, QRL_NATIVE_TOKEN)
       ? `it escrows a token, not native ${plan.symbol}`
       : `it escrows the wrong token contract, not the agreed ${plan.symbol}`;
   };
@@ -259,11 +259,11 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     // a clean responder leg and fails closed while it is unknown.
     canRun: Boolean(
       iState &&
-        iState.status === SwapStatus.Open &&
-        unassigned(iState, iLeg) &&
-        rState &&
-        rState.status === SwapStatus.None &&
-        nowS < responderTimeout,
+      iState.status === SwapStatus.Open &&
+      unassigned(iState, iLeg) &&
+      rState &&
+      rState.status === SwapStatus.None &&
+      nowS < responderTimeout,
     ),
     issue:
       mySteps[0] &&
@@ -276,9 +276,9 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
         : null,
     awaitingDepth: Boolean(
       iState &&
-        iState.status === SwapStatus.Open &&
-        !unassigned(iState, iLeg) &&
-        !(iConfirmed && iConfirmed.status === SwapStatus.Open && !unassigned(iConfirmed, iLeg)),
+      iState.status === SwapStatus.Open &&
+      !unassigned(iState, iLeg) &&
+      !(iConfirmed && iConfirmed.status === SwapStatus.Open && !unassigned(iConfirmed, iLeg)),
     ),
   };
 
@@ -301,12 +301,12 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       done: Boolean(rState && rState.status !== SwapStatus.None),
       canRun: Boolean(
         iConfirmed &&
-          iConfirmed.status === SwapStatus.Open &&
-          !initiatorLockIssue &&
-          !awaitingAssign &&
-          rState &&
-          rState.status === SwapStatus.None &&
-          nowS < responderTimeout,
+        iConfirmed.status === SwapStatus.Open &&
+        !initiatorLockIssue &&
+        !awaitingAssign &&
+        rState &&
+        rState.status === SwapStatus.None &&
+        nowS < responderTimeout,
       ),
       issue: mySteps[1] ? initiatorLockIssue : null,
       awaitingDepth: Boolean(
@@ -328,13 +328,13 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       // taker; this closes it for buggy counterclients too).
       canRun: Boolean(
         swap.preimage &&
-          iState &&
-          iState.status === SwapStatus.Open &&
-          (!prelocked || !unassigned(iState, iLeg)) &&
-          rConfirmed &&
-          rConfirmed.status === SwapStatus.Open &&
-          !responderLockIssue &&
-          nowS < responderTimeout,
+        iState &&
+        iState.status === SwapStatus.Open &&
+        (!prelocked || !unassigned(iState, iLeg)) &&
+        rConfirmed &&
+        rConfirmed.status === SwapStatus.Open &&
+        !responderLockIssue &&
+        nowS < responderTimeout,
       ),
       issue: mySteps[2] ? responderLockIssue : null,
       awaitingDepth: Boolean(
@@ -358,10 +358,10 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
       // contract reverts NotAssigned), so nothing to offer either.
       canRun: Boolean(
         revealedPreimage &&
-          iState &&
-          iState.status === SwapStatus.Open &&
-          (!prelocked || !unassigned(iState, iLeg)) &&
-          !claimCutoffBlocked(iState.timeout, nowS, CLAIM_MARGIN_S),
+        iState &&
+        iState.status === SwapStatus.Open &&
+        (!prelocked || !unassigned(iState, iLeg)) &&
+        !claimCutoffBlocked(iState.timeout, nowS, CLAIM_MARGIN_S),
       ),
       issue:
         mySteps[3] &&
@@ -416,8 +416,8 @@ export function deriveSwapMachine(input: SwapMachineInput): SwapMachine | null {
     // leg, so each leg's refund payee is the party that did not agree to
     // receive on it.
     legPayees: {
-      [iLeg]: { claim: addrOn(iLeg, "taker"), refund: addrOn(iLeg, "maker") },
-      [rLeg]: { claim: addrOn(rLeg, "maker"), refund: addrOn(rLeg, "taker") },
-    } as Record<LegKey, { claim: string; refund: string }>,
+      eth: payeesFor("eth"),
+      qrl: payeesFor("qrl"),
+    },
   };
 }

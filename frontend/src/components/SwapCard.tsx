@@ -124,17 +124,17 @@ export function SwapCard({ ethAccount, qrlAccount, onStart }: Props) {
           <div className="flex items-start justify-between gap-4">
             <span className="text-muted-foreground">Receive to</span>
             <span className="min-w-0 text-right text-xs text-blue-accent">
-              {toLeg.key === "qrl"
-                ? qrlAccount
-                  ? (
-                      <AddressFingerprint address={qrlAccount} />
-                    )
-                  : "connect QRL wallet"
-                : ethAccount
-                  ? (
-                      <AddressFingerprint address={ethAccount} />
-                    )
-                  : "connect ETH wallet"}
+              {toLeg.key === "qrl" ? (
+                qrlAccount ? (
+                  <AddressFingerprint address={qrlAccount} />
+                ) : (
+                  "connect QRL wallet"
+                )
+              ) : ethAccount ? (
+                <AddressFingerprint address={ethAccount} />
+              ) : (
+                "connect ETH wallet"
+              )}
             </span>
           </div>
           <div className="flex justify-between">

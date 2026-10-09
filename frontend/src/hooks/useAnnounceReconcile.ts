@@ -1,10 +1,5 @@
 import { useEffect, useRef } from "react";
-import {
-  clearMyOrder,
-  loadMyOrder,
-  type ActiveSwap,
-  type MyOrderRef,
-} from "@/lib/activeSwap";
+import { clearMyOrder, loadMyOrder, type ActiveSwap, type MyOrderRef } from "@/lib/activeSwap";
 import {
   announceHashlock,
   assertMakerOrderProgress,
@@ -14,11 +9,7 @@ import {
 } from "@/lib/orderbook";
 
 interface AnnounceReconcileDependencies {
-  getOrder: (
-    id: string,
-    shareToken: string | undefined,
-    bookId: string,
-  ) => Promise<OrderView>;
+  getOrder: (id: string, shareToken: string | undefined, bookId: string) => Promise<OrderView>;
   announceHashlock: (
     id: string,
     body: {
@@ -29,11 +20,7 @@ interface AnnounceReconcileDependencies {
     },
     bookId: string,
   ) => Promise<OrderView>;
-  assertMakerOrderProgress: (
-    local: MyOrderRef,
-    stored: ActiveSwap,
-    current: OrderView,
-  ) => void;
+  assertMakerOrderProgress: (local: MyOrderRef, stored: ActiveSwap, current: OrderView) => void;
 }
 
 const defaultDependencies: AnnounceReconcileDependencies = {
@@ -48,11 +35,7 @@ export async function reconcileMakerAnnouncement(
   dependencies: AnnounceReconcileDependencies = defaultDependencies,
 ): Promise<void> {
   const bookId = myOrder.bookId ?? swap.bookId ?? "primary";
-  const order = await dependencies.getOrder(
-    myOrder.id,
-    myOrder.shareToken ?? undefined,
-    bookId,
-  );
+  const order = await dependencies.getOrder(myOrder.id, myOrder.shareToken ?? undefined, bookId);
   dependencies.assertMakerOrderProgress(myOrder, swap, order);
   if (order.status !== "accepted") return;
   const announced = await dependencies.announceHashlock(

@@ -2,16 +2,8 @@ import { useEffect, useState } from "react";
 import { formatUnits } from "ethers";
 import { ETH_ASSETS, QRL_LEG } from "@/config";
 import { saveActiveSwap, type ActiveSwap } from "@/lib/activeSwap";
-import {
-  announcedOrderTerms,
-  getOrder,
-  OrderGoneError,
-  submitFillIntent,
-} from "@/lib/orderbook";
-import {
-  sameSignedIntent,
-  verifyTakerFill,
-} from "@/components/signedOrderFlow";
+import { announcedOrderTerms, getOrder, OrderGoneError, submitFillIntent } from "@/lib/orderbook";
+import { sameSignedIntent, verifyTakerFill } from "@/components/signedOrderFlow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { Button } from "@/components/UI/Button";
 
@@ -58,17 +50,11 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
             if (!stop) setError(null);
           } catch (err) {
             if (!stop) {
-              setError(
-                err instanceof Error ? err.message : "Could not replay the fill request",
-              );
+              setError(err instanceof Error ? err.message : "Could not replay the fill request");
             }
           }
         }
-        const order = await getOrder(
-          orderId,
-          swap.shareToken ?? undefined,
-          swap.bookId,
-        );
+        const order = await getOrder(orderId, swap.shareToken ?? undefined, swap.bookId);
         if (stop) return;
         if (order.status === "cancelled") {
           onAbort("The maker cancelled the order before locking. Nothing was at risk.");
@@ -85,10 +71,7 @@ export function AwaitHashlock({ swap, onReady, onAbort }: Props) {
               }
             : null;
         if (signedRecovery !== null) {
-          if (
-            order.status === "open" &&
-            now > signedRecovery.intent.auth.expiresAt + 10
-          ) {
+          if (order.status === "open" && now > signedRecovery.intent.auth.expiresAt + 10) {
             onAbort("The signed fill request expired before the maker selected it.");
             return;
           }

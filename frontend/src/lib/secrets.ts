@@ -15,6 +15,6 @@ export interface SwapSecret {
 export async function generateSecret(): Promise<SwapSecret> {
   const raw = new Uint8Array(32);
   crypto.getRandomValues(raw);
-  const digest = await crypto.subtle.digest("SHA-256", raw.buffer as ArrayBuffer);
+  const digest = await crypto.subtle.digest("SHA-256", raw.buffer);
   return { preimage: toHex(raw), hashlock: toHex(new Uint8Array(digest)) };
 }

@@ -1,9 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  loadSignedOrderStage,
-  saveSignedOrderStage,
-  type SignedOrderStage,
-} from "./activeSwap";
+import { loadSignedOrderStage, saveSignedOrderStage, type SignedOrderStage } from "./activeSwap";
 import type { MakerOrderAuthV1, OrderView } from "./orderbook";
 import { OrderbookClient } from "./orderbookClient";
 import { capabilityCommitment } from "./orderSigning";
@@ -19,7 +15,7 @@ function stubStorage(): void {
     get length() {
       return store.size;
     },
-  } as Storage;
+  };
 }
 
 const makerToken = "aa".repeat(32);
@@ -43,7 +39,7 @@ const stage: SignedOrderStage = {
     fromAmount: "1",
     toAmount: "2",
     makerEthAccount: `0x${"22".repeat(20)}`,
-    makerQrlAccount: `Q${"33".repeat(20)}`,
+    makerQrlAccount: `Q${"33".repeat(64)}`,
     visibility: "private",
   },
   auth,
@@ -103,9 +99,7 @@ describe("signed order publication recovery", () => {
         order: afterReload!.order,
         auth: afterReload!.auth,
         makerToken: afterReload!.makerToken,
-        ...(afterReload!.shareToken === undefined
-          ? {}
-          : { shareToken: afterReload!.shareToken }),
+        ...(afterReload!.shareToken === undefined ? {} : { shareToken: afterReload!.shareToken }),
       }),
     ).resolves.toEqual({ order });
     expect(sent).toHaveLength(2);

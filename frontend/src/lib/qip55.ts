@@ -6,8 +6,7 @@ export const QRVM_ADDRESS_RE = /^0x[0-9a-fA-F]{128}$/;
 export const LEGACY_QRL_ADDRESS_RE = /^Q[0-9a-fA-F]{40}$/;
 export const QRVM_ZERO_ADDRESS = `0x${"0".repeat(128)}`;
 
-export const QIP55_PORTABLE_ORDER_ERROR =
-  "Portable V2 requires a QIP-55 64-byte QRL account";
+export const QIP55_PORTABLE_ORDER_ERROR = "Portable V2 requires a QIP-55 64-byte QRL account";
 export const QIP55_DEPLOYMENT_ERROR =
   "QIP-55 requires a fresh 64-byte QRL HTLC deployment before QRL swaps can run";
 export const QIP55_QRVM_ABI_ERROR =
@@ -84,7 +83,9 @@ export function assertQip55ExecutionReady(account: string, htlc: string): void {
   }
   if (LEGACY_QRL_ADDRESS_RE.test(htlc)) throw new Error(QIP55_DEPLOYMENT_ERROR);
   if (!isQip55QrlAddress(htlc)) {
-    throw new Error("QRL HTLC must be an uppercase Q-prefixed 64-byte address with a valid checksum");
+    throw new Error(
+      "QRL HTLC must be an uppercase Q-prefixed 64-byte address with a valid checksum",
+    );
   }
 }
 
@@ -92,7 +93,9 @@ export function assertQip55Deployment(htlc: string): void {
   if (!htlc || /^Q0{128}$/.test(htlc)) throw new Error(QIP55_DEPLOYMENT_ERROR);
   if (LEGACY_QRL_ADDRESS_RE.test(htlc)) throw new Error(QIP55_DEPLOYMENT_ERROR);
   if (!isQip55QrlAddress(htlc)) {
-    throw new Error("QRL HTLC must be an uppercase Q-prefixed 64-byte address with a valid checksum");
+    throw new Error(
+      "QRL HTLC must be an uppercase Q-prefixed 64-byte address with a valid checksum",
+    );
   }
 }
 

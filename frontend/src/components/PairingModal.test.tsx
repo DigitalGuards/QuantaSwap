@@ -51,9 +51,7 @@ describe("PairingModal lifecycle", () => {
       />,
     );
 
-    container
-      .querySelector("qrl-pairing-modal")!
-      .dispatchEvent(new CustomEvent("qrl-cancel"));
+    container.querySelector("qrl-pairing-modal")!.dispatchEvent(new CustomEvent("qrl-cancel"));
 
     expect(onCancel).toHaveBeenCalledOnce();
   });

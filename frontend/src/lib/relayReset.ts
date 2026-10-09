@@ -35,20 +35,17 @@ export function shouldIgnoreRelayResetEvent(
   guard: RelayResetGuard,
   event: RelayResetEvent,
 ): boolean {
-  return (
-    guard.active && (event === "accounts" || event === "disconnect" || event === "status")
-  );
+  return guard.active && (event === "accounts" || event === "disconnect" || event === "status");
 }
 
 export type WalletConnectionKind = "relay" | "extension";
 
 export type ExtensionActivationResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; retirementError: unknown };
+  { ok: true; value: T } | { ok: false; retirementError: unknown };
 
 /** Retire every relay session before requesting and activating an extension. */
 export async function activateExtensionAfterRelayRetirement<TAccounts, TResult>(
-  retireRelay: () => Promise<unknown | null>,
+  retireRelay: () => Promise<unknown>,
   requestAccounts: () => Promise<TAccounts>,
   activate: (accounts: TAccounts) => TResult | Promise<TResult>,
 ): Promise<ExtensionActivationResult<TResult>> {
@@ -108,8 +105,7 @@ export class ChannelTaskGuard {
 
   isPending(channelId?: string): boolean {
     return (
-      this.current !== null &&
-      (channelId === undefined || this.current.channelId === channelId)
+      this.current !== null && (channelId === undefined || this.current.channelId === channelId)
     );
   }
 }

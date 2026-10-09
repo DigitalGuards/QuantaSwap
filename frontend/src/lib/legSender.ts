@@ -1,3 +1,4 @@
+import { requireHex } from "@/utils/guards";
 // Wallet transaction sender for both legs, shared by the swap flow and
 // the prelock post flow (which escrows before an order even exists, so it
 // cannot live inside SwapFlow). Extracted verbatim from SwapFlow; the
@@ -51,7 +52,7 @@ export type ClaimSender = (
  *  transport, because only the QRL relay estimates on the wallet's side.
  *  See docs/audit/HTLCV3_SCOPE.md A1 and A2. */
 async function estimateQrlSettlementGas(tx: Record<string, unknown>): Promise<bigint> {
-  const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
+  const estimated = requireHex(await qrlRpc("qrl_estimateGas", [tx]));
   const gasLimit = settlementGasLimit(BigInt(estimated));
   if (gasLimit <= 0n || gasLimit > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Invalid QRL settlement gas estimate");
@@ -127,9 +128,10 @@ export const makeLegSender =
         // shape its own internal sends use. Numeric gas under both keys,
         // decimal-string value. The relay wallet estimates itself, so it
         // keeps the minimal hex shape.
-        const estimated = (await qrlRpc("qrl_estimateGas", [tx])) as string;
+        const estimated = requireHex(await qrlRpc("qrl_estimateGas", [tx]));
         const gasLimit = Number((BigInt(estimated) * 130n) / 100n);
-        if (!Number.isSafeInteger(gasLimit) || gasLimit <= 0) throw new Error("Invalid QRL gas estimate");
+        if (!Number.isSafeInteger(gasLimit) || gasLimit <= 0)
+          throw new Error("Invalid QRL gas estimate");
         tx = {
           from: h.qrlAccount,
           to: QRL_LEG.htlc,
@@ -207,7 +209,7 @@ export const makePreflightedClaimSender =
       const signer = await h.browserProvider.getSigner();
       const from = await signer.getAddress();
       try {
-        const result = await h.browserProvider.send("eth_call", [
+        const result: unknown = await h.browserProvider.send("eth_call", [
           { from, to: ETH_LEG.htlc, data, value: `0x${valueWei.toString(16)}` },
           "latest",
         ]);
@@ -259,7 +261,8 @@ export const makePreflightedClaimSender =
     };
     try {
       const result = await qrlRpc("qrl_call", [callTx, "latest"]);
-      if (typeof result !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(result)) throw new Error("Invalid QRL simulation result");
+      if (typeof result !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(result))
+        throw new Error("Invalid QRL simulation result");
     } catch {
       throw new Error("QRL claim preflight rejected; the secret was not submitted");
     }
@@ -275,13 +278,7 @@ export const makePreflightedClaimSender =
     } catch {
       throw new Error("QRL claim gas estimation failed; the secret was not submitted");
     }
-    const sendTx = qrlSettlementTx(
-      h.qrlAccount,
-      data,
-      valueWei,
-      h.qrlTransport,
-      gasLimit,
-    );
+    const sendTx = qrlSettlementTx(h.qrlAccount, data, valueWei, h.qrlTransport, gasLimit);
     // The network recheck runs before the cutoff guard, so nothing
     // network-bound sits between the guard reading the escrow's deadline and
     // the broadcast: a slow call there would widen the very window the guard

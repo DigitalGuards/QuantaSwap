@@ -97,7 +97,9 @@ describe("calldata encoding", () => {
   it("lockToken and approve selectors derive from their canonical signatures", () => {
     // The selectors are recomputed from the signatures here so a drifted
     // ABI string in htlc.ts cannot silently change the wire format.
-    expect(id("lockToken(bytes32,address,address,uint256,uint256)").slice(0, 10)).toBe("0xecac467d");
+    expect(id("lockToken(bytes32,address,address,uint256,uint256)").slice(0, 10)).toBe(
+      "0xecac467d",
+    );
     expect(id("approve(address,uint256)").slice(0, 10)).toBe("0x095ea7b3");
     expect(buildLockTokenData(HASHLOCK, RECIPIENT, TOKEN, AMOUNT, TIMEOUT).slice(0, 10)).toBe(
       "0xecac467d",
@@ -162,8 +164,8 @@ describe("shortAddr", () => {
   it("truncates long addresses and passes short strings through", () => {
     expect(shortAddr(RECIPIENT)).toBe("0xbbbbbb…bbbb");
     expect(shortAddr("Qabc")).toBe("Qabc");
-    expect(
-      shortAddr(`Q${"11111111"}${"2".repeat(52)}${"33333333"}${"4".repeat(52)}${"55555555"}`),
-    ).toBe("Q11111111...33333333...55555555");
+    expect(shortAddr(`Q11111111${"2".repeat(52)}33333333${"4".repeat(52)}55555555`)).toBe(
+      "Q11111111...33333333...55555555",
+    );
   });
 });

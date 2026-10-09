@@ -1,18 +1,15 @@
+import { isRecord, InvalidInputError } from "@/utils/guards";
+import { isActiveSwap, isMyOrderRef, isSignedOrderStage, isPrelockStage } from "./storageGuards";
 // Local persistence for the in-flight swap. The preimage is safety-critical
 // state: losing it after the counterparty locked means waiting out the
 // refund path, so it stays in localStorage until the swap reaches a
 // terminal state on both legs. The taker never holds the preimage.
 
 import { DEPLOYMENT_STORAGE_PREFIX, PRIMARY_ORDERBOOK_ID, type LegKey } from "../config";
-import { ethAssetSymbolOrNull, type EthAssetSymbol } from "./assetRegistry";
+import type { EthAssetSymbol } from "./assetRegistry";
 import type { CreateOrderBody, MakerOrderAuthV1 } from "./orderbook";
 import type { FillIntentView } from "./orderbookClient";
-import type {
-  FillV1Body,
-  SignedCancelV1,
-  SignedFillIntentV1,
-  SignedFillV1,
-} from "./orderSigning";
+import type { FillV1Body, SignedCancelV1, SignedFillIntentV1, SignedFillV1 } from "./orderSigning";
 
 export type Direction = "eth->qrl" | "qrl->eth";
 export type SwapRole = "maker" | "taker" | "sandbox";
@@ -90,9 +87,11 @@ const KEY = SWAP_STORAGE_KEY;
 const BOOK_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 function persistedBookId(value: unknown): string {
-  return typeof value === "string" && BOOK_ID_RE.test(value)
-    ? value
-    : PRIMARY_ORDERBOOK_ID;
+  if (value === undefined) return PRIMARY_ORDERBOOK_ID;
+  if (typeof value !== "string" || !BOOK_ID_RE.test(value)) {
+    throw new InvalidInputError("Invalid persisted order book identity");
+  }
+  return value;
 }
 
 export const initiatorLeg = (direction: Direction): LegKey =>
@@ -102,26 +101,30 @@ export const responderLeg = (direction: Direction): LegKey =>
 
 export function hasLegacySwapState(): boolean {
   try {
-    return ["quantaswap.demo.v1", "quantaswap.swap.v2", "quantaswap.myorder.v1",
-      "quantaswap.signedorderstage.v1", "quantaswap.prelockstage.v1"].some(
-      key => localStorage.getItem(key) !== null,
-    );
-  } catch { return false; }
+    return [
+      "quantaswap.demo.v1",
+      "quantaswap.swap.v2",
+      "quantaswap.myorder.v1",
+      "quantaswap.signedorderstage.v1",
+      "quantaswap.prelockstage.v1",
+    ].some((key) => localStorage.getItem(key) !== null);
+  } catch {
+    return false;
+  }
 }
 
 export function loadActiveSwap(): ActiveSwap | null {
   try {
     const raw = localStorage.getItem(KEY);
     if (raw) {
-      const swap = JSON.parse(raw) as ActiveSwap;
+      const swap: unknown = JSON.parse(raw);
+      if (!isRecord(swap)) return null;
       swap.bookId = persistedBookId(swap.bookId);
       // Swaps stored before the taker token existed.
       swap.takerToken ??= null;
-      // Swaps stored before the ETH-leg asset existed mean native ETH;
-      // anything the registry does not know also normalizes to ETH, which
-      // fails closed downstream (token verification rejects the mismatch).
-      swap.ethAsset = ethAssetSymbolOrNull(swap.ethAsset) ?? "ETH";
-      return swap;
+      // Swaps stored before the ETH-leg asset existed mean native ETH.
+      if (swap.ethAsset === undefined) swap.ethAsset = "ETH";
+      return isActiveSwap(swap) ? swap : null;
     }
     return null;
   } catch {
@@ -130,10 +133,7 @@ export function loadActiveSwap(): ActiveSwap | null {
 }
 
 export function saveActiveSwap(swap: ActiveSwap): void {
-  localStorage.setItem(
-    KEY,
-    JSON.stringify({ ...swap, bookId: persistedBookId(swap.bookId) }),
-  );
+  localStorage.setItem(KEY, JSON.stringify({ ...swap, bookId: persistedBookId(swap.bookId) }));
 }
 
 export const hasCurrentTermBinding = (swap: ActiveSwap): boolean =>
@@ -203,31 +203,28 @@ export function loadMyOrder(): MyOrderRef | null {
   try {
     const raw = localStorage.getItem(ORDER_KEY);
     if (!raw) return null;
-    const ref = JSON.parse(raw) as MyOrderRef;
+    const ref: unknown = JSON.parse(raw);
+    if (!isRecord(ref)) return null;
     ref.bookId = persistedBookId(ref.bookId);
     // Handles stored before semantic term binding existed may still be
     // used to cancel or release an escrow, but matching fails closed.
-    ref.direction =
-      ref.direction === "eth->qrl" || ref.direction === "qrl->eth" ? ref.direction : null;
+    if (ref.direction === undefined) ref.direction = null;
     // Handles stored before the ETH-leg asset existed mean native ETH.
-    ref.asset = ethAssetSymbolOrNull(ref.asset) ?? "ETH";
+    if (ref.asset === undefined) ref.asset = "ETH";
     // Handles stored before amount anchoring / private orders existed.
     ref.fromAmount ??= null;
     ref.toAmount ??= null;
     ref.shareToken ??= null;
     // Handles stored before pre-funded orders existed.
     ref.prelock ??= null;
-    return ref;
+    return isMyOrderRef(ref) ? ref : null;
   } catch {
     return null;
   }
 }
 
 export function saveMyOrder(ref: MyOrderRef): void {
-  localStorage.setItem(
-    ORDER_KEY,
-    JSON.stringify({ ...ref, bookId: persistedBookId(ref.bookId) }),
-  );
+  localStorage.setItem(ORDER_KEY, JSON.stringify({ ...ref, bookId: persistedBookId(ref.bookId) }));
 }
 
 export function clearMyOrder(): void {
@@ -253,9 +250,10 @@ export function loadSignedOrderStage(): SignedOrderStage | null {
   try {
     const raw = localStorage.getItem(SIGNED_ORDER_STAGE_KEY);
     if (!raw) return null;
-    const stage = JSON.parse(raw) as SignedOrderStage;
+    const stage: unknown = JSON.parse(raw);
+    if (!isRecord(stage)) return null;
     stage.bookId = persistedBookId(stage.bookId);
-    return stage;
+    return isSignedOrderStage(stage) ? stage : null;
   } catch {
     return null;
   }
@@ -301,7 +299,8 @@ export function loadPrelockStage(): PrelockStage | null {
   try {
     const raw = localStorage.getItem(STAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as PrelockStage;
+    const stage: unknown = JSON.parse(raw);
+    return isPrelockStage(stage) ? stage : null;
   } catch {
     return null;
   }

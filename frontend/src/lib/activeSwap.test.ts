@@ -36,7 +36,7 @@ function stubStorage(): void {
     get length() {
       return store.size;
     },
-  } as Storage;
+  };
 }
 
 const swap: ActiveSwap = {
@@ -63,6 +63,23 @@ const swap: ActiveSwap = {
 beforeEach(stubStorage);
 
 describe("active swap persistence", () => {
+  it.each([
+    null,
+    [],
+    { ...swap, direction: "invalid" },
+    { ...swap, fromAmount: 42 },
+    { ...swap, ethAsset: null },
+    { ...swap, bookId: 42 },
+    { ...swap, initiatorTimeout: "1800007200" },
+    { ...swap, intent: { intent: {}, auth: {} } },
+    { ...swap, fill: { fill: {}, auth: {} } },
+    { ...swap, acceptedPrelock: { hashlock: swap.hashlock } },
+  ])("rejects malformed recovery state and preserves its stored bytes: %j", (value) => {
+    const raw = JSON.stringify(value);
+    localStorage.setItem(SWAP_STORAGE_KEY, raw);
+    expect(loadActiveSwap()).toBeNull();
+    expect(localStorage.getItem(SWAP_STORAGE_KEY)).toBe(raw);
+  });
   it("roundtrips save -> load, preimage included", () => {
     saveActiveSwap(swap);
     expect(loadActiveSwap()).toEqual(swap);
@@ -102,19 +119,18 @@ describe("active swap persistence", () => {
     expect(loadActiveSwap()?.ethAsset).toBe("tUSDT");
   });
 
-  it("normalizes an unknown persisted asset to ETH (fails closed downstream)", () => {
-    localStorage.setItem(SWAP_STORAGE_KEY, JSON.stringify({ ...swap, ethAsset: "DOGE" }));
-    expect(loadActiveSwap()?.ethAsset).toBe("ETH");
+  it("rejects an unknown persisted asset and retains its recovery bytes", () => {
+    const raw = JSON.stringify({ ...swap, ethAsset: "DOGE" });
+    localStorage.setItem(SWAP_STORAGE_KEY, raw);
+    expect(loadActiveSwap()).toBeNull();
+    expect(localStorage.getItem(SWAP_STORAGE_KEY)).toBe(raw);
   });
 
-  it("persists a selected mirror and defaults an invalid legacy id to primary", () => {
+  it("persists a selected mirror and rejects an invalid stored identity", () => {
     saveActiveSwap({ ...swap, bookId: "community" });
     expect(loadActiveSwap()?.bookId).toBe("community");
-    localStorage.setItem(
-      SWAP_STORAGE_KEY,
-      JSON.stringify({ ...swap, bookId: "../not-an-origin" }),
-    );
-    expect(loadActiveSwap()?.bookId).toBe("primary");
+    localStorage.setItem(SWAP_STORAGE_KEY, JSON.stringify({ ...swap, bookId: "../not-an-origin" }));
+    expect(loadActiveSwap()).toBeNull();
   });
 
   it("roundtrips the prelocked flag and leaves classic swaps without it", () => {
@@ -162,7 +178,12 @@ describe("legacy testnet preservation", () => {
   });
 
   it("keeps previous swap, order, and staged secrets intact across v3 clear", () => {
-    const legacyKeys = ["quantaswap.swap.v2", "quantaswap.myorder.v1", "quantaswap.signedorderstage.v1", "quantaswap.prelockstage.v1"];
+    const legacyKeys = [
+      "quantaswap.swap.v2",
+      "quantaswap.myorder.v1",
+      "quantaswap.signedorderstage.v1",
+      "quantaswap.prelockstage.v1",
+    ];
     for (const key of legacyKeys) localStorage.setItem(key, "preserved-recovery-state");
     expect(loadActiveSwap()).toBeNull();
     expect(loadMyOrder()).toBeNull();
@@ -172,11 +193,18 @@ describe("legacy testnet preservation", () => {
     clearActiveSwap();
     clearSignedOrderStage();
     clearPrelockStage();
-    for (const key of legacyKeys) expect(localStorage.getItem(key)).toBe("preserved-recovery-state");
+    for (const key of legacyKeys)
+      expect(localStorage.getItem(key)).toBe("preserved-recovery-state");
   });
 });
 
 describe("my-order handle", () => {
+  it("rejects incomplete signed artifacts without clearing recovery material", () => {
+    const raw = JSON.stringify({ id: "o1", token: "t1", fill: { auth: {} } });
+    localStorage.setItem(ORDER_STORAGE_KEY, raw);
+    expect(loadMyOrder()).toBeNull();
+    expect(localStorage.getItem(ORDER_STORAGE_KEY)).toBe(raw);
+  });
   it("roundtrips and survives corruption", () => {
     const ref = {
       id: "o1",

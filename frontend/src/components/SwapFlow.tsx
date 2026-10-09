@@ -305,11 +305,7 @@ export function SwapFlow({
     let stop = false;
     const poll = async () => {
       try {
-        const view = await getOrder(
-          orderId,
-          swap.shareToken ?? undefined,
-          swap.bookId,
-        );
+        const view = await getOrder(orderId, swap.shareToken ?? undefined, swap.bookId);
         if (!stop) setOrder(view);
       } catch {
         // transient or gone; ignore, the chain governs the funds
@@ -343,7 +339,14 @@ export function SwapFlow({
   // Refunds, releases and credit moves carry the HTLCv3 settlement gas rule
   // so a payout that can be delivered is not deferred into a credit.
   const settleOnLeg = useMemo(
-    () => makeSettlementSender({ browserProvider, ensureSepolia, qrlAccount, qrlTransport, qrlRequest }),
+    () =>
+      makeSettlementSender({
+        browserProvider,
+        ensureSepolia,
+        qrlAccount,
+        qrlTransport,
+        qrlRequest,
+      }),
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
@@ -453,8 +456,7 @@ export function SwapFlow({
       requireBoundTerms();
       if (
         swap.intent !== undefined &&
-        ((swap.role === "taker" && leg === rLeg) ||
-          (swap.role === "maker" && leg === iLeg))
+        ((swap.role === "taker" && leg === rLeg) || (swap.role === "maker" && leg === iLeg))
       ) {
         if (signedFillIssue !== null) throw new Error(signedFillIssue);
       }
@@ -511,9 +513,7 @@ export function SwapFlow({
           fresh.status === SwapStatus.Open &&
           claimCutoffBlocked(fresh.timeout, Math.floor(Date.now() / 1000), CLAIM_MARGIN_S)
         ) {
-          throw new Error(
-            `The ${legByKey(leg).name} claim was abandoned: ${CLAIM_CUTOFF_ISSUE}.`,
-          );
+          throw new Error(`The ${legByKey(leg).name} claim was abandoned: ${CLAIM_CUTOFF_ISSUE}.`);
         }
       };
       try {
@@ -542,8 +542,7 @@ export function SwapFlow({
     runAction(`credit-${creditKey(view.leg, view.token, view.account)}`, async () => {
       // Say plainly what a mistyped destination is, before the codec throws
       // its own message at a user who is trying to recover funds.
-      const wellFormed =
-        view.leg === "eth" ? /^0x[0-9a-fA-F]{40}$/.test(to) : isQrlAddress(to);
+      const wellFormed = view.leg === "eth" ? /^0x[0-9a-fA-F]{40}$/.test(to) : isQrlAddress(to);
       if (!wellFormed) {
         throw new Error(
           view.leg === "eth"
@@ -556,11 +555,7 @@ export function SwapFlow({
 
   const pushCredit = (view: CreditView) =>
     runAction(`credit-${creditKey(view.leg, view.token, view.account)}`, async () => {
-      await settleOnLeg(
-        view.leg,
-        buildPushCreditData(view.leg, view.token, view.account),
-        0n,
-      );
+      await settleOnLeg(view.leg, buildPushCreditData(view.leg, view.token, view.account), 0n);
     });
 
   // Prelocked swaps only: one-time recipient assignment on the maker's
@@ -733,8 +728,8 @@ export function SwapFlow({
             <p>
               A connected wallet differs from the address this swap was agreed with. Payouts still
               go to the agreed addresses (
-              <AddressFingerprint address={ownEth} /> /{" "}
-              <AddressFingerprint address={ownQrl} />).
+              <AddressFingerprint address={ownEth} /> / <AddressFingerprint address={ownQrl} />
+              ).
             </p>
             <details className="mt-2">
               <summary className="cursor-pointer font-medium">Show full agreed addresses</summary>
@@ -835,8 +830,7 @@ export function SwapFlow({
                           (step.key === "lock-responder" &&
                             swap.role === "taker" &&
                             signedFillIssue !== null) ||
-                          ((step.key === "lock-initiator" ||
-                            step.key === "assign-initiator") &&
+                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
                             swap.role === "maker" &&
                             signedFillIssue !== null) ||
                           ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
@@ -892,7 +886,10 @@ export function SwapFlow({
               const key = creditKey(view.leg, view.token, view.account);
               const destination = withdrawTo[key] ?? "";
               return (
-                <div key={key} className="space-y-1.5 border-t border-border/60 pt-2 first:border-t-0 first:pt-0">
+                <div
+                  key={key}
+                  className="space-y-1.5 border-t border-border/60 pt-2 first:border-t-0 first:pt-0"
+                >
                   <dl className="space-y-1 text-xs">
                     <div>
                       <dt className="inline text-muted-foreground">Amount: </dt>

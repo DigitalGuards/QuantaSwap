@@ -78,7 +78,7 @@ describe("HASHLOCK_RE", () => {
   it("accepts a 32-byte hex hash and rejects everything else", () => {
     expect(HASHLOCK_RE.test(`0x${"ab".repeat(32)}`)).toBe(true);
     expect(HASHLOCK_RE.test(`0x${"ab".repeat(31)}`)).toBe(false);
-    expect(HASHLOCK_RE.test(`${"ab".repeat(32)}`)).toBe(false);
+    expect(HASHLOCK_RE.test("ab".repeat(32))).toBe(false);
     expect(HASHLOCK_RE.test(`0x${"zz".repeat(32)}`)).toBe(false);
   });
 });

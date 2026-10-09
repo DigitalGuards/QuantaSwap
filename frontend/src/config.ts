@@ -1,3 +1,4 @@
+import { isArray, isRecord } from "./utils/guards";
 /// <reference types="vite/client" />
 import deployment from "../../config/protocol-v2.json";
 
@@ -93,17 +94,17 @@ export function parseConfiguredMirrors(raw: unknown): OrderbookMirror[] {
   } catch {
     throw new Error("VITE_ORDERBOOK_MIRRORS must be valid JSON");
   }
-  if (!Array.isArray(parsed)) throw new Error("VITE_ORDERBOOK_MIRRORS must be an array");
+  if (!isArray(parsed)) throw new Error("VITE_ORDERBOOK_MIRRORS must be an array");
   if (parsed.length >= MAX_ORDERBOOK_MIRRORS) {
     throw new Error(
       `VITE_ORDERBOOK_MIRRORS cannot contain more than ${MAX_ORDERBOOK_MIRRORS - 1} entries`,
     );
   }
   const mirrors = parsed.map((entry, index) => {
-    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    if (!isRecord(entry)) {
       throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} must be an object`);
     }
-    const row = entry as Record<string, unknown>;
+    const row = entry;
     const keys = Object.keys(row).sort();
     if (keys.length !== 2 || keys[0] !== "apiBase" || keys[1] !== "id") {
       throw new Error(`VITE_ORDERBOOK_MIRRORS entry ${index} has unexpected fields`);
@@ -216,7 +217,7 @@ export const absoluteAppUrl = (path: string): string =>
  * build time once that path is actually served.
  */
 export const LEGACY_RELEASE_PATH: string = (() => {
-  const raw = import.meta.env.VITE_LEGACY_RELEASE_PATH;
+  const raw: unknown = import.meta.env.VITE_LEGACY_RELEASE_PATH;
   if (typeof raw !== "string" || raw === "") return "";
   return normalizeBasePath(raw);
 })();

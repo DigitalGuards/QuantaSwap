@@ -33,11 +33,7 @@ interface ChainAddressPairProps {
 }
 
 /** Responsive ETH and QRL identities for order-maker and reserved-taker rows. */
-export function ChainAddressPair({
-  ethAddress,
-  qrlAddress,
-  className,
-}: ChainAddressPairProps) {
+export function ChainAddressPair({ ethAddress, qrlAddress, className }: ChainAddressPairProps) {
   return (
     <span className={cn("grid min-w-0 justify-items-end gap-0.5", className)}>
       {ethAddress ? (

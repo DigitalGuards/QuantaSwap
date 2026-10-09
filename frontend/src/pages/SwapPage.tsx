@@ -44,8 +44,8 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
           Atomic swaps for <span className="text-secondary">QRL</span>
         </h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Swap between Ethereum and QRL with no custodian and no bridge. Post an order or take
-          one; hashed timelock contracts on both chains settle every swap atomically or refund.
+          Swap between Ethereum and QRL with no custodian and no bridge. Post an order or take one;
+          hashed timelock contracts on both chains settle every swap atomically or refund.
         </p>
       </section>
 
@@ -69,7 +69,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 onReady={(updated) => {
                   setNotice(null);
                   setSwap(updated);
-                  if (updated.hashlock) navigate(`/swap/${updated.hashlock}`);
+                  if (updated.hashlock) void navigate(`/swap/${updated.hashlock}`);
                 }}
                 onAbort={(reason) => {
                   releaseTake(swap);
@@ -95,7 +95,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 onMatched={(matched) => {
                   setMyOrder(null);
                   setSwap(matched);
-                  if (matched.hashlock) navigate(`/swap/${matched.hashlock}`);
+                  if (matched.hashlock) void navigate(`/swap/${matched.hashlock}`);
                 }}
                 onClosed={() => setMyOrder(null)}
               />

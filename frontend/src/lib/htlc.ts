@@ -1,3 +1,4 @@
+import { isArray, isRecord, requireHex, InvalidInputError } from "@/utils/guards";
 // Read/encode helpers for the HTLC deployed on both legs. Reads go through
 // plain JSON-RPC (qrl_* namespace for the QRL leg, eth_* for Sepolia);
 // writes are encoded here and signed by the user's wallets.
@@ -7,10 +8,7 @@ import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config
 import { formatQrlAddressFingerprint, isQrlAddress, qToHex } from "./qrlAddress";
 import { decodeQrvmSwap, decodeQrvmUints, encodeQrvmHtlc } from "./qrvmHtlc";
 import { assertQrlNetwork } from "./qrlNetwork";
-import {
-  assertQip55ReadReady,
-  QRVM_ZERO_ADDRESS,
-} from "./qip55";
+import { assertQip55ReadReady, QRVM_ZERO_ADDRESS } from "./qip55";
 
 export { hexToQ, qToHex } from "./qrlAddress";
 
@@ -59,8 +57,7 @@ export const DELIVERY_GAS_RESERVE = 150_000n;
  *  costs only transaction-limit headroom. */
 export const SETTLEMENT_GAS_BUFFER = DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE;
 
-export const settlementGasLimit = (estimate: bigint): bigint =>
-  estimate + SETTLEMENT_GAS_BUFFER;
+export const settlementGasLimit = (estimate: bigint): bigint => estimate + SETTLEMENT_GAS_BUFFER;
 
 export const htlcInterface = new Interface(HTLC_ABI);
 
@@ -109,13 +106,27 @@ async function rpc(url: string, method: string, params: unknown[]): Promise<unkn
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   if (!res.ok) throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
-  const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
-  if (body.error) throw new Error(body.error.message ?? `RPC ${method} error`);
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    throw new InvalidInputError("Invalid RPC JSON response");
+  }
+  if (!isRecord(body)) throw new InvalidInputError("Invalid RPC response");
+  if (body.error !== undefined && body.error !== null) {
+    if (!isRecord(body.error) || typeof body.error.message !== "string") {
+      throw new InvalidInputError("Invalid RPC error response");
+    }
+    throw new Error(body.error.message);
+  }
+  if (!("result" in body)) throw new InvalidInputError("Missing RPC result");
   return body.result;
 }
 
 export const qrlRpc = async (method: string, params: unknown[]): Promise<unknown> => {
-  await assertQrlNetwork((identityMethod, identityParams) => rpc(QRL_LEG.rpc, identityMethod, identityParams));
+  await assertQrlNetwork((identityMethod, identityParams) =>
+    rpc(QRL_LEG.rpc, identityMethod, identityParams),
+  );
   return rpc(QRL_LEG.rpc, method, params);
 };
 export const ethRpc = (method: string, params: unknown[]) => rpc(ETH_LEG.rpc, method, params);
@@ -127,34 +138,36 @@ export async function getLegState(
 ): Promise<LegState> {
   if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   if (leg === "qrl") {
-    return decodeQrvmSwap(await qrlRpc("qrl_call", [
-      { to: QRL_LEG.htlc, data: encodeQrvmHtlc("getSwap", [hashlock]) },
-      blockTag,
-    ]));
+    return decodeQrvmSwap(
+      await qrlRpc("qrl_call", [
+        { to: QRL_LEG.htlc, data: encodeQrvmHtlc("getSwap", [hashlock]) },
+        blockTag,
+      ]),
+    );
   }
   const data = htlcInterface.encodeFunctionData("getSwap", [hashlock]);
   const call = ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, blockTag]);
-  const raw = (await call) as string;
-  const [swap] = htlcInterface.decodeFunctionResult("getSwap", raw) as unknown as [
-    {
-      initiator: string;
-      recipient: string;
-      token: string;
-      amount: bigint;
-      timeout: bigint;
-      status: bigint;
-      preimage: string;
-    },
-  ];
-  return {
-    status: Number(swap.status) as SwapStatusValue,
-    initiator: swap.initiator,
-    recipient: swap.recipient,
-    token: swap.token,
-    amount: swap.amount,
-    timeout: Number(swap.timeout),
-    preimage: swap.preimage,
-  };
+  const raw = requireHex(await call);
+  const decoded = decodeResult(htlcInterface, "getSwap", raw);
+  if (!isArray(decoded) || !isArray(decoded[0])) throw new InvalidInputError("Invalid swap result");
+  const [initiator, recipient, token, amount, timeout, rawStatus, preimage] = decoded[0];
+  if (
+    typeof initiator !== "string" ||
+    typeof recipient !== "string" ||
+    typeof token !== "string" ||
+    typeof amount !== "bigint" ||
+    typeof timeout !== "bigint" ||
+    typeof rawStatus !== "bigint" ||
+    typeof preimage !== "string" ||
+    timeout > BigInt(Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new InvalidInputError("Invalid swap fields");
+  }
+  const status = Number(rawStatus);
+  if (status !== 0 && status !== 1 && status !== 2 && status !== 3) {
+    throw new InvalidInputError("Unknown swap status");
+  }
+  return { initiator, recipient, token, amount, timeout: Number(timeout), status, preimage };
 }
 
 /** Undelivered payout owned by `account` in `token` on this leg. Zero for
@@ -169,9 +182,9 @@ export async function getCredit(leg: LegKey, token: string, account: string): Pr
     return decodeQrvmUints(raw, 1)[0] ?? 0n;
   }
   const data = htlcInterface.encodeFunctionData("creditOf", [token, qToHex(account)]);
-  const raw = (await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"])) as string;
-  const [value] = htlcInterface.decodeFunctionResult("creditOf", raw) as unknown as [bigint];
-  return value;
+  const raw = requireHex(await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"]));
+  const decoded = decodeResult(htlcInterface, "creditOf", raw);
+  return decodedUint(decoded);
 }
 
 export interface DeliveryGasPolicy {
@@ -193,12 +206,12 @@ export async function getDeliveryGasPolicy(leg: LegKey): Promise<DeliveryGasPoli
     return { gasLimit: gasLimit ?? 0n, gasReserve: gasReserve ?? 0n };
   }
   const data = htlcInterface.encodeFunctionData("deliveryGasPolicy", []);
-  const raw = (await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"])) as string;
-  const [gasLimit, gasReserve] = htlcInterface.decodeFunctionResult(
-    "deliveryGasPolicy",
-    raw,
-  ) as unknown as [bigint, bigint];
-  return { gasLimit, gasReserve };
+  const raw = requireHex(await ethRpc("eth_call", [{ to: ETH_LEG.htlc, data }, "latest"]));
+  const decoded = decodeResult(htlcInterface, "deliveryGasPolicy", raw);
+  if (!isArray(decoded) || typeof decoded[0] !== "bigint" || typeof decoded[1] !== "bigint") {
+    throw new InvalidInputError("Invalid delivery gas policy");
+  }
+  return { gasLimit: decoded[0], gasReserve: decoded[1] };
 }
 
 const policyChecked = new Map<LegKey, Promise<void>>();
@@ -230,7 +243,8 @@ export function assertDeliveryGasPolicy(leg: LegKey): Promise<void> {
       }
       policyUnverified.delete(leg);
     },
-    () => {
+    (error: unknown) => {
+      if (error instanceof InvalidInputError) throw error;
       policyChecked.delete(leg);
       policyUnverified.add(leg);
     },
@@ -270,7 +284,9 @@ export async function getConfirmedLegState(leg: LegKey, hashlock: string): Promi
 export async function getBlockNumber(leg: LegKey): Promise<number> {
   const method = leg === "qrl" ? "qrl_blockNumber" : "eth_blockNumber";
   const fn = leg === "qrl" ? qrlRpc : ethRpc;
-  return Number(BigInt((await fn(method, [])) as string));
+  const number = Number(BigInt(requireHex(await fn(method, []))));
+  if (!Number.isSafeInteger(number)) throw new InvalidInputError("Unsafe block number");
+  return number;
 }
 
 export type SwapEventKind = "locked" | "assigned" | "claimed" | "refunded";
@@ -309,10 +325,7 @@ const QRL_TOPIC_KIND: ReadonlyMap<string, SwapEventKind> = new Map([
   [qrvm64Topic(eventTopic("Refunded")), "refunded"],
 ]);
 
-export function swapEventKindFromTopic(
-  leg: LegKey,
-  topic: string,
-): SwapEventKind | undefined {
+export function swapEventKindFromTopic(leg: LegKey, topic: string): SwapEventKind | undefined {
   return (leg === "qrl" ? QRL_TOPIC_KIND : TOPIC_KIND).get(topic.toLowerCase());
 }
 
@@ -336,17 +349,13 @@ export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<Swap
   const raw = await (leg === "qrl"
     ? qrlRpc("qrl_getLogs", params)
     : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
-  if (!Array.isArray(raw)) return [];
+  if (!isArray(raw)) return [];
   const events: SwapEvent[] = [];
-  for (const entry of raw as unknown[]) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const log = entry as { topics?: unknown; transactionHash?: unknown };
-    const topic0 =
-      Array.isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
-    const kind =
-      topic0 === null
-        ? undefined
-        : swapEventKindFromTopic(leg, topic0);
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const log = entry;
+    const topic0 = isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
+    const kind = topic0 === null ? undefined : swapEventKindFromTopic(leg, topic0);
     if (kind === undefined || typeof log.transactionHash !== "string") continue;
     events.push({ kind, txHash: log.transactionHash });
   }
@@ -430,11 +439,11 @@ export async function getCreditedForSwap(
   const raw = await (leg === "qrl"
     ? qrlRpc("qrl_getLogs", params)
     : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
-  if (!Array.isArray(raw)) return 0n;
+  if (!isArray(raw)) return 0n;
   let total = 0n;
-  for (const entry of raw as unknown[]) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const { data } = entry as { data?: unknown };
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const { data } = entry;
     const amount = decodeCreditedAmount(leg, data);
     if (amount === null) continue;
     total += amount;
@@ -469,7 +478,8 @@ export async function readSwapCredit(
 }
 
 function assertEthersAddressRecipient(recipient: string): void {
-  if (isQrlAddress(recipient)) throw new Error("The Ethereum leg requires a 20-byte Ethereum recipient");
+  if (isQrlAddress(recipient))
+    throw new Error("The Ethereum leg requires a 20-byte Ethereum recipient");
 }
 
 function assertLegCalldataReady(leg: LegKey): void {
@@ -519,9 +529,9 @@ export const buildApproveData = (spender: string, amount: bigint): string =>
  *  tokens require resetting to 0 first. */
 export async function allowanceOf(token: string, owner: string, spender: string): Promise<bigint> {
   const data = erc20Interface.encodeFunctionData("allowance", [owner, spender]);
-  const raw = (await ethRpc("eth_call", [{ to: token, data }, "latest"])) as string;
-  const [value] = erc20Interface.decodeFunctionResult("allowance", raw) as unknown as [bigint];
-  return value;
+  const raw = requireHex(await ethRpc("eth_call", [{ to: token, data }, "latest"]));
+  const decoded = decodeResult(erc20Interface, "allowance", raw);
+  return decodedUint(decoded);
 }
 
 export const buildClaimData = (leg: LegKey, hashlock: string, preimage: string): string => {
@@ -538,11 +548,7 @@ export const buildRefundData = (leg: LegKey, hashlock: string): string => {
 
 /** Open-recipient (prelock) escrow: no recipient in the calldata; it is
  *  fixed later by assign(). */
-export const buildLockNativeOpenData = (
-  leg: LegKey,
-  hashlock: string,
-  timeout: number,
-): string => {
+export const buildLockNativeOpenData = (leg: LegKey, hashlock: string, timeout: number): string => {
   assertLegCalldataReady(leg);
   if (leg === "qrl") return encodeQrvmHtlc("lockNativeOpen", [hashlock, timeout]);
   return htlcInterface.encodeFunctionData("lockNativeOpen", [hashlock, timeout]);
@@ -609,3 +615,18 @@ export const shortAddr = (addr: string): string =>
     : addr.length > 12
       ? `${addr.slice(0, 8)}…${addr.slice(-4)}`
       : addr;
+
+function decodedUint(value: unknown): bigint {
+  if (!isArray(value) || typeof value[0] !== "bigint") {
+    throw new InvalidInputError("Invalid ABI integer result");
+  }
+  return value[0];
+}
+
+function decodeResult(codec: Interface, method: string, raw: string): unknown {
+  try {
+    return codec.decodeFunctionResult(method, raw);
+  } catch {
+    throw new InvalidInputError("Invalid ABI result");
+  }
+}

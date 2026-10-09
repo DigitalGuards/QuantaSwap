@@ -61,14 +61,12 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
     getLegState: vi.fn(async (leg: "eth" | "qrl") => stateFor(leg)),
     getConfirmedLegState: vi.fn(async (leg: "eth" | "qrl") => stateFor(leg)),
     getSwapEvents: vi.fn(async () => []),
-    readSwapCredit: vi.fn(
-      async (leg: string, token: string, account: string) => {
-        const key = `${leg}:${token.toLowerCase()}:${account.toLowerCase()}`;
-        if (unreadable.has(leg)) throw new Error("offline test");
-        const credited = credits.get(key) ?? 0n;
-        return { global: credited + (foreignCredits.get(key) ?? 0n), credited };
-      },
-    ),
+    readSwapCredit: vi.fn(async (leg: string, token: string, account: string) => {
+      const key = `${leg}:${token.toLowerCase()}:${account.toLowerCase()}`;
+      if (unreadable.has(leg)) throw new Error("offline test");
+      const credited = credits.get(key) ?? 0n;
+      return { global: credited + (foreignCredits.get(key) ?? 0n), credited };
+    }),
   };
 });
 
@@ -198,9 +196,7 @@ describe("deferred payout panel", () => {
       target: { value: "not-an-address" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
-    await waitFor(() =>
-      expect(screen.getByText(/Enter a 20-byte Ethereum address/)).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText(/Enter a 20-byte Ethereum address/)).toBeTruthy());
     // Nothing was sent: the wallet was never asked, and the credit stands.
     expect(screen.getByText("1.0 ETH")).toBeTruthy();
   });

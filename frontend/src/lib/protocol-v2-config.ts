@@ -1,4 +1,5 @@
-import config from "../../../config/protocol-v2.json";
+import { isRecord } from "@/utils/guards";
+import rawConfig from "../../../config/protocol-v2.json";
 
 const keys = [
   "version",
@@ -10,17 +11,16 @@ const keys = [
   "ethHtlc",
   "qrlHtlc",
 ] as const;
-if (
-  !config ||
-  typeof config !== "object" ||
-  Array.isArray(config) ||
-  Object.keys(config).length !== keys.length ||
-  keys.some(
-    (key) => typeof (config as Record<string, unknown>)[key] !== "string",
-  )
-)
-  throw new Error("Invalid portable V2 deployment configuration");
-export const protocolV2Config = config as Record<(typeof keys)[number], string>;
+function isDeployment(value: unknown): value is Record<(typeof keys)[number], string> {
+  return (
+    isRecord(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => typeof value[key] === "string")
+  );
+}
+const config: unknown = rawConfig;
+if (!isDeployment(config)) throw new Error("Invalid portable V2 deployment configuration");
+export const protocolV2Config = config;
 
 /** HTLC contract interface this build is written against. HTLCv3 adds the
  *  payout credit ledger (withdraw, withdrawAll, pushCredit, creditOf,
@@ -44,9 +44,7 @@ if (protocolV2Config.htlcInterface !== HTLC_INTERFACE)
   );
 
 if (
-  (protocolV2Config.ethHtlc !== "" &&
-    !/^0x[0-9a-fA-F]{40}$/.test(protocolV2Config.ethHtlc)) ||
-  (protocolV2Config.qrlHtlc !== "" &&
-    !/^Q[0-9a-fA-F]{128}$/.test(protocolV2Config.qrlHtlc))
+  (protocolV2Config.ethHtlc !== "" && !/^0x[0-9a-fA-F]{40}$/.test(protocolV2Config.ethHtlc)) ||
+  (protocolV2Config.qrlHtlc !== "" && !/^Q[0-9a-fA-F]{128}$/.test(protocolV2Config.qrlHtlc))
 )
   throw new Error("Invalid portable V2 HTLC address");
