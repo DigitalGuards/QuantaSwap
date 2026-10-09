@@ -20,13 +20,19 @@ import type { AssetSymbol } from "./assets.js";
 describe("midMilliFromUsd", () => {
   it("derives the cross rate in integer milli", () => {
     assert.equal(midMilliFromUsd(1700, 1), 1_700_000n);
-    assert.equal(midMilliFromUsd(1712.34, 1.02), BigInt(Math.round((1712.34 / 1.02) * 1000)));
+    assert.equal(
+      midMilliFromUsd(1712.34, 1.02),
+      BigInt(Math.round((1712.34 / 1.02) * 1000)),
+    );
   });
 
   it("derives the USDC cross rate with the same math", () => {
     // 1 USD USDC over 0.5 USD QRL = 2 QRL per USDC = 2000 milli
     assert.equal(midMilliFromUsd(1, 0.5), 2_000n);
-    assert.equal(midMilliFromUsd(0.9998, 0.02), BigInt(Math.round((0.9998 / 0.02) * 1000)));
+    assert.equal(
+      midMilliFromUsd(0.9998, 0.02),
+      BigInt(Math.round((0.9998 / 0.02) * 1000)),
+    );
   });
 
   it("rejects garbage quotes", () => {
@@ -94,8 +100,11 @@ function scripted(
       calls.push([...symbols]);
       timeouts.push(timeoutMs);
       const next = script.shift();
-      if (next === undefined) return Promise.reject(new Error("script exhausted"));
-      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+      if (next === undefined)
+        return Promise.reject(new Error("script exhausted"));
+      return next instanceof Error
+        ? Promise.reject(next)
+        : Promise.resolve(next);
     },
   };
 }
@@ -136,13 +145,21 @@ describe("source fallback", () => {
     await feed.maybeRefresh(1000);
     assert.equal(feed.current(1000, "ETH"), 4_000_000n);
     assert.equal(feed.current(1000, "USDC"), 2_000n);
-    assert.ok(logs.some((l) => l.includes("ETH,USDC from fallback (primary: HTTP 403)")));
+    assert.ok(
+      logs.some((l) =>
+        l.includes("ETH,USDC from fallback (primary: HTTP 403)"),
+      ),
+    );
     assert.ok(!logs.some((l) => l.includes("price feed error")));
   });
 
   it("asks the fallback only for what the primary left unpriced", async () => {
-    const primary = scripted("primary", 0, [{ qrl: { usd: 0.5 }, assets: { ETH: { usd: 2000 } } }]);
-    const fallback = scripted("fallback", 900, [{ qrl: { usd: 0.5 }, assets: { USDC: { usd: 1 } } }]);
+    const primary = scripted("primary", 0, [
+      { qrl: { usd: 0.5 }, assets: { ETH: { usd: 2000 } } },
+    ]);
+    const fallback = scripted("fallback", 900, [
+      { qrl: { usd: 0.5 }, assets: { USDC: { usd: 1 } } },
+    ]);
     const feed = feedWith([primary, fallback]);
     await feed.maybeRefresh(1000);
     assert.deepEqual(fallback.calls, [["USDC"]]);
@@ -167,7 +184,16 @@ describe("source fallback", () => {
 
   it("stops quoting once every source stays down past the max age", async () => {
     const down = new Error("HTTP 403");
-    const primary = scripted("primary", 0, [QUOTES, down, down, down, down, down, down, down]);
+    const primary = scripted("primary", 0, [
+      QUOTES,
+      down,
+      down,
+      down,
+      down,
+      down,
+      down,
+      down,
+    ]);
     const fallback = scripted("fallback", 900, [down, down, down]);
     const feed = feedWith([primary, fallback]);
     await feed.maybeRefresh(1000);
@@ -200,38 +226,64 @@ describe("source fallback", () => {
   it("names the assets a partly usable primary left to the fallback", async () => {
     const logs: string[] = [];
     const primary = scripted("primary", 0, [
-      { qrl: { usd: 0.5 }, assets: { ETH: { usd: 2000 }, USDC: { usd: Number.NaN } } },
+      {
+        qrl: { usd: 0.5 },
+        assets: { ETH: { usd: 2000 }, USDC: { usd: Number.NaN } },
+      },
     ]);
-    const fallback = scripted("fallback", 900, [{ qrl: { usd: 0.5 }, assets: { USDC: { usd: 1 } } }]);
+    const fallback = scripted("fallback", 900, [
+      { qrl: { usd: 0.5 }, assets: { USDC: { usd: 1 } } },
+    ]);
     const feed = feedWith([primary, fallback], logs);
     await feed.maybeRefresh(1000);
-    assert.ok(logs.some((l) => l.includes("USDC from fallback (primary: USDC unusable)")));
+    assert.ok(
+      logs.some((l) =>
+        l.includes("USDC from fallback (primary: USDC unusable)"),
+      ),
+    );
   });
 
   it("reports a stale quote with its age", async () => {
     const logs: string[] = [];
     const primary = scripted("primary", 0, [
-      { qrl: { usd: 0.5, atS: 100 }, assets: { ETH: { usd: 2000 }, USDC: { usd: 1 } } },
+      {
+        qrl: { usd: 0.5, atS: 100 },
+        assets: { ETH: { usd: 2000 }, USDC: { usd: 1 } },
+      },
     ]);
     const feed = feedWith([primary], logs);
     await feed.maybeRefresh(2000);
-    assert.ok(logs.some((l) => l.includes("primary: ETH stale (1900s old), USDC stale (1900s old)")));
+    assert.ok(
+      logs.some((l) =>
+        l.includes("primary: ETH stale (1900s old), USDC stale (1900s old)"),
+      ),
+    );
   });
 
   it("never replaces a cached mid with an older quote", async () => {
     const logs: string[] = [];
     const primary = scripted("primary", 0, [
-      { qrl: { usd: 0.5, atS: 1000 }, assets: { ETH: { usd: 2000, atS: 1000 }, USDC: { usd: 1 } } },
+      {
+        qrl: { usd: 0.5, atS: 1000 },
+        assets: { ETH: { usd: 2000, atS: 1000 }, USDC: { usd: 1 } },
+      },
       new Error("HTTP 403"),
     ]);
     const fallback = scripted("fallback", 0, [
-      { qrl: { usd: 0.5, atS: 900 }, assets: { ETH: { usd: 2100, atS: 900 }, USDC: { usd: 1 } } },
+      {
+        qrl: { usd: 0.5, atS: 900 },
+        assets: { ETH: { usd: 2100, atS: 900 }, USDC: { usd: 1 } },
+      },
     ]);
     const feed = feedWith([primary, fallback], logs);
     await feed.maybeRefresh(1000);
     await feed.maybeRefresh(1300);
     assert.equal(feed.current(1300, "ETH"), 4_000_000n);
-    assert.ok(logs.some((l) => l.includes("fallback: ETH older than cache, USDC older than cache")));
+    assert.ok(
+      logs.some((l) =>
+        l.includes("fallback: ETH older than cache, USDC older than cache"),
+      ),
+    );
     assert.ok(!logs.some((l) => l.includes("mid moved")));
   });
 
@@ -265,21 +317,30 @@ describe("source fallback", () => {
   });
 });
 
-function fakeFetch(routes: Record<string, { status: number; body: unknown }>): FetchFn & {
+function fakeFetch(
+  routes: Record<string, { status: number; body: unknown }>,
+): FetchFn & {
   urls: string[];
 } {
   const urls: string[] = [];
   const fn = (url: string): Promise<Response> => {
     urls.push(url);
     const route = routes[url];
-    if (route === undefined) return Promise.reject(new Error(`unexpected ${url}`));
-    return Promise.resolve(new Response(JSON.stringify(route.body), { status: route.status }));
+    if (route === undefined)
+      return Promise.reject(new Error(`unexpected ${url}`));
+    return Promise.resolve(
+      new Response(JSON.stringify(route.body), { status: route.status }),
+    );
   };
   return Object.assign(fn, { urls });
 }
 
-const paprika = (id: string): string => `${COINPAPRIKA_TICKER_URL}${id}?quotes=USD`;
-const ticker = (price: number, lastUpdated = "2026-09-29T07:57:13Z"): unknown => ({
+const paprika = (id: string): string =>
+  `${COINPAPRIKA_TICKER_URL}${id}?quotes=USD`;
+const ticker = (
+  price: number,
+  lastUpdated = "2026-09-29T07:57:13Z",
+): unknown => ({
   last_updated: lastUpdated,
   quotes: { USD: { price } },
 });
@@ -314,8 +375,13 @@ describe("coingeckoSource", () => {
   });
 
   it("surfaces an HTTP refusal", async () => {
-    const fetchFn = fakeFetch({ [coingeckoUrl(["ethereum"])]: { status: 403, body: {} } });
-    await assert.rejects(coingeckoSource(fetchFn).fetch(["ETH"], 1000), /HTTP 403/);
+    const fetchFn = fakeFetch({
+      [coingeckoUrl(["ethereum"])]: { status: 403, body: {} },
+    });
+    await assert.rejects(
+      coingeckoSource(fetchFn).fetch(["ETH"], 1000),
+      /HTTP 403/,
+    );
   });
 });
 
@@ -324,11 +390,17 @@ describe("coinpaprikaSource", () => {
 
   it("fetches QRL plus each requested asset, with upstream timestamps", async () => {
     const fetchFn = fakeFetch({
-      [paprika("qrl-quantum-resistant-ledger")]: { status: 200, body: ticker(0.5) },
+      [paprika("qrl-quantum-resistant-ledger")]: {
+        status: 200,
+        body: ticker(0.5),
+      },
       [paprika("eth-ethereum")]: { status: 200, body: ticker(2000) },
       [paprika("usdc-usd-coin")]: { status: 200, body: ticker(1) },
     });
-    const quotes = await coinpaprikaSource(900, fetchFn).fetch(["ETH", "USDC"], 1000);
+    const quotes = await coinpaprikaSource(900, fetchFn).fetch(
+      ["ETH", "USDC"],
+      1000,
+    );
     assert.deepEqual(quotes, {
       qrl: { usd: 0.5, atS },
       assets: { ETH: { usd: 2000, atS }, USDC: { usd: 1, atS } },
@@ -338,7 +410,10 @@ describe("coinpaprikaSource", () => {
 
   it("skips assets without a feed and costs no request for them", async () => {
     const fetchFn = fakeFetch({
-      [paprika("qrl-quantum-resistant-ledger")]: { status: 200, body: ticker(0.5) },
+      [paprika("qrl-quantum-resistant-ledger")]: {
+        status: 200,
+        body: ticker(0.5),
+      },
     });
     const quotes = await coinpaprikaSource(900, fetchFn).fetch(["tUSDT"], 1000);
     assert.deepEqual(quotes.assets, {});
@@ -347,11 +422,17 @@ describe("coinpaprikaSource", () => {
 
   it("drops one failed asset ticker and keeps the rest", async () => {
     const fetchFn = fakeFetch({
-      [paprika("qrl-quantum-resistant-ledger")]: { status: 200, body: ticker(0.5) },
+      [paprika("qrl-quantum-resistant-ledger")]: {
+        status: 200,
+        body: ticker(0.5),
+      },
       [paprika("eth-ethereum")]: { status: 429, body: {} },
       [paprika("usdc-usd-coin")]: { status: 200, body: ticker(1) },
     });
-    const quotes = await coinpaprikaSource(900, fetchFn).fetch(["ETH", "USDC"], 1000);
+    const quotes = await coinpaprikaSource(900, fetchFn).fetch(
+      ["ETH", "USDC"],
+      1000,
+    );
     assert.deepEqual(quotes.assets, { USDC: { usd: 1, atS } });
   });
 
@@ -360,12 +441,21 @@ describe("coinpaprikaSource", () => {
       [paprika("qrl-quantum-resistant-ledger")]: { status: 429, body: {} },
       [paprika("eth-ethereum")]: { status: 200, body: ticker(2000) },
     });
-    await assert.rejects(coinpaprikaSource(900, down).fetch(["ETH"], 1000), /HTTP 429/);
+    await assert.rejects(
+      coinpaprikaSource(900, down).fetch(["ETH"], 1000),
+      /HTTP 429/,
+    );
     assert.deepEqual(down.urls, [paprika("qrl-quantum-resistant-ledger")]);
     const malformed = fakeFetch({
-      [paprika("qrl-quantum-resistant-ledger")]: { status: 200, body: ticker(0.5, "not a date") },
+      [paprika("qrl-quantum-resistant-ledger")]: {
+        status: 200,
+        body: ticker(0.5, "not a date"),
+      },
       [paprika("eth-ethereum")]: { status: 200, body: ticker(2000) },
     });
-    await assert.rejects(coinpaprikaSource(900, malformed).fetch(["ETH"], 1000), /malformed ticker/);
+    await assert.rejects(
+      coinpaprikaSource(900, malformed).fetch(["ETH"], 1000),
+      /malformed ticker/,
+    );
   });
 });

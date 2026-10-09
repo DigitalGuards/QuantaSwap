@@ -1,3 +1,4 @@
+import { isRecord } from "./guards.js";
 import {
   ORDER_V2_DOMAIN,
   ORDER_V2_DEPLOYMENT,
@@ -305,11 +306,7 @@ interface SignCancelV1Options {
   cancelNonce?: string;
 }
 
-type WalletWithCleanup = ReturnType<
-  typeof MLDSA87.newWalletFromExtendedSeed
-> & {
-  zeroize(): void;
-};
+type WalletWithCleanup = ReturnType<typeof MLDSA87.newWalletFromExtendedSeed>;
 
 function hex(bytes: Uint8Array): string {
   return `0x${Buffer.from(bytes).toString("hex")}`;
@@ -694,8 +691,7 @@ function hasExactKeys(
   value: unknown,
   keys: readonly string[],
 ): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value))
-    return false;
+  if (!isRecord(value)) return false;
   const actual = Object.keys(value);
   return (
     actual.length === keys.length && keys.every((key) => actual.includes(key))
@@ -888,9 +884,9 @@ function walletFromExtendedSeed(input: string | Uint8Array): WalletWithCleanup {
     if (hex(extendedSeed.getDescriptorBytes()) !== OFFICIAL_DESCRIPTOR) {
       throw new Error("QRL extended seed must use descriptor 0x010000");
     }
-    return MLDSA87.newWalletFromExtendedSeed(extendedSeed) as WalletWithCleanup;
+    return MLDSA87.newWalletFromExtendedSeed(extendedSeed);
   } finally {
-    (extendedSeed as typeof extendedSeed & { zeroize(): void }).zeroize();
+    extendedSeed.zeroize();
   }
 }
 

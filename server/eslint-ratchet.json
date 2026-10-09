@@ -1,0 +1,53 @@
+{
+  "src/admission.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/cors.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/federation-reset.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 1
+  },
+  "src/federation.ts": {
+    "preserve-caught-error": 1
+  },
+  "src/lease-integration.test.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 2
+  },
+  "src/loadtest/main.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 5,
+    "no-useless-assignment": 7
+  },
+  "src/loadtest/probe-worker.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 2
+  },
+  "src/order-signing.ts": {
+    "@typescript-eslint/no-unnecessary-condition": 3
+  },
+  "src/peer-sync.test.ts": {
+    "@typescript-eslint/no-base-to-string": 12,
+    "@typescript-eslint/no-unnecessary-condition": 12,
+    "@typescript-eslint/prefer-promise-reject-errors": 2,
+    "@typescript-eslint/require-await": 18
+  },
+  "src/peer-sync.ts": {
+    "@typescript-eslint/no-invalid-void-type": 2,
+    "no-useless-assignment": 1,
+    "no-useless-escape": 1,
+    "preserve-caught-error": 1
+  },
+  "src/peer-transport.test.ts": {
+    "@typescript-eslint/require-await": 1
+  },
+  "src/peer-transport.ts": {
+    "@typescript-eslint/prefer-promise-reject-errors": 1,
+    "@typescript-eslint/require-await": 1
+  },
+  "src/store-protocol.test.ts": {
+    "@typescript-eslint/require-await": 1
+  },
+  "src/store.ts": {
+    "@typescript-eslint/prefer-promise-reject-errors": 1,
+    "preserve-caught-error": 1
+  }
+}

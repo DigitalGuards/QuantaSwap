@@ -19,7 +19,10 @@ interface Web3Ctor {
   };
 }
 
-const ns = qrlweb3 as unknown as { Web3?: Web3Ctor; default?: { Web3?: Web3Ctor } };
+const ns = qrlweb3 as unknown as {
+  Web3?: Web3Ctor;
+  default?: { Web3?: Web3Ctor };
+};
 const Web3 = ns.Web3 ?? ns.default?.Web3;
 if (Web3 === undefined) throw new Error("@theqrl/web3 did not expose Web3");
 
@@ -28,7 +31,9 @@ describe("QRL web3 deployment compatibility", () => {
     const wallet = MLDSA87.newWallet();
     try {
       const directAddress = canonicalQip55QrlAddress(wallet.getAddressStr());
-      const account = new Web3().qrl.accounts.seedToAccount(wallet.getHexExtendedSeed());
+      const account = new Web3().qrl.accounts.seedToAccount(
+        wallet.getHexExtendedSeed(),
+      );
       const web3Address = canonicalQip55QrlAddress(account.address);
       assert.match(directAddress, /^Q[0-9a-fA-F]{128}$/);
       assert.equal(web3Address, directAddress);

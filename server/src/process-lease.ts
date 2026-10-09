@@ -1,3 +1,4 @@
+import { hasErrorCode, isRecord } from "./guards.js";
 // Single-writer lease for the order book's data files. Two book processes on
 // one data directory interleave a whole-file orders rewrite with an
 // append-only feed log and destroy each other's state, so exactly one process
@@ -151,7 +152,8 @@ function currentPidNamespace(): string {
 
 function parseLease(raw: string): LeaseRecord | null {
   try {
-    const value = JSON.parse(raw) as Partial<LeaseRecord>;
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value)) return null;
     if (
       value.version !== 1 ||
       typeof value.pid !== "number" ||
@@ -165,7 +167,15 @@ function parseLease(raw: string): LeaseRecord | null {
     ) {
       return null;
     }
-    return value as LeaseRecord;
+    return {
+      version: value.version,
+      pid: value.pid,
+      processStart: value.processStart,
+      bootId: value.bootId,
+      pidNamespace: value.pidNamespace,
+      identityDigest: value.identityDigest,
+      leaseId: value.leaseId,
+    };
   } catch {
     return null;
   }
@@ -277,7 +287,7 @@ function readLease(path: string): ObservedLease | undefined {
   try {
     descriptor = openSync(path, "r");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (hasErrorCode(error, "ENOENT")) return undefined;
     throw error;
   }
   try {
@@ -299,7 +309,7 @@ function tryCreateLeaseFile(
   try {
     descriptor = openSync(path, "wx", 0o600);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    if (hasErrorCode(error, "EEXIST")) return false;
     throw error;
   }
   try {
@@ -416,12 +426,13 @@ function heldLeaseMessage(
     `heartbeat is the liveness signal: last refreshed ${ageS} s ago (a negative age means its ` +
     `clock runs ahead of this one), and live for ${Math.round(liveness.ttlMs / 1000)} s after each ` +
     `refresh. Stop that book first, or wait for its heartbeat to expire if it already crashed; ` +
-    `${refusal}`
+    refusal
   );
 }
 
 /** Why a lease stopped being ours, named in the shutdown log and refusals. */
-const LEASE_LOSS_REPLACED = "the lease file now carries another holder's lease id";
+const LEASE_LOSS_REPLACED =
+  "the lease file now carries another holder's lease id";
 const LEASE_LOSS_REMOVED = "the lease file was removed";
 
 /** Exclusive process lease for one protected file. */
@@ -754,7 +765,9 @@ export class BookLease {
     protectedFiles: readonly string[],
     options: ProcessLeaseAcquireOptions = {},
   ): BookLease {
-    const files = [...new Set(protectedFiles.map((file) => resolve(file)))].sort();
+    const files = [
+      ...new Set(protectedFiles.map((file) => resolve(file))),
+    ].sort();
     if (files.length === 0) {
       throw new Error("a book lease needs at least one protected file");
     }

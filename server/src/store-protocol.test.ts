@@ -44,11 +44,7 @@ import {
   type SignedOrderTerms,
   type VerifiedOrderV1,
 } from "./order-signing.js";
-import {
-  ApiError,
-  OrderStore,
-  OrderStorePersistenceError,
-} from "./store.js";
+import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
 import { federationEventId, type FederationEvent } from "./federation.js";
 import { FederationPeerSync } from "./peer-sync.js";
 
@@ -214,7 +210,8 @@ function makeFill(
   } = {},
 ): FillArtifacts {
   const signer = timing.takerKeys ?? taker;
-  const takerEth = timing.takerEth ?? "0x2222222222222222222222222222222222222222";
+  const takerEth =
+    timing.takerEth ?? "0x2222222222222222222222222222222222222222";
   const requestNonce = nonce(timing.requestNonceByte ?? 43);
   const releaseSecret = nonce(55);
   const releaseCommitment = computeReleaseCommitment(
@@ -908,8 +905,7 @@ describe("single-use signed order store", () => {
       Record<string, unknown>
     >;
     const rawAuth = rows[0]?.["makerAuth"] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     delete rawAuth?.["makerTokenCommitment"];
     delete rawAuth?.["shareTokenCommitment"];
     writeFileSync(file, JSON.stringify(rows));
@@ -933,7 +929,10 @@ describe("fill intent admission fairness", () => {
   const takerEthFor = (index: number): string =>
     `0x${(index + 0x30).toString(16).padStart(2, "0").repeat(20)}`;
 
-  function withClock<T>(start: number, run: (advance: (s: number) => void) => T): T {
+  function withClock<T>(
+    start: number,
+    run: (advance: (s: number) => void) => T,
+  ): T {
     const originalNow = Date.now;
     let clock = start * 1000;
     Date.now = () => clock;
@@ -964,7 +963,10 @@ describe("fill intent admission fairness", () => {
     }
   }
 
-  function freshOrder(now: number, nonceByte: number): {
+  function freshOrder(
+    now: number,
+    nonceByte: number,
+  ): {
     store: OrderStore;
     order: VerifiedOrderV1;
   } {
@@ -1354,7 +1356,11 @@ describe("fill intent admission fairness", () => {
         nonceByte: 97,
         makerCapability: laterCapability,
       });
-      store.createVerified(later, { makerToken: laterCapability }, "203.0.113.97");
+      store.createVerified(
+        later,
+        { makerToken: laterCapability },
+        "203.0.113.97",
+      );
       assert.equal(
         store
           .federationSnapshot()
@@ -1481,10 +1487,7 @@ describe("order store group commit", () => {
    *  creates can share one commit. */
   const signedOrders = (now: number, count: number): CapabilityOrder[] =>
     Array.from({ length: count }, (_value, index) => {
-      const capability = (200 + index)
-        .toString(16)
-        .padStart(2, "0")
-        .repeat(32);
+      const capability = (200 + index).toString(16).padStart(2, "0").repeat(32);
       return {
         order: makeOrder(now, {
           nonceByte: 200 + index,
@@ -1612,10 +1615,9 @@ describe("order store group commit", () => {
     store.subscribeFederation(() => {
       published += 1;
     });
-    const reported = new OrderStore(file, {
+    new OrderStore(file, {
       onPersistenceFailure: (error) => failures.push(error),
     });
-    void reported;
     const orders = signedOrders(now, 2);
     rmSync(dirname(file), { recursive: true, force: true });
     const durable = orders.map((entry, index) => {

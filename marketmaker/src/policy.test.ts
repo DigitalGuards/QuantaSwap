@@ -619,8 +619,14 @@ describe("refund and settlement", () => {
     // HTLCv3 reports Claimed whether the payout was delivered or credited,
     // so the credit read is the only signal. Retiring the record first would
     // delete the local handle on value still in the contract.
-    assert.equal(decide(input({ ...settled, ourResponderCredit: AMOUNT })), "withdraw");
-    assert.equal(decide(input({ ...settled, ourResponderCredit: 0n })), "finish");
+    assert.equal(
+      decide(input({ ...settled, ourResponderCredit: AMOUNT })),
+      "withdraw",
+    );
+    assert.equal(
+      decide(input({ ...settled, ourResponderCredit: 0n })),
+      "finish",
+    );
   });
 
   it("spaces withdrawal retries like every other irreversible send", () => {
@@ -653,7 +659,9 @@ describe("refund and settlement", () => {
     assert.equal(decide(input({ ...sponsored, takerCredit: AMOUNT })), "push");
     // Off under the operator's sponsor policy, exactly like the claim half.
     assert.equal(
-      decide(input({ ...sponsored, takerCredit: AMOUNT, sponsorClaims: false })),
+      decide(
+        input({ ...sponsored, takerCredit: AMOUNT, sponsorClaims: false }),
+      ),
       "finish",
     );
   });
@@ -758,16 +766,28 @@ describe("refund and settlement", () => {
     assert.equal(withdrawParked(fresh, T1 + 10_000), false);
     assert.equal(decide(input({ ...settled, managed: fresh })), "withdraw");
     // A day later, with the same rejections behind it, it parks.
-    assert.equal(withdrawParked(fresh, T1 + 10_000 + CREDIT_PARK_AFTER_S), true);
+    assert.equal(
+      withdrawParked(fresh, T1 + 10_000 + CREDIT_PARK_AFTER_S),
+      true,
+    );
   });
 
   it("never parks on a record the contract has not rejected", () => {
     // Transient faults leave the counters alone, so a credit that has only
     // ever failed to reach the chain is retried forever, which is correct:
     // nothing has said it cannot move.
-    const never = managed({ withdrawAttempts: 0, withdrawFirstRejectedAt: null });
-    assert.equal(withdrawParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
-    assert.equal(pushParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10), false);
+    const never = managed({
+      withdrawAttempts: 0,
+      withdrawFirstRejectedAt: null,
+    });
+    assert.equal(
+      withdrawParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10),
+      false,
+    );
+    assert.equal(
+      pushParked(never, T1 + 10_000 + CREDIT_PARK_AFTER_S * 10),
+      false,
+    );
   });
 
   it("spaces credit retries wider with each contract rejection", () => {
@@ -823,7 +843,10 @@ describe("refund and settlement", () => {
       rState: leg(SwapStatus.Claimed),
       nowS: T1 + 100,
     };
-    assert.equal(decide(input({ ...settled, ourResponderCredit: null })), "wait");
+    assert.equal(
+      decide(input({ ...settled, ourResponderCredit: null })),
+      "wait",
+    );
     assert.equal(decide(input({ ...settled, takerCredit: null })), "wait");
     // With sponsorship off the taker credit is not ours to act on, so an
     // unreadable one does not hold the record open.
@@ -886,7 +909,10 @@ describe("sponsored taker claim", () => {
   });
 
   it("waits while our reveal is not yet at confirmation depth", () => {
-    assert.equal(decide(revealed({ rConfirmed: leg(SwapStatus.Open) })), "wait");
+    assert.equal(
+      decide(revealed({ rConfirmed: leg(SwapStatus.Open) })),
+      "wait",
+    );
     assert.equal(decide(revealed({ rConfirmed: null })), "wait");
   });
 
@@ -1034,7 +1060,10 @@ describe("refill policy", () => {
 
   it("reports inventory short only when funds are the blocker", () => {
     assert.equal(inventoryShort(base), false);
-    assert.equal(inventoryShort({ ...base, balanceWei: 6n * 10n ** 16n }), true);
+    assert.equal(
+      inventoryShort({ ...base, balanceWei: 6n * 10n ** 16n }),
+      true,
+    );
     assert.equal(inventoryShort({ ...base, gasBalanceWei: 10n ** 16n }), true);
     // Full ladder or maxed in-flight: nothing is wanted, so nothing is short.
     assert.equal(

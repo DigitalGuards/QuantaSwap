@@ -41,10 +41,11 @@ describe("QIP-55 order-book boundaries", () => {
   });
 
   it("accepts v3 accounts and refuses legacy-width order inputs", () => {
-    assert.doesNotThrow(() => assertLegacyOrderProtocolInput(account));
-    assert.throws(
-      () => assertLegacyOrderProtocolInput(`Q${"12".repeat(20)}`),
-      new RegExp(QIP55_PORTABLE_ORDER_ERROR),
-    );
+    assert.doesNotThrow(() => {
+      assertLegacyOrderProtocolInput(account);
+    });
+    assert.throws(() => {
+      assertLegacyOrderProtocolInput(`Q${"12".repeat(20)}`);
+    }, new RegExp(QIP55_PORTABLE_ORDER_ERROR));
   });
 });

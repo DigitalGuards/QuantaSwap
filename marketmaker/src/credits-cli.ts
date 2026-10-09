@@ -74,19 +74,24 @@ export async function main(argv: readonly string[]): Promise<number> {
   });
   try {
     const state = new StateFile(cfg.stateFile, deployment);
-    for (const warning of state.warnings) console.error(`state warning: ${warning}`);
+    for (const warning of state.warnings)
+      console.error(`state warning: ${warning}`);
 
     if (command === "list") {
       const own = state.ownStrandedCredits();
       const theirs = state.counterpartyStrandedCredits();
-      console.log(`Owed to this maker (${own.length}), a drain waits for these:`);
+      console.log(
+        `Owed to this maker (${own.length}), a drain waits for these:`,
+      );
       for (const entry of own) console.log(`  ${line(entry)}`);
       console.log(
         `Owed to a counterparty (${theirs.length}), reported and never gating a drain:`,
       );
       for (const entry of theirs) console.log(`  ${line(entry)}`);
       if (own.length === 0 && theirs.length === 0) {
-        console.log("Nothing is parked: every settlement handed over its funds.");
+        console.log(
+          "Nothing is parked: every settlement handed over its funds.",
+        );
       }
       return 0;
     }
@@ -97,9 +102,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     const dismissed = state.dismissCounterpartyCredit(key);
     if (dismissed === null) {
-      const existing = state.strandedCredits().find(
-        (entry) => StateFile.strandedKey(entry) === key,
-      );
+      const existing = state
+        .strandedCredits()
+        .find((entry) => StateFile.strandedKey(entry) === key);
       console.error(
         existing === undefined
           ? `no parked credit under key ${key}`
@@ -129,7 +134,10 @@ if (
       process.exitCode = code;
     })
     .catch((error: unknown) => {
-      console.error("credits failed:", error instanceof Error ? error.message : error);
+      console.error(
+        "credits failed:",
+        error instanceof Error ? error.message : error,
+      );
       process.exitCode = 1;
     });
 }

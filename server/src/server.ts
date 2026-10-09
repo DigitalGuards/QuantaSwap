@@ -1,3 +1,4 @@
+import { isRecord } from "./guards.js";
 // QuantaSwap order book service. Plain node:http with a small, lockfile-pinned
 // cryptographic verification boundary.
 // Served same-origin behind nginx (/api -> 127.0.0.1:PORT) in production
@@ -188,8 +189,12 @@ function waitForResponse(
       res.off("error", onFailure);
       resolve(result);
     };
-    const onSuccess = () => finish(true);
-    const onFailure = () => finish(false);
+    const onSuccess = () => {
+      finish(true);
+    };
+    const onFailure = () => {
+      finish(false);
+    };
     const timer = setTimeout(() => {
       res.destroy();
       finish(false);
@@ -282,9 +287,15 @@ function readRequestBody(
       }
       chunks.push(chunk);
     };
-    const onEnd = (): void => finish(Buffer.concat(chunks));
-    const onFailure = (): void => finish("aborted");
-    const timer = setTimeout(() => finish("too-slow"), timeoutMs);
+    const onEnd = (): void => {
+      finish(Buffer.concat(chunks));
+    };
+    const onFailure = (): void => {
+      finish("aborted");
+    };
+    const timer = setTimeout(() => {
+      finish("too-slow");
+    }, timeoutMs);
     timer.unref();
     req.on("data", onData);
     req.once("end", onEnd);
@@ -350,14 +361,10 @@ async function readJsonBody(
   if (outcome.byteLength === 0) return {};
   try {
     const parsed: unknown = JSON.parse(outcome.toString("utf8"));
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
+    if (!isRecord(parsed)) {
       throw new Error("not an object");
     }
-    return parsed as Record<string, unknown>;
+    return parsed;
   } catch {
     throw new ApiError(400, "body must be a JSON object");
   }
@@ -573,7 +580,7 @@ const peerSync = new FederationPeerSync({
       const peerId =
         peerIndex === -1
           ? "peer-unknown"
-          : config.federationPeerIds[peerIndex]!;
+          : (config.federationPeerIds[peerIndex] ?? "peer-unknown");
       store.applyFederationEvent(event, peerId);
       // The peer cursor may only advance past an event this mirror has on
       // disk, so the applier waits for the group commit that carries it.
@@ -823,12 +830,14 @@ function openStream(
     Connection: "keep-alive",
     "X-Accel-Buffering": "no",
   });
-  const writer = new BoundedSseWriter(res, config.streamBackpressureMs, () =>
-    removeStream(res, ip),
-  );
+  const writer = new BoundedSseWriter(res, config.streamBackpressureMs, () => {
+    removeStream(res, ip);
+  });
   streamClients.set(res, writer);
   streamIpCounts.set(ip, perIp + 1);
-  req.on("close", () => writer.close());
+  req.on("close", () => {
+    writer.close();
+  });
   writer.write(`event: book\ndata: ${bookPayload()}\n\n`);
 }
 
@@ -898,8 +907,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // with several listings pings often by design. Every other write method is
   // mutation-class; GET and HEAD never reach the write path and OPTIONS was
   // answered above.
-  const mutation =
-    MUTATION_METHODS.has(method) && !path.endsWith("/heartbeat");
+  const mutation = MUTATION_METHODS.has(method) && !path.endsWith("/heartbeat");
   if (path !== "/api/federation/v2/events" && rateLimitExceeded(ip, mutation)) {
     sendShedJson(res, 429, "rate limited, slow down");
     return;
@@ -1167,7 +1175,13 @@ async function dispatch(
       return;
     }
     if (action === "intents" && method === "POST") {
-      const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(
+        req,
+        res,
+        ip,
+        lane,
+        MAX_SIGNED_BODY_BYTES,
+      );
       const shareToken = req.headers["x-share-token"];
       await withMutationSlot(res, ip, lane, async () => {
         const intent = store.submitFillIntent(
@@ -1183,7 +1197,13 @@ async function dispatch(
       return;
     }
     if (action === "fill" && method === "POST") {
-      const body = await readJsonBody(req, res, ip, lane, MAX_SIGNED_BODY_BYTES);
+      const body = await readJsonBody(
+        req,
+        res,
+        ip,
+        lane,
+        MAX_SIGNED_BODY_BYTES,
+      );
       const makerToken = req.headers["x-maker-token"];
       await withMutationSlot(res, ip, lane, async () => {
         const order = store.fillOrder(
@@ -1391,8 +1411,12 @@ process.once("exit", (code) => {
   }
 });
 
-process.once("SIGTERM", () => initiateShutdown("SIGTERM"));
-process.once("SIGINT", () => initiateShutdown("SIGINT"));
+process.once("SIGTERM", () => {
+  initiateShutdown("SIGTERM");
+});
+process.once("SIGINT", () => {
+  initiateShutdown("SIGINT");
+});
 
 server.on("clientError", (_error, socket) => {
   if (socket.writable)

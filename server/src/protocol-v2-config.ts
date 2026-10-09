@@ -1,3 +1,4 @@
+import { hasStringFields } from "./guards.js";
 import { readFileSync } from "node:fs";
 const config: unknown = JSON.parse(
   readFileSync(
@@ -17,16 +18,12 @@ const keys = [
   "qrlHtlc",
 ] as const;
 if (
-  !config ||
-  typeof config !== "object" ||
-  Array.isArray(config) ||
-  Object.keys(config).length !== keys.length ||
-  keys.some(
-    (key) => typeof (config as Record<string, unknown>)[key] !== "string",
-  )
-)
+  !hasStringFields(config, keys) ||
+  Object.keys(config).length !== keys.length
+) {
   throw new Error("Invalid portable V2 deployment configuration");
-export const protocolV2Config = config as Record<(typeof keys)[number], string>;
+}
+export const protocolV2Config = config;
 
 /** HTLC contract interface this build is written against. HTLCv3 adds the
  *  payout credit ledger (withdraw, withdrawAll, pushCredit, creditOf,

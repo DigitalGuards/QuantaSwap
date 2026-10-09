@@ -9,7 +9,10 @@ let server: Server | null = null;
 afterEach(async () => {
   if (server === null) return;
   await new Promise<void>((resolve, reject) =>
-    server?.close((err) => (err === undefined ? resolve() : reject(err))),
+    server?.close((err) => {
+      if (err === undefined) resolve();
+      else reject(err);
+    }),
   );
   server = null;
 });
@@ -17,8 +20,13 @@ afterEach(async () => {
 describe("market maker health", () => {
   it("reports retention waits and upstream backoff without hiding settlement progress", () => {
     let now = 1_800_000_000_000;
-    const health = new MakerHealth({ deploymentFingerprint: "sha256:test", assets: ["ETH"],
-      draining: false, staleAfterMs: 60_000, now: () => now });
+    const health = new MakerHealth({
+      deploymentFingerprint: "sha256:test",
+      assets: ["ETH"],
+      draining: false,
+      staleAfterMs: 60_000,
+      now: () => now,
+    });
     health.markRuntimeVerified();
     health.markTickStarted(2);
     health.markTickCompleted(2, 0);
@@ -98,7 +106,9 @@ describe("market maker health", () => {
       staleAfterMs: 60_000,
     });
     server = createHealthServer(health);
-    await new Promise<void>((resolve) => server?.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server?.listen(0, "127.0.0.1", resolve),
+    );
     const address = server.address() as AddressInfo;
     const starting = await fetch(`http://127.0.0.1:${address.port}/health`);
     assert.equal(starting.status, 503);

@@ -1,3 +1,4 @@
+import { isRecord } from "../guards.js";
 // HTTP and SSE clients for the load harness. Every request carries an
 // X-Forwarded-For value so the book resolves a distinct source per synthetic
 // client through its real trusted-proxy path (ORDERBOOK_TRUST_PROXY=loopback),
@@ -62,7 +63,9 @@ export class BookClient {
     extraHeaders: Record<string, string> = {},
   ): Promise<Reply> {
     const payload =
-      body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
+      body === undefined
+        ? undefined
+        : Buffer.from(JSON.stringify(body), "utf8");
     const headers: Record<string, string> = {
       "X-Forwarded-For": ip,
       ...extraHeaders,
@@ -123,10 +126,10 @@ function parseJson(buffer: Buffer): Record<string, unknown> | undefined {
   if (buffer.byteLength === 0) return undefined;
   try {
     const parsed: unknown = JSON.parse(buffer.toString("utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (!isRecord(parsed)) {
       return undefined;
     }
-    return parsed as Record<string, unknown>;
+    return parsed;
   } catch {
     return undefined;
   }
@@ -169,7 +172,9 @@ export class SseSubscriber {
           this.status = res.statusCode ?? 0;
           this.response = res;
           res.setEncoding("utf8");
-          res.on("data", (chunk: string) => this.consume(chunk));
+          res.on("data", (chunk: string) => {
+            this.consume(chunk);
+          });
           res.on("end", () => {
             this.closed = true;
           });

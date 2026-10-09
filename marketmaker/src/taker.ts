@@ -40,10 +40,7 @@ import {
   OrderGoneError,
 } from "./orderbook.js";
 import type { Direction } from "./policy.js";
-import {
-  computeFillIntentDigest,
-  ProtocolSigner,
-} from "./protocol-signing.js";
+import { computeFillIntentDigest, ProtocolSigner } from "./protocol-signing.js";
 import { claimSubmitMarginS, type TakerReadConfig } from "./taker-config.js";
 import type { TakerBookClient } from "./taker-orderbook.js";
 import {
@@ -433,7 +430,9 @@ export class TakerEngine {
     const signing = this.signing();
     const existing = signing.state.get(orderId);
     if (existing !== null && existing.outcome === null) {
-      this.log(`resuming the take already recorded for order ${short(orderId)}`);
+      this.log(
+        `resuming the take already recorded for order ${short(orderId)}`,
+      );
       return existing;
     }
     if (existing !== null) {
@@ -466,9 +465,20 @@ export class TakerEngine {
       initiatorTimeout: 0,
       responderTimeout: 0,
     });
-    const balances = await this.fundingBalances(plans.responder, verified.asset);
-    const payView = legView(plans.responder.leg, verified.asset, plans.responder.amount);
-    const receiveView = legView(plans.initiator.leg, verified.asset, plans.initiator.amount);
+    const balances = await this.fundingBalances(
+      plans.responder,
+      verified.asset,
+    );
+    const payView = legView(
+      plans.responder.leg,
+      verified.asset,
+      plans.responder.amount,
+    );
+    const receiveView = legView(
+      plans.initiator.leg,
+      verified.asset,
+      plans.initiator.amount,
+    );
     const issue = takeBoundsIssue({
       payAmount: plans.responder.amount,
       receiveAmount: plans.initiator.amount,
@@ -484,7 +494,8 @@ export class TakerEngine {
       nowS: now,
       minOrderRunwayS: this.deps.cfg.minOrderRunwayS,
     });
-    if (issue !== null) throw new Error(`refusing to take this order: ${issue}`);
+    if (issue !== null)
+      throw new Error(`refusing to take this order: ${issue}`);
     const record = newTakerSwapRecord({
       verified,
       deployment: signing.deployment,
@@ -559,7 +570,9 @@ export class TakerEngine {
         account,
         hashlock,
       );
-      return reading.credited < reading.global ? reading.credited : reading.global;
+      return reading.credited < reading.global
+        ? reading.credited
+        : reading.global;
     } catch {
       return null;
     }
@@ -578,24 +591,45 @@ export class TakerEngine {
     if (hashlock === undefined) return [];
     const plans = this.plansForRecord(record);
     const candidates: { leg: LegKey; account: string; own: boolean }[] = [
-      { leg: plans.initiator.leg, account: this.ourAddress(plans.initiator.leg), own: true },
-      { leg: plans.responder.leg, account: this.ourAddress(plans.responder.leg), own: true },
-      { leg: plans.responder.leg, account: plans.responder.recipient, own: false },
+      {
+        leg: plans.initiator.leg,
+        account: this.ourAddress(plans.initiator.leg),
+        own: true,
+      },
+      {
+        leg: plans.responder.leg,
+        account: this.ourAddress(plans.responder.leg),
+        own: true,
+      },
+      {
+        leg: plans.responder.leg,
+        account: plans.responder.recipient,
+        own: false,
+      },
     ];
     const wanted = candidates.filter(
       (candidate) =>
-        candidate.own || !sameAddr(candidate.account, this.ourAddress(candidate.leg)),
+        candidate.own ||
+        !sameAddr(candidate.account, this.ourAddress(candidate.leg)),
     );
     const amounts = await Promise.all(
       wanted.map((candidate) =>
-        this.creditOrNull(candidate.leg, record.asset, candidate.account, hashlock),
+        this.creditOrNull(
+          candidate.leg,
+          record.asset,
+          candidate.account,
+          hashlock,
+        ),
       ),
     );
     const lines: TakerCreditLine[] = [];
     wanted.forEach((candidate, index) => {
       const amount = amounts[index];
       if (amount === undefined || amount === null || amount <= 0n) return;
-      const plan = candidate.leg === plans.initiator.leg ? plans.initiator : plans.responder;
+      const plan =
+        candidate.leg === plans.initiator.leg
+          ? plans.initiator
+          : plans.responder;
       lines.push({
         orderId: record.orderId,
         leg: candidate.leg,
@@ -653,7 +687,11 @@ export class TakerEngine {
   ): Promise<LegState | null> {
     try {
       return confirmed
-        ? await getConfirmedSwapState(leg, hashlock, this.deps.cfg.confirmations)
+        ? await getConfirmedSwapState(
+            leg,
+            hashlock,
+            this.deps.cfg.confirmations,
+          )
         : await getSwapState(leg, hashlock);
     } catch {
       return null; // fail closed; the decision treats null as unverified
@@ -671,7 +709,11 @@ export class TakerEngine {
   ): Promise<{ record: TakerSwapRecord; verdict: TakerVerdict }> {
     const signing = this.signing();
     if (
-      recordBelongsToOtherAccounts(input, signing.eth.address, signing.signer.address)
+      recordBelongsToOtherAccounts(
+        input,
+        signing.eth.address,
+        signing.signer.address,
+      )
     ) {
       throw new Error(
         `swap ${short(input.orderId)} belongs to other taker accounts; refusing to act on it with these keys`,
@@ -732,8 +774,18 @@ export class TakerEngine {
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, false),
             this.legStateOrNull(this.deps.legRpc[iLeg], hashlock, true),
             this.legStateOrNull(this.deps.legRpc[rLeg], hashlock, false),
-            this.creditOrNull(iLeg, record.asset, this.ourAddress(iLeg), hashlock),
-            this.creditOrNull(rLeg, record.asset, this.ourAddress(rLeg), hashlock),
+            this.creditOrNull(
+              iLeg,
+              record.asset,
+              this.ourAddress(iLeg),
+              hashlock,
+            ),
+            this.creditOrNull(
+              rLeg,
+              record.asset,
+              this.ourAddress(rLeg),
+              hashlock,
+            ),
           ]);
 
     const pending = latestIntent(record);
@@ -771,7 +823,9 @@ export class TakerEngine {
       rState,
       ourResponderAddress: this.ourAddress(rLeg),
       intentPending:
-        pending === null || pending.submittedAt === null || pending.releasedAt !== null
+        pending === null ||
+        pending.submittedAt === null ||
+        pending.releasedAt !== null
           ? null
           : { expiresAt: pending.auth.expiresAt },
       abandonRequested: options.abandon === true,
@@ -1047,7 +1101,8 @@ export class TakerEngine {
       );
       return record;
     }
-    const token = plan.leg === "eth" ? assetInfo(record.asset).tokenAddress : null;
+    const token =
+      plan.leg === "eth" ? assetInfo(record.asset).tokenAddress : null;
     const now = this.nowS();
     if (token !== null) {
       // ERC-20 leg: exact-amount approve, then lockToken with value 0. The
@@ -1071,7 +1126,11 @@ export class TakerEngine {
         });
         if (allowance !== 0n && assetInfo(record.asset).quirks.approvalRace) {
           // USDT-style tokens revert on a nonzero to nonzero approve.
-          await signing.eth.send(encodeApprove(this.deps.cfg.ethHtlc, 0n), 0n, token);
+          await signing.eth.send(
+            encodeApprove(this.deps.cfg.ethHtlc, 0n),
+            0n,
+            token,
+          );
         }
         await signing.eth.send(
           encodeApprove(this.deps.cfg.ethHtlc, plan.amount),
@@ -1085,13 +1144,23 @@ export class TakerEngine {
         updatedAt: now,
       });
       const hash = await signing.eth.send(
-        encodeLockToken(hashlock, plan.recipient, token, plan.amount, plan.timeout),
+        encodeLockToken(
+          hashlock,
+          plan.recipient,
+          token,
+          plan.amount,
+          plan.timeout,
+        ),
         0n,
       );
       this.log(
         `order ${short(record.orderId)}: escrowed ${record.asset} on the eth leg, tx ${hash}`,
       );
-      return signing.state.upsert({ ...stored, lockTx: hash, updatedAt: this.nowS() });
+      return signing.state.upsert({
+        ...stored,
+        lockTx: hash,
+        updatedAt: this.nowS(),
+      });
     }
     const stored = signing.state.upsert({
       ...record,
@@ -1105,7 +1174,11 @@ export class TakerEngine {
     this.log(
       `order ${short(record.orderId)}: escrowed ${legView(plan.leg, record.asset, plan.amount).display} on the ${plan.leg} leg, tx ${hash}`,
     );
-    return signing.state.upsert({ ...stored, lockTx: hash, updatedAt: this.nowS() });
+    return signing.state.upsert({
+      ...stored,
+      lockTx: hash,
+      updatedAt: this.nowS(),
+    });
   }
 
   /** Claim the maker escrow with the public preimage. A claim that lost a
@@ -1144,7 +1217,9 @@ export class TakerEngine {
             claimSentAt: now,
             updatedAt: now,
           });
-          return this.sender(leg).send(claimData, 0n, undefined, { settlement: true });
+          return this.sender(leg).send(claimData, 0n, undefined, {
+            settlement: true,
+          });
         },
         // The claim cutoff, re-checked against a fresh read of the escrow's
         // own deadline immediately before the secret goes out
@@ -1242,7 +1317,11 @@ export class TakerEngine {
       updatedAt: now,
     });
     const hash = await this.sender(leg).send(
-      encodeWithdrawAll(leg, expectedToken(leg, record.asset), this.ourAddress(leg)),
+      encodeWithdrawAll(
+        leg,
+        expectedToken(leg, record.asset),
+        this.ourAddress(leg),
+      ),
       0n,
       undefined,
       { settlement: true },
@@ -1370,7 +1449,6 @@ export class TakerEngine {
         }
         await this.sleep(this.deps.cfg.pollMs);
         continue;
-
       }
       last = verdict;
       if (
@@ -1409,8 +1487,7 @@ export class TakerEngine {
         signing.state
           .all()
           .filter(
-            (record) =>
-              record.outcome === null && !parked.has(record.orderId),
+            (record) => record.outcome === null && !parked.has(record.orderId),
           ),
       );
       if (pending.length === 0) break;
@@ -1565,24 +1642,27 @@ export class TakerEngine {
       .all()
       .filter((record) => record.outcome === null)
       .map((record) => {
-      const plans = this.plansForRecord(record);
-      return {
-        orderId: record.orderId,
-        direction: record.direction,
-        asset: record.asset,
-        pay: legView(plans.responder.leg, record.asset, plans.responder.amount)
-          .display,
-        receive: legView(
-          plans.initiator.leg,
-          record.asset,
-          plans.initiator.amount,
-        ).display,
-        phase: takePhase(record),
-        hashlock: record.fill?.fill.hashlock ?? null,
-        responderTimeout: record.fill?.fill.responderTimeout ?? null,
-        outcome: record.outcome,
-      };
-    });
+        const plans = this.plansForRecord(record);
+        return {
+          orderId: record.orderId,
+          direction: record.direction,
+          asset: record.asset,
+          pay: legView(
+            plans.responder.leg,
+            record.asset,
+            plans.responder.amount,
+          ).display,
+          receive: legView(
+            plans.initiator.leg,
+            record.asset,
+            plans.initiator.amount,
+          ).display,
+          phase: takePhase(record),
+          hashlock: record.fill?.fill.hashlock ?? null,
+          responderTimeout: record.fill?.fill.responderTimeout ?? null,
+          outcome: record.outcome,
+        };
+      });
   }
 }
 

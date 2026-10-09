@@ -48,7 +48,9 @@ const TAKER_ETH = `0x${"c".repeat(40)}`;
 const FROM_AMOUNT = (2n * 10n ** 16n).toString();
 const TO_AMOUNT = (2n * 10n ** 18n).toString();
 
-function signOrder(overrides: { issuedAt?: number; expiresAt?: number } = {}): SignedOrderV1 {
+function signOrder(
+  overrides: { issuedAt?: number; expiresAt?: number } = {},
+): SignedOrderV1 {
   const issuedAt = overrides.issuedAt ?? NOW - 60;
   return maker.signOrderV1(
     {
@@ -258,7 +260,6 @@ describe("book row parsing", () => {
   it("refuses a maker auth missing its capability commitments", () => {
     const order = signOrder();
     const { makerTokenCommitment: _drop, ...auth } = order.auth;
-    void _drop;
     assert.throws(() =>
       parseBookOrderRow({ ...openRow(order), makerAuth: auth }),
     );
@@ -272,7 +273,10 @@ describe("maker order verification", () => {
       now: NOW,
     });
     assert.notEqual(verified, null);
-    assert.equal(verified?.orderDigest, computeOrderDigest(order.order, order.auth));
+    assert.equal(
+      verified?.orderDigest,
+      computeOrderDigest(order.order, order.auth),
+    );
     assert.equal(verified?.fromAmount, BigInt(FROM_AMOUNT));
     assert.equal(verified?.toAmount, BigInt(TO_AMOUNT));
   });
@@ -336,8 +340,6 @@ describe("maker order verification", () => {
   it("refuses a legacy unsigned row", () => {
     const order = signOrder();
     const { makerAuth: _auth, orderDigest: _digest, ...rest } = openRow(order);
-    void _auth;
-    void _digest;
     assert.equal(verifyMakerOrder(parseBookOrderRow(rest), { now: NOW }), null);
   });
 
@@ -380,7 +382,10 @@ describe("pre-funded orders", () => {
   it("refuses a listing whose escrow window is too short", () => {
     const issuedAt = NOW - 60;
     const order = signRawOrder({
-      prelock: { hashlock: PRELOCK_HASHLOCK, initiatorTimeout: issuedAt + 3600 },
+      prelock: {
+        hashlock: PRELOCK_HASHLOCK,
+        initiatorTimeout: issuedAt + 3600,
+      },
       issuedAt,
       expiresAt: issuedAt + 1800,
     });
@@ -481,11 +486,9 @@ describe("pre-funded orders", () => {
     };
     assert.throws(
       () =>
-        verifyMakerFill(
-          parseBookOrderRow(row),
-          recoveryFor(intent, order),
-          { now: fillIssuedAt + 10 },
-        ),
+        verifyMakerFill(parseBookOrderRow(row), recoveryFor(intent, order), {
+          now: fillIssuedAt + 10,
+        }),
       FundingBlockedError,
     );
   });
@@ -510,9 +513,15 @@ describe("our own proposal", () => {
     const order = signOrder({ issuedAt: NOW - 3600 });
     const { signed } = signIntent(order, NOW - 300);
     const digest = computeOrderDigest(order.order, order.auth);
-    assert.equal(verifyOwnIntent(signed, digest, order.auth, { now: NOW }), false);
     assert.equal(
-      verifyOwnIntent(signed, digest, order.auth, { now: NOW, allowExpired: true }),
+      verifyOwnIntent(signed, digest, order.auth, { now: NOW }),
+      false,
+    );
+    assert.equal(
+      verifyOwnIntent(signed, digest, order.auth, {
+        now: NOW,
+        allowExpired: true,
+      }),
       true,
     );
   });
@@ -613,11 +622,9 @@ describe("maker fill verification", () => {
     const other = signIntent(order, NOW + 1).signed;
     assert.throws(
       () =>
-        verifyMakerFill(
-          parseBookOrderRow(row),
-          recoveryFor(other, order),
-          { now: NOW + 10 },
-        ),
+        verifyMakerFill(parseBookOrderRow(row), recoveryFor(other, order), {
+          now: NOW + 10,
+        }),
       FundingBlockedError,
     );
   });
@@ -667,9 +674,13 @@ describe("maker fill verification", () => {
     };
     assert.throws(
       () =>
-        verifyMakerFill(parseBookOrderRow(tampered), recoveryFor(intent, order), {
-          now: NOW + 10,
-        }),
+        verifyMakerFill(
+          parseBookOrderRow(tampered),
+          recoveryFor(intent, order),
+          {
+            now: NOW + 10,
+          },
+        ),
       FundingBlockedError,
     );
   });
@@ -677,12 +688,15 @@ describe("maker fill verification", () => {
   it("blocks funding on an incomplete locking row", () => {
     const { order, intent, row } = setup();
     const { selectedIntent: _drop, ...partial } = row;
-    void _drop;
     assert.throws(
       () =>
-        verifyMakerFill(parseBookOrderRow(partial), recoveryFor(intent, order), {
-          now: NOW + 10,
-        }),
+        verifyMakerFill(
+          parseBookOrderRow(partial),
+          recoveryFor(intent, order),
+          {
+            now: NOW + 10,
+          },
+        ),
       /incomplete FillV2/,
     );
   });
@@ -692,7 +706,10 @@ describe("maker cancellation", () => {
   it("authenticates a genuine cancellation", () => {
     const order = signOrder();
     const cancel = maker.signCancelV1(
-      { orderDigest: computeOrderDigest(order.order, order.auth), reasonCode: 1 },
+      {
+        orderDigest: computeOrderDigest(order.order, order.auth),
+        reasonCode: 1,
+      },
       {
         orderNonce: order.auth.nonce,
         expiresAt: order.auth.expiresAt,
@@ -717,7 +734,10 @@ describe("maker cancellation", () => {
     const order = signOrder();
     const other = signOrder({ issuedAt: NOW - 120 });
     const cancel = maker.signCancelV1(
-      { orderDigest: computeOrderDigest(other.order, other.auth), reasonCode: 1 },
+      {
+        orderDigest: computeOrderDigest(other.order, other.auth),
+        reasonCode: 1,
+      },
       {
         orderNonce: other.auth.nonce,
         expiresAt: other.auth.expiresAt,

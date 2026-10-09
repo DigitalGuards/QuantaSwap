@@ -67,10 +67,16 @@ function integerEnv(
   return value;
 }
 
-function nonEmptyEnv(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+function nonEmptyEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: string,
+): string {
   const value = env[name] ?? fallback;
   if (value.trim() !== value || value.length === 0) {
-    throw new Error(`${name} must be a non-empty value without surrounding whitespace`);
+    throw new Error(
+      `${name} must be a non-empty value without surrounding whitespace`,
+    );
   }
   return value;
 }
@@ -80,16 +86,21 @@ function csvEnv(env: NodeJS.ProcessEnv, name: string): string[] {
   if (raw === undefined || raw === "") return [];
   const values = raw.split(",").map((value) => value.trim());
   if (values.some((value) => value.length === 0)) {
-    throw new Error(`${name} must be a comma-separated list without empty entries`);
+    throw new Error(
+      `${name} must be a comma-separated list without empty entries`,
+    );
   }
-  if (new Set(values).size !== values.length) throw new Error(`${name} contains duplicates`);
+  if (new Set(values).size !== values.length)
+    throw new Error(`${name} contains duplicates`);
   return values;
 }
 
 function federationPeers(env: NodeJS.ProcessEnv): string[] {
   const configured = csvEnv(env, "ORDERBOOK_FEDERATION_PEERS");
   if (configured.length > MAX_FEDERATION_PEERS) {
-    throw new Error(`ORDERBOOK_FEDERATION_PEERS cannot contain more than ${MAX_FEDERATION_PEERS} peers`);
+    throw new Error(
+      `ORDERBOOK_FEDERATION_PEERS cannot contain more than ${MAX_FEDERATION_PEERS} peers`,
+    );
   }
   const peers = configured.map((raw) => {
     let url: URL;
@@ -105,28 +116,40 @@ function federationPeers(env: NodeJS.ProcessEnv): string[] {
       url.search !== "" ||
       url.hash !== ""
     ) {
-      throw new Error("ORDERBOOK_FEDERATION_PEERS URLs must be plain HTTP(S) base URLs");
+      throw new Error(
+        "ORDERBOOK_FEDERATION_PEERS URLs must be plain HTTP(S) base URLs",
+      );
     }
     if (
       (url.hostname.endsWith(".onion") || url.hostname.endsWith(".onion.")) &&
       !V3_ONION_HOST_RE.test(url.hostname)
     ) {
-      throw new Error("ORDERBOOK_FEDERATION_PEERS onion URLs must use canonical v3 hostnames");
+      throw new Error(
+        "ORDERBOOK_FEDERATION_PEERS onion URLs must use canonical v3 hostnames",
+      );
     }
     url.pathname = url.pathname.replace(/\/$/, "");
     return url.toString().replace(/\/$/, "");
   });
   if (new Set(peers).size !== peers.length) {
-    throw new Error("ORDERBOOK_FEDERATION_PEERS contains equivalent duplicate URLs");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEERS contains equivalent duplicate URLs",
+    );
   }
   return peers;
 }
 
-function federationPeerIds(env: NodeJS.ProcessEnv, peers: readonly string[]): string[] {
+function federationPeerIds(
+  env: NodeJS.ProcessEnv,
+  peers: readonly string[],
+): string[] {
   const configured = csvEnv(env, "ORDERBOOK_FEDERATION_PEER_IDS");
-  if (configured.length === 0) return peers.map((_peer, index) => `peer-${index + 1}`);
+  if (configured.length === 0)
+    return peers.map((_peer, index) => `peer-${index + 1}`);
   if (configured.length !== peers.length) {
-    throw new Error("ORDERBOOK_FEDERATION_PEER_IDS must contain one id for every peer");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEER_IDS must contain one id for every peer",
+    );
   }
   if (configured.some((id) => !FEDERATION_PEER_ID_RE.test(id))) {
     throw new Error(
@@ -144,9 +167,13 @@ function federationPeerTokens(
   if (raw === undefined || raw === "") return peers.map(() => null);
   const rawTokens = raw.split(",");
   if (rawTokens.length !== peers.length) {
-    throw new Error("ORDERBOOK_FEDERATION_PEER_TOKENS must contain one token for every peer");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEER_TOKENS must contain one token for every peer",
+    );
   }
-  if (rawTokens.some((token) => token !== "-" && !FEDERATION_TOKEN_RE.test(token))) {
+  if (
+    rawTokens.some((token) => token !== "-" && !FEDERATION_TOKEN_RE.test(token))
+  ) {
     throw new Error(
       "ORDERBOOK_FEDERATION_PEER_TOKENS entries must be 32 bytes of lowercase hex or -",
     );
@@ -185,7 +212,9 @@ function federationReadToken(env: NodeJS.ProcessEnv): string | null {
   const raw = env["ORDERBOOK_FEDERATION_READ_TOKEN"];
   if (raw === undefined || raw === "") return null;
   if (!FEDERATION_TOKEN_RE.test(raw)) {
-    throw new Error("ORDERBOOK_FEDERATION_READ_TOKEN must be 32 bytes of lowercase hex");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_READ_TOKEN must be 32 bytes of lowercase hex",
+    );
   }
   return raw;
 }
@@ -204,7 +233,9 @@ function corsOrigins(env: NodeJS.ProcessEnv): string[] {
       url.username !== "" ||
       url.password !== ""
     ) {
-      throw new Error("ORDERBOOK_CORS_ORIGINS entries must be exact HTTP(S) origins");
+      throw new Error(
+        "ORDERBOOK_CORS_ORIGINS entries must be exact HTTP(S) origins",
+      );
     }
     return raw;
   });
@@ -252,7 +283,11 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       "ORDERBOOK_RESERVED_MAKER_BODY_READS must be below ORDERBOOK_MAX_INFLIGHT_BODY_READS",
     );
   }
-  if (rawProxyTrust !== "none" && rawProxyTrust !== "loopback" && rawProxyTrust !== "all") {
+  if (
+    rawProxyTrust !== "none" &&
+    rawProxyTrust !== "loopback" &&
+    rawProxyTrust !== "all"
+  ) {
     throw new Error("ORDERBOOK_TRUST_PROXY must be none, loopback, or all");
   }
 
@@ -268,7 +303,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     `${dataFile}.federation`,
   );
   if (resolve(dataFile) === resolve(federationDataFile)) {
-    throw new Error("ORDERBOOK_DATA and ORDERBOOK_FEDERATION_DATA must be different files");
+    throw new Error(
+      "ORDERBOOK_DATA and ORDERBOOK_FEDERATION_DATA must be different files",
+    );
   }
   // The single-writer lease lives at "<data file>.lock" beside each protected
   // file, so a data path with that suffix would collide with another path's
@@ -279,7 +316,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     ["ORDERBOOK_FEDERATION_DATA", federationDataFile],
   ] as const) {
     if (file.endsWith(".lock")) {
-      throw new Error(`${name} must not end with .lock, which names the single-writer lease file`);
+      throw new Error(
+        `${name} must not end with .lock, which names the single-writer lease file`,
+      );
     }
   }
   const peerTokens = federationPeerTokens(env, peers);
@@ -289,7 +328,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     onionOnly &&
     peers.some((peer) => !V3_ONION_HOST_RE.test(new URL(peer).hostname))
   ) {
-    throw new Error("ORDERBOOK_FEDERATION_ONION_ONLY requires every peer to use a v3 onion URL");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_ONION_ONLY requires every peer to use a v3 onion URL",
+    );
   }
   if (
     onionProxy === null &&
@@ -312,11 +353,16 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         V3_ONION_HOST_RE.test(new URL(peer).hostname),
     )
   ) {
-    throw new Error("ORDERBOOK_FEDERATION_PEER_TOKENS cannot be sent over HTTP onion peers");
+    throw new Error(
+      "ORDERBOOK_FEDERATION_PEER_TOKENS cannot be sent over HTTP onion peers",
+    );
   }
   if (
     !allowInsecurePeerTokens &&
-    peers.some((peer, index) => peerTokens[index] !== null && new URL(peer).protocol !== "https:")
+    peers.some(
+      (peer, index) =>
+        peerTokens[index] !== null && new URL(peer).protocol !== "https:",
+    )
   ) {
     throw new Error(
       "ORDERBOOK_FEDERATION_PEER_TOKENS require HTTPS peers unless insecure lab mode is enabled",
@@ -334,7 +380,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     federationAllowInsecurePeerTokens: allowInsecurePeerTokens,
     federationOnionOnly: onionOnly,
     federationOnionProxy: onionProxy,
-    federationSyncMs: integerEnv(env, "ORDERBOOK_FEDERATION_SYNC_MS", 5000, 1000, 300_000),
+    federationSyncMs: integerEnv(
+      env,
+      "ORDERBOOK_FEDERATION_SYNC_MS",
+      5000,
+      1000,
+      300_000,
+    ),
     federationRequestTimeoutMs: integerEnv(
       env,
       "ORDERBOOK_FEDERATION_REQUEST_TIMEOUT_MS",
@@ -345,7 +397,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     corsOrigins: corsOrigins(env),
     presenceTtlS: integerEnv(env, "PRESENCE_TTL_S", 90, 1, 3600),
     proxyTrust: rawProxyTrust,
-    requestTimeoutMs: integerEnv(env, "ORDERBOOK_REQUEST_TIMEOUT_MS", 15_000, 1000, 120_000),
+    requestTimeoutMs: integerEnv(
+      env,
+      "ORDERBOOK_REQUEST_TIMEOUT_MS",
+      15_000,
+      1000,
+      120_000,
+    ),
     // Concurrent mutating requests admitted once their body is in hand.
     // Mutations are the expensive class: each one verifies an ML-DSA-87 proof
     // and joins a group commit, and the book is one process, so past a small
@@ -375,7 +433,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       250,
       60_000,
     ),
-    shutdownTimeoutMs: integerEnv(env, "ORDERBOOK_SHUTDOWN_TIMEOUT_MS", 10_000, 1000, 60_000),
+    shutdownTimeoutMs: integerEnv(
+      env,
+      "ORDERBOOK_SHUTDOWN_TIMEOUT_MS",
+      10_000,
+      1000,
+      60_000,
+    ),
     streamBackpressureMs: integerEnv(
       env,
       "ORDERBOOK_STREAM_BACKPRESSURE_MS",

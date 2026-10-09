@@ -56,7 +56,9 @@ async function assertPortFree(port: number): Promise<void> {
       );
     });
     probe.listen(port, "127.0.0.1", () => {
-      probe.close(() => resolve());
+      probe.close(() => {
+        resolve();
+      });
     });
   });
 }
@@ -93,7 +95,10 @@ export async function startBook(options: BookOptions): Promise<Book> {
   child.stdout?.on("data", collect);
   child.stderr?.on("data", collect);
 
-  const state = { exited: false, exitCode: null as number | null };
+  const state: { exited: boolean; exitCode: number | null } = {
+    exited: false,
+    exitCode: null,
+  };
   const exited = new Promise<number | null>((resolve) => {
     child.once("exit", (code) => {
       state.exited = true;
@@ -173,23 +178,25 @@ export function probeHealth(
       },
       (res) => {
         res.resume();
-        res.once("end", () =>
+        res.once("end", () => {
           resolve({
             status: res.statusCode ?? 0,
             detail: `status ${String(res.statusCode)}`,
             latencyMs: performance.now() - startedAt,
-          }),
-        );
+          });
+        });
       },
     );
-    req.setTimeout(10_000, () => req.destroy(new Error("health probe timeout")));
-    req.once("error", (error: Error) =>
+    req.setTimeout(10_000, () =>
+      req.destroy(new Error("health probe timeout")),
+    );
+    req.once("error", (error: Error) => {
       resolve({
         status: 0,
         detail: error.message,
         latencyMs: performance.now() - startedAt,
-      }),
-    );
+      });
+    });
     req.end();
   });
 }

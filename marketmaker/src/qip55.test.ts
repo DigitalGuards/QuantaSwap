@@ -20,7 +20,10 @@ describe("QIP-55 market-maker boundaries", () => {
 
   it("canonicalizes Q plus exactly 64 bytes", () => {
     assert.equal(canonicalQip55QrlAddress(lowerAddress), checksumAddress);
-    assert.equal(isQip55QrlAddress(`Q${lowerAddress.slice(1).toUpperCase()}`), true);
+    assert.equal(
+      isQip55QrlAddress(`Q${lowerAddress.slice(1).toUpperCase()}`),
+      true,
+    );
     assert.equal(isQip55QrlAddress(`QD${checksumAddress.slice(2)}`), false);
     assert.throws(
       () => canonicalQip55QrlAddress(`Q${"12".repeat(20)}`),
@@ -29,7 +32,10 @@ describe("QIP-55 market-maker boundaries", () => {
   });
 
   it("derives a 64-byte descriptor and public-key binding", () => {
-    const address = deriveQip55Address(new Uint8Array([1, 0, 0]), new Uint8Array(2592).fill(4));
+    const address = deriveQip55Address(
+      new Uint8Array([1, 0, 0]),
+      new Uint8Array(2592).fill(4),
+    );
     assert.match(address, /^Q[0-9a-fA-F]{128}$/);
     assert.equal(isQip55QrlAddress(address), true);
   });
@@ -39,12 +45,20 @@ describe("QIP-55 market-maker boundaries", () => {
   });
 
   it("accepts portable V2 accounts and refuses legacy-width signing", () => {
-    assert.doesNotThrow(() => assertPortableOrderV1CanSign(account));
-    assert.throws(() => assertPortableOrderV1CanSign(`Q${"12".repeat(20)}`), new RegExp(QIP55_PORTABLE_ORDER_ERROR));
+    assert.doesNotThrow(() => {
+      assertPortableOrderV1CanSign(account);
+    });
+    assert.throws(() => {
+      assertPortableOrderV1CanSign(`Q${"12".repeat(20)}`);
+    }, new RegExp(QIP55_PORTABLE_ORDER_ERROR));
   });
 
   it("accepts full-width identities after QRVM64 codec qualification", () => {
-    assert.doesNotThrow(() => assertQip55ExecutionReady(account, `Q${"34".repeat(64)}`));
-    assert.throws(() => assertQip55ExecutionReady(`Q${"12".repeat(20)}`, `Q${"34".repeat(64)}`));
+    assert.doesNotThrow(() => {
+      assertQip55ExecutionReady(account, `Q${"34".repeat(64)}`);
+    });
+    assert.throws(() => {
+      assertQip55ExecutionReady(`Q${"12".repeat(20)}`, `Q${"34".repeat(64)}`);
+    });
   });
 });

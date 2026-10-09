@@ -37,7 +37,8 @@ export function encodeQrvmHtlc(
   values: readonly (string | number | bigint)[],
 ): string {
   const types = METHODS[method];
-  if (values.length !== types.length) throw new Error("Invalid QRVM HTLC argument count");
+  if (values.length !== types.length)
+    throw new Error("Invalid QRVM HTLC argument count");
   const words = types.map((type, index) => {
     const value = values[index];
     if (type === "bytes32") {
@@ -50,12 +51,14 @@ export function encodeQrvmHtlc(
     if (
       value === undefined ||
       (typeof value === "number" && !Number.isSafeInteger(value)) ||
-      (typeof value === "string" && !/^(?:0|[1-9][0-9]*|0x[0-9a-fA-F]+)$/.test(value))
+      (typeof value === "string" &&
+        !/^(?:0|[1-9][0-9]*|0x[0-9a-fA-F]+)$/.test(value))
     ) {
       throw new Error("Invalid QRVM HTLC uint256");
     }
     const number = BigInt(value);
-    if (number < 0n || number >= 1n << 256n) throw new Error("QRVM HTLC uint256 out of range");
+    if (number < 0n || number >= 1n << 256n)
+      throw new Error("QRVM HTLC uint256 out of range");
     return number.toString(16).padStart(128, "0");
   });
   return id(`${method}(${types.join(",")})`).slice(0, 10) + words.join("");
@@ -65,12 +68,18 @@ export function encodeQrvmHtlc(
  *  half. Padding is checked so a truncating or noncanonical response can
  *  never be read as a smaller number. */
 export function decodeQrvmUints(raw: unknown, count: number): bigint[] {
-  if (typeof raw !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${count * 128}}$`).test(raw)) {
+  if (
+    typeof raw !== "string" ||
+    !new RegExp(`^0x[0-9a-fA-F]{${count * 128}}$`).test(raw)
+  ) {
     throw new Error(`QRVM call must return exactly ${count} 64-byte word(s)`);
   }
   return Array.from({ length: count }, (_unused, index) => {
-    const word = raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
-    if (!/^0{64}/.test(word)) throw new Error("Noncanonical QRVM uint256 padding");
+    const word = raw
+      .slice(2 + index * 128, 2 + (index + 1) * 128)
+      .toLowerCase();
+    if (!/^0{64}/.test(word))
+      throw new Error("Noncanonical QRVM uint256 padding");
     return BigInt(`0x${word}`);
   });
 }
@@ -89,26 +98,38 @@ export function decodeQrvmSwap(raw: unknown): QrvmSwap {
   if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{896}$/.test(raw)) {
     throw new Error("QRVM getSwap must return exactly seven 64-byte words");
   }
-  const word = (index: number): string => raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
+  const word = (index: number): string =>
+    raw.slice(2 + index * 128, 2 + (index + 1) * 128).toLowerCase();
   const uint256 = (index: number): bigint => {
     const value = word(index);
-    if (!/^0{64}/.test(value)) throw new Error("Noncanonical QRVM uint256 padding");
+    if (!/^0{64}/.test(value))
+      throw new Error("Noncanonical QRVM uint256 padding");
     return BigInt(`0x${value}`);
   };
   const amount = uint256(3);
   const timeout = uint256(4);
   const status = uint256(5);
-  if (timeout > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Unsafe QRVM timeout");
-  if (status > 3n) throw new Error("Unknown QRVM swap status");
+  if (timeout > BigInt(Number.MAX_SAFE_INTEGER))
+    throw new Error("Unsafe QRVM timeout");
+  const numericStatus = Number(status);
+  if (
+    numericStatus !== 0 &&
+    numericStatus !== 1 &&
+    numericStatus !== 2 &&
+    numericStatus !== 3
+  ) {
+    throw new Error("Unknown QRVM swap status");
+  }
   const preimage = word(6);
-  if (!/0{64}$/.test(preimage)) throw new Error("Noncanonical QRVM bytes32 padding");
+  if (!/0{64}$/.test(preimage))
+    throw new Error("Noncanonical QRVM bytes32 padding");
   return {
     initiator: `0x${word(0)}`,
     recipient: `0x${word(1)}`,
     token: `0x${word(2)}`,
     amount,
     timeout: Number(timeout),
-    status: Number(status) as QrvmSwap["status"],
+    status: numericStatus,
     preimage: `0x${preimage.slice(0, 64)}`,
   };
 }

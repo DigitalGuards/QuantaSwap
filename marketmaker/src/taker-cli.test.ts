@@ -60,7 +60,11 @@ describe("taker CLI arguments", () => {
     assert.equal(spaced.command, "withdraw");
     assert.equal(spaced.flags.get("to"), `0x${"a".repeat(40)}`);
     assert.deepEqual(spaced.positional, []);
-    const scoped = parseArgs(["withdraw", "abc123", `--to=Q${"b".repeat(128)}`]);
+    const scoped = parseArgs([
+      "withdraw",
+      "abc123",
+      `--to=Q${"b".repeat(128)}`,
+    ]);
     assert.deepEqual(scoped.positional, ["abc123"]);
     assert.equal(scoped.flags.get("to"), `Q${"b".repeat(128)}`);
     assert.throws(() => parseArgs(["withdraw", "--to"]), /needs a value/);
@@ -92,7 +96,10 @@ describe("taker CLI arguments", () => {
       creditLedgerKey(line),
       creditLedgerKey({ ...line, account: line.account.toLowerCase() }),
     );
-    assert.notEqual(creditLedgerKey(line), creditLedgerKey({ ...line, leg: "qrl" }));
+    assert.notEqual(
+      creditLedgerKey(line),
+      creditLedgerKey({ ...line, leg: "qrl" }),
+    );
     assert.notEqual(
       creditLedgerKey(line),
       creditLedgerKey({ ...line, token: `0x${"1".repeat(40)}` }),
@@ -148,7 +155,8 @@ describe("take limits", () => {
 
   it("refuses a limit that is not an amount", () => {
     assert.throws(
-      () => boundsFor(parseArgs(["take", "id", "--max-in", "lots"]), QRL_FOR_ETH),
+      () =>
+        boundsFor(parseArgs(["take", "id", "--max-in", "lots"]), QRL_FOR_ETH),
       /decimal amount/,
     );
   });

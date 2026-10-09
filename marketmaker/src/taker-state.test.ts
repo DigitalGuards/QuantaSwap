@@ -83,7 +83,11 @@ function recordFor(order: SignedOrderV1): TakerSwapRecord {
   });
 }
 
-function withIntent(record: TakerSwapRecord, order: SignedOrderV1, issuedAt = NOW) {
+function withIntent(
+  record: TakerSwapRecord,
+  order: SignedOrderV1,
+  issuedAt = NOW,
+) {
   const releaseSecret = `0x${randomBytes(32).toString("hex")}`;
   const signed = taker.signFillIntentV1({
     order,
@@ -147,8 +151,15 @@ function withFill(
   };
 }
 
-function reopen(file: string, identity?: { ethAccount: string; qrlAccount: string }) {
-  return new TakerStateFile(file, DEPLOYMENT, identity === undefined ? {} : { identity });
+function reopen(
+  file: string,
+  identity?: { ethAccount: string; qrlAccount: string },
+) {
+  return new TakerStateFile(
+    file,
+    DEPLOYMENT,
+    identity === undefined ? {} : { identity },
+  );
 }
 
 describe("taker state durability", () => {
@@ -211,7 +222,9 @@ describe("taker state durability", () => {
   it("refuses a record whose proposal digest was edited on disk", () => {
     const file = tempFile();
     const order = signOrder();
-    new TakerStateFile(file, DEPLOYMENT).upsert(withIntent(recordFor(order), order));
+    new TakerStateFile(file, DEPLOYMENT).upsert(
+      withIntent(recordFor(order), order),
+    );
     const envelope = JSON.parse(readFileSync(file, "utf8")) as {
       swaps: { intents: { intentDigest: string }[] }[];
     };
@@ -229,7 +242,12 @@ describe("taker state durability", () => {
     const file = tempFile();
     writeFileSync(
       file,
-      JSON.stringify({ version: 1, role: "maker", deployment: DEPLOYMENT, swaps: [] }),
+      JSON.stringify({
+        version: 1,
+        role: "maker",
+        deployment: DEPLOYMENT,
+        swaps: [],
+      }),
     );
     assert.throws(() => new TakerStateFile(file, DEPLOYMENT), /role/);
   });
@@ -494,7 +512,10 @@ describe("taker state durability", () => {
     assert.equal(kept[0]?.orderId, recordFor(second).orderId);
     assert.equal(reporting.warnings.length, 1);
     assert.match(reporting.warnings[0] ?? "", /unverifiable/);
-    assert.match(reporting.warnings[0] ?? "", new RegExp(recordFor(first).orderId));
+    assert.match(
+      reporting.warnings[0] ?? "",
+      new RegExp(recordFor(first).orderId),
+    );
   });
 
   it("drops an unreadable history entry and keeps the refund path", () => {

@@ -19,11 +19,7 @@ import type { Direction } from "./policy.js";
 export const ZERO_BYTES32 = `0x${"0".repeat(64)}`;
 
 export type TakerBookStatus =
-  | "open"
-  | "accepted"
-  | "locking"
-  | "cancelled"
-  | "gone";
+  "open" | "accepted" | "locking" | "cancelled" | "gone";
 
 export type TakerDecision =
   /** Nothing to do on this pass. */
@@ -368,7 +364,8 @@ export function decideTaker(x: TakerDecideInput): TakerVerdict {
 
   if (!exposed) {
     if (x.abandonRequested) {
-      return x.record.releaseSentAt === null && x.record.intentSubmittedAt !== null
+      return x.record.releaseSentAt === null &&
+        x.record.intentSubmittedAt !== null
         ? verdict("release", "operator abandoned this take before funding")
         : verdict("abort", "operator abandoned this take before funding");
     }

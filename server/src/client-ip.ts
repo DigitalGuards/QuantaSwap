@@ -1,3 +1,4 @@
+import { isArray } from "./guards.js";
 import { isIP } from "node:net";
 import type { ProxyTrust } from "./config.js";
 
@@ -14,7 +15,7 @@ function normalizedIp(raw: string | undefined): string | undefined {
 }
 
 function firstHeader(value: HeaderValue): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
+  return isArray(value) ? value[0] : value;
 }
 
 function isLoopback(address: string | undefined): boolean {
@@ -83,10 +84,16 @@ export function clientSourceKey(ip: string): string {
 
 export function resolveClientIp(
   remoteAddress: string | undefined,
-  headers: { "cf-connecting-ip"?: HeaderValue; "x-forwarded-for"?: HeaderValue },
+  headers: {
+    "cf-connecting-ip"?: HeaderValue;
+    "x-forwarded-for"?: HeaderValue;
+  },
   proxyTrust: ProxyTrust,
 ): string {
-  if (proxyTrust === "all" || (proxyTrust === "loopback" && isLoopback(remoteAddress))) {
+  if (
+    proxyTrust === "all" ||
+    (proxyTrust === "loopback" && isLoopback(remoteAddress))
+  ) {
     const cloudflare = normalizedIp(firstHeader(headers["cf-connecting-ip"]));
     if (cloudflare !== undefined) return clientSourceKey(cloudflare);
 

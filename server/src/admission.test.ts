@@ -42,7 +42,11 @@ describe("write admission lanes", () => {
       assert.equal(admissionLane(path, TOKEN, noCapability), "taker");
       // The token belongs to one order only.
       assert.equal(
-        admissionLane(`/api/orders/${"d".repeat(16)}/${action}`, TOKEN, matches),
+        admissionLane(
+          `/api/orders/${"d".repeat(16)}/${action}`,
+          TOKEN,
+          matches,
+        ),
         "taker",
       );
     }

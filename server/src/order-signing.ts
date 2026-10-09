@@ -1,3 +1,4 @@
+import { isRecord } from "./guards.js";
 import {
   ORDER_V2_DOMAIN,
   ORDER_V2_DEPLOYMENT,
@@ -290,10 +291,10 @@ function invalid(message: string): never {
 }
 
 function objectValue(raw: unknown, field: string): Record<string, unknown> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     invalid(`${field} must be an object`);
   }
-  return raw as Record<string, unknown>;
+  return raw;
 }
 
 function exactObject(

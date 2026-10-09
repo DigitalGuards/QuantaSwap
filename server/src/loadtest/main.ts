@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "../guards.js";
 // Entry point for `npm run loadtest`. Starts a real order-book process per
 // scenario against a throwaway data directory, drives synthetic makers,
 // takers, readers and stream subscribers over loopback, then verifies the
@@ -65,13 +66,17 @@ interface Options {
   concurrency: number;
   signWorkers: number;
   niceness: number;
-  scenarios: string[];
+  scenarios: ScenarioKey[];
   runDir: string | undefined;
   out: string | undefined;
   basePort: number;
 }
 
 const SCENARIO_KEYS = ["a", "b", "c", "d", "e", "f"] as const;
+
+function isScenarioKey(value: string): value is ScenarioKey {
+  return SCENARIO_KEYS.some((key) => key === value);
+}
 
 const SCENARIO_NAMES: Record<ScenarioKey, string> = {
   a: "a: takers race one hot order",
@@ -125,7 +130,7 @@ function parseOptions(argv: readonly string[]): Options {
       flags.set(name.slice(0, inline), name.slice(inline + 1));
       continue;
     }
-    if (!VALUE_FLAGS.includes(name as (typeof VALUE_FLAGS)[number])) {
+    if (!VALUE_FLAGS.some((flag) => flag === name)) {
       throw new Error(`unknown flag --${name}`);
     }
     // Every supported flag takes a value. A bare flag used to fall back to the
@@ -138,7 +143,7 @@ function parseOptions(argv: readonly string[]): Options {
     index += 1;
   }
   for (const name of flags.keys()) {
-    if (!VALUE_FLAGS.includes(name as (typeof VALUE_FLAGS)[number])) {
+    if (!VALUE_FLAGS.some((flag) => flag === name)) {
       throw new Error(`unknown flag --${name}`);
     }
   }
@@ -167,12 +172,12 @@ function parseOptions(argv: readonly string[]): Options {
   const scenarios = requested
     .split(",")
     .map((key) => key.trim().toLowerCase())
-    .filter((key) => key.length > 0);
-  for (const key of scenarios) {
-    if (!SCENARIO_KEYS.includes(key as ScenarioKey)) {
-      throw new Error(`unknown scenario "${key}"; pick from a,b,c,d,e,f`);
-    }
-  }
+    .filter((key) => key.length > 0)
+    .map((key) => {
+      if (!isScenarioKey(key))
+        throw new Error(`unknown scenario "${key}"; pick from a,b,c,d,e,f`);
+      return key;
+    });
   return {
     takers,
     makers,
@@ -240,8 +245,8 @@ function startProbe(port: number, intervalMs: number, niceness: number): Probe {
       if (line.length === 0) continue;
       try {
         const parsed: unknown = JSON.parse(line);
-        if (typeof parsed !== "object" || parsed === null) continue;
-        const record = parsed as Record<string, unknown>;
+        if (!isRecord(parsed)) continue;
+        const record = parsed;
         if (typeof record["latencyMs"] === "number") {
           health.add(record["latencyMs"]);
         }
@@ -261,9 +266,13 @@ function startProbe(port: number, intervalMs: number, niceness: number): Probe {
     }
   };
   child.stdout?.setEncoding("utf8");
-  child.stdout?.on("data", (chunk: string) => consume(chunk));
+  child.stdout?.on("data", (chunk: string) => {
+    consume(chunk);
+  });
   const finished = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
+    child.once("exit", () => {
+      resolve();
+    });
   });
   return {
     stop: async () => {
@@ -324,12 +333,11 @@ async function auditScenario(
       AUDIT_IP,
     );
     const order = reply.body?.["order"];
-    if (typeof order !== "object" || order === null) continue;
-    const record = order as Record<string, unknown>;
+    if (!isRecord(order)) continue;
+    const record = order;
     const fill = record["fill"];
     const digest = record["fillDigest"];
-    const storedFills =
-      typeof fill === "object" && fill !== null && !Array.isArray(fill) ? 1 : 0;
+    const storedFills = isRecord(fill) ? 1 : 0;
     if (storedFills !== 1 || typeof digest !== "string") {
       multipleStoredFills.push(orderId);
     }
@@ -382,11 +390,11 @@ function readStorage(
   let retainedIntents = 0;
   try {
     const parsed: unknown = JSON.parse(readFileSync(dataFile, "utf8"));
-    if (Array.isArray(parsed)) {
+    if (isArray(parsed)) {
       for (const entry of parsed) {
-        if (typeof entry !== "object" || entry === null) continue;
-        const intents = (entry as Record<string, unknown>)["fillIntents"];
-        if (Array.isArray(intents)) retainedIntents += intents.length;
+        if (!isRecord(entry)) continue;
+        const intents = entry["fillIntents"];
+        if (isArray(intents)) retainedIntents += intents.length;
       }
     }
   } catch {
@@ -576,8 +584,9 @@ async function runScenario(
       intentsAdmittedPerSecond:
         wallMs <= 0
           ? 0
-          : Math.round(((outcome.intents?.admitted ?? 0) / wallMs) * 1000 * 10) /
-            10,
+          : Math.round(
+              ((outcome.intents?.admitted ?? 0) / wallMs) * 1000 * 10,
+            ) / 10,
     },
     ...(outcome.intents === undefined ? {} : { intents: outcome.intents }),
     ...(outcome.fairness === undefined ? {} : { fairness: outcome.fairness }),
@@ -657,12 +666,18 @@ function failures(scenarios: readonly ScenarioReport[]): string[] {
         `scenario ${label}: one order held ${String(consistency.maxLiveIntentsOnOneOrder)} live proposals against the documented ceiling of 8`,
       );
     }
-    if (scenario.doubleFill.attempted && !scenario.doubleFill.exactlyOneFillSelected) {
+    if (
+      scenario.doubleFill.attempted &&
+      !scenario.doubleFill.exactlyOneFillSelected
+    ) {
       found.push(
         `scenario ${label}: the double-fill race did not leave exactly one selected fill with the loser retained`,
       );
     }
-    if (scenario.intents !== undefined && scenario.intents.transportErrors > 0) {
+    if (
+      scenario.intents !== undefined &&
+      scenario.intents.transportErrors > 0
+    ) {
       found.push(
         `scenario ${label}: ${String(scenario.intents.transportErrors)} transport errors`,
       );
@@ -697,7 +712,7 @@ async function main(): Promise<void> {
     process.stdout.write(`running scenario ${key} ...\n`);
     scenarios.push(
       await runScenario(
-        key as ScenarioKey,
+        key,
         options,
         runDir,
         options.basePort + index,
