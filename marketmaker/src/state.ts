@@ -1,3 +1,4 @@
+import { isRecord, isArray, hasErrorCode, hasStringFields } from "./guards.js";
 // Persistence for managed orders. Preimages live here until their swap
 // settles, so the file is written 0600 and atomically. Losing a preimage
 // after our lock confirms would strand funds until the refund window.
@@ -21,7 +22,11 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isAssetSymbol } from "./assets.js";
-import { orderRetentionUntil, parseAdmissionRecords, type AdmissionRecord } from "./admission.js";
+import {
+  orderRetentionUntil,
+  parseAdmissionRecords,
+  type AdmissionRecord,
+} from "./admission.js";
 import {
   parseDeploymentIdentity,
   sameDeployment,
@@ -94,7 +99,11 @@ export interface StrandedCredit {
   owner: "maker" | "counterparty";
 }
 
-const STRANDED_KEY = (entry: { leg: string; token: string; account: string }): string =>
+const STRANDED_KEY = (entry: {
+  leg: string;
+  token: string;
+  account: string;
+}): string =>
   `${entry.leg}:${entry.token.toLowerCase()}:${entry.account.toLowerCase()}`;
 
 /**
@@ -107,49 +116,58 @@ function parseStrandedCredits(raw: unknown): {
   entries: StrandedCredit[];
   dropped: string[];
 } {
-  if (!Array.isArray(raw)) return { entries: [], dropped: [] };
+  if (!isArray(raw)) return { entries: [], dropped: [] };
   const entries: StrandedCredit[] = [];
   const dropped: string[] = [];
   const describe = (row: unknown, reason: string): string => {
-    if (typeof row !== "object" || row === null) return `${reason}, unreadable shape`;
-    const fields = row as Record<string, unknown>;
+    if (!isRecord(row)) return `${reason}, unreadable shape`;
+    const fields = row;
     const part = (key: string): string =>
-      typeof fields[key] === "string" ? (fields[key] as string) : "?";
+      typeof fields[key] === "string" ? fields[key] : "?";
     return `${reason}, leg ${part("leg")} account ${part("account")} hashlock ${part("hashlock")}`;
   };
   for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) {
+    if (!isRecord(entry)) {
       dropped.push(describe(entry, "malformed row"));
       continue;
     }
-    const row = entry as Record<string, unknown>;
+    const row = entry;
     const leg = row["leg"];
     if (leg !== "eth" && leg !== "qrl") {
       dropped.push(describe(row, "unknown leg"));
       continue;
     }
-    const strings = ["orderId", "token", "account", "hashlock", "amount"] as const;
-    const missing = strings.find((key) => typeof row[key] !== "string");
-    if (missing !== undefined) {
+    const strings = [
+      "orderId",
+      "token",
+      "account",
+      "hashlock",
+      "amount",
+    ] as const;
+    if (!hasStringFields(row, strings)) {
+      const missing = strings.find((key) => typeof row[key] !== "string");
       dropped.push(describe(row, `missing ${missing}`));
       continue;
     }
-    if (typeof row["parkedAt"] !== "number" || !Number.isSafeInteger(row["parkedAt"])) {
+    if (
+      typeof row["parkedAt"] !== "number" ||
+      !Number.isSafeInteger(row["parkedAt"])
+    ) {
       dropped.push(describe(row, "invalid parkedAt"));
       continue;
     }
-    if (!AMOUNT_RE.test(row["amount"] as string)) {
+    if (!AMOUNT_RE.test(row["amount"])) {
       dropped.push(describe(row, "invalid amount"));
       continue;
     }
     const owner = row["owner"];
     entries.push({
-      orderId: row["orderId"] as string,
+      orderId: row["orderId"],
       leg,
-      token: row["token"] as string,
-      account: row["account"] as string,
-      hashlock: row["hashlock"] as string,
-      amount: row["amount"] as string,
+      token: row["token"],
+      account: row["account"],
+      hashlock: row["hashlock"],
+      amount: row["amount"],
       parkedAt: row["parkedAt"],
       // Records written before the field existed are maker-owned: the
       // conservative reading, since that is the one that gates the drain.
@@ -185,6 +203,58 @@ type PersistedOrder = Omit<
   deployment?: unknown;
   protocol?: unknown;
 };
+
+function isPersistedOrder(value: unknown): value is PersistedOrder {
+  if (
+    !isRecord(value) ||
+    !hasStringFields(value, ["id", "fromAmount", "toAmount"])
+  )
+    return false;
+  const nullableStrings = [
+    "token",
+    "preimage",
+    "hashlock",
+    "takerEthAccount",
+    "takerQrlAccount",
+  ];
+  const nullableNumbers = [
+    "initiatorTimeout",
+    "responderTimeout",
+    "lockSentAt",
+    "claimSentAt",
+    "refundSentAt",
+  ];
+  const optionalNumbers = ["level", "withdrawAttempts", "pushAttempts"];
+  const optionalNullableNumbers = [
+    "announcedAt",
+    "sponsorSentAt",
+    "withdrawSentAt",
+    "pushSentAt",
+    "withdrawFirstRejectedAt",
+    "pushFirstRejectedAt",
+  ];
+  const isTime = (item: unknown): boolean =>
+    typeof item === "number" && Number.isSafeInteger(item) && item >= 0;
+  return (
+    (value.direction === "eth->qrl" || value.direction === "qrl->eth") &&
+    isTime(value.createdAt) &&
+    nullableStrings.every(
+      (key) => value[key] === null || typeof value[key] === "string",
+    ) &&
+    nullableNumbers.every((key) => value[key] === null || isTime(value[key])) &&
+    optionalNumbers.every(
+      (key) => !Object.hasOwn(value, key) || isTime(value[key]),
+    ) &&
+    optionalNullableNumbers.every(
+      (key) =>
+        !Object.hasOwn(value, key) || value[key] === null || isTime(value[key]),
+    ) &&
+    (!Object.hasOwn(value, "asset") || typeof value.asset === "string") &&
+    (!Object.hasOwn(value, "quotedMidMilli") ||
+      value.quotedMidMilli === null ||
+      typeof value.quotedMidMilli === "string")
+  );
+}
 
 const BYTES32_RE = /^0x[0-9a-f]{64}$/;
 const ETH_ADDRESS_RE = /^0x[0-9a-f]{40}$/;
@@ -308,7 +378,8 @@ function currentPidNamespace(): string {
 
 function parseLease(raw: string): LeaseRecord | null {
   try {
-    const value = JSON.parse(raw) as Partial<LeaseRecord>;
+    const value: unknown = JSON.parse(raw);
+    if (!isRecord(value)) return null;
     if (
       (value.version !== 1 && value.version !== 2) ||
       typeof value.pid !== "number" ||
@@ -323,7 +394,17 @@ function parseLease(raw: string): LeaseRecord | null {
     ) {
       return null;
     }
-    return value as LeaseRecord;
+    return {
+      version: value.version,
+      pid: value.pid,
+      processStart: value.processStart,
+      bootId: value.bootId,
+      ...(value.pidNamespace === undefined
+        ? {}
+        : { pidNamespace: value.pidNamespace }),
+      identityDigest: value.identityDigest,
+      leaseId: value.leaseId,
+    };
   } catch {
     return null;
   }
@@ -439,7 +520,7 @@ function readLease(path: string): ObservedLease | undefined {
   try {
     descriptor = openSync(path, "r");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (hasErrorCode(error, "ENOENT")) return undefined;
     throw error;
   }
   try {
@@ -461,7 +542,7 @@ function tryCreateLeaseFile(
   try {
     descriptor = openSync(path, "wx", 0o600);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    if (hasErrorCode(error, "EEXIST")) return false;
     throw error;
   }
   try {
@@ -578,12 +659,13 @@ function heldLeaseMessage(
     `heartbeat is the liveness signal: last refreshed ${ageS} s ago (a negative age means its ` +
     `clock runs ahead of this one), and live for ${Math.round(liveness.ttlMs / 1000)} s after each ` +
     `refresh. Stop that maker first, or wait for its heartbeat to expire if it already crashed; ` +
-    `${refusal}`
+    refusal
   );
 }
 
 /** Why a lease stopped being ours, named in the shutdown log and refusals. */
-const LEASE_LOSS_REPLACED = "the lease file now carries another holder's lease id";
+const LEASE_LOSS_REPLACED =
+  "the lease file now carries another holder's lease id";
 const LEASE_LOSS_REMOVED = "the lease file was removed";
 
 /** Exclusive process lease for one state file and operator-key identity. */
@@ -890,10 +972,10 @@ export class StateProcessLease {
 }
 
 function proofObject(raw: unknown, field: string): Record<string, unknown> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`${field} is malformed`);
   }
-  return raw as Record<string, unknown>;
+  return raw;
 }
 
 function exactProofKeys(
@@ -1604,15 +1686,15 @@ export class StateFile {
       // Only a missing file is a first boot. Any other read failure on a
       // preimage-holding file must not silently start empty: the next
       // persist() would overwrite whatever is on disk.
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (!hasErrorCode(err, "ENOENT")) throw err;
     }
     if (raw === null) return;
 
     // The pre-deployment-identity format was a bare order array. An empty
     // array contains no recovery material and can be safely bound in place.
     // A non-empty one may contain locks on any prior HTLC, so never guess.
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
+    const parsed: unknown = JSON.parse(raw);
+    if (isArray(parsed)) {
       if (parsed.length > 0) {
         throw recoveryError(
           this.file,
@@ -1622,11 +1704,14 @@ export class StateFile {
       this.persist();
       return;
     }
-    if (typeof parsed !== "object" || parsed === null) {
+    if (!isRecord(parsed)) {
       throw recoveryError(this.file, "state envelope is malformed");
     }
-    const envelope = parsed as Record<string, unknown>;
-    if ((envelope.version !== 1 && envelope.version !== 2) || !Array.isArray(envelope.orders)) {
+    const envelope = parsed;
+    if (
+      (envelope.version !== 1 && envelope.version !== 2) ||
+      !isArray(envelope.orders)
+    ) {
       throw recoveryError(
         this.file,
         "state envelope version or order list is malformed",
@@ -1669,10 +1754,12 @@ export class StateFile {
     // interpret must stop the daemon loudly. Skipping or relabeling one
     // could strand its swap, and a later persist would erase it.
     for (const value of envelope.orders) {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      if (!isRecord(value)) {
         throw recoveryError(this.file, "an order record is malformed");
       }
-      const order = value as PersistedOrder;
+      if (!isPersistedOrder(value))
+        throw recoveryError(this.file, "an order record has malformed fields");
+      const order = value;
       if (typeof order.id !== "string" || order.id.length === 0) {
         throw recoveryError(this.file, "an order has no valid id");
       }
@@ -1733,8 +1820,7 @@ export class StateFile {
       // defaultable inside a correctly bound envelope so in-flight swaps
       // from that same deployment continue settling after an upgrade.
       const { protocol: _rawProtocol, ...persisted } = order;
-      void _rawProtocol;
-      this.orders.set(order.id, {
+      const managed: ManagedOrder = {
         ...persisted,
         level: order.level ?? 0,
         quotedMidMilli: order.quotedMidMilli ?? null,
@@ -1750,8 +1836,9 @@ export class StateFile {
         asset,
         deployment: orderDeployment,
         ...(protocol === undefined ? {} : { protocol }),
-      });
-      this.rememberAdmission(this.orders.get(order.id)!);
+      };
+      this.orders.set(order.id, managed);
+      this.rememberAdmission(managed);
     }
   }
 
@@ -1762,7 +1849,7 @@ export class StateFile {
 
   retainedAdmissionCount(now: number): number {
     this.assertHealthy();
-    return [...this.admissions.values()].filter(until => until > now).length;
+    return [...this.admissions.values()].filter((until) => until > now).length;
   }
 
   /**
@@ -1795,7 +1882,9 @@ export class StateFile {
    *  receive, no action by anyone clears one, so these are reported and never
    *  gate a drain; an operator dismisses them. */
   counterpartyStrandedCredits(): StrandedCredit[] {
-    return this.strandedCredits().filter((entry) => entry.owner === "counterparty");
+    return this.strandedCredits().filter(
+      (entry) => entry.owner === "counterparty",
+    );
   }
 
   /**
@@ -1814,13 +1903,21 @@ export class StateFile {
   }
 
   /** The key an entry is stored under, which is the ledger entry it moves. */
-  static strandedKey(entry: { leg: string; token: string; account: string }): string {
+  static strandedKey(entry: {
+    leg: string;
+    token: string;
+    account: string;
+  }): string {
     return STRANDED_KEY(entry);
   }
 
   /** Drop a parked entry once its ledger balance reads zero, whether the
    *  operator collected it by hand or the token started cooperating. */
-  clearStrandedCredit(entry: { leg: string; token: string; account: string }): boolean {
+  clearStrandedCredit(entry: {
+    leg: string;
+    token: string;
+    account: string;
+  }): boolean {
     this.assertHealthy();
     const key = STRANDED_KEY(entry);
     if (!this.stranded.delete(key)) return false;
@@ -1835,7 +1932,10 @@ export class StateFile {
     }
     const until = orderRetentionUntil(order, now);
     if (until !== null) {
-      this.admissions.set(order.id, Math.max(this.admissions.get(order.id) ?? 0, until));
+      this.admissions.set(
+        order.id,
+        Math.max(this.admissions.get(order.id) ?? 0, until),
+      );
     }
   }
 

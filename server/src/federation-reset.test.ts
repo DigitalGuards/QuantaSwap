@@ -13,7 +13,10 @@ describe("federation bearer authentication", () => {
     const token = "ab".repeat(32);
     assert.equal(federationBearerAuthorized(`Bearer ${token}`, token), true);
     assert.equal(federationBearerAuthorized(`bearer ${token}`, token), false);
-    assert.equal(federationBearerAuthorized(`Bearer ${"ac".repeat(32)}`, token), false);
+    assert.equal(
+      federationBearerAuthorized(`Bearer ${"ac".repeat(32)}`, token),
+      false,
+    );
     assert.equal(federationBearerAuthorized(`Bearer ${token} `, token), false);
     assert.equal(federationBearerAuthorized([`Bearer ${token}`], token), false);
     assert.equal(federationBearerAuthorized(undefined, token), false);
@@ -173,8 +176,14 @@ describe("federation serialized response cache", () => {
     const limitOne = federationResponseCacheKey(true, "foreign:1", 1, 1, 9);
     const limitMax = federationResponseCacheKey(true, null, 256, 1, 9);
     assert.equal(limitOne, limitMax);
-    assert.equal(cache.getOrCreate(limitOne, create, 0).toString(), "reset-body");
-    assert.equal(cache.getOrCreate(limitMax, create, 0).toString(), "reset-body");
+    assert.equal(
+      cache.getOrCreate(limitOne, create, 0).toString(),
+      "reset-body",
+    );
+    assert.equal(
+      cache.getOrCreate(limitMax, create, 0).toString(),
+      "reset-body",
+    );
     assert.equal(calls, 1);
 
     assert.notEqual(
@@ -195,14 +204,26 @@ describe("federation serialized response cache", () => {
       return value;
     };
 
-    assert.equal(cache.getOrCreate("one", create("1111"), 0).toString(), "1111");
-    assert.equal(cache.getOrCreate("one", create("xxxx"), 50).toString(), "1111");
+    assert.equal(
+      cache.getOrCreate("one", create("1111"), 0).toString(),
+      "1111",
+    );
+    assert.equal(
+      cache.getOrCreate("one", create("xxxx"), 50).toString(),
+      "1111",
+    );
     assert.equal(calls, 1);
     cache.getOrCreate("two", create("2222"), 50);
     cache.getOrCreate("three", create("3333"), 50);
-    assert.equal(cache.getOrCreate("one", create("4444"), 50).toString(), "4444");
+    assert.equal(
+      cache.getOrCreate("one", create("4444"), 50).toString(),
+      "4444",
+    );
     assert.equal(calls, 4);
-    assert.equal(cache.getOrCreate("one", create("5555"), 150).toString(), "5555");
+    assert.equal(
+      cache.getOrCreate("one", create("5555"), 150).toString(),
+      "5555",
+    );
     assert.equal(calls, 5);
   });
 });

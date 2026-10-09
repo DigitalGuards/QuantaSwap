@@ -1,3 +1,4 @@
+import { isRecord, isArray, hasErrorCode } from "./guards.js";
 // Persistence for in-flight takes. Every record holds walk-away secrets
 // and the exact signed proofs a retry or a crash recovery needs, so the
 // file is written 0600 and atomically, and the process lease from
@@ -164,10 +165,10 @@ const recoveryError = (file: string, reason: string): Error =>
   );
 
 function object(raw: unknown, field: string): Record<string, unknown> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+  if (!isRecord(raw)) {
     throw new Error(`${field} is malformed`);
   }
-  return raw as Record<string, unknown>;
+  return raw;
 }
 
 function text(value: unknown, pattern: RegExp, field: string): string {
@@ -422,7 +423,7 @@ export function parseTakerSwapRecord(
     throw new Error(`${field}.orderId does not follow from its order`);
   }
   const intentsRaw = row["intents"];
-  if (!Array.isArray(intentsRaw) || intentsRaw.length > MAX_RETAINED_INTENTS) {
+  if (!isArray(intentsRaw) || intentsRaw.length > MAX_RETAINED_INTENTS) {
     throw new Error(`${field}.intents is malformed`);
   }
   const intents = intentsRaw.map((value, index) =>
@@ -442,10 +443,15 @@ export function parseTakerSwapRecord(
     }
     if (
       record.intent.orderDigest !== orderDigest ||
-      !verifyOwnIntent({ intent: record.intent, auth: record.auth }, orderDigest, orderAuth, {
-        now: record.auth.issuedAt,
-        allowExpired: true,
-      })
+      !verifyOwnIntent(
+        { intent: record.intent, auth: record.auth },
+        orderDigest,
+        orderAuth,
+        {
+          now: record.auth.issuedAt,
+          allowExpired: true,
+        },
+      )
     ) {
       throw new Error(`${field}.intents holds a proposal that does not verify`);
     }
@@ -558,7 +564,11 @@ export function parseTakerSwapRecord(
     }
   }
   const asset = row["asset"];
-  if (typeof asset !== "string" || !isAssetSymbol(asset) || asset !== order.asset) {
+  if (
+    typeof asset !== "string" ||
+    !isAssetSymbol(asset) ||
+    asset !== order.asset
+  ) {
     throw new Error(`${field}.asset is malformed`);
   }
   const direction: Direction = order.direction;
@@ -588,7 +598,10 @@ export function parseTakerSwapRecord(
     lockSentAt: nullableUint(row["lockSentAt"], `${field}.lockSentAt`),
     claimSentAt: nullableUint(row["claimSentAt"], `${field}.claimSentAt`),
     refundSentAt: nullableUint(row["refundSentAt"], `${field}.refundSentAt`),
-    withdrawSentAt: nullableUint(row["withdrawSentAt"], `${field}.withdrawSentAt`),
+    withdrawSentAt: nullableUint(
+      row["withdrawSentAt"],
+      `${field}.withdrawSentAt`,
+    ),
     lockTx: nullableHash(row["lockTx"], `${field}.lockTx`),
     claimTx: nullableHash(row["claimTx"], `${field}.claimTx`),
     refundTx: nullableHash(row["refundTx"], `${field}.refundTx`),
@@ -601,7 +614,13 @@ export function parseTakerSwapRecord(
 
 /** Build a fresh record for an order this client verified itself. */
 export function newTakerSwapRecord(args: {
-  verified: { id: string; signed: SignedOrderV1; orderDigest: string; asset: AssetSymbol; direction: Direction };
+  verified: {
+    id: string;
+    signed: SignedOrderV1;
+    orderDigest: string;
+    asset: AssetSymbol;
+    direction: Direction;
+  };
   deployment: DeploymentIdentity;
   takerEthAccount: string;
   takerQrlAccount: string;
@@ -677,9 +696,7 @@ export function latestIntent(
   return record.intents[record.intents.length - 1] ?? null;
 }
 
-export function signedIntentOf(
-  intent: TakerIntentRecord,
-): SignedFillIntentV1 {
+export function signedIntentOf(intent: TakerIntentRecord): SignedFillIntentV1 {
   return { intent: intent.intent, auth: intent.auth };
 }
 
@@ -716,8 +733,8 @@ export function recordOrderRow(record: TakerSwapRecord): BookOrderRow {
 
 /** Best-effort order id for a record this build cannot parse. */
 function swapLabel(raw: unknown, index: number): string {
-  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
-    const id = (raw as Record<string, unknown>)["orderId"];
+  if (isRecord(raw)) {
+    const id = raw["orderId"];
     if (typeof id === "string" && ORDER_ID_RE.test(id)) return id;
   }
   return `#${index}`;
@@ -774,24 +791,24 @@ export class TakerStateFile {
       // Only a missing file is a first run. Any other read failure on a
       // secret-holding file must not silently start empty, or the next
       // write would overwrite live recovery material.
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      if (!hasErrorCode(err, "ENOENT")) throw err;
     }
     if (raw === null) return;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(raw) as unknown;
+      parsed = JSON.parse(raw);
     } catch {
       throw recoveryError(this.file, "state envelope is not valid JSON");
     }
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    if (!isRecord(parsed)) {
       throw recoveryError(this.file, "state envelope is malformed");
     }
-    const envelope = parsed as Record<string, unknown>;
+    const envelope = parsed;
     if (
       envelope["version"] !== 1 ||
       envelope["role"] !== "taker" ||
-      !Array.isArray(envelope["swaps"]) ||
-      (envelope["history"] !== undefined && !Array.isArray(envelope["history"]))
+      !isArray(envelope["swaps"]) ||
+      (envelope["history"] !== undefined && !isArray(envelope["history"]))
     ) {
       throw recoveryError(
         this.file,

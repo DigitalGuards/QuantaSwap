@@ -15,6 +15,9 @@ import {
   encodePushCredit,
   encodeWithdrawAll,
   getChainId,
+  getBlockNumber,
+  getSwapState,
+  rpc,
   getCredit,
   getDeliveryGasPolicy,
   isContractRejection,
@@ -53,13 +56,16 @@ async function withRpcResponse<T>(
 ): Promise<T> {
   const originalFetch = globalThis.fetch;
   const requests: RpcRequest[] = [];
-  globalThis.fetch = (async (_input, init) => {
+  globalThis.fetch = async (_input, init) => {
     requests.push(JSON.parse(String(init?.body)) as RpcRequest);
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, ...response }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }) as typeof fetch;
+    return new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: 1, ...response }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  };
   try {
     return await run(requests);
   } finally {
@@ -102,7 +108,10 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
     const sender = `Q${"4".repeat(128)}`;
     const claimData = `0x${"cd".repeat(68)}`;
     await withRpcResponse({ result: "0x" }, async (requests) => {
-      await assert.rejects(simulateHtlcCall(QRL_LEG, sender, claimData), /fresh 64-byte/);
+      await assert.rejects(
+        simulateHtlcCall(QRL_LEG, sender, claimData),
+        /fresh 64-byte/,
+      );
       assert.equal(requests.length, 0);
     });
   });
@@ -110,18 +119,27 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
   it("fails closed and never reflects secret calldata from an RPC error", async () => {
     const claimData = `0x${"ef".repeat(68)}`;
     await withRpcResponse(
-      { error: { message: `execution reverted; transaction data=${claimData}` } },
+      {
+        error: { message: `execution reverted; transaction data=${claimData}` },
+      },
       async (requests) => {
         await assert.rejects(
           simulateHtlcCall(ETH_LEG, `0x${"5".repeat(40)}`, claimData),
           (error: unknown) => {
             assert.ok(error instanceof Error);
-            assert.equal(error.message, "eth HTLC preflight rejected; claim was not broadcast");
+            assert.equal(
+              error.message,
+              "eth HTLC preflight rejected; claim was not broadcast",
+            );
             assert.ok(!error.message.includes(claimData));
             return true;
           },
         );
-        assert.equal(requests.length, 1, "preflight performs no send/broadcast RPC");
+        assert.equal(
+          requests.length,
+          1,
+          "preflight performs no send/broadcast RPC",
+        );
         assert.equal(requests[0]?.method, "eth_call");
       },
     );
@@ -129,20 +147,23 @@ describe("secret-bearing claim preflight", { concurrency: false }, () => {
 
   it("never invokes the broadcast callback when simulation fails", async () => {
     let submissions = 0;
-    await withRpcResponse({ error: { message: "execution reverted" } }, async () => {
-      await assert.rejects(
-        submitPreflightedClaim(
-          ETH_LEG,
-          `0x${"6".repeat(40)}`,
-          `0x${"12".repeat(68)}`,
-          async () => {
-            submissions += 1;
-            return "0xnever";
-          },
-        ),
-        /preflight rejected; claim was not broadcast/,
-      );
-    });
+    await withRpcResponse(
+      { error: { message: "execution reverted" } },
+      async () => {
+        await assert.rejects(
+          submitPreflightedClaim(
+            ETH_LEG,
+            `0x${"6".repeat(40)}`,
+            `0x${"12".repeat(68)}`,
+            async () => {
+              submissions += 1;
+              return "0xnever";
+            },
+          ),
+          /preflight rejected; claim was not broadcast/,
+        );
+      },
+    );
     assert.equal(submissions, 0);
   });
 
@@ -234,18 +255,21 @@ describe("claim cutoff at broadcast", { concurrency: false }, () => {
   });
 
   it("broadcasts while the escrow deadline is outside the margin", async () => {
-    await withRpcResponse({ result: swapResult(1, NOW + MARGIN + 1) }, async () => {
-      assert.equal(
-        await submitPreflightedClaim(
-          ETH_LEG,
-          `0x${"7".repeat(40)}`,
-          `0x${"34".repeat(68)}`,
-          async () => "0xtxhash",
-          { hashlock, marginS: MARGIN, nowS: () => NOW },
-        ),
-        "0xtxhash",
-      );
-    });
+    await withRpcResponse(
+      { result: swapResult(1, NOW + MARGIN + 1) },
+      async () => {
+        assert.equal(
+          await submitPreflightedClaim(
+            ETH_LEG,
+            `0x${"7".repeat(40)}`,
+            `0x${"34".repeat(68)}`,
+            async () => "0xtxhash",
+            { hashlock, marginS: MARGIN, nowS: () => NOW },
+          ),
+          "0xtxhash",
+        );
+      },
+    );
   });
 
   it("is the same rule the pure predicate states", () => {
@@ -255,72 +279,82 @@ describe("claim cutoff at broadcast", { concurrency: false }, () => {
   });
 });
 
-describe("HTLCv3 settlement gas rule and payout credits", { concurrency: false }, () => {
-  it("adds the delivery budget and the credit reserve to an estimate", () => {
-    // docs/audit/HTLCV3_SCOPE.md A1 and A2: a bare estimate lands on the
-    // credit path, because crediting is cheaper than a real transfer.
-    assert.equal(SETTLEMENT_GAS_BUFFER, DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE);
-    assert.equal(SETTLEMENT_GAS_BUFFER, 250_000n);
-    assert.equal(settlementGasLimit(37_038n), 287_038n);
-  });
+describe(
+  "HTLCv3 settlement gas rule and payout credits",
+  { concurrency: false },
+  () => {
+    it("adds the delivery budget and the credit reserve to an estimate", () => {
+      // docs/audit/HTLCV3_SCOPE.md A1 and A2: a bare estimate lands on the
+      // credit path, because crediting is cheaper than a real transfer.
+      assert.equal(
+        SETTLEMENT_GAS_BUFFER,
+        DELIVERY_GAS_LIMIT + DELIVERY_GAS_RESERVE,
+      );
+      assert.equal(SETTLEMENT_GAS_BUFFER, 250_000n);
+      assert.equal(settlementGasLimit(37_038n), 287_038n);
+    });
 
-  it("reads a credit and the published gas policy on the Ethereum leg", async () => {
-    await withRpcResponse(
-      { result: htlcAbi.encodeFunctionResult("creditOf", [42n]) },
-      async (requests) => {
-        assert.equal(await getCredit(ETH_LEG, NATIVE_TOKEN, `0x${"a".repeat(40)}`), 42n);
-        assert.equal(requests[0]?.method, "eth_call");
-      },
-    );
-    await withRpcResponse(
-      {
-        result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [
-          DELIVERY_GAS_LIMIT,
-          DELIVERY_GAS_RESERVE,
-        ]),
-      },
-      async () => {
-        assert.deepEqual(await getDeliveryGasPolicy(ETH_LEG), {
-          gasLimit: DELIVERY_GAS_LIMIT,
-          gasReserve: DELIVERY_GAS_RESERVE,
-        });
-        await assertDeliveryGasPolicy(ETH_LEG);
-      },
-    );
-  });
+    it("reads a credit and the published gas policy on the Ethereum leg", async () => {
+      await withRpcResponse(
+        { result: htlcAbi.encodeFunctionResult("creditOf", [42n]) },
+        async (requests) => {
+          assert.equal(
+            await getCredit(ETH_LEG, NATIVE_TOKEN, `0x${"a".repeat(40)}`),
+            42n,
+          );
+          assert.equal(requests[0]?.method, "eth_call");
+        },
+      );
+      await withRpcResponse(
+        {
+          result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [
+            DELIVERY_GAS_LIMIT,
+            DELIVERY_GAS_RESERVE,
+          ]),
+        },
+        async () => {
+          assert.deepEqual(await getDeliveryGasPolicy(ETH_LEG), {
+            gasLimit: DELIVERY_GAS_LIMIT,
+            gasReserve: DELIVERY_GAS_RESERVE,
+          });
+          await assertDeliveryGasPolicy(ETH_LEG);
+        },
+      );
+    });
 
-  it("refuses a contract that publishes a different budget", async () => {
-    await withRpcResponse(
-      { result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [1n, 2n]) },
-      async () => {
-        await assert.rejects(
-          assertDeliveryGasPolicy(ETH_LEG),
-          /was not written for \(1\/2\); refusing to settle/,
-        );
-      },
-    );
-  });
+    it("refuses a contract that publishes a different budget", async () => {
+      await withRpcResponse(
+        { result: htlcAbi.encodeFunctionResult("deliveryGasPolicy", [1n, 2n]) },
+        async () => {
+          await assert.rejects(
+            assertDeliveryGasPolicy(ETH_LEG),
+            /was not written for \(1\/2\); refusing to settle/,
+          );
+        },
+      );
+    });
 
-  it("encodes withdrawAll and pushCredit for both legs", () => {
-    const account = `0x${"a".repeat(40)}`;
-    assert.equal(
-      encodeWithdrawAll("eth", NATIVE_TOKEN, account),
-      htlcAbi.encodeFunctionData("withdrawAll", [NATIVE_TOKEN, account]),
-    );
-    assert.equal(
-      encodePushCredit("eth", NATIVE_TOKEN, account),
-      htlcAbi.encodeFunctionData("pushCredit", [NATIVE_TOKEN, account]),
-    );
-    const qrlAccount = `Q${"a".repeat(128)}`;
-    assert.equal(
-      encodeWithdrawAll("qrl", QRL_NATIVE_TOKEN, qrlAccount),
-      encodeQrvmHtlc("withdrawAll", [QRL_NATIVE_TOKEN, qrlAccount]),
-    );
-    // A 64-byte QRL account can never ride in the 20-byte Ethereum codec.
-    assert.throws(() => encodeWithdrawAll("eth", NATIVE_TOKEN, qrlAccount));
-    assert.throws(() => encodePushCredit("eth", NATIVE_TOKEN, qrlAccount));
-  });
-});
+    it("encodes withdrawAll and pushCredit for both legs", () => {
+      const account = `0x${"a".repeat(40)}`;
+      assert.equal(
+        encodeWithdrawAll("eth", NATIVE_TOKEN, account),
+        htlcAbi.encodeFunctionData("withdrawAll", [NATIVE_TOKEN, account]),
+      );
+      assert.equal(
+        encodePushCredit("eth", NATIVE_TOKEN, account),
+        htlcAbi.encodeFunctionData("pushCredit", [NATIVE_TOKEN, account]),
+      );
+      const qrlAccount = `Q${"a".repeat(128)}`;
+      assert.equal(
+        encodeWithdrawAll("qrl", QRL_NATIVE_TOKEN, qrlAccount),
+        encodeQrvmHtlc("withdrawAll", [QRL_NATIVE_TOKEN, qrlAccount]),
+      );
+      // A 64-byte QRL account can never ride in the 20-byte Ethereum codec.
+      assert.throws(() => encodeWithdrawAll("eth", NATIVE_TOKEN, qrlAccount));
+      assert.throws(() => encodePushCredit("eth", NATIVE_TOKEN, qrlAccount));
+    });
+  },
+);
 
 describe("PayoutCredited filter widths", { concurrency: false }, () => {
   // Pinned against a real HTLCv3 log on the private QRL v3 devnet, tx
@@ -331,7 +365,8 @@ describe("PayoutCredited filter widths", { concurrency: false }, () => {
   const accountHex =
     "64f616d40a895750df633414e9dafad5426444fcd5acec79e01640a1278648c8" +
     "b949633f721a2503dc54c51026f3ea08e5123faa5b2e458d412c3dc822af900f";
-  const hashlock = "0xcf36ed676a65c67d7a9cb2bdb006cdf1fc116bb305ca283f538256ba4ca3e1b9";
+  const hashlock =
+    "0xcf36ed676a65c67d7a9cb2bdb006cdf1fc116bb305ca283f538256ba4ca3e1b9";
 
   it("matches the topics of a real devnet log", () => {
     const topics = creditFilterTopics(
@@ -350,16 +385,33 @@ describe("PayoutCredited filter widths", { concurrency: false }, () => {
   });
 
   it("uses Ethereum widths on the Ethereum leg", () => {
-    const topics = creditFilterTopics("eth", NATIVE_TOKEN, `0x${"a".repeat(40)}`, hashlock);
+    const topics = creditFilterTopics(
+      "eth",
+      NATIVE_TOKEN,
+      `0x${"a".repeat(40)}`,
+      hashlock,
+    );
     for (const topic of topics) assert.equal(topic.length, 2 + 64);
     assert.equal(topics[2], `0x${"0".repeat(24)}${"a".repeat(40)}`);
     assert.equal(topics[3], hashlock);
   });
 
   it("decodes one data word per target and refuses any other width", () => {
-    assert.equal(decodeCreditedAmount("qrl", `0x${(11000n).toString(16).padStart(128, "0")}`), 11000n);
-    assert.equal(decodeCreditedAmount("eth", `0x${(11000n).toString(16).padStart(64, "0")}`), 11000n);
-    assert.equal(decodeCreditedAmount("qrl", `0x${(11000n).toString(16).padStart(64, "0")}`), null);
+    assert.equal(
+      decodeCreditedAmount(
+        "qrl",
+        `0x${11000n.toString(16).padStart(128, "0")}`,
+      ),
+      11000n,
+    );
+    assert.equal(
+      decodeCreditedAmount("eth", `0x${11000n.toString(16).padStart(64, "0")}`),
+      11000n,
+    );
+    assert.equal(
+      decodeCreditedAmount("qrl", `0x${11000n.toString(16).padStart(64, "0")}`),
+      null,
+    );
     assert.equal(decodeCreditedAmount("eth", "0x"), null);
   });
 });
@@ -392,7 +444,10 @@ describe("credit failure classification", { concurrency: false }, () => {
       message: "execution reverted",
       data: "0xb5d5b5ba",
     });
-    assert.match(contractError.message, /Error happened while trying to execute/);
+    assert.match(
+      contractError.message,
+      /Error happened while trying to execute/,
+    );
     assert.equal(
       REJECTION_HINTS_ABSENT(contractError.message),
       true,
@@ -401,17 +456,23 @@ describe("credit failure classification", { concurrency: false }, () => {
     assert.equal(isContractRejection(contractError), true);
 
     assert.equal(
-      isContractRejection(new Eip838ExecutionError({ code: 3, message: "execution reverted" })),
-      true,
-    );
-    assert.equal(
       isContractRejection(
-        new TransactionRevertInstructionError("reverted", "0xb5d5b5ba", { status: "0x0" }),
+        new Eip838ExecutionError({ code: 3, message: "execution reverted" }),
       ),
       true,
     );
     assert.equal(
-      isContractRejection(new TransactionRevertedWithoutReasonError({ status: "0x0" })),
+      isContractRejection(
+        new TransactionRevertInstructionError("reverted", "0xb5d5b5ba", {
+          status: "0x0",
+        }),
+      ),
+      true,
+    );
+    assert.equal(
+      isContractRejection(
+        new TransactionRevertedWithoutReasonError({ status: "0x0" }),
+      ),
       true,
     );
   });
@@ -419,7 +480,10 @@ describe("credit failure classification", { concurrency: false }, () => {
   it("counts the ethers revert shape", () => {
     // ethers reports a revert as code CALL_EXCEPTION, sometimes with the
     // provider's own error nested under info.
-    assert.equal(isContractRejection({ code: "CALL_EXCEPTION", shortMessage: "" }), true);
+    assert.equal(
+      isContractRejection({ code: "CALL_EXCEPTION", shortMessage: "" }),
+      true,
+    );
     assert.equal(
       isContractRejection({
         code: "UNKNOWN_ERROR",
@@ -427,7 +491,10 @@ describe("credit failure classification", { concurrency: false }, () => {
       }),
       true,
     );
-    assert.equal(isContractRejection({ message: "", receipt: { status: 0n } }), true);
+    assert.equal(
+      isContractRejection({ message: "", receipt: { status: 0n } }),
+      true,
+    );
   });
 
   it("does not count a fault that never reached the contract", () => {
@@ -448,12 +515,18 @@ describe("credit failure classification", { concurrency: false }, () => {
     }
     // A timeout inside a contract call is still a timeout, however it is
     // wrapped: the transient shapes are read over the whole chain first.
-    const wrapped = new ContractExecutionError({ code: 3, message: "request timed out" });
+    const wrapped = new ContractExecutionError({
+      code: 3,
+      message: "request timed out",
+    });
     assert.equal(isContractRejection(wrapped), false);
   });
 
   it("walks a bounded chain and survives a cycle", () => {
-    const deep = { message: "", cause: { message: "", cause: new Error("execution reverted") } };
+    const deep = {
+      message: "",
+      cause: { message: "", cause: new Error("execution reverted") },
+    };
     assert.equal(isContractRejection(deep), true);
     const cyclic: Record<string, unknown> = { message: "unclear" };
     cyclic["cause"] = cyclic;
@@ -472,5 +545,60 @@ describe("chain identity RPC", { concurrency: false }, () => {
       assert.equal(requests[0]?.method, "eth_chainId");
       assert.deepEqual(requests[0]?.params, []);
     });
+  });
+});
+
+describe("untrusted RPC and ABI results", { concurrency: false }, () => {
+  it("rejects absent results and malformed error objects", async () => {
+    for (const response of [{}, { error: [] }, { error: "failure" }]) {
+      await withRpcResponse(response, async () => {
+        await assert.rejects(rpc(ETH_LEG.url, "eth_call", []), TypeError);
+      });
+    }
+  });
+
+  it("rejects non-hex and unsafe block heights", async () => {
+    for (const result of [
+      null,
+      {},
+      [],
+      true,
+      42,
+      "",
+      "42",
+      "0x20000000000000",
+    ]) {
+      await withRpcResponse({ result }, async () => {
+        await assert.rejects(getBlockNumber(ETH_LEG), TypeError);
+      });
+    }
+    await withRpcResponse({ result: "0x2a" }, async () => {
+      assert.equal(await getBlockNumber(ETH_LEG), 42);
+    });
+  });
+
+  it("preserves every valid EVM status and refuses unknown statuses or unsafe timeouts", async () => {
+    for (const status of [0, 1, 2, 3]) {
+      await withRpcResponse(
+        { result: swapResult(status, 1_800_000_000) },
+        async () => {
+          const swap = await getSwapState(ETH_LEG, `0x${"1".repeat(64)}`);
+          assert.equal(swap.status, status);
+          assert.equal(swap.amount, 1n);
+          assert.equal(swap.timeout, 1_800_000_000);
+        },
+      );
+    }
+    for (const result of [
+      swapResult(4, 100),
+      swapResult(1, Number.MAX_SAFE_INTEGER + 1),
+    ]) {
+      await withRpcResponse({ result }, async () => {
+        await assert.rejects(
+          getSwapState(ETH_LEG, `0x${"1".repeat(64)}`),
+          TypeError,
+        );
+      });
+    }
   });
 });

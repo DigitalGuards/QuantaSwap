@@ -11,17 +11,26 @@ import { FederationPeerTransport } from "./peer-transport.js";
 
 const ONION_HOST = `${"a".repeat(56)}.onion`;
 
-async function listen(server: TcpServer | ReturnType<typeof createHttpServer>): Promise<number> {
+async function listen(
+  server: TcpServer | ReturnType<typeof createHttpServer>,
+): Promise<number> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolve());
+    server.listen(0, "127.0.0.1", () => {
+      resolve();
+    });
   });
   return (server.address() as AddressInfo).port;
 }
 
-async function closeServer(server: TcpServer | ReturnType<typeof createHttpServer>): Promise<void> {
+async function closeServer(
+  server: TcpServer | ReturnType<typeof createHttpServer>,
+): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    server.close((error) => (error === undefined ? resolve() : reject(error)));
+    server.close((error) => {
+      if (error === undefined) resolve();
+      else reject(error);
+    });
   });
 }
 
@@ -99,7 +108,9 @@ describe("federation onion transport", () => {
       observation = value;
     });
     const proxyPort = await listen(proxy);
-    const transport = new FederationPeerTransport(`socks5h://127.0.0.1:${proxyPort}`);
+    const transport = new FederationPeerTransport(
+      `socks5h://127.0.0.1:${proxyPort}`,
+    );
     try {
       const response = await transport.fetch(
         `http://${ONION_HOST}:${targetPort}/api/federation/v2/events`,
@@ -123,12 +134,13 @@ describe("federation onion transport", () => {
     const requested: string[] = [];
     const directFetch = async (input: string | URL): Promise<Response> => {
       requested.push(String(input));
-      return new Response("{}", { headers: { "Content-Type": "application/json" } });
+      return new Response("{}", {
+        headers: { "Content-Type": "application/json" },
+      });
     };
-    const transport = new FederationPeerTransport(
-      "socks5h://127.0.0.1:1",
-      { directFetch },
-    );
+    const transport = new FederationPeerTransport("socks5h://127.0.0.1:1", {
+      directFetch,
+    });
     try {
       const response = await transport.fetch("https://book.example/api/health");
       assert.equal(response.status, 200);
@@ -172,9 +184,12 @@ describe("federation onion transport", () => {
       });
     });
     const proxyPort = await listen(proxy);
-    const transport = new FederationPeerTransport(`socks5h://127.0.0.1:${proxyPort}`, {
-      connectTimeoutMs: 50,
-    });
+    const transport = new FederationPeerTransport(
+      `socks5h://127.0.0.1:${proxyPort}`,
+      {
+        connectTimeoutMs: 50,
+      },
+    );
     try {
       await assert.rejects(
         transport.fetch(`http://${ONION_HOST}/api/federation/v2/events`, {

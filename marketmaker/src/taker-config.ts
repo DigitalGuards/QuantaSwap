@@ -91,9 +91,7 @@ export function loadTakerReadConfig(): TakerReadConfig {
 
 /** Margin below an escrow's own deadline where a claim can no longer be
  *  expected to mine, so submitting one only burns the retry slot. */
-export function claimSubmitMarginS(cfg: {
-  txTimeoutMs: number;
-}): number {
+export function claimSubmitMarginS(cfg: { txTimeoutMs: number }): number {
   return Math.ceil(cfg.txTimeoutMs / 1000) + 60;
 }
 

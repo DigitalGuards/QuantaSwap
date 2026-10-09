@@ -28,8 +28,14 @@ describe("operator key initialization", () => {
       assert.equal(statSync(dir).mode & 0o777, 0o700);
       assert.equal(statSync(paths.ethPrivateKey).mode & 0o777, 0o600);
       assert.equal(statSync(paths.qrlHexseed).mode & 0o777, 0o600);
-      assert.equal(readFileSync(paths.ethPrivateKey, "utf8"), `${KEYS.ethPrivateKey}\n`);
-      assert.equal(readFileSync(paths.qrlHexseed, "utf8"), `${KEYS.qrlHexseed}\n`);
+      assert.equal(
+        readFileSync(paths.ethPrivateKey, "utf8"),
+        `${KEYS.ethPrivateKey}\n`,
+      );
+      assert.equal(
+        readFileSync(paths.qrlHexseed, "utf8"),
+        `${KEYS.qrlHexseed}\n`,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

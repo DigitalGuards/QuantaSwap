@@ -54,7 +54,9 @@ export class BoundedSseWriter {
       if (!this.response.write(chunk)) {
         this.blocked = true;
         this.response.once("drain", this.handleDrain);
-        this.timer = setTimeout(() => this.finish(true), this.backpressureMs);
+        this.timer = setTimeout(() => {
+          this.finish(true);
+        }, this.backpressureMs);
         this.timer.unref();
       }
       return true;

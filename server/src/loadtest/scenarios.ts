@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "../guards.js";
 // Load scenarios for the order book. Each one runs against a freshly started
 // book with its own data directory, so per-source daily caps and retained
 // state from an earlier scenario never bleed into the next measurement.
@@ -136,13 +137,15 @@ function ipFor(ctx: ScenarioContext, identity: Identity): string {
 
 function makerAt(ctx: ScenarioContext, index: number): Identity {
   const maker = ctx.makers[index];
-  if (maker === undefined) throw new Error(`no maker at index ${String(index)}`);
+  if (maker === undefined)
+    throw new Error(`no maker at index ${String(index)}`);
   return maker;
 }
 
 function takerAt(ctx: ScenarioContext, index: number): Identity {
   const taker = ctx.takers[index];
-  if (taker === undefined) throw new Error(`no taker at index ${String(index)}`);
+  if (taker === undefined)
+    throw new Error(`no taker at index ${String(index)}`);
   return taker;
 }
 
@@ -199,10 +202,9 @@ export async function seedOrders(
       return;
     }
     const returned = reply.body?.["order"];
-    const returnedDigest =
-      typeof returned === "object" && returned !== null
-        ? (returned as Record<string, unknown>)["orderDigest"]
-        : undefined;
+    const returnedDigest = isRecord(returned)
+      ? returned["orderDigest"]
+      : undefined;
     if (returnedDigest !== order.orderDigest) {
       throw new Error(
         "seeded order digest disagrees with the locally derived digest",
@@ -480,10 +482,7 @@ async function submitIntent(
       (collector.winsByTaker.get(intent.takerIndex) ?? 0) + 1,
     );
     const returned = reply.body?.["intent"];
-    const digest =
-      typeof returned === "object" && returned !== null
-        ? (returned as Record<string, unknown>)["intentDigest"]
-        : undefined;
+    const digest = isRecord(returned) ? returned["intentDigest"] : undefined;
     if (typeof digest === "string") collector.admittedDigests.push(digest);
     return;
   }
@@ -613,7 +612,12 @@ export async function scenarioHotRace(
     if (round + 1 < plan.rounds) await sleep(250);
   }
 
-  const fairness = await inspectFairness(ctx, [hot], collector, winnersPerRound);
+  const fairness = await inspectFairness(
+    ctx,
+    [hot],
+    collector,
+    winnersPerRound,
+  );
   return {
     intents: finishCollector(collector),
     fairness,
@@ -634,8 +638,12 @@ export async function scenarioSpread(
   const collector = newCollector();
   const deadline = performance.now() + ctx.durationMs;
   const queue = flatQueue(plan.perTaker, plan.rounds);
-  const drained = await drainQueue(queue, ctx.concurrency, deadline, 0, (intent) =>
-    submitIntent(ctx, intent, collector),
+  const drained = await drainQueue(
+    queue,
+    ctx.concurrency,
+    deadline,
+    0,
+    (intent) => submitIntent(ctx, intent, collector),
   );
 
   const fairness = await inspectFairness(ctx, orders, collector, []);
@@ -677,7 +685,9 @@ export async function scenarioMixed(
   // measures its delivery; later frames would just re-report it.
   const firstSeen = new Map<string, Map<number, number>>();
   const requestStarts = new Map<string, number>();
-  const trackedIds = new Set(plan.makerCycles.map((cycle) => cycle.repost.orderId));
+  const trackedIds = new Set(
+    plan.makerCycles.map((cycle) => cycle.repost.orderId),
+  );
 
   // Each subscriber scans only the ids it has not seen yet, so the harness's
   // own event loop does not become the thing being measured.
@@ -767,12 +777,8 @@ export async function scenarioMixed(
       await sleep(400);
     }
   })();
-  const takerLoop = drainQueue(
-    queue,
-    ctx.concurrency,
-    deadline,
-    0,
-    (intent) => submitIntent(ctx, intent, collector),
+  const takerLoop = drainQueue(queue, ctx.concurrency, deadline, 0, (intent) =>
+    submitIntent(ctx, intent, collector),
   );
 
   const [drained] = await Promise.all([takerLoop, makerLoop, ...readerLoops]);
@@ -1058,23 +1064,22 @@ async function inspectFairness(
 }
 
 function parseIntents(raw: unknown): PublicIntent[] {
-  if (!Array.isArray(raw)) return [];
+  if (!isArray(raw)) return [];
   const parsed: PublicIntent[] = [];
   for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as Record<string, unknown>;
+    if (!isRecord(entry)) continue;
+    const record = entry;
     const auth = record["auth"];
     const digest = record["intentDigest"];
     const receivedAt = record["receivedAt"];
     if (
       typeof digest !== "string" ||
       typeof receivedAt !== "number" ||
-      typeof auth !== "object" ||
-      auth === null
+      !isRecord(auth)
     ) {
       continue;
     }
-    const issuedAt = (auth as Record<string, unknown>)["issuedAt"];
+    const issuedAt = auth["issuedAt"];
     if (typeof issuedAt !== "number") continue;
     parsed.push({ intentDigest: digest, receivedAt, issuedAt });
   }
@@ -1138,16 +1143,16 @@ export async function probeDoubleFill(
     );
     if (listed.status !== 200) continue;
     const raw = listed.body?.["intents"];
-    if (!Array.isArray(raw) || raw.length < 2) continue;
+    if (!isArray(raw) || raw.length < 2) continue;
     const now = Math.floor(Date.now() / 1000);
     // A FillV2 must be issued inside its proposal's signed window, so only
     // proposals that are still live can be raced.
     const picks = raw
-      .map((entry) => entry as Record<string, unknown>)
+      .filter(isRecord)
       .filter((pick) => {
         const auth = pick["auth"];
-        if (typeof auth !== "object" || auth === null) return false;
-        const window = auth as Record<string, unknown>;
+        if (!isRecord(auth)) return false;
+        const window = auth;
         return (
           typeof window["issuedAt"] === "number" &&
           typeof window["expiresAt"] === "number" &&
@@ -1158,8 +1163,10 @@ export async function probeDoubleFill(
       .slice(0, 2);
     if (picks.length < 2) continue;
     const fills = picks.map((pick) => {
-      const body = pick["intent"] as Record<string, unknown>;
-      const auth = pick["auth"] as Record<string, unknown>;
+      const body = pick["intent"];
+      const auth = pick["auth"];
+      if (!isRecord(body) || !isRecord(auth))
+        throw new TypeError("Malformed load-test intent");
       return {
         intentBody: body,
         intentAuth: auth,
@@ -1214,17 +1221,16 @@ export async function probeDoubleFill(
       maker.ip,
     );
     const stored = after.body?.["order"];
-    const record =
-      typeof stored === "object" && stored !== null
-        ? (stored as Record<string, unknown>)
-        : {};
+    const record = isRecord(stored) ? stored : {};
     const storedFillDigest =
       typeof record["fillDigest"] === "string"
         ? record["fillDigest"]
         : undefined;
     const rawConflicts = record["conflictDigests"];
-    const retainedConflicts = Array.isArray(rawConflicts)
-      ? rawConflicts.filter((value): value is string => typeof value === "string")
+    const retainedConflicts = isArray(rawConflicts)
+      ? rawConflicts.filter(
+          (value): value is string => typeof value === "string",
+        )
       : [];
     const winners = racedDigests.filter(
       (digest) => digest === storedFillDigest,

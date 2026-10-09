@@ -182,7 +182,16 @@ export function formatRun(result: RunResult): string {
     out.push("");
     out.push(
       table(
-        ["measured endpoint", "n", "p50", "p95", "p99", "max", "req/s", "statuses"],
+        [
+          "measured endpoint",
+          "n",
+          "p50",
+          "p95",
+          "p99",
+          "max",
+          "req/s",
+          "statuses",
+        ],
         scenario.endpoints.map((endpoint) => [
           ...latencyRow(endpoint.endpoint, endpoint),
           endpoint.requestsPerSecond.toFixed(1),
@@ -244,7 +253,10 @@ export function formatRun(result: RunResult): string {
           table(
             ["intent path", "n", "p50", "p95", "p99", "max"],
             [
-              latencyRow("admitted: verify plus persist", intents.admittedLatency),
+              latencyRow(
+                "admitted: verify plus persist",
+                intents.admittedLatency,
+              ),
               latencyRow(
                 "refused after verification",
                 intents.refusedAfterVerifyLatency,

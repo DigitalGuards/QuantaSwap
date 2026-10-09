@@ -525,7 +525,10 @@ export const CREDIT_PARK_AFTER_S = 24 * 60 * 60;
  *  interval, capped so a parked-in-waiting credit is still retried hourly. */
 export const CREDIT_RETRY_CAP_S = 60 * 60;
 
-export function creditRetryAfterS(rejections: number, resendAfterS: number): number {
+export function creditRetryAfterS(
+  rejections: number,
+  resendAfterS: number,
+): number {
   const scaled = resendAfterS * 2 ** Math.max(0, rejections);
   return Math.min(scaled, CREDIT_RETRY_CAP_S);
 }

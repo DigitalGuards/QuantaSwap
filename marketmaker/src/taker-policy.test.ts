@@ -92,7 +92,9 @@ function ourLock(overrides: Partial<LegState> = {}): LegState {
   });
 }
 
-function record(overrides: Partial<TakerDecisionRecord> = {}): TakerDecisionRecord {
+function record(
+  overrides: Partial<TakerDecisionRecord> = {},
+): TakerDecisionRecord {
   return {
     fillAcknowledged: true,
     intentSubmittedAt: NOW - 30,
@@ -196,10 +198,7 @@ describe("maker escrow verification", () => {
       600,
     );
     assert.equal(check.state, "mismatch");
-    assert.match(
-      check.state === "mismatch" ? check.issue : "",
-      /claim window/,
-    );
+    assert.match(check.state === "mismatch" ? check.issue : "", /claim window/);
   });
 
   it("separates an unassigned pre-funded escrow from a mismatch", () => {
@@ -624,7 +623,11 @@ describe("decideTaker settlement", () => {
 });
 
 describe("resume is idempotent at every step", () => {
-  const steps: { name: string; patch: Partial<TakerDecideInput>; expect: string }[] = [
+  const steps: {
+    name: string;
+    patch: Partial<TakerDecideInput>;
+    expect: string;
+  }[] = [
     {
       name: "before proposing",
       patch: {
@@ -796,10 +799,7 @@ describe("take bounds", () => {
   });
 
   it("refuses to pay more than --max-in", () => {
-    assert.match(
-      takeBoundsIssue({ ...base, maxIn: PAY - 1n }) ?? "",
-      /max-in/,
-    );
+    assert.match(takeBoundsIssue({ ...base, maxIn: PAY - 1n }) ?? "", /max-in/);
   });
 
   it("refuses to receive less than --min-out", () => {
@@ -849,9 +849,6 @@ describe("take bounds", () => {
   });
 
   it("refuses a take with no gas headroom", () => {
-    assert.match(
-      takeBoundsIssue({ ...base, gasBalance: 0n }) ?? "",
-      /gas/,
-    );
+    assert.match(takeBoundsIssue({ ...base, gasBalance: 0n }) ?? "", /gas/);
   });
 });

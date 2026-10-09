@@ -1,3 +1,4 @@
+import { isArray } from "./guards.js";
 // Taker-side order book client. It reuses the maker transport in
 // orderbook.ts (bounded reads, media-type checks, error mapping) and adds
 // the three taker routes: read the public book, propose a signed fill, and
@@ -25,14 +26,13 @@ export interface ListedBook {
 }
 
 export type ReleaseReference =
-  | { intentDigest: string }
-  | { fillDigest: string };
+  { intentDigest: string } | { fillDigest: string };
 
 export class TakerBookClient extends OrderBookClient {
   /** The open public book. A malformed row is skipped and counted. */
   async listOpen(): Promise<ListedBook> {
-    const payload = await this.api<{ orders?: unknown }>("GET", "/orders");
-    if (!Array.isArray(payload.orders)) {
+    const payload = await this.api("GET", "/orders");
+    if (!isArray(payload.orders)) {
       throw new Error("order book returned an invalid order list");
     }
     if (payload.orders.length > MAX_LISTED_ROWS) {
@@ -59,10 +59,7 @@ export class TakerBookClient extends OrderBookClient {
   }
 
   async getRow(id: string): Promise<BookOrderRow> {
-    const payload = await this.api<unknown>(
-      "GET",
-      `/orders/${encodeURIComponent(id)}`,
-    );
+    const payload = await this.api("GET", `/orders/${encodeURIComponent(id)}`);
     const response = record(payload, "order response");
     exactKeys(response, ["order"], "order response");
     const row = parseBookOrderRow(response["order"]);
@@ -81,7 +78,7 @@ export class TakerBookClient extends OrderBookClient {
     id: string,
     signed: SignedFillIntentV1,
   ): Promise<SelectedFillIntentV1> {
-    const payload = await this.api<unknown>(
+    const payload = await this.api(
       "POST",
       `/orders/${encodeURIComponent(id)}/intents`,
       signed,
@@ -90,7 +87,8 @@ export class TakerBookClient extends OrderBookClient {
     exactKeys(response, ["intent"], "intent response");
     const accepted = parseSelectedIntent(response["intent"], "intent response");
     if (
-      accepted.intentDigest !== computeFillIntentDigest(signed.intent, signed.auth) ||
+      accepted.intentDigest !==
+        computeFillIntentDigest(signed.intent, signed.auth) ||
       !sameSignedIntent(accepted, signed)
     ) {
       throw new Error(
@@ -106,7 +104,7 @@ export class TakerBookClient extends OrderBookClient {
     releaseSecret: string,
     reference: ReleaseReference,
   ): Promise<BookOrderRow> {
-    const payload = await this.api<unknown>(
+    const payload = await this.api(
       "POST",
       `/orders/${encodeURIComponent(id)}/release`,
       { releaseSecret, ...reference },

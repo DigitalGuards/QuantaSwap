@@ -211,10 +211,9 @@ describe("federation peer pages", () => {
       hasMore: false,
       events: [{ ...record, seq: 2 }],
     });
-    assert.throws(
-      () => validateFederationPageProgress(`${"ab".repeat(16)}:01`, page),
-      /invalid cursor/,
-    );
+    assert.throws(() => {
+      validateFederationPageProgress(`${"ab".repeat(16)}:01`, page);
+    }, /invalid cursor/);
   });
 
   it("rejects unknown page, record, and event envelope fields", () => {
@@ -320,17 +319,15 @@ describe("federation peer pages", () => {
       hasMore: false,
       events: [record],
     });
-    assert.doesNotThrow(() =>
-      validateFederationPageProgress(`${"ab".repeat(16)}:6`, page),
-    );
-    assert.throws(
-      () => validateFederationPageProgress(`${"cd".repeat(16)}:6`, page),
-      /changed feed id/,
-    );
-    assert.throws(
-      () => validateFederationPageProgress(null, page),
-      /required initial reset/,
-    );
+    assert.doesNotThrow(() => {
+      validateFederationPageProgress(`${"ab".repeat(16)}:6`, page);
+    });
+    assert.throws(() => {
+      validateFederationPageProgress(`${"cd".repeat(16)}:6`, page);
+    }, /changed feed id/);
+    assert.throws(() => {
+      validateFederationPageProgress(null, page);
+    }, /required initial reset/);
 
     const nextEvent = releaseEvent(2);
     assert.throws(
@@ -357,10 +354,9 @@ describe("federation peer pages", () => {
       hasMore: false,
       events: [],
     });
-    assert.throws(
-      () => validateFederationPageProgress(`${"ab".repeat(16)}:8`, stalePage),
-      /nonadvancing empty page/,
-    );
+    assert.throws(() => {
+      validateFederationPageProgress(`${"ab".repeat(16)}:8`, stalePage);
+    }, /nonadvancing empty page/);
   });
 
   it("bounds and content-types peer response bodies before parsing", async () => {
@@ -739,7 +735,7 @@ describe("federation peer pages", () => {
     const originalNow = Date.now;
     const first = releaseEvent(20);
     const replacement = releaseEvent(21);
-    let clock = 1_000;
+    const clock = 1_000;
     let fetches = 0;
     let applied = 0;
     const errors: string[] = [];
@@ -996,7 +992,7 @@ describe("federation peer pages", () => {
     const originalFetch = globalThis.fetch;
     const originalNow = Date.now;
     const errors: Array<{ peer: string; message: string }> = [];
-    let clock = 1_000;
+    const clock = 1_000;
     let applyCalls = 0;
     Date.now = () => clock;
     globalThis.fetch = async (input) => {
@@ -1304,7 +1300,7 @@ describe("federation peer pages", () => {
     const errors: string[] = [];
     const originalFetch = globalThis.fetch;
     const originalNow = Date.now;
-    let clock = 1_000;
+    const clock = 1_000;
     Date.now = () => clock;
     globalThis.fetch = async () =>
       federationResponse({

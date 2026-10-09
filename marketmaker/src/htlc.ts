@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "./guards.js";
 // HTLC reads and calldata for both legs over plain JSON-RPC, mirroring
 // frontend/src/lib/htlc.ts. Chain state is the only trusted input: the
 // order book coordinates, the chain decides.
@@ -64,7 +65,12 @@ export const ERC20_ABI = [
 const iface = new Interface(HTLC_ABI);
 const erc20 = new Interface(ERC20_ABI);
 
-export const SwapStatus = { None: 0, Open: 1, Claimed: 2, Refunded: 3 } as const;
+export const SwapStatus = {
+  None: 0,
+  Open: 1,
+  Claimed: 2,
+  Refunded: 3,
+} as const;
 export type SwapStatusValue = (typeof SwapStatus)[keyof typeof SwapStatus];
 
 /** Ethereum address(0). QRL QRVM64 uses QRL_NATIVE_TOKEN. */
@@ -89,6 +95,45 @@ export interface LegState {
 
 export type LegKey = "eth" | "qrl";
 
+function isSwapStatus(value: number): value is SwapStatusValue {
+  return value === 0 || value === 1 || value === 2 || value === 3;
+}
+
+function rpcBytes(raw: unknown): string {
+  if (typeof raw !== "string" || !/^0x(?:[0-9a-fA-F]{2})*$/.test(raw)) {
+    throw new TypeError("RPC returned malformed ABI bytes");
+  }
+  return raw;
+}
+
+type EvmSwapTuple = [string, string, string, bigint, bigint, bigint, string];
+
+function isEvmSwapTuple(value: unknown): value is EvmSwapTuple {
+  return (
+    isArray(value) &&
+    value.length === 7 &&
+    typeof value[0] === "string" &&
+    typeof value[1] === "string" &&
+    typeof value[2] === "string" &&
+    typeof value[3] === "bigint" &&
+    typeof value[4] === "bigint" &&
+    typeof value[5] === "bigint" &&
+    typeof value[6] === "string"
+  );
+}
+
+function decodeEvmUint(abi: Interface, method: string, raw: unknown): bigint {
+  const decoded: unknown = abi.decodeFunctionResult(method, rpcBytes(raw));
+  if (
+    !isArray(decoded) ||
+    decoded.length !== 1 ||
+    typeof decoded[0] !== "bigint"
+  ) {
+    throw new TypeError("Malformed EVM uint result");
+  }
+  return decoded[0];
+}
+
 export const qToHex = (addr: string): string => qrlOrEthHex(addr);
 
 export const sameAddr = (a: string, b: string): boolean =>
@@ -111,8 +156,20 @@ export async function rpc(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`RPC ${method} failed: HTTP ${res.status}`);
-  const body = (await res.json()) as { result?: unknown; error?: { message?: string } };
-  if (body.error) throw new Error(body.error.message ?? `RPC ${method} error`);
+  const body: unknown = await res.json();
+  if (!isRecord(body))
+    throw new TypeError(`RPC ${method} returned a malformed response`);
+  if (body.error !== undefined && body.error !== null) {
+    if (!isRecord(body.error))
+      throw new TypeError(`RPC ${method} returned a malformed error`);
+    throw new Error(
+      typeof body.error.message === "string"
+        ? body.error.message
+        : `RPC ${method} error`,
+    );
+  }
+  if (!Object.hasOwn(body, "result"))
+    throw new TypeError(`RPC ${method} omitted its result`);
   return body.result;
 }
 
@@ -142,9 +199,13 @@ export async function assertQrlRuntime(leg: LegRpc): Promise<void> {
   ]);
   if (
     BigInt(chain) !== BigInt(protocolV2Config.qrlChainId) ||
-    typeof block !== "object" || block === null ||
-    !("hash" in block) || block.hash !== protocolV2Config.qrlGenesisHash
-  ) throw new Error("QRL RPC chain or genesis mismatch; refusing v3 operations");
+    !isRecord(block) ||
+    !("hash" in block) ||
+    block.hash !== protocolV2Config.qrlGenesisHash
+  )
+    throw new Error(
+      "QRL RPC chain or genesis mismatch; refusing v3 operations",
+    );
 }
 
 /** Simulate exact HTLC calldata from the real transaction sender against
@@ -178,7 +239,9 @@ export async function simulateHtlcCall(
       throw new Error("malformed result");
     }
   } catch {
-    throw new Error(`${leg.ns} HTLC preflight rejected; claim was not broadcast`);
+    throw new Error(
+      `${leg.ns} HTLC preflight rejected; claim was not broadcast`,
+    );
   }
 }
 
@@ -243,12 +306,21 @@ export async function submitPreflightedClaim(
   } catch {
     // Provider errors can reflect transaction calldata. Never pass a
     // secret-bearing RPC error through the daemon logger.
-    throw new Error(`${leg.ns} claim submission failed; reconcile chain state before retry`);
+    throw new Error(
+      `${leg.ns} claim submission failed; reconcile chain state before retry`,
+    );
   }
 }
 
 export async function getBlockNumber(leg: LegRpc): Promise<number> {
-  return Number(BigInt((await rpc(leg.url, `${leg.ns}_blockNumber`, [], leg.timeoutMs)) as string));
+  const raw = await rpc(leg.url, `${leg.ns}_blockNumber`, [], leg.timeoutMs);
+  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]+$/.test(raw)) {
+    throw new TypeError("RPC returned a malformed block number");
+  }
+  const height = Number(BigInt(raw));
+  if (!Number.isSafeInteger(height))
+    throw new TypeError("RPC returned an unsafe block number");
+  return height;
 }
 
 export async function getSwapState(
@@ -257,35 +329,40 @@ export async function getSwapState(
   blockTag = "latest",
 ): Promise<LegState> {
   await assertQrlRuntime(leg);
-  const data = leg.ns === "qrl"
-    ? encodeQrvmHtlc("getSwap", [hashlock])
-    : iface.encodeFunctionData("getSwap", [hashlock]);
-  const raw = (await rpc(
+  const data =
+    leg.ns === "qrl"
+      ? encodeQrvmHtlc("getSwap", [hashlock])
+      : iface.encodeFunctionData("getSwap", [hashlock]);
+  const raw = await rpc(
     leg.url,
     `${leg.ns}_call`,
     [{ to: leg.htlc, data }, blockTag],
     leg.timeoutMs,
-  )) as string;
+  );
   if (leg.ns === "qrl") return decodeQrvmSwap(raw);
-  const [swap] = iface.decodeFunctionResult("getSwap", raw) as unknown as [
-    {
-      initiator: string;
-      recipient: string;
-      token: string;
-      amount: bigint;
-      timeout: bigint;
-      status: bigint;
-      preimage: string;
-    },
-  ];
+  const decoded: unknown = iface.decodeFunctionResult("getSwap", rpcBytes(raw));
+  if (
+    !isArray(decoded) ||
+    decoded.length !== 1 ||
+    !isEvmSwapTuple(decoded[0])
+  ) {
+    throw new TypeError("Malformed EVM swap result");
+  }
+  const [initiator, recipient, token, amount, timeout, status, preimage] =
+    decoded[0];
+  const numericStatus = Number(status);
+  const numericTimeout = Number(timeout);
+  if (!isSwapStatus(numericStatus) || !Number.isSafeInteger(numericTimeout)) {
+    throw new TypeError("Malformed EVM swap status or timeout");
+  }
   return {
-    status: Number(swap.status) as SwapStatusValue,
-    initiator: swap.initiator,
-    recipient: swap.recipient,
-    token: swap.token,
-    amount: swap.amount,
-    timeout: Number(swap.timeout),
-    preimage: swap.preimage,
+    status: numericStatus,
+    initiator,
+    recipient,
+    token,
+    amount,
+    timeout: numericTimeout,
+    preimage,
   };
 }
 
@@ -308,9 +385,14 @@ export const encodeLock = (
   recipient: string,
   timeout: number,
 ): string => {
-  if (leg === "qrl") return encodeQrvmHtlc("lockNative", [hashlock, recipient, timeout]);
+  if (leg === "qrl")
+    return encodeQrvmHtlc("lockNative", [hashlock, recipient, timeout]);
   if (isQip55QrlAddress(recipient)) throw new Error(QIP55_QRVM_ABI_ERROR);
-  return iface.encodeFunctionData("lockNative", [hashlock, qToHex(recipient), timeout]);
+  return iface.encodeFunctionData("lockNative", [
+    hashlock,
+    qToHex(recipient),
+    timeout,
+  ]);
 };
 
 /** lockToken calldata: value rides in the calldata (msg.value 0) after an
@@ -344,32 +426,40 @@ export async function erc20Allowance(
   owner: string,
   spender: string,
 ): Promise<bigint> {
-  if (leg.ns !== "eth") throw new Error("ERC-20 allowances require the Ethereum leg");
+  if (leg.ns !== "eth")
+    throw new Error("ERC-20 allowances require the Ethereum leg");
   const data = erc20.encodeFunctionData("allowance", [owner, spender]);
-  const raw = (await rpc(
+  const raw = await rpc(
     leg.url,
     `${leg.ns}_call`,
     [{ to: token, data }, "latest"],
     leg.timeoutMs,
-  )) as string;
-  const [value] = erc20.decodeFunctionResult("allowance", raw) as unknown as [bigint];
-  return value;
+  );
+  return decodeEvmUint(erc20, "allowance", raw);
 }
 
-export async function erc20BalanceOf(leg: LegRpc, token: string, holder: string): Promise<bigint> {
-  if (leg.ns !== "eth") throw new Error("ERC-20 balances require the Ethereum leg");
+export async function erc20BalanceOf(
+  leg: LegRpc,
+  token: string,
+  holder: string,
+): Promise<bigint> {
+  if (leg.ns !== "eth")
+    throw new Error("ERC-20 balances require the Ethereum leg");
   const data = erc20.encodeFunctionData("balanceOf", [holder]);
-  const raw = (await rpc(
+  const raw = await rpc(
     leg.url,
     `${leg.ns}_call`,
     [{ to: token, data }, "latest"],
     leg.timeoutMs,
-  )) as string;
-  const [value] = erc20.decodeFunctionResult("balanceOf", raw) as unknown as [bigint];
-  return value;
+  );
+  return decodeEvmUint(erc20, "balanceOf", raw);
 }
 
-export const encodeClaim = (leg: LegKey, hashlock: string, preimage: string): string => {
+export const encodeClaim = (
+  leg: LegKey,
+  hashlock: string,
+  preimage: string,
+): string => {
   if (leg === "qrl") return encodeQrvmHtlc("claim", [hashlock, preimage]);
   return iface.encodeFunctionData("claim", [hashlock, preimage]);
 };
@@ -380,7 +470,11 @@ export const encodeRefund = (leg: LegKey, hashlock: string): string => {
 };
 
 /** Move the caller's whole credit in `token` to `to`. */
-export const encodeWithdrawAll = (leg: LegKey, token: string, to: string): string => {
+export const encodeWithdrawAll = (
+  leg: LegKey,
+  token: string,
+  to: string,
+): string => {
   if (leg === "qrl") return encodeQrvmHtlc("withdrawAll", [token, to]);
   if (isQip55QrlAddress(to)) throw new Error(QIP55_QRVM_ABI_ERROR);
   return iface.encodeFunctionData("withdrawAll", [token, qToHex(to)]);
@@ -389,7 +483,11 @@ export const encodeWithdrawAll = (leg: LegKey, token: string, to: string): strin
 /** Deliver `account`'s whole credit in `token` to `account`. Permissionless
  *  and destinationless, so a sponsor can finish a deferred payout for a
  *  taker with no gas on that chain without gaining redirect authority. */
-export const encodePushCredit = (leg: LegKey, token: string, account: string): string => {
+export const encodePushCredit = (
+  leg: LegKey,
+  token: string,
+  account: string,
+): string => {
   if (leg === "qrl") return encodeQrvmHtlc("pushCredit", [token, account]);
   if (isQip55QrlAddress(account)) throw new Error(QIP55_QRVM_ABI_ERROR);
   return iface.encodeFunctionData("pushCredit", [token, qToHex(account)]);
@@ -399,12 +497,15 @@ export const encodePushCredit = (leg: LegKey, token: string, account: string): s
  *  64-byte address itself on QRVM-512. */
 function addressTopic(ns: LegKey, address: string): string {
   const hex = qToHex(address).slice(2).toLowerCase();
-  return ns === "qrl" ? `0x${hex.padStart(128, "0")}` : `0x${hex.padStart(64, "0")}`;
+  return ns === "qrl"
+    ? `0x${hex.padStart(128, "0")}`
+    : `0x${hex.padStart(64, "0")}`;
 }
 
 /** QRVM-512 log topics are 64-byte words: a 32-byte value sits in the high
  *  half followed by 32 zero bytes. Mirrors the browser's qrvm64Topic. */
-const qrvm64Topic = (word: string): string => `${word.toLowerCase()}${"0".repeat(64)}`;
+const qrvm64Topic = (word: string): string =>
+  `${word.toLowerCase()}${"0".repeat(64)}`;
 
 const PAYOUT_CREDITED_TOPIC = (() => {
   const frag = iface.getEvent("PayoutCredited");
@@ -441,7 +542,10 @@ export function creditFilterTopics(
  *  for anything else, so a malformed answer is never read as a number. */
 export function decodeCreditedAmount(ns: LegKey, data: unknown): bigint | null {
   const width = ns === "qrl" ? 128 : 64;
-  if (typeof data !== "string" || !new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)) {
+  if (
+    typeof data !== "string" ||
+    !new RegExp(`^0x[0-9a-fA-F]{${width}}$`).test(data)
+  ) {
     return null;
   }
   return BigInt(data);
@@ -467,11 +571,11 @@ export async function getCreditedForSwap(
     ],
     leg.timeoutMs,
   );
-  if (!Array.isArray(raw)) return 0n;
+  if (!isArray(raw)) return 0n;
   let total = 0n;
-  for (const entry of raw as unknown[]) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const { data } = entry as { data?: unknown };
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const { data } = entry;
     const amount = decodeCreditedAmount(leg.ns, data);
     if (amount === null) continue;
     total += amount;
@@ -500,7 +604,8 @@ export async function readSwapCredit(
   hashlock: string,
 ): Promise<CreditReading> {
   const global = await getCredit(leg, token, account);
-  const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+  const credited =
+    global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
   return { global, credited };
 }
 
@@ -514,18 +619,20 @@ function causeChain(error: unknown): unknown[] {
   const chain: unknown[] = [];
   const seen = new Set<unknown>();
   let current = error;
-  for (let depth = 0; depth < CAUSE_DEPTH && current !== undefined && current !== null; depth += 1) {
+  for (
+    let depth = 0;
+    depth < CAUSE_DEPTH && current !== undefined && current !== null;
+    depth += 1
+  ) {
     if (seen.has(current)) break;
     seen.add(current);
     chain.push(current);
-    if (typeof current !== "object") break;
-    const node = current as Record<string, unknown>;
+    if (!isRecord(current)) break;
+    const node = current;
     const next =
       node["innerError"] ??
       node["cause"] ??
-      (typeof node["info"] === "object" && node["info"] !== null
-        ? (node["info"] as Record<string, unknown>)["error"]
-        : undefined);
+      (isRecord(node["info"]) ? node["info"]["error"] : undefined);
     current = next;
   }
   return chain;
@@ -614,8 +721,8 @@ export function isContractRejection(error: unknown): boolean {
     .map((node) => {
       if (node instanceof Error) return node.message;
       if (typeof node === "string") return node;
-      if (typeof node === "object" && node !== null) {
-        const message = (node as Record<string, unknown>)["message"];
+      if (isRecord(node)) {
+        const message = node["message"];
         return typeof message === "string" ? message : "";
       }
       return "";
@@ -626,20 +733,29 @@ export function isContractRejection(error: unknown): boolean {
   if (TRANSIENT_HINTS.some((hint) => text.includes(hint))) return false;
 
   for (const node of chain) {
-    if (typeof node !== "object" || node === null) continue;
-    const row = node as Record<string, unknown>;
-    if (typeof row["name"] === "string" && REJECTION_NAMES.has(row["name"])) return true;
+    if (!isRecord(node)) continue;
+    const row = node;
+    if (typeof row["name"] === "string" && REJECTION_NAMES.has(row["name"]))
+      return true;
     const code = row["code"];
-    if ((typeof code === "string" || typeof code === "number") && REJECTION_CODES.has(code)) {
+    if (
+      (typeof code === "string" || typeof code === "number") &&
+      REJECTION_CODES.has(code)
+    ) {
       return true;
     }
     // Revert data is only ever produced by a call that reached the contract.
     const data = row["data"];
-    if (typeof data === "string" && /^0x[0-9a-fA-F]*$/.test(data) && data.length > 2) return true;
+    if (
+      typeof data === "string" &&
+      /^0x[0-9a-fA-F]*$/.test(data) &&
+      data.length > 2
+    )
+      return true;
     // A receipt with status 0 is a mined revert.
     const receipt = row["receipt"];
-    if (typeof receipt === "object" && receipt !== null) {
-      const status = (receipt as Record<string, unknown>)["status"];
+    if (isRecord(receipt)) {
+      const status = receipt["status"];
       if (status === "0x0" || status === 0n || status === 0) return true;
     }
   }
@@ -659,20 +775,22 @@ export async function getCredit(
     const raw = await rpc(
       leg.url,
       "qrl_call",
-      [{ to: leg.htlc, data: encodeQrvmHtlc("creditOf", [token, account]) }, "latest"],
+      [
+        { to: leg.htlc, data: encodeQrvmHtlc("creditOf", [token, account]) },
+        "latest",
+      ],
       leg.timeoutMs,
     );
     return decodeQrvmUints(raw, 1)[0] ?? 0n;
   }
   const data = iface.encodeFunctionData("creditOf", [token, qToHex(account)]);
-  const raw = (await rpc(
+  const raw = await rpc(
     leg.url,
     "eth_call",
     [{ to: leg.htlc, data }, "latest"],
     leg.timeoutMs,
-  )) as string;
-  const [value] = iface.decodeFunctionResult("creditOf", raw) as unknown as [bigint];
-  return value;
+  );
+  return decodeEvmUint(iface, "creditOf", raw);
 }
 
 export interface DeliveryGasPolicy {
@@ -683,30 +801,43 @@ export interface DeliveryGasPolicy {
 /** The deployed contract's own delivery budget and credit reserve. Only
  *  HTLCv3 answers this call, so a successful read also proves the
  *  configured address is the interface this build settles against. */
-export async function getDeliveryGasPolicy(leg: LegRpc): Promise<DeliveryGasPolicy> {
+export async function getDeliveryGasPolicy(
+  leg: LegRpc,
+): Promise<DeliveryGasPolicy> {
   await assertQrlRuntime(leg);
   if (leg.ns === "qrl") {
     const raw = await rpc(
       leg.url,
       "qrl_call",
-      [{ to: leg.htlc, data: encodeQrvmHtlc("deliveryGasPolicy", []) }, "latest"],
+      [
+        { to: leg.htlc, data: encodeQrvmHtlc("deliveryGasPolicy", []) },
+        "latest",
+      ],
       leg.timeoutMs,
     );
     const [gasLimit, gasReserve] = decodeQrvmUints(raw, 2);
     return { gasLimit: gasLimit ?? 0n, gasReserve: gasReserve ?? 0n };
   }
   const data = iface.encodeFunctionData("deliveryGasPolicy", []);
-  const raw = (await rpc(
+  const raw = await rpc(
     leg.url,
     "eth_call",
     [{ to: leg.htlc, data }, "latest"],
     leg.timeoutMs,
-  )) as string;
-  const [gasLimit, gasReserve] = iface.decodeFunctionResult(
+  );
+  const decoded: unknown = iface.decodeFunctionResult(
     "deliveryGasPolicy",
-    raw,
-  ) as unknown as [bigint, bigint];
-  return { gasLimit, gasReserve };
+    rpcBytes(raw),
+  );
+  if (
+    !isArray(decoded) ||
+    decoded.length !== 2 ||
+    typeof decoded[0] !== "bigint" ||
+    typeof decoded[1] !== "bigint"
+  ) {
+    throw new TypeError("Malformed EVM delivery gas policy");
+  }
+  return { gasLimit: decoded[0], gasReserve: decoded[1] };
 }
 
 /** Refuse to run against a contract whose published budget differs from the
@@ -715,7 +846,10 @@ export async function getDeliveryGasPolicy(leg: LegRpc): Promise<DeliveryGasPoli
  *  daemon at boot, before a single payout can quietly defer. */
 export async function assertDeliveryGasPolicy(leg: LegRpc): Promise<void> {
   const policy = await getDeliveryGasPolicy(leg);
-  if (policy.gasLimit !== DELIVERY_GAS_LIMIT || policy.gasReserve !== DELIVERY_GAS_RESERVE) {
+  if (
+    policy.gasLimit !== DELIVERY_GAS_LIMIT ||
+    policy.gasReserve !== DELIVERY_GAS_RESERVE
+  ) {
     throw new Error(
       `the ${leg.ns} HTLC publishes a delivery budget this build was not written for (${policy.gasLimit}/${policy.gasReserve}); refusing to settle`,
     );

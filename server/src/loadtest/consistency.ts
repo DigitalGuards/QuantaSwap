@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "../guards.js";
 // End-of-scenario invariant checks: the served book, the federation feed and
 // a restarted process all have to agree, and no order may hold two fills.
 
@@ -66,11 +67,11 @@ export async function readBook(client: BookClient): Promise<BookRow[]> {
     AUDIT_IP,
   );
   const raw = reply.body?.["orders"];
-  if (!Array.isArray(raw)) return [];
+  if (!isArray(raw)) return [];
   const rows: BookRow[] = [];
   for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as Record<string, unknown>;
+    if (!isRecord(entry)) continue;
+    const record = entry;
     const conflicts = record["conflictDigests"];
     rows.push({
       id: String(record["id"]),
@@ -80,7 +81,7 @@ export async function readBook(client: BookClient): Promise<BookRow[]> {
       toAmount: String(record["toAmount"]),
       orderDigest: String(record["orderDigest"]),
       filled: record["fill"] !== undefined,
-      conflicts: Array.isArray(conflicts) ? conflicts.length : 0,
+      conflicts: isArray(conflicts) ? conflicts.length : 0,
     });
   }
   return rows.sort((left, right) => left.id.localeCompare(right.id));
@@ -101,22 +102,22 @@ export interface FeedRead {
 
 const CURSOR_RE = /^([0-9a-f]{32}):([0-9]+)$/;
 
-function collectEvents(body: Record<string, unknown>, key: string): FeedEvent[] {
+function collectEvents(
+  body: Record<string, unknown>,
+  key: string,
+): FeedEvent[] {
   const list = body[key];
-  if (!Array.isArray(list)) return [];
+  if (!isArray(list)) return [];
   const events: FeedEvent[] = [];
   for (const entry of list) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const event = (entry as Record<string, unknown>)["event"];
-    if (typeof event !== "object" || event === null) continue;
-    const record = event as Record<string, unknown>;
+    if (!isRecord(entry)) continue;
+    const event = entry["event"];
+    if (!isRecord(event)) continue;
+    const record = event;
     const payload = record["payload"];
     events.push({
       kind: String(record["kind"]),
-      payload:
-        typeof payload === "object" && payload !== null
-          ? (payload as Record<string, unknown>)
-          : {},
+      payload: isRecord(payload) ? payload : {},
     });
   }
   return events;
@@ -148,10 +149,7 @@ export async function readFeed(client: BookClient): Promise<FeedRead> {
     AUDIT_IP,
   );
   const feedStatus = status.body?.["feed"];
-  const feedRecord =
-    typeof feedStatus === "object" && feedStatus !== null
-      ? (feedStatus as Record<string, unknown>)
-      : {};
+  const feedRecord = isRecord(feedStatus) ? feedStatus : {};
   const oldest = feedRecord["oldestSequence"];
   const latest = feedRecord["latestSequence"];
   const oldestSequence = typeof oldest === "number" ? oldest : undefined;
@@ -217,10 +215,10 @@ export function feedOrderIds(events: readonly FeedEvent[]): Set<string> {
     if (event.kind !== "order-v2") continue;
     const order = event.payload["order"];
     const auth = event.payload["auth"];
-    if (typeof order !== "object" || order === null) continue;
-    if (typeof auth !== "object" || auth === null) continue;
-    const account = (order as Record<string, unknown>)["makerQrlAccount"];
-    const nonce = (auth as Record<string, unknown>)["nonce"];
+    if (!isRecord(order)) continue;
+    if (!isRecord(auth)) continue;
+    const account = order["makerQrlAccount"];
+    const nonce = auth["nonce"];
     if (typeof account !== "string" || typeof nonce !== "string") continue;
     try {
       ids.add(deriveOrderV2Id(account, nonce));
@@ -262,7 +260,7 @@ export async function intentCounts(
       { "X-Maker-Token": order.makerToken },
     );
     const list = reply.body?.["intents"];
-    counts[order.orderId] = Array.isArray(list) ? list.length : -1;
+    counts[order.orderId] = isArray(list) ? list.length : -1;
   }
   return counts;
 }

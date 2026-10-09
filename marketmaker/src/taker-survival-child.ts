@@ -183,6 +183,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error("CHILD_FAILED:", error instanceof Error ? error.message : error);
+  console.error(
+    "CHILD_FAILED:",
+    error instanceof Error ? error.message : error,
+  );
   process.exitCode = 1;
 });

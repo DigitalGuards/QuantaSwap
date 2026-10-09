@@ -15,11 +15,21 @@
     "build:loadtest": "tsc --project tsconfig.loadtest.json",
     "typecheck:loadtest": "tsc --project tsconfig.loadtest.json --noEmit",
     "loadtest": "npm run build:loadtest && node dist-loadtest/loadtest/main.js",
-    "smoke:federation": "npm run build && node federation-smoke.js"
+    "smoke:federation": "npm run build && node federation-smoke.js",
+    "lint": "node lint.mjs",
+    "typecheck": "tsc --noEmit",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,mts,cts}\" \"*.json\" \"*.mjs\"",
+    "pretest": "npm run format:check && npm run lint && npm run typecheck",
+    "lint:prune": "node lint.mjs --prune"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^22.20.1",
-    "typescript": "~5.8.3"
+    "eslint": "10.12.0",
+    "eslint-config-prettier": "10.1.8",
+    "prettier": "3.9.9",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "8.71.1"
   },
   "dependencies": {
     "@noble/hashes": "2.2.0",

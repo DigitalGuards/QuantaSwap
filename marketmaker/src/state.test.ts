@@ -19,7 +19,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import type { ManagedOrder } from "./policy.js";
-import { canRetireExpiredUnfundedQuote, LOCAL_RETAINED_ORDER_BUDGET } from "./admission.js";
+import {
+  canRetireExpiredUnfundedQuote,
+  LOCAL_RETAINED_ORDER_BUDGET,
+} from "./admission.js";
 import {
   makeDeploymentIdentity,
   type DeploymentIdentity,
@@ -263,9 +266,14 @@ describe("durable quote retention accounting", () => {
     t.mock.method(Date, "now", () => now * 1000);
     withStateFile(envelope([]), (state, file) => {
       for (let quote = 0; quote < LOCAL_RETAINED_ORDER_BUDGET; quote++) {
-        assert.ok(state.retainedAdmissionCount(now) < LOCAL_RETAINED_ORDER_BUDGET);
+        assert.ok(
+          state.retainedAdmissionCount(now) < LOCAL_RETAINED_ORDER_BUDGET,
+        );
         const nonce = `0x${quote.toString(16).padStart(64, "0")}`;
-        const row = portableOpenRecord(now + 300, nonce) as unknown as ManagedOrder;
+        const row = portableOpenRecord(
+          now + 300,
+          nonce,
+        ) as unknown as ManagedOrder;
         state.upsert(row);
         state.delete(row.id);
       }
@@ -302,7 +310,10 @@ describe("durable quote retention accounting", () => {
   it("keeps filled recovery state active past short quote expiry", (t) => {
     let now = preFieldRecord.createdAt;
     t.mock.method(Date, "now", () => now * 1000);
-    const original = portableFillRecord({ orderExpiresAt: now + 300, fillRespondBy: now + 290 });
+    const original = portableFillRecord({
+      orderExpiresAt: now + 300,
+      fillRespondBy: now + 290,
+    });
     withStateFile(envelope([original]), (state, file) => {
       const row = state.all()[0]!;
       state.upsert(row);
@@ -312,13 +323,22 @@ describe("durable quote retention accounting", () => {
       assert.deepEqual(restarted.all()[0], row);
       restarted.delete(row.id);
       const terminal = new StateFile(file, DEPLOYMENT);
-      assert.equal(terminal.retainedAdmissionCount(row.initiatorTimeout! + 86400), 1);
-      assert.equal(terminal.retainedAdmissionCount(row.initiatorTimeout! + 86401), 0);
+      assert.equal(
+        terminal.retainedAdmissionCount(row.initiatorTimeout! + 86400),
+        1,
+      );
+      assert.equal(
+        terminal.retainedAdmissionCount(row.initiatorTimeout! + 86401),
+        0,
+      );
     });
   });
 
   it("refuses corrupted admission history without rewriting recovery state", () => {
-    assertRefusedWithoutMutation({ ...envelope([]), admissions: [{ id: "bad", retainUntil: 2 }] }, /admission/);
+    assertRefusedWithoutMutation(
+      { ...envelope([]), admissions: [{ id: "bad", retainUntil: 2 }] },
+      /admission/,
+    );
     assertRefusedWithoutMutation({ ...envelope([]), version: 2 }, /admission/);
   });
 });
@@ -470,9 +490,14 @@ describe("stranded payout credits", () => {
       // The maker's own money: dismissing it would erase the only record of
       // where it is, so it has to be collected.
       assert.equal(StateFile.prototype.dismissCounterpartyCredit.length, 1);
-      assert.equal(state.dismissCounterpartyCredit(StateFile.strandedKey(parked)), null);
+      assert.equal(
+        state.dismissCounterpartyCredit(StateFile.strandedKey(parked)),
+        null,
+      );
       assert.deepEqual(state.ownStrandedCredits(), [parked]);
-      const dismissed = state.dismissCounterpartyCredit(StateFile.strandedKey(theirs));
+      const dismissed = state.dismissCounterpartyCredit(
+        StateFile.strandedKey(theirs),
+      );
       assert.deepEqual(dismissed, theirs);
       assert.deepEqual(state.counterpartyStrandedCredits(), []);
       // And it stays dismissed across a restart.
@@ -489,7 +514,6 @@ describe("stranded payout credits", () => {
     const now = preFieldRecord.createdAt;
     t.mock.method(Date, "now", () => now * 1000);
     const { owner: _owner, ...legacy } = parked;
-    void _owner;
     const withLegacy = {
       ...envelope([portableOpenRecord(now + 300)]),
       strandedCredits: [legacy],
@@ -528,7 +552,9 @@ describe("deployment-bound state hydration", () => {
           deployment: DEPLOYMENT,
         },
       ]),
-      (state) => assert.equal(state.all()[0]?.asset, "USDC"),
+      (state) => {
+        assert.equal(state.all()[0]?.asset, "USDC");
+      },
     );
   });
 
@@ -742,10 +768,9 @@ describe("deployment-bound state hydration", () => {
         const order = state.all()[0];
         assert.ok(order);
         const before = readFileSync(file, "utf8");
-        assert.throws(
-          () => state.upsert({ ...order, deployment: OTHER_DEPLOYMENT }),
-          /belongs to another deployment.*left untouched/s,
-        );
+        assert.throws(() => {
+          state.upsert({ ...order, deployment: OTHER_DEPLOYMENT });
+        }, /belongs to another deployment.*left untouched/s);
         assert.equal(readFileSync(file, "utf8"), before);
       },
     );
@@ -768,7 +793,9 @@ describe("deployment-bound state hydration", () => {
       rmSync(stateDir, { recursive: true, force: true });
       writeFileSync(stateDir, "blocks directory recreation", "utf8");
 
-      assert.throws(() => state.delete(preFieldRecord.id));
+      assert.throws(() => {
+        state.delete(preFieldRecord.id);
+      });
       assert.equal(state.all().length, 1);
       assert.equal(state.all()[0]?.id, preFieldRecord.id);
     } finally {
@@ -790,19 +817,17 @@ describe("deployment-bound state hydration", () => {
       const state = new StateFile(file, DEPLOYMENT, () => {
         throw new Error("injected directory sync failure");
       });
-      assert.throws(
-        () => state.delete(preFieldRecord.id),
-        StateFilePoisonedError,
-      );
+      assert.throws(() => {
+        state.delete(preFieldRecord.id);
+      }, StateFilePoisonedError);
       const persisted = JSON.parse(readFileSync(file, "utf8")) as {
         orders: unknown[];
       };
       assert.deepEqual(persisted.orders, []);
       assert.throws(() => state.all(), StateFilePoisonedError);
-      assert.throws(
-        () => state.delete(preFieldRecord.id),
-        StateFilePoisonedError,
-      );
+      assert.throws(() => {
+        state.delete(preFieldRecord.id);
+      }, StateFilePoisonedError);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -858,10 +883,7 @@ const ageLock = (file: string, byMs: number): number => {
   return stamp.getTime();
 };
 
-async function waitFor(
-  ready: () => boolean,
-  timeoutMs = 5_000,
-): Promise<void> {
+async function waitFor(ready: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!ready()) {
     if (Date.now() > deadline) {
@@ -1207,11 +1229,9 @@ describe("exclusive state process lease", () => {
         pidNamespace: LOCAL_NS,
       });
       const { pidNamespace: _dropped, ...v1 } = readLock(file);
-      writeFileSync(
-        `${file}.lock`,
-        JSON.stringify({ ...v1, version: 1 }),
-        { mode: 0o600 },
-      );
+      writeFileSync(`${file}.lock`, JSON.stringify({ ...v1, version: 1 }), {
+        mode: 0o600,
+      });
       // A v1 record is read as this namespace's own, so its live PID still
       // refuses a starter that observes from anywhere.
       assert.throws(
@@ -1414,10 +1434,14 @@ describe("exclusive state process lease", () => {
       lease.assertOwned();
       // No heartbeat runs here, so only a fresh read can catch this.
       writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
-      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      assert.throws(() => {
+        lease.assertOwned();
+      }, StateLeaseLostError);
       // A proven loss latches, so a record that comes back does not revive it.
       writeFileSync(`${file}.lock`, held, { mode: 0o600 });
-      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      assert.throws(() => {
+        lease.assertOwned();
+      }, StateLeaseLostError);
       lease.close();
       assert.equal(existsSync(`${file}.lock`), true);
     } finally {
@@ -1433,10 +1457,9 @@ describe("exclusive state process lease", () => {
         pidNamespace: LOCAL_NS,
         ttlMs: 100,
       });
-      assert.throws(
-        () => lease.startHeartbeat(() => undefined, 40),
-        /no detection margin/,
-      );
+      assert.throws(() => {
+        lease.startHeartbeat(() => undefined, 40);
+      }, /no detection margin/);
       lease.startHeartbeat(() => undefined, 30);
       lease.close();
     } finally {
@@ -1467,8 +1490,7 @@ describe("exclusive state process lease", () => {
       // A starter that cannot read its own namespace uses the heartbeat for
       // this v1 record too, so a fresh one still refuses.
       assert.throws(
-        () =>
-          StateProcessLease.acquire(file, identity, { pidNamespace: null }),
+        () => StateProcessLease.acquire(file, identity, { pidNamespace: null }),
         /another PID namespace/,
       );
       ageLock(file, LEASE_TTL_MS + 5_000);
@@ -1522,9 +1544,9 @@ describe("exclusive state process lease", () => {
       });
       const owner = lease;
       const held = readFileSync(`${file}.lock`, "utf8");
-      const state = new StateFile(file, DEPLOYMENT, undefined, () =>
-        owner.assertOwned(),
-      );
+      const state = new StateFile(file, DEPLOYMENT, undefined, () => {
+        owner.assertOwned();
+      });
       let lost = 0;
       // A long interval, so only the write path observes the failure.
       lease.startHeartbeat(() => {
@@ -1534,10 +1556,9 @@ describe("exclusive state process lease", () => {
       // A lock path this process cannot read, for one write only.
       rmSync(`${file}.lock`);
       mkdirSync(`${file}.lock`);
-      assert.throws(
-        () => state.delete(preFieldRecord.id),
-        StateLeaseUnverifiableError,
-      );
+      assert.throws(() => {
+        state.delete(preFieldRecord.id);
+      }, StateLeaseUnverifiableError);
       assert.equal(readFileSync(file, "utf8"), contents);
       assert.equal(state.all().length, 1);
 
@@ -1563,7 +1584,9 @@ describe("exclusive state process lease", () => {
         pidNamespace: LOCAL_NS,
       });
       rmSync(`${file}.lock`);
-      assert.throws(() => lease.assertOwned(), StateLeaseLostError);
+      assert.throws(() => {
+        lease.assertOwned();
+      }, StateLeaseLostError);
       lease.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1583,9 +1606,9 @@ describe("exclusive state process lease", () => {
         pidNamespace: LOCAL_NS,
       });
       const owner = lease;
-      const state = new StateFile(file, DEPLOYMENT, undefined, () =>
-        owner.assertOwned(),
-      );
+      const state = new StateFile(file, DEPLOYMENT, undefined, () => {
+        owner.assertOwned();
+      });
       let lost = 0;
       lease.startHeartbeat(() => {
         lost += 1;
@@ -1593,16 +1616,36 @@ describe("exclusive state process lease", () => {
       writeLock(file, { pidNamespace: FOREIGN_NS, leaseId: "successor" });
       await waitFor(() => lost === 1);
 
-      assert.throws(
-        () => state.delete(preFieldRecord.id),
-        StateLeaseLostError,
-      );
+      assert.throws(() => {
+        state.delete(preFieldRecord.id);
+      }, StateLeaseLostError);
       assert.equal(readFileSync(file, "utf8"), contents);
       // The refused write rolled back, so the order is still managed here.
       assert.equal(state.all().length, 1);
     } finally {
       lease?.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("recovery field validation", () => {
+  it("leaves recovery bytes intact when economic or lifecycle fields are malformed", () => {
+    for (const override of [
+      { direction: "unknown" },
+      { fromAmount: 1 },
+      { toAmount: [] },
+      { preimage: {} },
+      { hashlock: [] },
+      { lockSentAt: "100" },
+      { createdAt: -1 },
+      { withdrawAttempts: "1" },
+      { pushFirstRejectedAt: [] },
+    ]) {
+      assertRefusedWithoutMutation(
+        envelope([{ ...preFieldRecord, deployment: DEPLOYMENT, ...override }]),
+        /malformed fields.*left untouched/s,
+      );
     }
   });
 });

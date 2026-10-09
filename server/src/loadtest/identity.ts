@@ -1,3 +1,4 @@
+import { isRecord, isArray } from "../guards.js";
 // Synthetic ML-DSA-87 identities for the load harness. Key generation costs
 // milliseconds per identity and the harness needs hundreds, so identities are
 // derived from deterministic seeds and cached in the run directory. Every seed
@@ -144,18 +145,32 @@ function readCache(cacheFile: string): IdentityCacheFile | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(cacheFile, "utf8"));
     if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      (parsed as { version?: unknown }).version !== 1
-    ) {
+      !isRecord(parsed) ||
+      parsed.version !== 1 ||
+      !isArray(parsed.makers) ||
+      !parsed.makers.every(isIdentity) ||
+      !isArray(parsed.takers) ||
+      !parsed.takers.every(isIdentity)
+    )
       return undefined;
-    }
-    const candidate = parsed as IdentityCacheFile;
-    if (!Array.isArray(candidate.makers) || !Array.isArray(candidate.takers)) {
-      return undefined;
-    }
-    return candidate;
+    return { version: 1, makers: parsed.makers, takers: parsed.takers };
   } catch {
     return undefined;
   }
+}
+
+function isIdentity(value: unknown): value is Identity {
+  return (
+    isRecord(value) &&
+    (value.role === "maker" || value.role === "taker") &&
+    typeof value.index === "number" &&
+    Number.isSafeInteger(value.index) &&
+    value.index >= 0 &&
+    typeof value.seedHex === "string" &&
+    typeof value.descriptor === "string" &&
+    typeof value.publicKey === "string" &&
+    typeof value.qrlAccount === "string" &&
+    typeof value.ethAccount === "string" &&
+    typeof value.ip === "string"
+  );
 }

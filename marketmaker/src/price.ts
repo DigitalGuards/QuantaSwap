@@ -1,3 +1,4 @@
+import { isRecord } from "./guards.js";
 // Live mids for the QRL pairs, derived from USD quotes (the pairs
 // themselves trade nowhere). Sources are tried in order: CoinGecko first,
 // then CoinPaprika for whatever the earlier sources left unpriced. Each
@@ -7,7 +8,12 @@
 // the maker simply stops posting it; in-flight swaps are untouched (their
 // amounts were fixed at listing).
 
-import { ASSETS, ASSET_SYMBOLS, type AssetSymbol, type PriceIds } from "./assets.js";
+import {
+  ASSETS,
+  ASSET_SYMBOLS,
+  type AssetSymbol,
+  type PriceIds,
+} from "./assets.js";
 
 const COINGECKO_QRL_ID = "quantum-resistant-ledger";
 const COINPAPRIKA_QRL_ID = "qrl-quantum-resistant-ledger";
@@ -29,8 +35,16 @@ export function coingeckoUrl(ids: readonly string[]): string {
 
 /** QRL per one whole unit of the base asset, in integer milli, or null
  *  for garbage inputs. */
-export function midMilliFromUsd(baseUsd: number, qrlUsd: number): bigint | null {
-  if (!Number.isFinite(baseUsd) || !Number.isFinite(qrlUsd) || baseUsd <= 0 || qrlUsd <= 0) {
+export function midMilliFromUsd(
+  baseUsd: number,
+  qrlUsd: number,
+): bigint | null {
+  if (
+    !Number.isFinite(baseUsd) ||
+    !Number.isFinite(qrlUsd) ||
+    baseUsd <= 0 ||
+    qrlUsd <= 0
+  ) {
     return null;
   }
   const milli = Math.round((baseUsd / qrlUsd) * 1000);
@@ -44,7 +58,10 @@ export function needsReprice(
   currentMilli: bigint,
   thresholdBps: bigint,
 ): boolean {
-  const diff = quotedMilli > currentMilli ? quotedMilli - currentMilli : currentMilli - quotedMilli;
+  const diff =
+    quotedMilli > currentMilli
+      ? quotedMilli - currentMilli
+      : currentMilli - quotedMilli;
   return diff * 10_000n > currentMilli * thresholdBps;
 }
 
@@ -72,17 +89,17 @@ export interface PriceSource {
   fetch(symbols: readonly AssetSymbol[], timeoutMs: number): Promise<UsdQuotes>;
 }
 
-async function getJson(fetchFn: FetchFn, url: string, signal: AbortSignal): Promise<unknown> {
+async function getJson(
+  fetchFn: FetchFn,
+  url: string,
+  signal: AbortSignal,
+): Promise<unknown> {
   const res = await fetchFn(url, {
     headers: { Accept: "application/json", "User-Agent": USER_AGENT },
     signal,
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
 }
 
 function priceIdsOf(symbol: AssetSymbol): PriceIds | null {
@@ -105,7 +122,9 @@ export function coingeckoSource(fetchFn: FetchFn = fetch): PriceSource {
         const entry = isRecord(body) ? body[id] : undefined;
         const usd = isRecord(entry) ? entry["usd"] : undefined;
         const at = isRecord(entry) ? entry["last_updated_at"] : undefined;
-        const quote: UsdQuote = { usd: typeof usd === "number" ? usd : Number.NaN };
+        const quote: UsdQuote = {
+          usd: typeof usd === "number" ? usd : Number.NaN,
+        };
         if (typeof at === "number" && Number.isFinite(at)) quote.atS = at;
         return quote;
       };
@@ -119,9 +138,16 @@ export function coingeckoSource(fetchFn: FetchFn = fetch): PriceSource {
 /** One /v1/tickers/<id> request per coin. The QRL ticker goes first and
  *  alone, since no pair prices without it; the asset tickers follow in
  *  parallel only once it succeeded. */
-export function coinpaprikaSource(minIntervalS: number, fetchFn: FetchFn = fetch): PriceSource {
+export function coinpaprikaSource(
+  minIntervalS: number,
+  fetchFn: FetchFn = fetch,
+): PriceSource {
   const ticker = async (id: string, signal: AbortSignal): Promise<UsdQuote> => {
-    const body = await getJson(fetchFn, `${COINPAPRIKA_TICKER_URL}${id}?quotes=USD`, signal);
+    const body = await getJson(
+      fetchFn,
+      `${COINPAPRIKA_TICKER_URL}${id}?quotes=USD`,
+      signal,
+    );
     const quotes = isRecord(body) ? body["quotes"] : undefined;
     const usdQuote = isRecord(quotes) ? quotes["USD"] : undefined;
     const price = isRecord(usdQuote) ? usdQuote["price"] : undefined;
@@ -142,11 +168,14 @@ export function coinpaprikaSource(minIntervalS: number, fetchFn: FetchFn = fetch
         const ids = priceIdsOf(symbol);
         return ids === null ? [] : [{ symbol, id: ids.coinpaprika }];
       });
-      const results = await Promise.allSettled(priced.map((p) => ticker(p.id, signal)));
+      const results = await Promise.allSettled(
+        priced.map((p) => ticker(p.id, signal)),
+      );
       const quotes: UsdQuotes = { qrl, assets: {} };
       priced.forEach((p, i) => {
         const result = results[i];
-        if (result?.status === "fulfilled") quotes.assets[p.symbol] = result.value;
+        if (result?.status === "fulfilled")
+          quotes.assets[p.symbol] = result.value;
       });
       return quotes;
     },
@@ -156,10 +185,15 @@ export function coinpaprikaSource(minIntervalS: number, fetchFn: FetchFn = fetch
 /** Every asset some source can price, whether stocked or not: a listing
  *  persisted before its asset left MM_ASSETS still needs a mid to be
  *  repriced. tUSDT and friends never enter. */
-const FEED_SYMBOLS: readonly AssetSymbol[] = ASSET_SYMBOLS.filter((s) => priceIdsOf(s) !== null);
+const FEED_SYMBOLS: readonly AssetSymbol[] = ASSET_SYMBOLS.filter(
+  (s) => priceIdsOf(s) !== null,
+);
 
 export class PriceFeed {
-  private readonly mids = new Map<AssetSymbol, { milli: bigint; atS: number }>();
+  private readonly mids = new Map<
+    AssetSymbol,
+    { milli: bigint; atS: number }
+  >();
   private readonly lastAttemptAtS = new Map<string, number>();
   private lastFetchAtS = 0;
 
@@ -189,24 +223,37 @@ export class PriceFeed {
     this.lastFetchAtS = nowS;
     const pending = new Set(FEED_SYMBOLS);
     const errors: string[] = [];
-    const perSourceMs = Math.max(1, Math.floor(this.opts.timeoutMs / this.opts.sources.length));
+    const perSourceMs = Math.max(
+      1,
+      Math.floor(this.opts.timeoutMs / this.opts.sources.length),
+    );
     for (const source of this.opts.sources) {
       if (pending.size === 0) break;
       const lastAttemptS = this.lastAttemptAtS.get(source.name);
-      if (lastAttemptS !== undefined && nowS - lastAttemptS < source.minIntervalS) {
-        errors.push(`${source.name}: next attempt in ${source.minIntervalS - (nowS - lastAttemptS)}s`);
+      if (
+        lastAttemptS !== undefined &&
+        nowS - lastAttemptS < source.minIntervalS
+      ) {
+        errors.push(
+          `${source.name}: next attempt in ${source.minIntervalS - (nowS - lastAttemptS)}s`,
+        );
         continue;
       }
       this.lastAttemptAtS.set(source.name, nowS);
       try {
         const quotes = await source.fetch([...pending], perSourceMs);
         const { priced, skipped } = this.apply(nowS, quotes, pending);
-        if (skipped.length > 0) errors.push(`${source.name}: ${skipped.join(", ")}`);
+        if (skipped.length > 0)
+          errors.push(`${source.name}: ${skipped.join(", ")}`);
         if (priced.length > 0 && source !== this.opts.sources[0]) {
-          this.opts.log(`price feed: ${priced.join(",")} from ${source.name} (${errors.join("; ")})`);
+          this.opts.log(
+            `price feed: ${priced.join(",")} from ${source.name} (${errors.join("; ")})`,
+          );
         }
       } catch (err) {
-        errors.push(`${source.name}: ${err instanceof Error ? err.message : String(err)}`);
+        errors.push(
+          `${source.name}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
     if (pending.size > 0) {
@@ -250,7 +297,9 @@ export class PriceFeed {
         continue;
       }
       if (prev !== undefined && needsReprice(prev.milli, milli, 100n)) {
-        this.opts.log(`${symbol} mid moved ${prev.milli} -> ${milli} milli-QRL/${symbol}`);
+        this.opts.log(
+          `${symbol} mid moved ${prev.milli} -> ${milli} milli-QRL/${symbol}`,
+        );
       }
       this.mids.set(symbol, { milli, atS });
       priced.push(symbol);
@@ -262,9 +311,11 @@ export class PriceFeed {
   /** The mid to quote `asset` at (milli-QRL per whole unit), or null when
    *  quoting that pair must pause. */
   current(nowS: number, asset: AssetSymbol): bigint | null {
-    if (this.opts.staticMilli !== null) return asset === "ETH" ? this.opts.staticMilli : null;
+    if (this.opts.staticMilli !== null)
+      return asset === "ETH" ? this.opts.staticMilli : null;
     const cached = this.mids.get(asset);
-    if (cached === undefined || nowS - cached.atS > this.opts.maxAgeS) return null;
+    if (cached === undefined || nowS - cached.atS > this.opts.maxAgeS)
+      return null;
     return cached.milli;
   }
 }

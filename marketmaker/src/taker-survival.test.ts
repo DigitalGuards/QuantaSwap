@@ -11,9 +11,8 @@ import { describe, it } from "node:test";
 import { defaultSleep } from "./taker.js";
 
 const timeouts = (): number =>
-  process
-    .getActiveResourcesInfo()
-    .filter((resource) => resource === "Timeout").length;
+  process.getActiveResourcesInfo().filter((resource) => resource === "Timeout")
+    .length;
 
 describe("the wait between passes keeps the process alive", () => {
   it("registers a timer that holds the event loop", async () => {

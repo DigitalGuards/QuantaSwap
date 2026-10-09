@@ -18,25 +18,56 @@ const CONFIG = {
 
 describe("deployment identity", () => {
   it("accepts the real checksummed v3 contract and rejects other deployment identities", () => {
-    assert.doesNotThrow(() => assertPortableDeployment(makeDeploymentIdentity(protocolV2Config)));
-    assert.doesNotThrow(() => assertPortableDeployment(makeDeploymentIdentity({
-      ...protocolV2Config, qrlHtlc: `Q${protocolV2Config.qrlHtlc.slice(1).toLowerCase()}`,
-    })));
+    assert.doesNotThrow(() => {
+      assertPortableDeployment(makeDeploymentIdentity(protocolV2Config));
+    });
+    assert.doesNotThrow(() => {
+      assertPortableDeployment(
+        makeDeploymentIdentity({
+          ...protocolV2Config,
+          qrlHtlc: `Q${protocolV2Config.qrlHtlc.slice(1).toLowerCase()}`,
+        }),
+      );
+    });
     for (const override of [
       { qrlHtlc: `Q${"11".repeat(64)}` },
       { ethHtlc: `0x${"11".repeat(20)}` },
       { qrlChainId: "1337" },
       { qrlGenesisHash: `0x${"11".repeat(32)}` },
     ]) {
-      assert.throws(() => assertPortableDeployment(makeDeploymentIdentity({ ...protocolV2Config, ...override })), /signing domain/);
+      assert.throws(() => {
+        assertPortableDeployment(
+          makeDeploymentIdentity({ ...protocolV2Config, ...override }),
+        );
+      }, /signing domain/);
     }
   });
   it("binds the genesis and preserves the legacy identity boundary", () => {
     const identity = makeDeploymentIdentity(CONFIG);
     assert.equal(identity.schemaVersion, 2);
-    assert.throws(() => parseDeploymentIdentity({ ...identity, schemaVersion: 1 }, "legacy"), /malformed/);
-    assert.throws(() => parseDeploymentIdentity({ ...identity, qrlGenesisHash: `0x${"1".repeat(64)}` }, "changed genesis"), /fingerprint is invalid/);
-    assert.equal(sameDeployment(identity, makeDeploymentIdentity({ ...CONFIG, qrlGenesisHash: `0x${"1".repeat(64)}` })), false);
+    assert.throws(
+      () =>
+        parseDeploymentIdentity({ ...identity, schemaVersion: 1 }, "legacy"),
+      /malformed/,
+    );
+    assert.throws(
+      () =>
+        parseDeploymentIdentity(
+          { ...identity, qrlGenesisHash: `0x${"1".repeat(64)}` },
+          "changed genesis",
+        ),
+      /fingerprint is invalid/,
+    );
+    assert.equal(
+      sameDeployment(
+        identity,
+        makeDeploymentIdentity({
+          ...CONFIG,
+          qrlGenesisHash: `0x${"1".repeat(64)}`,
+        }),
+      ),
+      false,
+    );
   });
   it("canonicalizes addresses and chain IDs into a stable fingerprint", () => {
     const a = makeDeploymentIdentity(CONFIG);
@@ -54,20 +85,32 @@ describe("deployment identity", () => {
   it("rejects a fingerprint that does not cover the stored fields", () => {
     const identity = makeDeploymentIdentity(CONFIG);
     assert.throws(
-      () => parseDeploymentIdentity({ ...identity, ethChainId: "1" }, "test identity"),
+      () =>
+        parseDeploymentIdentity(
+          { ...identity, ethChainId: "1" },
+          "test identity",
+        ),
       /fingerprint is invalid/,
     );
   });
 
   it("accepts the expected runtime chain IDs in RPC hexadecimal form", () => {
-    assert.doesNotThrow(() =>
-      assertRuntimeChainIds(makeDeploymentIdentity(CONFIG), "0xaa36a7", "0x539"),
-    );
+    assert.doesNotThrow(() => {
+      assertRuntimeChainIds(
+        makeDeploymentIdentity(CONFIG),
+        "0xaa36a7",
+        "0x539",
+      );
+    });
   });
 
   it("fails closed when either RPC is connected to another chain", () => {
     const identity = makeDeploymentIdentity(CONFIG);
-    assert.throws(() => assertRuntimeChainIds(identity, "0x1", "0x539"), /RPC chain mismatch/);
-    assert.throws(() => assertRuntimeChainIds(identity, "0xaa36a7", "0x1"), /RPC chain mismatch/);
+    assert.throws(() => {
+      assertRuntimeChainIds(identity, "0x1", "0x539");
+    }, /RPC chain mismatch/);
+    assert.throws(() => {
+      assertRuntimeChainIds(identity, "0xaa36a7", "0x1");
+    }, /RPC chain mismatch/);
   });
 });

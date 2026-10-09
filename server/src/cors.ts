@@ -37,7 +37,11 @@ export function preflightHeaders(
   ) {
     return null;
   }
-  const allowedHeaderNames = new Set(["content-type", "x-share-token", "x-maker-token"]);
+  const allowedHeaderNames = new Set([
+    "content-type",
+    "x-share-token",
+    "x-maker-token",
+  ]);
   const headers = (requestedHeaders ?? "")
     .split(",")
     .map((header) => header.trim().toLowerCase())
@@ -46,7 +50,8 @@ export function preflightHeaders(
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Share-Token, X-Maker-Token",
+    "Access-Control-Allow-Headers":
+      "Content-Type, X-Share-Token, X-Maker-Token",
     "Access-Control-Max-Age": "600",
     Vary: "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
   };

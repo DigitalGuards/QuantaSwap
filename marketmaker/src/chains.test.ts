@@ -7,7 +7,12 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { MLDSA87 } from "@theqrl/wallet.js";
-import { MAX_QRL_TIP_WEI, MIN_QRL_TIP_WEI, QrlLeg, suggestedQrlTip } from "./chains.js";
+import {
+  MAX_QRL_TIP_WEI,
+  MIN_QRL_TIP_WEI,
+  QrlLeg,
+  suggestedQrlTip,
+} from "./chains.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { canonicalQip55QrlAddress } from "./qip55.js";
 
@@ -24,18 +29,25 @@ function readBody(req: import("node:http").IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let body = "";
     req.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
-    req.on("end", () => resolve(body));
+    req.on("end", () => {
+      resolve(body);
+    });
     req.on("error", reject);
   });
 }
 
-function answer(method: string, params: unknown[]): {
+function answer(
+  method: string,
+  params: unknown[],
+): {
   result?: unknown;
   error?: { code: number; message: string };
 } {
   switch (method) {
     case "qrl_chainId":
-      return { result: `0x${BigInt(protocolV2Config.qrlChainId).toString(16)}` };
+      return {
+        result: `0x${BigInt(protocolV2Config.qrlChainId).toString(16)}`,
+      };
     case "net_version":
       return { result: protocolV2Config.qrlChainId };
     case "qrl_getBlockByNumber":
@@ -95,7 +107,11 @@ function decodeType2Head(raw: string): {
       throw new Error("unexpected long scalar in transaction head");
     }
   }
-  return { maxPriorityFeePerGas: items[2]!, maxFeePerGas: items[3]!, gas: items[4]! };
+  return {
+    maxPriorityFeePerGas: items[2]!,
+    maxFeePerGas: items[3]!,
+    gas: items[4]!,
+  };
 }
 
 function newLeg(): QrlLeg {
@@ -117,7 +133,10 @@ function newLeg(): QrlLeg {
 }
 
 async function signedFees(): Promise<ReturnType<typeof decodeType2Head>> {
-  await assert.rejects(newLeg().send("0x", 0n, undefined, { settlement: false }), /captured by test/);
+  await assert.rejects(
+    newLeg().send("0x", 0n, undefined, { settlement: false }),
+    /captured by test/,
+  );
   assert.ok(rawTx, "the leg broadcast a signed transaction");
   return decodeType2Head(rawTx);
 }
@@ -125,28 +144,40 @@ async function signedFees(): Promise<ReturnType<typeof decodeType2Head>> {
 describe("QrlLeg fee inputs", () => {
   before(async () => {
     server = createServer((req, res) => {
-      readBody(req).then((body) => {
-        const { id, method, params } = JSON.parse(body) as {
-          id: unknown;
-          method: string;
-          params: unknown[];
-        };
-        methods.push(method);
-        const reply = JSON.stringify({ jsonrpc: "2.0", id, ...answer(method, params ?? []) });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(reply);
-      }).catch((err: unknown) => {
-        res.writeHead(500);
-        res.end(String(err));
-      });
+      readBody(req)
+        .then((body) => {
+          const { id, method, params } = JSON.parse(body) as {
+            id: unknown;
+            method: string;
+            params: unknown[];
+          };
+          methods.push(method);
+          const reply = JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            ...answer(method, params ?? []),
+          });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(reply);
+        })
+        .catch((err: unknown) => {
+          res.writeHead(500);
+          res.end(String(err));
+        });
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
   after(() => {
     server.closeAllConnections();
-    return new Promise<void>((resolve) => server.close(() => resolve()));
+    return new Promise<void>((resolve) =>
+      server.close(() => {
+        resolve();
+      }),
+    );
   });
 
   beforeEach(() => {
@@ -172,9 +203,15 @@ describe("QrlLeg fee inputs", () => {
   });
 
   it("falls back to the floor on a node without the method", async () => {
-    tipAnswer = { error: { code: -32601, message: "the method does not exist" } };
+    tipAnswer = {
+      error: { code: -32601, message: "the method does not exist" },
+    };
     const fees = await signedFees();
-    assert.equal(fees.maxPriorityFeePerGas, MIN_QRL_TIP_WEI, "the @theqrl/web3 default tip");
+    assert.equal(
+      fees.maxPriorityFeePerGas,
+      MIN_QRL_TIP_WEI,
+      "the @theqrl/web3 default tip",
+    );
     assert.equal(fees.maxFeePerGas, 2n * BASE_FEE + MIN_QRL_TIP_WEI);
   });
 
@@ -193,20 +230,41 @@ describe("suggestedQrlTip", () => {
 
   it("passes a suggestion inside the bounds through silently", async () => {
     const log = collect();
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(3n * GWEI), log.warn), 3n * GWEI);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve("0x9502f900"), log.warn), 2_500_000_000n);
+    assert.equal(
+      await suggestedQrlTip(() => Promise.resolve(3n * GWEI), log.warn),
+      3n * GWEI,
+    );
+    assert.equal(
+      await suggestedQrlTip(() => Promise.resolve("0x9502f900"), log.warn),
+      2_500_000_000n,
+    );
     assert.deepEqual(log.lines, []);
   });
 
   it("raises a low suggestion to the floor", async () => {
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(0n)), MIN_QRL_TIP_WEI);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(GWEI)), MIN_QRL_TIP_WEI);
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(-1n)), MIN_QRL_TIP_WEI);
+    assert.equal(
+      await suggestedQrlTip(() => Promise.resolve(0n)),
+      MIN_QRL_TIP_WEI,
+    );
+    assert.equal(
+      await suggestedQrlTip(() => Promise.resolve(GWEI)),
+      MIN_QRL_TIP_WEI,
+    );
+    assert.equal(
+      await suggestedQrlTip(() => Promise.resolve(-1n)),
+      MIN_QRL_TIP_WEI,
+    );
   });
 
   it("caps a high suggestion and logs it", async () => {
     const log = collect();
-    assert.equal(await suggestedQrlTip(() => Promise.resolve(MAX_QRL_TIP_WEI + 1n), log.warn), MAX_QRL_TIP_WEI);
+    assert.equal(
+      await suggestedQrlTip(
+        () => Promise.resolve(MAX_QRL_TIP_WEI + 1n),
+        log.warn,
+      ),
+      MAX_QRL_TIP_WEI,
+    );
     assert.equal(log.lines.length, 1);
     assert.match(log.lines[0]!, /capped/);
   });
@@ -214,7 +272,10 @@ describe("suggestedQrlTip", () => {
   it("falls back to the floor and logs on a failed read or an unusable answer", async () => {
     const log = collect();
     for (const read of [
-      () => Promise.reject(new Error("qrl maxPriorityFeePerGas timed out after 5000ms")),
+      () =>
+        Promise.reject(
+          new Error("qrl maxPriorityFeePerGas timed out after 5000ms"),
+        ),
       () => Promise.resolve("not a number"),
       () => Promise.resolve(1.5),
       () => Promise.resolve({}),
