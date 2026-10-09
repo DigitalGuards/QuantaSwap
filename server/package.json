@@ -39,6 +39,7 @@
     "socks-proxy-agent": "10.1.0"
   },
   "overrides": {
+    "ip-address": "10.7.3",
     "@theqrl/mldsa87": "$@theqrl/mldsa87",
     "@theqrl/wallet.js": "6.3.0",
     "@theqrl/qrl-cryptography": "0.3.3"
