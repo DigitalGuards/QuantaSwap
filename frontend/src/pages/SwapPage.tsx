@@ -44,7 +44,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
           Atomic swaps for <span className="text-secondary">QRL</span>
         </h1>
         <p className="mx-auto mt-4 max-w-xl text-muted-foreground">
-          Swap between Ethereum and QRL with no custodian and no bridge. Post an order or take one;
+          Swap between Ethereum and QRL directly from your own wallets. Post an order or take one;
           hashed timelock contracts on both chains settle every swap atomically or refund.
         </p>
       </section>
