@@ -44,7 +44,7 @@ export function LegalPage() {
       <div>
         <h1 className="text-2xl font-bold">Legal notice</h1>
         <p className="mt-2 text-muted-foreground">
-          What QuantaSwap is, what it is not, and who is behind it. Last updated: 14 July 2026.
+          What QuantaSwap is and who is behind it. Last updated: 21 October 2026.
         </p>
       </div>
 
@@ -62,17 +62,17 @@ export function LegalPage() {
         </p>
       </Section>
 
-      <Section icon={Scale} title="No services are provided" accent="blue">
+      <Section icon={Scale} title="What QuantaSwap is" accent="blue">
         <p>
           QuantaSwap is free, experimental, open-source software: an interface to immutable
           hashed-timelock contracts that you use directly from your own wallets. QuantaSwap charges
           no fees.
         </p>
         <p>
-          QuantaSwap runs on test networks with valueless test assets. Nothing on this site is an
-          offer, solicitation, or recommendation to buy, sell, or exchange any crypto-asset, nor
-          investment, legal, or tax advice. The order book only introduces counterparties and never
-          holds funds; any test liquidity present on it exists for demonstration purposes.
+          Nothing on this site is an offer, solicitation, or recommendation to buy, sell, or
+          exchange any crypto-asset, nor investment, legal, or tax advice. The order book only
+          introduces counterparties and never holds funds; any test liquidity present on it exists
+          for demonstration purposes.
         </p>
       </Section>
 
