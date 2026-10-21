@@ -65,17 +65,14 @@ export function LegalPage() {
       <Section icon={Scale} title="No services are provided" accent="blue">
         <p>
           QuantaSwap is free, experimental, open-source software: an interface to immutable
-          hashed-timelock contracts that you interact with directly from your own wallets.
-          DigitalGuards never holds, controls, or transmits your assets, does not execute swaps on
-          your behalf, and charges no fees.
+          hashed-timelock contracts that you use directly from your own wallets. QuantaSwap charges
+          no fees.
         </p>
         <p>
-          Because everything here is limited to valueless test assets, no crypto-asset services
-          within the meaning of Regulation (EU) 2023/1114 (MiCA) are provided, and nothing on this
-          site is an offer, solicitation, or recommendation to buy, sell, or exchange any
-          crypto-asset, nor investment, legal, or tax advice. The order book only introduces
-          counterparties and never holds funds; any test liquidity present on it exists for
-          demonstration purposes.
+          QuantaSwap runs on test networks with valueless test assets. Nothing on this site is an
+          offer, solicitation, or recommendation to buy, sell, or exchange any crypto-asset, nor
+          investment, legal, or tax advice. The order book only introduces counterparties and never
+          holds funds; any test liquidity present on it exists for demonstration purposes.
         </p>
       </Section>
 
