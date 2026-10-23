@@ -324,6 +324,30 @@ for (const pkg of packages) {
       },
     );
 
+    await t.test(
+      "src/build authored code is linted and frozen even when Git ignores it",
+      async () => {
+        const file = `${pkg}/src/build/review-ignored.ts`;
+        const source =
+          'export type ReviewEscape = any;\nPromise.reject(new Error("unhandled work"));\n';
+        await f.edit(file, `/* eslint-disable */\n${source}`);
+        f.run(["run", "typecheck"], 0);
+        f.run(["run", "lint"], 1, /lint-policy\/no-inline-config/u);
+        f.check(f.withLedger, 1, /lint-policy\/no-inline-config/u);
+        assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+        await f.edit(file, source);
+        const output = f.run(["run", "lint"], 1, /no-explicit-any/u);
+        assert.match(output, /no-floating-promises/u);
+        f.check(f.withLedger, 1, /no-floating-promises/u);
+        await f.edit(file, "export const authored = true;\n");
+        f.run(["run", "lint"], 0);
+        assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+        const before = await fs.readFile(f.ledgerPath, "utf8");
+        f.update(f.bootstrap, 1, equalityFailure);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), before);
+      },
+    );
+
     const sibling = {
       frontend: "server/src/guards.ts",
       server: "marketmaker/src/guards.ts",
@@ -566,13 +590,43 @@ for (const pkg of packages) {
         [
           "ordinary rejected promise typed as a registration",
           'import type test from "node:test";\nconst work: typeof test.skip = () => Promise.reject(new Error("unhandled work"));\nwork();\n',
-          /node-test\/direct-registrations/u,
+          /node-test\/direct-calls/u,
+          /unhandled work/u,
+        ],
+        [
+          "generic indexed-access rejected promise",
+          'import type { TestContext } from "node:test";\ntype Property<T, K extends keyof T> = T[K];\nconst work: Property<Property<TestContext, "test">, "skip"> = () => Promise.reject(new Error("unhandled work"));\nwork("work");\n',
+          /node-test\/direct-calls/u,
+          /unhandled work/u,
+        ],
+        [
+          "alias-chain rejected promise",
+          'import type test from "node:test";\ntype First = typeof test.skip;\ntype Second = First;\ntype Third = Second;\nconst work: Third = () => Promise.reject(new Error("unhandled work"));\nwork("work");\n',
+          /node-test\/direct-calls/u,
+          /unhandled work/u,
+        ],
+        [
+          "generic getter bound subtest",
+          'import test from "node:test";\nimport { setTimeout } from "node:timers/promises";\nfunction get<T, K extends keyof T>(object: T, key: K): T[K] { return object[key]; }\ntest("parent", async (t) => {\n  const subtest = get(t, "test").bind(t);\n  subtest("child", async () => { await setTimeout(50); });\n  await setTimeout(1);\n});\n',
+          /node-test\/direct-calls/u,
+          /cancelledByParent/u,
+        ],
+        [
+          "un-awaited subtest through a helper",
+          'import test from "node:test";\nimport type { TestContext } from "node:test";\nimport { setTimeout } from "node:timers/promises";\nfunction child(t: TestContext) { return t.test("child", async () => { await setTimeout(50); }); }\ntest("parent", async (t) => {\n  child(t);\n  await setTimeout(1);\n});\n',
+          /node-test\/direct-calls/u,
+          /cancelledByParent/u,
+        ],
+        [
+          "hook borrowing an allowed local function name",
+          'import { test as register } from "node:test";\nimport type { HookFn } from "node:test";\nconst test: HookFn = () => Promise.reject(new Error("unhandled work"));\nregister("parent", (context) => { test(context, () => {}); });\n',
+          /node-test\/direct-calls/u,
           /unhandled work/u,
         ],
         [
           "bound subtest in an object property",
           'import test from "node:test";\nimport { setTimeout } from "node:timers/promises";\ntest("parent", async (t) => {\n  const helper = { subtest: t.test.bind(t) };\n  helper.subtest("child", async () => { await setTimeout(50); });\n  await setTimeout(1);\n});\n',
-          /node-test\/no-floating-subtests/u,
+          /node-test\/direct-calls/u,
           /cancelledByParent/u,
         ],
       ]) {

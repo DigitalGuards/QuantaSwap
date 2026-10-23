@@ -7,6 +7,7 @@ import { generatedDirectories } from "./eslint-policy.mjs";
 
 const protectedRules = new Set([
   "lint-policy/no-inline-config",
+  "node-test/direct-calls",
   "no-warning-comments",
   "@typescript-eslint/ban-ts-comment",
 ]);
@@ -15,8 +16,14 @@ export function isTypeScript(file) {
   return /\.(?:ts|tsx|mts|cts)$/u.test(file);
 }
 
-export function isSourceFile(file) {
-  return !file.split("/").some((part) => generatedDirectories.includes(part));
+export function isSourceFile(file, repositoryRelative = false) {
+  const parts = file.split("/");
+  if (
+    repositoryRelative &&
+    ["frontend", "server", "marketmaker"].includes(parts[0])
+  )
+    parts.shift();
+  return !generatedDirectories.includes(parts[0]);
 }
 
 export function collectPairs(manifest) {
@@ -157,16 +164,15 @@ export async function assertBootstrapSources(repository, commit, git) {
     "--exclude-standard",
   ])
     .split("\0")
-    .filter((file) => file && isSourceFile(file));
+    .filter((file) => file && isSourceFile(file, true));
   // ESLint does not honor .gitignore. Include authored JS/TS even when Git
   // ignores it, so an ignored declaration or source cannot alter the scan.
   async function includeAuthoredFiles(directory = "") {
     for (const item of await readdir(path.join(repository, directory), {
       withFileTypes: true,
     })) {
-      if (item.name === ".git" || generatedDirectories.includes(item.name))
-        continue;
       const file = path.posix.join(directory, item.name);
+      if (file === ".git" || !isSourceFile(file, true)) continue;
       if (item.isDirectory()) await includeAuthoredFiles(file);
       else if (/\.(?:[cm]?[jt]s|[jt]sx)$/u.test(file)) current.push(file);
     }

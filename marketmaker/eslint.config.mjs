@@ -4,6 +4,7 @@ import prettier from "eslint-config-prettier";
 import ts from "typescript";
 import createNodeTestPlugin, {
   nodeTestFiles,
+  nodeTestSafeCalls,
 } from "../scripts/eslint-node-test.mjs";
 import {
   arrayGuard,
@@ -24,7 +25,7 @@ const testFiles = [
 ];
 
 export const strictConfig = tseslint.config(
-  { ignores: generatedDirectories.map((directory) => `**/${directory}/**`) },
+  { ignores: generatedDirectories.map((directory) => `${directory}/**`) },
   suppressionGuard,
   {
     files: typedFiles,
@@ -40,11 +41,10 @@ export const strictConfig = tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    plugins: { "node-test": createNodeTestPlugin(ts) },
+    plugins: { "node-test": createNodeTestPlugin(ts, import.meta.url) },
     rules: {
       ...hardenedRules,
-      "node-test/direct-registrations": "error",
-      "node-test/no-floating-subtests": "error",
+      "node-test/direct-calls": "error",
       "no-restricted-syntax": ["error", doubleAssertionGuard, arrayGuard],
       "@typescript-eslint/no-unused-vars": [
         "error",
@@ -55,18 +55,12 @@ export const strictConfig = tseslint.config(
   {
     files: testFiles,
     rules: {
-      // Companion rules confine this allowance to direct registration calls
-      // and require awaited or returned subtests.
+      // The type-aware companion rule checks every call covered by this allowance
+      // and requires direct bindings plus awaited or returned subtests.
       "@typescript-eslint/no-floating-promises": [
         "error",
         {
-          allowForKnownSafeCalls: [
-            {
-              from: "package",
-              package: "node:test",
-              name: ["test", "describe", "it", "suite", "skip", "only", "todo"],
-            },
-          ],
+          allowForKnownSafeCalls: nodeTestSafeCalls,
         },
       ],
     },

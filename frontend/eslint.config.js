@@ -10,7 +10,7 @@ import {
 import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
 
 export const strictConfig = tseslint.config(
-  { ignores: generatedDirectories.map((directory) => `**/${directory}/**`) },
+  { ignores: generatedDirectories.map((directory) => `${directory}/**`) },
   suppressionGuard,
   {
     files: typedFiles,

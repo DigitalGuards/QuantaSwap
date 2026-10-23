@@ -1,12 +1,44 @@
+import { createRequire } from "node:module";
+
 export const nodeTestFiles = [
   "**/*.{test,spec}.{ts,tsx,mts,cts}",
   "**/{test,tests,__tests__}/**/*.{ts,tsx,mts,cts}",
 ];
 
-// Accept each package's locked TypeScript so the shared plugin needs no
-// root-level dependency installation. Match symbols, never callable types.
-export default function createNodeTestPlugin(ts) {
-  function inNodeTest(declaration) {
+const imports = new Set(["test", "describe", "it", "suite"]);
+const subtestMethods = new Set(["test"]);
+const modifiers = new Set(["skip", "only", "todo"]);
+export const nodeTestSafeCalls = [
+  { from: "package", package: "node:test", name: [...imports, ...modifiers] },
+];
+
+// Accept each package's locked TypeScript without a root dependency. Inspect
+// the resolved callee type, just as no-floating-promises' safe-call allowance
+// does. Type construction syntax never decides whether a call is checked.
+export default function createNodeTestPlugin(ts, configUrl) {
+  // Use the exact matchers owned by the installed no-floating-promises rule.
+  // Resolve through its dependency tree so no new package is required.
+  const packageRequire = createRequire(configUrl);
+  const tseslintRequire = createRequire(
+    packageRequire.resolve("typescript-eslint"),
+  );
+  const pluginRequire = createRequire(
+    tseslintRequire.resolve("@typescript-eslint/eslint-plugin"),
+  );
+  const { typeMatchesSomeSpecifier, valueMatchesSomeSpecifier } = pluginRequire(
+    "@typescript-eslint/type-utils",
+  );
+  function isRegistration(declaration) {
+    const registration =
+      ts.isFunctionDeclaration(declaration) &&
+      (imports.has(declaration.name?.text) ||
+        modifiers.has(declaration.name?.text));
+    const subtest =
+      ts.isPropertySignature(declaration) &&
+      declaration.name.getText() === "test" &&
+      ts.isInterfaceDeclaration(declaration.parent) &&
+      declaration.parent.name.text === "TestContext";
+    if (!registration && !subtest) return false;
     for (let parent = declaration.parent; parent; parent = parent.parent) {
       if (ts.isModuleDeclaration(parent) && parent.name.text === "node:test")
         return true;
@@ -14,215 +46,210 @@ export default function createNodeTestPlugin(ts) {
     return false;
   }
 
-  const registrationNames = new Set([
-    "test",
-    "describe",
-    "it",
-    "suite",
-    "skip",
-    "only",
-    "todo",
-  ]);
-  const isRegistration = (declaration) =>
-    ts.isFunctionDeclaration(declaration) &&
-    registrationNames.has(declaration.name?.text) &&
-    inNodeTest(declaration);
-  const isSubtest = (declaration) =>
-    ts.isPropertySignature(declaration) &&
-    declaration.name.getText() === "test" &&
-    ts.isInterfaceDeclaration(declaration.parent) &&
-    declaration.parent.name.text === "TestContext" &&
-    inNodeTest(declaration);
-
-  function rule(matches, message, subtests = false) {
-    return {
-      meta: {
-        type: "problem",
-        docs: { description: message },
-        schema: [],
-        messages: { direct: message },
-      },
-      create(context) {
-        const services = context.sourceCode.parserServices;
-        const checker = services.program.getTypeChecker();
-        const references = new Set(
-          context.sourceCode.scopeManager.scopes.flatMap((scope) =>
-            scope.references.map((reference) => reference.identifier),
-          ),
-        );
-        function matchesSymbol(symbol) {
-          if (symbol?.flags & ts.SymbolFlags.Alias)
-            symbol = checker.getAliasedSymbol(symbol);
-          return symbol?.getDeclarations()?.some(matches) ?? false;
-        }
-        function symbols(node) {
-          const typed = services.esTreeNodeToTSNodeMap.get(node);
-          if (
-            ts.isElementAccessExpression(typed) ||
-            ts.isIndexedAccessTypeNode(typed)
-          ) {
-            const key = checker.getTypeAtLocation(
-              ts.isElementAccessExpression(typed)
-                ? typed.argumentExpression
-                : typed.indexType,
-            );
-            const object = ts.isElementAccessExpression(typed)
-              ? typed.expression
-              : typed.objectType;
-            return (key.isUnion() ? key.types : [key])
-              .filter((part) => part.isStringLiteral())
-              .map((part) =>
-                checker.getTypeAtLocation(object).getProperty(part.value),
-              );
-          }
-          return [checker.getSymbolAtLocation(typed)];
-        }
-        const matched = (node) => symbols(node).some(matchesSymbol);
-        function extractedProperties(node) {
-          const typed = services.esTreeNodeToTSNodeMap.get(node);
-          const type = checker.getTypeAtLocation(
-            node.parent.type === "AssignmentExpression"
-              ? services.esTreeNodeToTSNodeMap.get(node.parent.right)
-              : typed,
-          );
-          return node.properties.filter((property) => {
-            if (property.type !== "Property") return false;
-            const key = property.computed
-              ? checker.getTypeAtLocation(
-                  services.esTreeNodeToTSNodeMap.get(property.key),
-                )
-              : undefined;
-            const names = property.computed
-              ? (key.isUnion() ? key.types : [key])
-                  .filter((part) => part.isStringLiteral())
-                  .map((part) => part.value)
-              : [property.key.name ?? property.key.value];
-            return names.some(
-              (name) => name && matchesSymbol(type.getProperty(name)),
-            );
-          });
-        }
-        function unchain(node) {
-          return node.parent?.type === "ChainExpression" ? node.parent : node;
-        }
-        function handled(node) {
-          node = unchain(node);
-          const parent = node.parent;
-          if (
-            (parent.type === "AwaitExpression" && parent.argument === node) ||
-            (parent.type === "ReturnStatement" && parent.argument === node) ||
-            (parent.type === "ArrowFunctionExpression" && parent.body === node)
-          )
-            return true;
-          // Preserve concurrent subtests when the built-in join is itself
-          // awaited or returned. race/any can finish before a child does.
-          if (parent.type === "ArrayExpression") {
-            const call = parent.parent;
-            if (
-              call.type === "CallExpression" &&
-              call.arguments[0] === parent &&
-              call.callee.type === "MemberExpression" &&
-              call.callee.object.type === "Identifier" &&
-              symbols(call.callee.object)[0]
-                ?.getDeclarations()
-                ?.some((declaration) =>
-                  services.program.isSourceFileDefaultLibrary(
-                    declaration.getSourceFile(),
-                  ),
-                )
-            ) {
-              const symbol = symbols(call.callee)[0];
-              if (
-                ["all", "allSettled"].includes(symbol?.name) &&
-                symbol
-                  .getDeclarations()
-                  ?.some(
-                    (declaration) =>
-                      ts.isInterfaceDeclaration(declaration.parent) &&
-                      declaration.parent.name.text === "PromiseConstructor" &&
-                      services.program.isSourceFileDefaultLibrary(
-                        declaration.getSourceFile(),
-                      ),
-                  )
-              )
-                return handled(call);
-            }
-          }
-          return false;
-        }
-        function inspect(node) {
-          if (!matched(node)) return;
-          const parent = node.parent;
-          if (parent.type === "TSImportType") return;
-          // Inspect the outermost registration member once, including in
-          // typeof queries. Its binding must remain a direct call target.
-          if (
-            !subtests &&
-            ((parent.type === "MemberExpression" && parent.object === node) ||
-              (parent.type === "TSQualifiedName" && parent.left === node)) &&
-            symbols(parent).some((symbol) => {
-              if (symbol?.flags & ts.SymbolFlags.Alias)
-                symbol = checker.getAliasedSymbol(symbol);
-              return symbol?.getDeclarations()?.some(inNodeTest);
-            })
-          )
-            return;
-          if (
-            !subtests &&
-            parent.type === "VariableDeclarator" &&
-            parent.init === node &&
-            parent.id.type === "ObjectPattern" &&
-            extractedProperties(parent.id).length
-          )
-            return;
-          if (
-            parent.type === "CallExpression" &&
-            parent.callee === node &&
-            (!subtests || handled(parent))
-          )
-            return;
-          context.report({ node, messageId: "direct" });
-        }
-        return {
-          Identifier(node) {
-            if (references.has(node)) inspect(node);
-          },
-          MemberExpression: inspect,
-          TSQualifiedName: inspect,
-          TSIndexedAccessType: inspect,
-          // Destructuring names bind new symbols. Inspect the source property
-          // on the pattern's contextual type, including callback parameters.
-          ObjectPattern(node) {
-            for (const property of extractedProperties(node))
-              context.report({ node: property, messageId: "direct" });
-          },
-          TSImportType(node) {
-            if (subtests) return;
-            const typed = services.esTreeNodeToTSNodeMap.get(node);
-            if (
-              typed.isTypeOf &&
-              ts.isLiteralTypeNode(typed.argument) &&
-              typed.argument.literal.text === "node:test" &&
-              (!typed.qualifier ||
-                matchesSymbol(checker.getSymbolAtLocation(typed.qualifier)))
-            )
-              context.report({ node, messageId: "direct" });
-          },
-        };
-      },
-    };
-  }
   return {
     rules: {
-      "direct-registrations": rule(
-        isRegistration,
-        "Call node:test registrations directly on their imported bindings; value aliases and type references are forbidden.",
-      ),
-      "no-floating-subtests": rule(
-        isSubtest,
-        "Call the test context's test method directly and await or return its result; method extraction is forbidden.",
-        true,
-      ),
+      "direct-calls": {
+        meta: {
+          type: "problem",
+          docs: {
+            description:
+              "Confine node:test callable types to direct imported registrations and handled context subtests.",
+            requiresTypeChecking: true,
+          },
+          schema: [],
+          messages: {
+            direct:
+              "Call node:test only on an imported test, describe, it or suite binding (or its .skip, .only or .todo), or directly on an enclosing test callback's context.test method.",
+            handled:
+              "Await or return the direct context.test call, including when joining subtests with Promise.all or Promise.allSettled.",
+          },
+        },
+        create(context) {
+          const services = context.sourceCode.parserServices;
+          const checker = services.program.getTypeChecker();
+          const typed = (node) => services.esTreeNodeToTSNodeMap.get(node);
+          const symbolAt = (node) => checker.getSymbolAtLocation(typed(node));
+          function matchesSymbol(symbol) {
+            if (symbol?.flags & ts.SymbolFlags.Alias)
+              symbol = checker.getAliasedSymbol(symbol);
+            return symbol?.getDeclarations()?.some(isRegistration) ?? false;
+          }
+          function registrationType(type, seen = new Set()) {
+            if (!type || seen.has(type)) return false;
+            seen.add(type);
+            if (
+              matchesSymbol(type.getSymbol()) ||
+              matchesSymbol(type.aliasSymbol)
+            )
+              return true;
+            // Preserve provenance through unions, intersections and constrained
+            // generics, including instantiated signatures and mapped types.
+            if (
+              type.isUnionOrIntersection() &&
+              type.types.some((part) => registrationType(part, seen))
+            )
+              return true;
+            if (
+              type.getCallSignatures().some((signature) => {
+                const declaration = signature.getDeclaration();
+                return declaration && isRegistration(declaration);
+              })
+            )
+              return true;
+            return registrationType(
+              checker.getBaseConstraintOfType(type),
+              seen,
+            );
+          }
+          function isRegistrationCall(node) {
+            const type = checker.getTypeAtLocation(typed(node.callee));
+            if (registrationType(type)) return true;
+            // The allowance also matches values by local name. A HookFn called
+            // "test", for example, can otherwise hide a rejected promise.
+            const exempt =
+              valueMatchesSomeSpecifier(
+                node.callee,
+                nodeTestSafeCalls,
+                services.program,
+                type,
+              ) ||
+              typeMatchesSomeSpecifier(
+                type,
+                nodeTestSafeCalls,
+                services.program,
+              );
+            // Synchronous context.skip/context.todo controls return void. The
+            // promise rule already accepts void calls without an allowance.
+            return (
+              exempt &&
+              !(
+                checker.getTypeAtLocation(typed(node)).flags & ts.TypeFlags.Void
+              )
+            );
+          }
+
+          function imported(node) {
+            if (node.type !== "Identifier") return false;
+            return (
+              symbolAt(node)
+                ?.getDeclarations()
+                ?.some((declaration) => {
+                  if (ts.isImportClause(declaration)) {
+                    return (
+                      !declaration.isTypeOnly &&
+                      declaration.parent.moduleSpecifier.text === "node:test"
+                    );
+                  }
+                  if (
+                    !ts.isImportSpecifier(declaration) ||
+                    declaration.isTypeOnly
+                  )
+                    return false;
+                  const clause = declaration.parent.parent;
+                  return (
+                    !clause.isTypeOnly &&
+                    clause.parent.moduleSpecifier.text === "node:test" &&
+                    imports.has(
+                      (declaration.propertyName ?? declaration.name).text,
+                    )
+                  );
+                }) ?? false
+            );
+          }
+          const member = (node, names) =>
+            node.type === "MemberExpression" &&
+            !node.computed &&
+            !node.optional &&
+            node.property.type === "Identifier" &&
+            names.has(node.property.name);
+
+          function callbackContext(node) {
+            if (node.type !== "Identifier") return false;
+            const symbol = symbolAt(node);
+            if (!symbol) return false;
+            for (let parent = node.parent; parent; parent = parent.parent) {
+              if (
+                (parent.type === "ArrowFunctionExpression" ||
+                  parent.type === "FunctionExpression") &&
+                parent.params[0]?.type === "Identifier" &&
+                symbolAt(parent.params[0]) === symbol
+              ) {
+                const call = parent.parent;
+                return (
+                  call.type === "CallExpression" &&
+                  call.arguments.at(-1) === parent &&
+                  isRegistrationCall(call) &&
+                  callKind(call) !== undefined
+                );
+              }
+            }
+            return false;
+          }
+          function callKind(call) {
+            if (call.optional) return undefined;
+            let callee = call.callee;
+            if (member(callee, modifiers)) callee = callee.object;
+            if (imported(callee)) return "registration";
+            if (
+              member(callee, subtestMethods) &&
+              callbackContext(callee.object)
+            )
+              return "subtest";
+            return undefined;
+          }
+          function handled(node) {
+            if (node.parent?.type === "ChainExpression") node = node.parent;
+            const parent = node.parent;
+            if (
+              (parent.type === "AwaitExpression" && parent.argument === node) ||
+              (parent.type === "ReturnStatement" && parent.argument === node) ||
+              (parent.type === "ArrowFunctionExpression" &&
+                parent.body === node)
+            )
+              return true;
+            // Concurrent children must be joined by the actual built-in all or
+            // allSettled, with that join awaited or returned. race/any can end
+            // before a child. A helper borrowing PromiseConstructor is unsafe.
+            if (parent.type !== "ArrayExpression") return false;
+            const call = parent.parent;
+            if (
+              call.type !== "CallExpression" ||
+              call.arguments[0] !== parent ||
+              call.callee.type !== "MemberExpression" ||
+              call.callee.object.type !== "Identifier"
+            )
+              return false;
+            const builtin = (declaration) =>
+              services.program.isSourceFileDefaultLibrary(
+                declaration.getSourceFile(),
+              );
+            if (!symbolAt(call.callee.object)?.getDeclarations()?.some(builtin))
+              return false;
+            const symbol = symbolAt(call.callee);
+            return (
+              ["all", "allSettled"].includes(symbol?.name) &&
+              symbol
+                .getDeclarations()
+                ?.some(
+                  (declaration) =>
+                    ts.isInterfaceDeclaration(declaration.parent) &&
+                    declaration.parent.name.text === "PromiseConstructor" &&
+                    builtin(declaration),
+                ) &&
+              handled(call)
+            );
+          }
+          return {
+            CallExpression(node) {
+              if (!isRegistrationCall(node)) return;
+              const kind = callKind(node);
+              if (!kind) context.report({ node, messageId: "direct" });
+              else if (kind === "subtest" && !handled(node))
+                context.report({ node, messageId: "handled" });
+            },
+          };
+        },
+      },
     },
   };
 }

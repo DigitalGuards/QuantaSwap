@@ -21,6 +21,7 @@ import {
   collectFindings,
   collectPairs,
   isBootstrapSetupFile,
+  isSourceFile,
   legacyManifest,
   onlyPackageScriptsChanged,
 } from "./lint-ratchet-lib.mjs";
@@ -153,6 +154,7 @@ test("ratchets reject globs, traversal, duplicates, invalid counts and suppressi
     { ...entry, rule: "no-warning-comments" },
     { ...entry, rule: "@typescript-eslint/ban-ts-comment" },
     { ...entry, rule: "lint-policy/no-inline-config" },
+    { ...entry, rule: "node-test/direct-calls" },
   ]) {
     assert.throws(() => collectPairs(manifest([changed])), /Invalid ratchet/u);
   }
@@ -213,127 +215,141 @@ test("strict and stylistic type-aware rules cover apps, tests, tooling and every
 });
 
 test(
-  "node:test registrations are safe while subtests and other promises stay checked",
+  "node:test subtests require the enclosing callback binding and handled results",
   { skip: path.basename(root) === "frontend" },
   async () => {
     const source = `
-import test, { test as namedTest, describe, it, suite } from "node:test";
-import * as runner from "node:test";
-test("default", () => {});
-namedTest("named", () => {});
-runner.test("namespace", () => {});
-test.skip("skipped", () => {});
-test.only("only", () => {});
-test.todo("todo");
-describe("describe", () => { it("it", () => {}); });
-suite("suite", () => {});
+import test from "node:test";
+import type { TestContext } from "node:test";
 test("parent", async (t) => {
-  t.test("direct", () => {}); // subtest
-  t["test"]("computed", () => {}); // subtest
-  t.test?.("optional", () => {}); // subtest
-  const alias = t.test; // subtest
-  alias("alias", () => {});
-  const { test: renamed } = t; // subtest
-  renamed("destructured", () => {});
-  const bound = t.test.bind(t); // subtest
-  bound("bound", () => {});
-  t.test.bind(t)("inline bound", () => {}); // subtest
-  const helper = { subtest: t.test.bind(t) }; // subtest
-  helper.subtest("object alias", () => {});
-  const methods = [t.test]; // subtest
-  consume(t.test); // subtest
-  let assigned;
-  assigned = t.test; // subtest
-  ({ test: assigned } = t); // subtest
-  const { ["test"]: computed } = t; // subtest
+  t.skip("context skip control");
+  t.todo("context todo control");
+  t.test("direct", () => {}); // guarded
+  t["test"]("computed", () => {}); // guarded
+  t.test?.("optional", () => {}); // guarded
+  const alias = t.test;
+  alias("alias", () => {}); // guarded
+  const { test: renamed } = t;
+  renamed("destructured", () => {}); // guarded
+  const bound = t.test.bind(t);
+  bound("bound", () => {}); // guarded
+  t.test.bind(t)("inline bound", () => {}); // guarded
+  const helper = { subtest: t.test.bind(t) };
+  helper.subtest("object alias", () => {}); // guarded
+  const methods = [t.test];
+  methods[0]("array alias", () => {}); // guarded
+  let assigned = t.test;
+  assigned = t.test;
+  assigned("assigned", () => {}); // guarded
+  ({ test: assigned } = t);
+  assigned("destructuring assignment", () => {}); // guarded
+  const { ["test"]: computed } = t;
+  computed("computed binding", () => {}); // guarded
   const key = "test";
-  const byKey = t[key]; // subtest
+  const byKey = t[key];
+  byKey("indexed", () => {}); // guarded
   const unionKey = Date.now() ? "test" : "name";
-  const { [unionKey]: mixedMethod } = t; // subtest
-  const byUnionKey = t[unionKey]; // subtest
-  type Method = typeof t.test; // subtest
-  void t.test("voided", () => {}); // subtest
-  const deferred = t.test("stored result", () => {}); // subtest
-  t.test.call(t, "call", () => {}); // subtest
-  t.test.apply(t, ["apply", () => {}]); // subtest
-  true && t.test("logical", () => {}); // subtest
-  true ? t.test("conditional", () => {}) : undefined; // subtest
-  [t.test("array", () => {})]; // subtest
-  (t.test("sequence", () => {}), undefined); // subtest
-  await Promise.race([t.test("race", () => {})]); // subtest
-  await consume(t.test("argument", () => {})); // subtest
+  const { [unionKey]: mixedMethod } = t;
+  if (typeof mixedMethod === "function") mixedMethod("narrowed", () => {}); // guarded
+  const byUnionKey = t[unionKey];
+  if (typeof byUnionKey === "function") byUnionKey("narrowed value", () => {}); // guarded
+  type Method = typeof t.test;
+  const borrowed: Method = t.test;
+  borrowed("borrowed type", () => {}); // guarded
+  const getter = get(t, "test").bind(t);
+  getter("generic getter", () => {}); // guarded
+  get(t, "test").bind(t)("inline getter", () => {}); // guarded
+  helperSubtest(t); // ordinary
+  const context = t;
+  await context.test("context alias", () => {}); // guarded
+  await get(t, "test")("returned method", () => {}); // guarded
+  void t.test("voided", () => {}); // guarded
+  const deferred = t.test("stored result", () => {}); // guarded
+  t.test.call(t, "call", () => {}); // ordinary
+  t.test.apply(t, ["apply", () => {}]); // ordinary
+  true && t.test("logical", () => {}); // guarded
+  true ? t.test("conditional", () => {}) : undefined; // guarded
+  [t.test("array", () => {})]; // guarded
+  (t.test("sequence", () => {}), undefined); // guarded
+  await Promise.race([t.test("race", () => {})]); // guarded
+  await Promise.any([t.test("any", () => {})]); // guarded
+  await consume(t.test("argument", () => {})); // guarded
   await t.test("awaited", () => {});
-  await t["test"]("computed awaited", () => {});
-  await t.test?.("optional awaited", () => {});
+  await t["test"]("computed awaited", () => {}); // guarded
+  await t.test?.("optional awaited", () => {}); // guarded
+  await t.test.skip("skipped", () => {});
+  await t.test.only("only", () => {});
+  await t.test.todo("todo");
+  t.test.skip("unhandled skip", () => {}); // guarded
+  t.test.only("unhandled only", () => {}); // guarded
+  t.test.todo("unhandled todo"); // guarded
   await Promise.all([t.test("collected", () => {})]);
   await Promise.allSettled([t.test("settled", () => {})]);
-  await untrustedJoin.all([t.test("borrowed join type", () => {})]); // subtest
+  await untrustedJoin.all([t.test("borrowed join type", () => {})]); // guarded
   {
     const Promise = { all: (_values: unknown[]) => undefined };
-    await Promise.all([t.test("unhandled by shadow", () => {})]); // subtest
+    await Promise.all([t.test("unhandled by shadow", () => {})]); // guarded
   }
   return t.test("returned", () => {});
 });
 test("expression body", (t) => t.test("returned", () => {}));
-test("parameter extraction", ({ test: child }) => {}); // subtest
+test("joined expression", (t) => Promise.all([t.test("returned", () => {})]));
+test("function callback", function (context) { return context.test("child", () => {}); });
+test("parameter extraction", ({ test: child }) => child("extracted", () => {})); // guarded
 test("nested", async (t) => {
   await t.test("child", async (child) => {
-    const methods = { child: child.test }; // subtest
+    const methods = { child: child.test };
+    methods.child("helper", () => {}); // guarded
     await child.test("grandchild", () => {});
+    await t.test("outer context", () => {});
+    { const child = t; await child.test("shadow", () => {}); } // guarded
   });
 });
+function helperSubtest(context: TestContext) {
+  return context.test("helper child", () => {}); // guarded
+}
+function get<T, K extends keyof T>(object: T, key: K): T[K] { return object[key]; }
 declare function consume(value: unknown): Promise<void>;
 declare const untrustedJoin: PromiseConstructor;
-type ExtractedMethod = import("node:test").TestContext["test"]; // subtest
 Promise.reject(new Error("unhandled")); // ordinary
-{
-  const test = () => Promise.resolve();
-  test(); // ordinary
-}
-{
-  const describe = () => Promise.resolve();
-  describe(); // ordinary
-}
-{
-  const skip = () => Promise.resolve();
-  skip(); // ordinary
-}
-{
-  const context = { test: () => Promise.resolve() };
-  context.test(); // ordinary
-}
+{ const test = () => Promise.resolve(); test(); } // ordinary
+{ const describe = () => Promise.resolve(); describe(); } // ordinary
+{ const skip = () => Promise.resolve(); skip(); } // ordinary
+{ const context = { test: () => Promise.resolve() }; context.test(); } // ordinary
 `;
-    const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
-    try {
-      const [result] = await fixture.eslint.lintFiles(["src/probe.test.ts"]);
-      assert.equal(result.fatalErrorCount, 0);
-      for (const [rule, marker] of [
-        ["node-test/no-floating-subtests", "subtest"],
-        ["@typescript-eslint/no-floating-promises", "ordinary"],
-      ]) {
-        const expected = source
-          .split("\n")
-          .flatMap((line, index) =>
-            line.endsWith(`// ${marker}`) ? [index + 1] : [],
-          );
-        assert.deepEqual(
-          result.messages
-            .filter(
-              (message) =>
-                message.ruleId === rule &&
-                (marker !== "ordinary" ||
-                  !source.split("\n")[message.line - 1].endsWith("// subtest")),
-            )
-            .map((message) => message.line),
-          expected,
-          rule,
-        );
-      }
-    } finally {
-      await fixture.cleanup();
-    }
+    await assertNodeTestCalls(source);
   },
 );
+
+async function assertNodeTestCalls(source) {
+  const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
+  try {
+    const [result] = await fixture.eslint.lintFiles(["src/probe.test.ts"]);
+    assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
+    for (const [rule, marker] of [
+      ["node-test/direct-calls", "guarded"],
+      ["@typescript-eslint/no-floating-promises", "ordinary"],
+    ]) {
+      const lines = source.split("\n");
+      assert.deepEqual(
+        result.messages
+          .filter(
+            (message) =>
+              message.ruleId === rule &&
+              (marker !== "ordinary" ||
+                !lines[message.line - 1].endsWith("// guarded")),
+          )
+          .map((message) => message.line),
+        lines.flatMap((line, index) =>
+          line.endsWith(`// ${marker}`) ? [index + 1] : [],
+        ),
+        rule,
+      );
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+}
 
 test("CI passes base and integration refs for main adoption", async () => {
   for (const name of [
@@ -373,98 +389,163 @@ test("CI passes base and integration refs for main adoption", async () => {
 });
 
 test(
-  "node:test registration bindings cannot escape through values or types",
+  "node:test resolves type constructions before validating call bindings",
   { skip: path.basename(root) === "frontend" },
   async () => {
-    const registrations = [
+    const direct = [
       "defaultTest",
       "renamedTest",
       "describeCase",
       "itCase",
       "suiteCase",
+    ].flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`]);
+    const indirect = [
       "runner.test",
       "runner.describe",
       "runner.it",
       "runner.suite",
     ].flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`]);
-    registrations.push(
+    indirect.push(
       "renamedSkip",
       "renamedOnly",
       "renamedTodo",
       'runner["test"]["skip"]',
+      'defaultTest["skip"]',
     );
     const source = [
       'import defaultTest, { test as renamedTest, describe as describeCase, it as itCase, suite as suiteCase, skip as renamedSkip, only as renamedOnly, todo as renamedTodo } from "node:test";',
       'import * as runner from "node:test";',
       'import type typeTest from "node:test";',
-      'import type { test as typeNamed } from "node:test";',
-      "declare function consume(value: unknown): void;",
-      ...registrations.flatMap((name, index) => [
-        `${name}("direct", () => {});`,
-        `{ const alias = ${name}; } // registration`,
-        `{ const helper = { register: ${name} }; } // registration`,
-        `consume(${name}); // registration`,
-        // Indexed access is a value expression; use the qualified forms for
-        // typeof annotations so all cases are syntactically valid.
-        ...(name.includes("[")
-          ? []
-          : [`type Registration${index} = typeof ${name}; // registration`]),
+      'import type { test as typeNamed, TestContext } from "node:test";',
+      ...direct.map((name) => `${name}("direct", () => {});`),
+      ...indirect.map((name) => `${name}("indirect", () => {}); // guarded`),
+      ...direct.flatMap((name, index) => [
+        `{ const alias = ${name}; alias("value alias", () => {}); } // guarded`,
+        `{ const helper = { register: ${name} }; helper.register("helper", () => {}); } // guarded`,
+        `type Registration${index} = typeof ${name};`,
+        `declare const constructed${index}: Registration${index};`,
+        `constructed${index}("constructed type", () => {}); // guarded`,
       ]),
-      'const work: typeof typeTest.skip = () => Promise.reject(new Error("unhandled work")); // registration',
-      "work();",
-      'const other: typeof typeNamed.only = () => Promise.reject(new Error("unhandled work")); // registration',
-      "other();",
-      'type ViaImport = typeof import("node:test").test.skip; // registration',
-      'type ViaSingleImport = typeof import("node:test").test; // registration',
-      'type ViaModule = typeof import("node:test"); // registration',
-      "type ViaNamespace = typeof runner; // registration",
-      'type Context = import("node:test").TestContext;',
-      "type NamedContext = runner.TestContext;",
-      "type SuiteContext = runner.SuiteContext;",
-      "defaultTest.bind(undefined); // registration",
-      'renamedTest.call(undefined, "indirect", () => {}); // registration',
-      "{ let assigned; assigned = renamedTest; } // registration",
-      "const { skip } = runner; // registration",
-      "const [first] = [renamedTest]; // registration",
+      'const work: typeof typeTest.skip = () => Promise.reject(new Error("unhandled work"));',
+      "work(); // guarded",
+      'const other: typeof typeNamed.only = () => Promise.reject(new Error("unhandled work"));',
+      "other(); // guarded",
+      "type Property<T, K extends keyof T> = T[K];",
+      'const indexed: Property<Property<TestContext, "test">, "skip"> = () => Promise.reject(new Error("unhandled work"));',
+      'indexed("work"); // guarded',
+      "type First = typeof typeTest.skip;",
+      "type Second = First;",
+      "type Third = Second;",
+      'const chained: Third = () => Promise.reject(new Error("unhandled work"));',
+      "chained(); // guarded",
+      "function getTest() { return renamedTest; }",
+      'getTest()("returned function", () => {}); // guarded',
+      "function getSkip() { return defaultTest.skip; }",
+      'const returned: ReturnType<typeof getSkip> = () => Promise.reject(new Error("unhandled work"));',
+      "returned(); // guarded",
+      'type ViaImport = typeof import("node:test").test.skip;',
+      "declare const viaImport: ViaImport;",
+      "viaImport(); // guarded",
+      "function identity<T>(value: T): T { return value; }",
+      'identity(defaultTest)("generic", () => {}); // guarded',
+      'function constrained<T extends typeof defaultTest>(value: T) { value("constrained", () => {}); } // guarded',
+      "type Conditional<T> = T extends { test: infer F } ? F : never;",
+      "declare const conditional: Conditional<TestContext>;",
+      'conditional("conditional", () => {}); // guarded',
+      "type Mapped<T> = { [K in keyof T]: T[K] };",
+      "declare const mapped: Mapped<TestContext>;",
+      'mapped.test("mapped", () => {}); // guarded',
+      "declare const intersection: typeof defaultTest.skip & { label: string };",
+      'intersection("intersection", () => {}); // guarded',
+      "declare const union: typeof defaultTest.skip | (() => Promise<void>);",
+      "union(); // guarded",
+      'defaultTest?.("optional", () => {}); // guarded',
+      'defaultTest.bind(undefined)("bound", () => {}); // guarded',
+      "const { skip } = runner; skip(); // guarded",
+      'const [first] = [renamedTest]; first("array", () => {}); // guarded',
+      '{ let assigned = renamedTest; assigned = defaultTest; assigned("assigned", () => {}); } // guarded',
+      "{ const renamedTest: typeof defaultTest.skip = () => Promise.resolve(); renamedTest(); } // guarded",
       "{ const renamedTest = () => Promise.resolve(); renamedTest(); } // ordinary",
       "{ const runner = { test: () => Promise.resolve() }; runner.test(); } // ordinary",
     ].join("\n");
-    const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
-    try {
-      const [result] = await fixture.eslint.lintFiles(["src/probe.test.ts"]);
-      assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
-      const expected = source
-        .split("\n")
-        .flatMap((line, index) =>
-          line.endsWith("// registration") ? [index + 1] : [],
-        );
-      assert.deepEqual(
-        result.messages
-          .filter(
-            (message) => message.ruleId === "node-test/direct-registrations",
-          )
-          .map((message) => message.line),
-        expected,
-      );
-      assert.deepEqual(
-        result.messages
-          .filter(
-            (message) =>
-              message.ruleId === "@typescript-eslint/no-floating-promises" &&
-              !source.split("\n")[message.line - 1].endsWith("// registration"),
-          )
-          .map((message) => message.line),
-        source
-          .split("\n")
-          .flatMap((line, index) =>
-            line.endsWith("// ordinary") ? [index + 1] : [],
-          ),
-      );
-    } finally {
-      await fixture.cleanup();
-    }
+    await assertNodeTestCalls(source);
   },
 );
+
+test(
+  "node:test value-name allowances also require approved call bindings",
+  { skip: path.basename(root) === "frontend" },
+  async () => {
+    const source = [
+      'import { test as register } from "node:test";',
+      'import type { HookFn } from "node:test";',
+      ...["test", "describe", "it", "suite", "skip", "only", "todo"].flatMap(
+        (name) => [
+          "{",
+          `const ${name}: HookFn = () => Promise.reject(new Error("unhandled work"));`,
+          `register("parent", (context) => { ${name}(context, () => {}); }); // guarded`,
+          "}",
+        ],
+      ),
+    ].join("\n");
+    await assertNodeTestCalls(source);
+  },
+);
+
+test("generated output exclusions apply only at repository and package roots", () => {
+  assert.equal(isSourceFile("frontend/dist/authored.ts"), true);
+  for (const root of ["", "frontend/", "server/", "marketmaker/"]) {
+    for (const directory of ["dist", "dist-loadtest", "build", "coverage"]) {
+      assert.equal(isSourceFile(`${root}${directory}/output.ts`, true), false);
+      for (const prefix of ["src/", "test/fixtures/", "scripts/"]) {
+        const file = `${root}${prefix}${directory}/authored.ts`;
+        assert.equal(isSourceFile(file, true), true, file);
+        assert.doesNotThrow(() => collectPairs(manifest([{ ...entry, file }])));
+      }
+    }
+  }
+});
+
+test("authored files under generated-looking directory names are fully linted", async () => {
+  const source =
+    '/* eslint-disable */\nexport type ReviewEscape = any;\nPromise.reject(new Error("unhandled work"));\n';
+  const authored = ["build", "dist", "dist-loadtest", "coverage"].flatMap(
+    (directory) => [
+      `src/${directory}/probe.ts`,
+      `test/fixtures/${directory}/probe.ts`,
+    ],
+  );
+  const fixture = await makePolicyFixture(
+    Object.fromEntries([
+      ...authored.map((file) => [file, source]),
+      ...["build", "dist", "dist-loadtest", "coverage"].map((directory) => [
+        `${directory}/output.ts`,
+        source,
+      ]),
+    ]),
+  );
+  try {
+    const results = await fixture.eslint.lintFiles(["."]);
+    assert.deepEqual(
+      results
+        .map((result) => path.relative(fixture.root, result.filePath))
+        .sort(),
+      authored.sort(),
+    );
+    for (const result of results) {
+      assert.equal(result.fatalErrorCount, 0);
+      const rules = result.messages.map((message) => message.ruleId);
+      for (const rule of [
+        "lint-policy/no-inline-config",
+        "@typescript-eslint/no-explicit-any",
+        "@typescript-eslint/no-floating-promises",
+      ])
+        assert.ok(rules.includes(rule), `${result.filePath}: ${rule}`);
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
 
 test("console policy preserves tests and allows service log levels", async () => {
   const source = ["info", "warn", "error", "log", "debug"]

@@ -1,4 +1,6 @@
 export const typedFiles = ["**/*.{ts,tsx,mts,cts}"];
+// These names are excluded only directly under a package or repository root.
+// Authored subdirectories with these names remain in lint and source inventory.
 export const generatedDirectories = [
   "node_modules",
   "dist",

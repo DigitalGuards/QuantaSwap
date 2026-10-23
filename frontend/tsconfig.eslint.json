@@ -5,11 +5,5 @@
     "rootDir": "."
   },
   "include": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
-  "exclude": [
-    "**/node_modules/**",
-    "**/dist/**",
-    "**/dist-loadtest/**",
-    "**/build/**",
-    "**/coverage/**"
-  ]
+  "exclude": ["node_modules/**", "dist/**", "dist-loadtest/**", "build/**", "coverage/**"]
 }
