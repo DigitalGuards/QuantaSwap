@@ -231,17 +231,60 @@ test("parent", async (t) => {
   t.test("direct", () => {}); // subtest
   t["test"]("computed", () => {}); // subtest
   t.test?.("optional", () => {}); // subtest
-  const alias = t.test;
-  alias("alias", () => {}); // subtest
-  const { test: renamed } = t;
-  renamed("destructured", () => {}); // subtest
-  const bound = t.test.bind(t);
-  bound("bound", () => {}); // subtest
+  const alias = t.test; // subtest
+  alias("alias", () => {});
+  const { test: renamed } = t; // subtest
+  renamed("destructured", () => {});
+  const bound = t.test.bind(t); // subtest
+  bound("bound", () => {});
   t.test.bind(t)("inline bound", () => {}); // subtest
+  const helper = { subtest: t.test.bind(t) }; // subtest
+  helper.subtest("object alias", () => {});
+  const methods = [t.test]; // subtest
+  consume(t.test); // subtest
+  let assigned;
+  assigned = t.test; // subtest
+  ({ test: assigned } = t); // subtest
+  const { ["test"]: computed } = t; // subtest
+  const key = "test";
+  const byKey = t[key]; // subtest
+  const unionKey = Date.now() ? "test" : "name";
+  const { [unionKey]: mixedMethod } = t; // subtest
+  const byUnionKey = t[unionKey]; // subtest
+  type Method = typeof t.test; // subtest
+  void t.test("voided", () => {}); // subtest
+  const deferred = t.test("stored result", () => {}); // subtest
+  t.test.call(t, "call", () => {}); // subtest
+  t.test.apply(t, ["apply", () => {}]); // subtest
+  true && t.test("logical", () => {}); // subtest
+  true ? t.test("conditional", () => {}) : undefined; // subtest
+  [t.test("array", () => {})]; // subtest
+  (t.test("sequence", () => {}), undefined); // subtest
+  await Promise.race([t.test("race", () => {})]); // subtest
+  await consume(t.test("argument", () => {})); // subtest
   await t.test("awaited", () => {});
+  await t["test"]("computed awaited", () => {});
+  await t.test?.("optional awaited", () => {});
   await Promise.all([t.test("collected", () => {})]);
+  await Promise.allSettled([t.test("settled", () => {})]);
+  await untrustedJoin.all([t.test("borrowed join type", () => {})]); // subtest
+  {
+    const Promise = { all: (_values: unknown[]) => undefined };
+    await Promise.all([t.test("unhandled by shadow", () => {})]); // subtest
+  }
   return t.test("returned", () => {});
 });
+test("expression body", (t) => t.test("returned", () => {}));
+test("parameter extraction", ({ test: child }) => {}); // subtest
+test("nested", async (t) => {
+  await t.test("child", async (child) => {
+    const methods = { child: child.test }; // subtest
+    await child.test("grandchild", () => {});
+  });
+});
+declare function consume(value: unknown): Promise<void>;
+declare const untrustedJoin: PromiseConstructor;
+type ExtractedMethod = import("node:test").TestContext["test"]; // subtest
 Promise.reject(new Error("unhandled")); // ordinary
 {
   const test = () => Promise.resolve();
@@ -254,6 +297,10 @@ Promise.reject(new Error("unhandled")); // ordinary
 {
   const skip = () => Promise.resolve();
   skip(); // ordinary
+}
+{
+  const context = { test: () => Promise.resolve() };
+  context.test(); // ordinary
 }
 `;
     const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
@@ -271,12 +318,148 @@ Promise.reject(new Error("unhandled")); // ordinary
           );
         assert.deepEqual(
           result.messages
-            .filter((message) => message.ruleId === rule)
+            .filter(
+              (message) =>
+                message.ruleId === rule &&
+                (marker !== "ordinary" ||
+                  !source.split("\n")[message.line - 1].endsWith("// subtest")),
+            )
             .map((message) => message.line),
           expected,
           rule,
         );
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  },
+);
+
+test("CI passes base and integration refs for main adoption", async () => {
+  for (const name of [
+    "frontend-ci",
+    "orderbook-ci",
+    "marketmaker-ci",
+    "orderbook-release",
+    "marketmaker-release",
+  ]) {
+    const source = await readFile(
+      new URL(`../.github/workflows/${name}.yml`, import.meta.url),
+      "utf8",
+    );
+    const commands = source
+      .split("\n")
+      .filter((line) => line.includes("npm run lint:ratchet --"));
+    assert.ok(commands.length, name);
+    for (const command of commands)
+      assert.ok(
+        command.includes(
+          '--base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"',
+        ),
+        name,
+      );
+    assert.equal(
+      (source.match(/LINT_INTEGRATION_REF: origin\/dev/gu) ?? []).length,
+      commands.length,
+    );
+    assert.ok(source.includes("fetch-depth: 0"), name);
+    if (name.endsWith("-ci"))
+      assert.match(
+        source,
+        /  push:\n    branches:\n(?:      - [^\n]+\n)*      - main\n/u,
+        name,
+      );
+  }
+});
+
+test(
+  "node:test registration bindings cannot escape through values or types",
+  { skip: path.basename(root) === "frontend" },
+  async () => {
+    const registrations = [
+      "defaultTest",
+      "renamedTest",
+      "describeCase",
+      "itCase",
+      "suiteCase",
+      "runner.test",
+      "runner.describe",
+      "runner.it",
+      "runner.suite",
+    ].flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`]);
+    registrations.push(
+      "renamedSkip",
+      "renamedOnly",
+      "renamedTodo",
+      'runner["test"]["skip"]',
+    );
+    const source = [
+      'import defaultTest, { test as renamedTest, describe as describeCase, it as itCase, suite as suiteCase, skip as renamedSkip, only as renamedOnly, todo as renamedTodo } from "node:test";',
+      'import * as runner from "node:test";',
+      'import type typeTest from "node:test";',
+      'import type { test as typeNamed } from "node:test";',
+      "declare function consume(value: unknown): void;",
+      ...registrations.flatMap((name, index) => [
+        `${name}("direct", () => {});`,
+        `{ const alias = ${name}; } // registration`,
+        `{ const helper = { register: ${name} }; } // registration`,
+        `consume(${name}); // registration`,
+        // Indexed access is a value expression; use the qualified forms for
+        // typeof annotations so all cases are syntactically valid.
+        ...(name.includes("[")
+          ? []
+          : [`type Registration${index} = typeof ${name}; // registration`]),
+      ]),
+      'const work: typeof typeTest.skip = () => Promise.reject(new Error("unhandled work")); // registration',
+      "work();",
+      'const other: typeof typeNamed.only = () => Promise.reject(new Error("unhandled work")); // registration',
+      "other();",
+      'type ViaImport = typeof import("node:test").test.skip; // registration',
+      'type ViaSingleImport = typeof import("node:test").test; // registration',
+      'type ViaModule = typeof import("node:test"); // registration',
+      "type ViaNamespace = typeof runner; // registration",
+      'type Context = import("node:test").TestContext;',
+      "type NamedContext = runner.TestContext;",
+      "type SuiteContext = runner.SuiteContext;",
+      "defaultTest.bind(undefined); // registration",
+      'renamedTest.call(undefined, "indirect", () => {}); // registration',
+      "{ let assigned; assigned = renamedTest; } // registration",
+      "const { skip } = runner; // registration",
+      "const [first] = [renamedTest]; // registration",
+      "{ const renamedTest = () => Promise.resolve(); renamedTest(); } // ordinary",
+      "{ const runner = { test: () => Promise.resolve() }; runner.test(); } // ordinary",
+    ].join("\n");
+    const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
+    try {
+      const [result] = await fixture.eslint.lintFiles(["src/probe.test.ts"]);
+      assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
+      const expected = source
+        .split("\n")
+        .flatMap((line, index) =>
+          line.endsWith("// registration") ? [index + 1] : [],
+        );
+      assert.deepEqual(
+        result.messages
+          .filter(
+            (message) => message.ruleId === "node-test/direct-registrations",
+          )
+          .map((message) => message.line),
+        expected,
+      );
+      assert.deepEqual(
+        result.messages
+          .filter(
+            (message) =>
+              message.ruleId === "@typescript-eslint/no-floating-promises" &&
+              !source.split("\n")[message.line - 1].endsWith("// registration"),
+          )
+          .map((message) => message.line),
+        source
+          .split("\n")
+          .flatMap((line, index) =>
+            line.endsWith("// ordinary") ? [index + 1] : [],
+          ),
+      );
     } finally {
       await fixture.cleanup();
     }
@@ -564,21 +747,35 @@ test("versioned and legacy bases preserve their growth guards", async () => {
     const bin = path.join(fixture.root, "bin");
     await mkdir(bin);
     const basePath = path.join(fixture.root, "base.json");
-    const baseSourcePath = path.join(fixture.root, "base.ts");
+    const baseSourcePath = path.join(bin, "base-source");
     await copyFile(fixture.source, baseSourcePath);
     // A read-only Git fixture exercises CLI dispatch without creating commits.
     await writeFile(
       path.join(bin, "git"),
       `#!/usr/bin/env node
 const fs = require("node:fs");
+const crypto = require("node:crypto");
 const args = process.argv.slice(2);
-if (args[0] === "rev-parse") console.log("a".repeat(40));
+const files = [
+  ["frontend/src/example.ts", process.env.QS_LINT_TEST_SOURCE],
+  ["frontend/package.json", "frontend/package.json"],
+];
+if (args[0] === "rev-parse") console.log(args.includes("--show-object-format") ? "sha1" : (args.at(-1) === "origin/dev^{commit}" ? "b" : "a").repeat(40));
 else if (args[0] === "ls-tree") {
-  if (args.includes("-r")) process.stdout.write("frontend/src/example.ts\\0");
+  if (args.includes("-r")) {
+    for (const [name, source] of files) {
+      const bytes = fs.readFileSync(source);
+      const hash = crypto.createHash("sha1").update("blob " + bytes.length + "\\0").update(bytes).digest("hex");
+      process.stdout.write("100644 blob " + hash + "\\t" + name + "\\0");
+    }
+  }
   else console.log("frontend/eslint-ratchet.json");
+} else if (args[0] === "ls-files") {
+  process.stdout.write(files.map(([name]) => name + "\\0").join(""));
 } else if (args[0] === "show") {
   const file = args[1].endsWith("/eslint-ratchet.json")
-    ? process.env.QS_LINT_TEST_BASE : process.env.QS_LINT_TEST_SOURCE;
+    ? (args[1].startsWith("b".repeat(40)) ? process.env.QS_LINT_TEST_INTEGRATION ?? process.env.QS_LINT_TEST_BASE : process.env.QS_LINT_TEST_BASE)
+    : process.env.QS_LINT_TEST_SOURCE;
   process.stdout.write(fs.readFileSync(file));
 }
 else process.exit(2);
@@ -604,7 +801,7 @@ else process.exit(2);
       await writeFile(basePath, JSON.stringify(baseline));
       const result = fixture.run("--check", "--base-ref", "test-base");
       assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, /legacy migration verified/u);
+      assert.match(result.stdout, /bootstrap source equality verified/u);
     }
     await writeFile(
       fixture.source,
@@ -612,13 +809,46 @@ else process.exit(2);
     );
     const changed = fixture.run("--check", "--base-ref", "test-base");
     assert.equal(changed.status, 1);
-    assert.match(changed.stderr, /requires unchanged TypeScript/u);
+    assert.match(changed.stderr, /Bootstrap setup PR must not change sources/u);
     await copyFile(baseSourcePath, fixture.source);
     await writeFile(path.join(fixture.package, "src/extra.ts"), "export {};\n");
     const added = fixture.run("--check", "--base-ref", "test-base");
     assert.equal(added.status, 1);
-    assert.match(added.stderr, /base's exact TypeScript file set/u);
+    assert.match(added.stderr, /Bootstrap setup PR must not change sources/u);
     assert.equal(await readFile(fixture.manifest, "utf8"), current);
+
+    await rm(path.join(fixture.package, "src/extra.ts"));
+    const integrationPath = path.join(fixture.root, "integration.json");
+    await writeFile(integrationPath, current);
+    fixture.env.QS_LINT_TEST_INTEGRATION = integrationPath;
+    await writeFile(
+      fixture.source,
+      "console.log('changed on dev');\nconsole.log('two');\n",
+    );
+    const promoted = fixture.run("--check", "--base-ref", "test-base");
+    assert.equal(promoted.status, 0, promoted.stderr);
+    assert.match(
+      promoted.stdout,
+      /allowances did not grow against origin\/dev/u,
+    );
+    assert.doesNotMatch(promoted.stdout, /bootstrap/u);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("reference arguments reject empty refs and an integration ref without a base", async () => {
+  const fixture = await makeFixture();
+  try {
+    for (const args of [
+      ["--base-ref", " "],
+      ["--base-ref", "HEAD", "--integration-ref", " "],
+      ["--integration-ref", "origin/dev"],
+    ]) {
+      const result = fixture.run("--check", ...args);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /must be a Git ref|requires --base-ref/u);
+    }
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

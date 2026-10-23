@@ -122,31 +122,38 @@ async function fixture(t, pkg) {
     return fixtureGit(["mktree", "-z"], `${rows.join("\0")}\0`);
   }
 
-  function baseWithManifest(source) {
+  function replaceFile(tree, parts, source) {
+    const [name, ...rest] = parts;
+    if (rest.length) {
+      const childTree = fixtureGit([
+        "rev-parse",
+        "--verify",
+        `${tree}:${name}`,
+      ]);
+      const child = replaceFile(childTree, rest, source);
+      return replaceTreeEntry(tree, name, `040000 tree ${child}\t${name}`);
+    }
     const blob =
       source === undefined
         ? undefined
         : fixtureGit(["hash-object", "-w", "--stdin"], source);
-    const packageTree = replaceTreeEntry(
-      `${sourceTree}:${pkg}`,
-      "eslint-ratchet.json",
-      blob && `100644 blob ${blob}\teslint-ratchet.json`,
-    );
-    const tree = replaceTreeEntry(
-      sourceTree,
-      pkg,
-      `040000 tree ${packageTree}\t${pkg}`,
-    );
+    return replaceTreeEntry(tree, name, blob && `100644 blob ${blob}\t${name}`);
+  }
+
+  function baseWithManifest(source, changedFiles = {}) {
+    let tree = replaceFile(sourceTree, [pkg, "eslint-ratchet.json"], source);
+    for (const [file, bytes] of Object.entries(changedFiles))
+      tree = replaceFile(tree, file.split("/"), bytes);
     return fixtureGit(
       ["hash-object", "-t", "commit", "-w", "--stdin"],
       `tree ${tree}\nauthor Ratchet Test <ratchet@example.invalid> 0 +0000\ncommitter Ratchet Test <ratchet@example.invalid> 0 +0000\n\nRatchet fixture\n`,
     );
   }
 
-  function run(args, code, pattern) {
+  function run(args, code, pattern, extraEnv = {}) {
     const result = spawnSync("npm", args, {
       cwd: root,
-      env,
+      env: { ...env, ...extraEnv },
       encoding: "utf8",
       timeout: 120_000,
     });
@@ -156,11 +163,20 @@ async function fixture(t, pkg) {
     if (pattern) assert.match(output, pattern);
     return output;
   }
-  const check = (base, code = 0, pattern) =>
-    run(["run", "lint:ratchet", "--", "--base-ref", base], code, pattern);
-  const update = (base, code = 0, pattern) =>
+  const refs = (base, integration) => [
+    "--base-ref",
+    base,
+    ...(integration ? ["--integration-ref", integration] : []),
+  ];
+  const check = (base, code = 0, pattern, integration = base) =>
     run(
-      ["run", "lint:ratchet:update", "--", "--base-ref", base],
+      ["run", "lint:ratchet", "--", ...refs(base, integration)],
+      code,
+      pattern,
+    );
+  const update = (base, code = 0, pattern, integration = base) =>
+    run(
+      ["run", "lint:ratchet:update", "--", ...refs(base, integration)],
       code,
       pattern,
     );
@@ -244,7 +260,12 @@ for (const pkg of packages) {
           f.check(f.withLedger),
           /bootstrap source equality/u,
         );
-        f.check(f.baseWithManifest("{}\n"), 0, /legacy migration verified/u);
+        for (const legacy of ["{}\n", "[]\n"])
+          f.check(
+            f.baseWithManifest(legacy),
+            0,
+            /bootstrap source equality verified/u,
+          );
       },
     );
 
@@ -417,13 +438,166 @@ for (const pkg of packages) {
         const file = `${pkg}/${data.entries[0].file}`;
         await f.edit(file, (source) => `${source}\n`);
         f.check(f.withLedger);
-        f.check(
+        f.check(f.baseWithManifest("{}\n"), 1, equalityFailure);
+      },
+    );
+
+    await t.test(
+      "legacy manifests enforce the repository freeze for config and dependency mutations",
+      async () => {
+        const bases = [
+          f.bootstrap,
           f.baseWithManifest("{}\n"),
+          f.baseWithManifest("[]\n"),
+        ];
+        for (const [file, mutate] of [
+          [
+            "config/protocol-v2.json",
+            (data) => {
+              data.qrlChainId += 1;
+            },
+          ],
+          [
+            "server/package.json",
+            (data) => {
+              data.dependencies.ethers = "0.0.0-fixture";
+            },
+          ],
+          [
+            "server/package-lock.json",
+            (data) => {
+              data.packages[""].dependencies.ethers = "0.0.0-fixture";
+            },
+          ],
+          [
+            "package.json",
+            (data) => {
+              data.exports = "./changed.js";
+            },
+          ],
+        ]) {
+          await f.edit(file, (source) => {
+            const data = JSON.parse(source);
+            mutate(data);
+            return `${JSON.stringify(data, null, 2)}\n`;
+          });
+          for (const base of bases) {
+            assert.ok(f.check(base, 1, equalityFailure, base).includes(file));
+            f.update(base, 1, equalityFailure, base);
+            assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          }
+          await f.restore();
+        }
+        // Reproduce the combined package and lockfile dependency edit too.
+        for (const file of ["server/package.json", "server/package-lock.json"])
+          await f.edit(file, (source) =>
+            source.replaceAll('"6.17.0"', '"0.0.0-fixture"'),
+          );
+        f.check(bases[1], 1, equalityFailure, bases[2]);
+      },
+    );
+
+    await t.test("legacy bootstrap requires exact findings", async () => {
+      const data = JSON.parse(f.original);
+      data.entries[0].count += 1;
+      await f.ledger(data);
+      for (const legacy of ["{}\n", "[]\n"]) {
+        const base = f.baseWithManifest(legacy);
+        f.check(base, 1, exactFailure, f.bootstrap);
+        f.update(base, 1, exactFailure, f.bootstrap);
+        assert.equal(
+          await fs.readFile(f.ledgerPath, "utf8"),
+          `${JSON.stringify(data, null, 2)}\n`,
+        );
+      }
+    });
+
+    await t.test(
+      "dev to main promotion uses the adopted integration manifest",
+      async () => {
+        const source = `${pkg}/${JSON.parse(f.original).entries[0].file}`;
+        const changedFiles = {
+          [source]: "// Earlier main source before dev adoption.\nexport {};\n",
+          "config/protocol-v2.json": "{}\n",
+        };
+        for (const oldManifest of [undefined, "{}\n", "[]\n"]) {
+          const main = f.baseWithManifest(oldManifest, changedFiles);
+          // Neither ref has adopted the new format yet: freeze against main.
+          f.check(main, 1, equalityFailure, f.bootstrap);
+          // Once dev adopts it, both PR and push base checks use its ceiling.
+          const output = f.check(
+            main,
+            0,
+            /allowances did not grow/u,
+            f.withLedger,
+          );
+          assert.ok(output.includes(`against ${f.withLedger}`));
+          assert.doesNotMatch(output, /bootstrap source equality/u);
+          f.update(main, 0, /allowances did not grow/u, f.withLedger);
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          const grown = JSON.parse(f.original);
+          grown.entries[0].count += 1;
+          await f.ledger(grown);
+          f.check(main, 1, /Ratchet growth/u, f.withLedger);
+          f.update(main, 1, /Ratchet growth/u, f.withLedger);
+          await f.restore();
+        }
+        // A versioned main remains authoritative even if dev has more debt.
+        const stricterMain = f.baseWithManifest('{"version":1,"entries":[]}\n');
+        const output = f.check(
+          stricterMain,
           1,
-          /requires unchanged TypeScript/u,
+          /Ratchet growth/u,
+          f.withLedger,
+        );
+        assert.ok(output.includes(`against ${stricterMain}`));
+        // A valid base needs no integration fallback, even for an unknown ref.
+        f.check(
+          f.withLedger,
+          0,
+          /allowances did not grow/u,
+          "absent-integration-ref",
         );
       },
     );
+
+    if (pkg !== "frontend") {
+      for (const [label, source, rule, runtimePattern] of [
+        [
+          "ordinary rejected promise typed as a registration",
+          'import type test from "node:test";\nconst work: typeof test.skip = () => Promise.reject(new Error("unhandled work"));\nwork();\n',
+          /node-test\/direct-registrations/u,
+          /unhandled work/u,
+        ],
+        [
+          "bound subtest in an object property",
+          'import test from "node:test";\nimport { setTimeout } from "node:timers/promises";\ntest("parent", async (t) => {\n  const helper = { subtest: t.test.bind(t) };\n  helper.subtest("child", async () => { await setTimeout(50); });\n  await setTimeout(1);\n});\n',
+          /node-test\/no-floating-subtests/u,
+          /cancelledByParent/u,
+        ],
+      ]) {
+        await t.test(`node:test review reproduction: ${label}`, async () => {
+          const file = `${pkg}/src/review-node.test.ts`;
+          await f.edit(file, source);
+          f.run(["run", "typecheck"], 0);
+          f.run(["run", "lint"], 1, rule);
+          f.check(f.withLedger, 1, rule);
+          f.update(f.withLedger, 1, rule);
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          const runtime = spawnSync(
+            process.execPath,
+            ["--experimental-strip-types", path.join(f.directory, file)],
+            {
+              encoding: "utf8",
+              timeout: 10_000,
+            },
+          );
+          assert.ifError(runtime.error);
+          assert.equal(runtime.status, 1, runtime.stdout + runtime.stderr);
+          assert.match(runtime.stdout + runtime.stderr, runtimePattern);
+        });
+      }
+    }
 
     await t.test(
       "typed debt in an existing file cannot gain an allowance",
@@ -450,13 +624,25 @@ for (const pkg of packages) {
 
     await t.test("bulk suppressions cannot hide new debt", async () => {
       await f.edit(probe, "export type ReviewEscape = any;\n");
-      await f.edit(
-        `${pkg}/eslint-suppressions.json`,
-        JSON.stringify({
-          "src/review-bypass.ts": { [anyRule]: { count: 1 } },
-        }),
-      );
-      f.check(f.withLedger, 1, /against eslint-ratchet.json[\s\S]*0 -> 1/u);
+      for (const name of [
+        "eslint-suppressions.json",
+        "custom-suppressions.json",
+      ]) {
+        await f.edit(
+          `${pkg}/${name}`,
+          JSON.stringify({
+            "src/review-bypass.ts": { [anyRule]: { count: 1 } },
+          }),
+        );
+        f.run(
+          ["run", "lint:ratchet", "--", "--base-ref", f.withLedger],
+          1,
+          /against eslint-ratchet.json[\s\S]*0 -> 1/u,
+          name.startsWith("custom")
+            ? { ESLINT_SUPPRESSIONS_LOCATION: path.join(f.root, name) }
+            : {},
+        );
+      }
     });
 
     for (const [label, comment, diagnostic] of [
@@ -487,6 +673,10 @@ for (const pkg of packages) {
           /Unrecognized legacy ratchet/u,
         );
         f.check(f.baseWithManifest("invalid JSON\n"), 1, /JSON/u);
+        const invalid = f.baseWithManifest('{"version":1,"entries":null}\n');
+        f.check(invalid, 1, /version 1 ratchet/u, f.withLedger);
+        f.check(f.bootstrap, 1, /version 1 ratchet/u, invalid);
+        f.check(f.baseWithManifest("{}\n"), 1, /version 1 ratchet/u, invalid);
       },
     );
   });

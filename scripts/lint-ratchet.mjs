@@ -11,8 +11,6 @@ import {
   assertNoGrowth,
   collectFindings,
   collectPairs,
-  isSourceFile,
-  isTypeScript,
   legacyManifest,
   readRatchet,
 } from "./lint-ratchet-lib.mjs";
@@ -53,6 +51,7 @@ async function main() {
     options: {
       check: { type: "boolean" },
       "base-ref": { type: "string" },
+      "integration-ref": { type: "string" },
       package: { type: "string", default: path.basename(process.cwd()) },
     },
   });
@@ -64,92 +63,66 @@ async function main() {
   }
   const root = path.join(repository, packageName);
   const baseRef = values["base-ref"];
-  if (baseRef !== undefined && !baseRef.trim()) {
-    throw new Error("--base-ref must be a Git ref");
+  const integrationRef =
+    values["integration-ref"] ??
+    (baseRef === undefined ? undefined : "origin/dev");
+  for (const name of ["base-ref", "integration-ref"]) {
+    if (values[name] !== undefined && !values[name].trim()) {
+      throw new Error(`--${name} must be a Git ref`);
+    }
+  }
+  if (integrationRef !== undefined && baseRef === undefined) {
+    throw new Error("--integration-ref requires --base-ref");
   }
   const manifestPath = path.join(root, "eslint-ratchet.json");
   const expected = readRatchet(manifestPath);
   const previous = collectPairs(expected);
-  let migrationCommit;
   let bootstrap = false;
   if (baseRef !== undefined) {
-    const commit = git([
-      "rev-parse",
-      "--verify",
-      "--end-of-options",
-      `${baseRef}^{commit}`,
-    ]).trim();
-    const file = `${packageName}/eslint-ratchet.json`;
-    const exists = git(["ls-tree", "--name-only", commit, "--", file]).trim();
-    if (!exists) {
-      bootstrap = true;
-      const verified = await assertBootstrapSources(repository, commit, git);
+    function reference(ref) {
+      const commit = git([
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${ref}^{commit}`,
+      ]).trim();
+      const file = `${packageName}/eslint-ratchet.json`;
+      const exists = git(["ls-tree", "--name-only", commit, "--", file]).trim();
+      let pairs;
+      if (exists) {
+        // JSON is data: never execute a reference's config or scripts.
+        const baseline = JSON.parse(git(["show", `${commit}:${file}`]));
+        if (baseline?.version === 1) pairs = collectPairs(baseline);
+        else legacyManifest(baseline);
+      }
+      return { ref, commit, pairs };
+    }
+    const base = reference(baseRef);
+    const selected =
+      base.pairs || integrationRef === undefined
+        ? base
+        : reference(integrationRef);
+    if (selected.pairs) {
+      assertNoGrowth(previous, selected.pairs, selected.ref);
       console.log(
-        `lint-ratchet: bootstrap source equality verified ${verified} files against ${baseRef} (${commit})`,
+        `lint-ratchet: allowances did not grow against ${selected.ref} (${selected.commit})`,
       );
     } else {
-      // JSON is data: never execute a base revision's config or scripts.
-      const baseline = JSON.parse(git(["show", `${commit}:${file}`]));
-      if (baseline?.version === 1) {
-        assertNoGrowth(previous, collectPairs(baseline), baseRef);
-        console.log(
-          `lint-ratchet: allowances did not grow against ${baseRef} (${commit})`,
-        );
-      } else {
-        legacyManifest(baseline);
-        migrationCommit = commit;
-      }
+      bootstrap = true;
+      const verified = await assertBootstrapSources(
+        repository,
+        base.commit,
+        git,
+      );
+      console.log(
+        `lint-ratchet: bootstrap source equality verified ${verified} files against ${baseRef} (${base.commit})`,
+      );
     }
   }
 
   // The API scan explicitly ignores every bulk suppression file, including a
   // custom ESLINT_SUPPRESSIONS_LOCATION. Inline directives fail the policy rule.
   const results = await lintPackage(root);
-
-  if (migrationCommit) {
-    // The initial setup enables rules that the legacy config did not run.
-    // Permit that one migration only while all typed sources match the base.
-    // Invalid base manifests fail above. Missing ones use bootstrap equality.
-    const prefix = `${packageName}/`;
-    const baseFiles = git([
-      "ls-tree",
-      "-r",
-      "--name-only",
-      "-z",
-      migrationCommit,
-      "--",
-      packageName,
-    ])
-      .split("\0")
-      .filter((file) => file.startsWith(prefix))
-      .map((file) => file.slice(prefix.length))
-      .filter((file) => isTypeScript(file) && isSourceFile(file))
-      .sort();
-    const currentFiles = results
-      .map((result) =>
-        path.relative(root, result.filePath).split(path.sep).join("/"),
-      )
-      .filter(isTypeScript)
-      .sort();
-    if (JSON.stringify(baseFiles) !== JSON.stringify(currentFiles)) {
-      throw new Error(
-        "Initial ratchet migration requires the base's exact TypeScript file set",
-      );
-    }
-    for (const file of currentFiles) {
-      if (
-        (await readFile(path.join(root, file), "utf8")) !==
-        git(["show", `${migrationCommit}:${prefix}${file}`])
-      ) {
-        throw new Error(
-          `Initial ratchet migration requires unchanged TypeScript: ${file}`,
-        );
-      }
-    }
-    console.log(
-      `lint-ratchet: legacy migration verified ${currentFiles.length} unchanged TypeScript files against ${baseRef}`,
-    );
-  }
 
   const actual = collectFindings(results, root);
   const current = collectPairs(actual);

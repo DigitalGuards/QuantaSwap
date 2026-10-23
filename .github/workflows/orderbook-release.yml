@@ -78,11 +78,12 @@ jobs:
         working-directory: server
         env:
           LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          LINT_INTEGRATION_REF: origin/dev
         run: |
           if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
             LINT_BASE_REF=HEAD
           fi
-          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF"
+          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
 
       - name: Typecheck server
         working-directory: server

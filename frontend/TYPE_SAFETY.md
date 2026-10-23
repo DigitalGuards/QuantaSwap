@@ -22,14 +22,16 @@ void-callback options remain in place.
 The package's versioned `eslint-ratchet.json` records exact file/rule pairs and occurrence counts.
 The editor config applies those exceptions; the checker always scans the full strict configuration.
 New pairs and increased counts fail. Resolved findings require `npm run lint:ratchet:update`, which
-only reduces counts or removes pairs. Use `npm run lint:ratchet -- --base-ref origin/dev` to also
-compare allowances against the integration base. CI supplies the exact PR base commit.
+only reduces counts or removes pairs. Use
+`npm run lint:ratchet -- --base-ref origin/dev --integration-ref origin/dev` to compare allowances
+against Git. CI supplies the exact PR base commit and `origin/dev` as the integration reference.
 
 Bulk suppressions are ignored. Inline ESLint disables and rule overrides are rejected, and the
 case-insensitive core comment guard rejects TypeScript no-check directives with extra slashes.
-The checker sets `TSESTREE_SINGLE_RUN=false` before loading the parser. The initial legacy migration
-requires every TypeScript file to be byte-identical to the base. Versioned bases use count ceilings.
-When the base has no manifest, bootstrap verifies unchanged repository sources, sibling packages,
+The checker sets `TSESTREE_SINGLE_RUN=false` before loading the parser. Versioned bases enforce
+count ceilings. A legacy or missing base manifest uses the versioned integration manifest when
+available, permitting dev-to-main promotion. When neither reference has a versioned manifest,
+bootstrap verifies unchanged repository sources, sibling packages,
 local dependencies, shared inputs, and dependency metadata. Only the explicit setup exceptions in
 [the bootstrap policy](../docs/LINT_CENSUS.md#bootstrap-source-equality) may differ. One current scan
 must exactly match the manifest's pairs and counts, in check and update modes. Source differences,

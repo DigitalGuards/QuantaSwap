@@ -15,9 +15,13 @@ retains its native array checks. Tests have the same typed rule set as app code.
 
 Node test registrations use the package-qualified `allowForKnownSafeCalls`
 exception for `node:test` (`test`, `describe`, `it`, `suite`, and their
-`skip`, `only`, and `todo` variants). The local `node-test/no-floating-subtests`
-rule still checks unhandled `TestContext.test` calls, including aliases and
-bound calls. Other floating promises remain findings.
+`skip`, `only`, and `todo` variants). The `node-test/direct-registrations` rule
+requires direct calls on imported bindings and rejects value aliases and type
+references. The `node-test/no-floating-subtests` rule requires a direct
+`TestContext.test` call with an awaited or returned result, including calls joined
+by the built-in `Promise.all` or `Promise.allSettled`. Method extraction through
+properties, arrays, binding, arguments, assignments, and destructuring fails.
+Other floating promises remain findings.
 
 Runtime TypeScript and scripts allow `console.info`, `console.warn`, and
 `console.error`. `console.log` and `console.debug` remain findings; cleanup
@@ -33,11 +37,13 @@ information and `npm run typecheck`. Runtime builds still use `tsconfig.json`.
 Editor overrides use these pairs; the checker scans the full strict config.
 New pairs and increased counts fail. Resolved findings require
 `npm run lint:ratchet:update`, which only reduces counts or removes pairs.
-`npm run lint:ratchet -- --base-ref origin/dev` also compares allowances against
-Git. CI supplies the exact PR base commit. The initial migration verifies every
-TypeScript file is byte-identical to that base before accepting the new policy's
-debt. Versioned bases enforce the saved pair and count ceilings. When the base
-has no manifest, bootstrap verifies unchanged repository sources, sibling packages,
+`npm run lint:ratchet -- --base-ref origin/dev --integration-ref origin/dev`
+also compares allowances against Git. CI supplies the exact PR base commit and
+`origin/dev` as the integration reference. A versioned base enforces its saved
+pair and count ceilings. A legacy or missing base manifest uses the versioned
+integration manifest when available, permitting dev-to-main promotion. When
+neither reference has a versioned manifest, bootstrap verifies unchanged
+repository sources, sibling packages,
 local dependencies, shared inputs, and dependency metadata. Only the explicit setup
 exceptions in [the bootstrap policy](../docs/LINT_CENSUS.md#bootstrap-source-equality)
 may differ. One current scan must exactly match the manifest's pairs and counts,

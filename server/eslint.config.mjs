@@ -32,9 +32,10 @@ export const strictConfig = tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    plugins: { "node-test": createNodeTestPlugin(ts, tseslint.plugin) },
+    plugins: { "node-test": createNodeTestPlugin(ts) },
     rules: {
       ...hardenedRules,
+      "node-test/direct-registrations": "error",
       "node-test/no-floating-subtests": "error",
       "no-restricted-syntax": ["error", doubleAssertionGuard, arrayGuard],
       "@typescript-eslint/no-unused-vars": [
@@ -46,7 +47,8 @@ export const strictConfig = tseslint.config(
   {
     files: nodeTestFiles,
     rules: {
-      // The runner owns registrations. The companion rule checks subtests.
+      // Companion rules confine this allowance to direct registration calls
+      // and require awaited or returned subtests.
       "@typescript-eslint/no-floating-promises": [
         "error",
         {
