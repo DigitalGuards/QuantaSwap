@@ -12,9 +12,9 @@ import {
   typedFiles,
 } from "../scripts/eslint-policy.mjs";
 import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
+import { nodeTestScope } from "../scripts/lint-ratchet-node-tests.mjs";
 
-const testFiles = [
-  "**/*.test.ts",
+const testHelpers = [
   "src/legacy-v1-test-helper.ts",
   "src/protocol-v2-test-helper.ts",
   "src/taker-test-harness.ts",
@@ -48,7 +48,7 @@ export const strictConfig = tseslint.config(
     },
   },
   {
-    files: testFiles,
+    files: nodeTestScope(import.meta.dirname).files,
     rules: {
       "@typescript-eslint/no-floating-promises": [
         "error",
@@ -60,7 +60,7 @@ export const strictConfig = tseslint.config(
   },
   {
     files: typedFiles,
-    ignores: [...testConsoleFiles, ...testFiles],
+    ignores: [...testConsoleFiles, ...testHelpers],
     // Services and scripts write to container stdout/stderr through console.
     rules: { "no-console": ["error", { allow: ["info", "warn", "error"] }] },
   },

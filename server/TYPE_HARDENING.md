@@ -13,7 +13,23 @@ the wallet policy. Existing unused-binding options remain in place. Production
 native array checks stay confined to `src/guards.ts`; the existing fixture scope
 retains its native array checks. Tests have the same typed rule set as app code.
 
-The node:test promise exemption applies only to `**/*.test.ts`.
+The node:test promise exemption applies only to compiled, non-hidden top-level
+`src/*.test.ts` files selected by `node --test dist/*.test.js`. There are no
+helper exemptions in this package. The shared
+`scripts/lint-ratchet-node-tests.mjs` scope reader supplies exact file paths to
+ESLint. It checks the complete `package.json` test command (including both smoke
+scripts), requires `build` to remain `tsc`, and uses the installed TypeScript
+compiler to read `tsconfig.json`, including inherited settings and file
+exclusions. JavaScript emission must map `src` to `dist`. A command or output
+mapping change fails until the scope contract is reviewed and updated.
+
+Every lint and ratchet check or update also inventories all package `*.test.ts`
+files recursively, including hidden and Git-ignored paths. Only `node_modules`
+and `.git` directories are skipped. Any test outside the executed set fails
+with its path before manifest comparisons or writes. This includes nested,
+compiler-excluded, and out-of-source tests. The existing CI lint and ratchet
+steps run this guard. The current inventory has 17 executed test files and no
+unrun test files; test discovery remains unchanged.
 
 The exemption uses typescript-eslint's documented
 [`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls)

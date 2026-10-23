@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { assertNodeTestsRun } from "./lint-ratchet-node-tests.mjs";
 import {
   assertBootstrapSources,
   assertExactFindings,
@@ -80,6 +81,12 @@ async function main() {
   assertNoTrackedNodeModules(
     git(["ls-files", "--cached", "-z"]).split("\0").filter(Boolean),
   );
+  if (packageName !== "frontend") {
+    const scope = await assertNodeTestsRun(root);
+    console.log(
+      `lint-ratchet: node:test coverage verified (${scope.tests.length} test files, ${scope.helpers.length} helpers; no unrun tests)`,
+    );
+  }
   const manifestPath = path.join(root, "eslint-ratchet.json");
   const expected = readRatchet(manifestPath);
   const previous = collectPairs(expected);

@@ -21,7 +21,7 @@ Legacy and missing manifests both require every repository source and input to r
 The complete bootstrap exception list is:
 
 - The three packages' `eslint.config.js` or `eslint.config.mjs`, `eslint-ratchet.json`, `tsconfig.json`, and `tsconfig.eslint.json`. The main tsconfigs are inherited by the lint projects.
-- `scripts/eslint-policy.mjs`, `scripts/lint-ratchet.mjs`, `scripts/lint-ratchet-lib.mjs`, `scripts/lint-ratchet.test.mjs`, and `scripts/lint-ratchet.integration.test.mjs`.
+- `scripts/eslint-policy.mjs`, `scripts/lint-ratchet.mjs`, `scripts/lint-ratchet-lib.mjs`, `scripts/lint-ratchet-node-tests.mjs`, `scripts/lint-ratchet.test.mjs`, and `scripts/lint-ratchet.integration.test.mjs`.
 - The retired tooling paths `scripts/eslint-node-test.mjs`, `frontend/scripts/check-lint-ratchet.mjs`, `server/lint.mjs`, and `marketmaker/lint.mjs`. These remain setup exceptions so their deletion passes the bootstrap freeze while the old paths are still in an uncommitted index.
 - The `scripts` object in an existing `package.json`. Every other parsed field must remain equal, including dependency declarations, exports, type entry points, and package identity. JSON formatting and key order may change.
 - `.github/workflows/*.yml` and `.github/workflows/*.yaml`.
@@ -33,13 +33,17 @@ After equality passes, one scan of the checked package must produce exactly the 
 
 ### Node test registrations and service logging
 
-Server and marketmaker use typescript-eslint's documented [`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls) with `from: "package"`, `package: "node:test"`, and names `test`, `describe`, `it`, `suite`, `skip`, `only`, and `todo`. The exemption covers runner-owned registrations and their `.skip`, `.only`, and `.todo` members only in `**/*.test.ts`. Marketmaker also includes exactly `src/legacy-v1-test-helper.ts`, `src/protocol-v2-test-helper.ts`, `src/taker-test-harness.ts`, and `src/taker-survival-child.ts`. Production code and every frontend file keep `no-floating-promises` without the exemption. Ordinary floating promises remain findings in tests too.
+Server and marketmaker use typescript-eslint's documented [`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls) with `from: "package"`, `package: "node:test"`, and names `test`, `describe`, `it`, `suite`, `skip`, `only`, and `todo`. The exemption covers runner-owned registrations and their `.skip`, `.only`, and `.todo` members only in compiled, non-hidden top-level `src/*.test.ts` files selected by `node --test dist/*.test.js`. Marketmaker also includes exactly `src/protocol-v2-test-helper.ts`, `src/taker-test-harness.ts`, and `src/taker-survival-child.ts`. The legacy V1 helper has no test importer and receives no promise exemption. Server has no helper exemptions. Production code and every frontend file keep `no-floating-promises` without the exemption. Ordinary floating promises remain findings in tests too.
+
+Both ESLint configs receive concrete paths from `scripts/lint-ratchet-node-tests.mjs`. It checks the complete package test script and `build: tsc`, then uses the installed TypeScript compiler to read `tsconfig.json`, honoring JSONC, inherited settings, include and exclude. Emission must produce JavaScript from `src` into `dist`; only compiled top-level test inputs qualify. The exact supported test commands are `npm run build && node --test dist/*.test.js && node smoke.js && node federation-smoke.js` for server and `npm run build && node --test dist/*.test.js` for marketmaker. Changing either command or the output mapping requires updating the scope contract and its tests. Named helper checks require compiled helpers and executed loader tests: value imports in `protocol-signing.test.ts` and `taker-e2e.test.ts`, and the child-script URL in `taker-survival.test.ts`. The existing survival suite launches and checks that child process.
+
+Before any manifest comparison or write, the ratchet recursively inventories every package `*.test.ts` file, including hidden, Git-ignored, and generated-looking paths, skipping only `node_modules` and `.git` directories. Any file outside the executed set fails with a package-relative path. Nested tests, tests outside `src`, hidden tests omitted by the shell glob, and compiler-excluded tests all fail. The guard runs through existing CI lint and ratchet steps; the new shared module matches their `scripts/lint-ratchet*.mjs` path filters. The current inventory contains 17 server and 23 marketmaker test files, with zero unrun files. Test discovery and application sources remain unchanged.
 
 This is a type-based exemption. A test author can deliberately bypass the promise check by aliasing node:test functions, borrowing their types, or mutating members such as `test.skip`. `TestContext.test` can share the allowed registration type. Authors must await, return, or join subtests so their parent waits for them. Node's test runner fails the run on unhandled rejections and cancelled subtests, including children returned from unrelated callbacks that the parent does not join. CI runs these tests through `npm test`. See the [Node test runner documentation](https://nodejs.org/api/test.html#subtests) for runtime behavior.
 
-The custom node:test rules and their adversarial rule tests have been removed. Policy tests verify the exemption's exact file scope, registrations and members, ordinary promises, and production enforcement. Ratchet unit and integration tests verify rejection of tracked `node_modules` segments at every depth, across packages and file types, in check and update modes without writing manifests. They use a private temporary Git index and leave the worktree index intact. Existing tests still cover root-only output ignores and the bootstrap source freeze.
+Policy tests verify the exemption's exact file scope, registrations and members, ordinary promises, production enforcement, and an unawaited nested `context.test`. Inventory tests report nested, hidden, excluded, and out-of-source tests. Integration tests reject unrun tests during lint, bootstrap, adoption, and versioned checks and updates, preserve manifests on failure, and reject command, compiler, and helper-loader drift. Ratchet unit and integration tests also verify rejection of tracked `node_modules` segments at every depth, across packages and file types, in check and update modes without writing manifests. They use a private temporary Git index and leave the worktree index intact. Existing tests still cover root-only output ignores and the bootstrap source freeze.
 
-Runtime TypeScript and scripts in the two services allow only `console.info`, `console.warn`, and `console.error`. `console.log` and `console.debug` remain findings. Later cleanup slices can change those calls to `console.info` to preserve stdout. Tests and the named marketmaker test helpers retain the existing full `no-console` rule. All three finding counts and manifests remain unchanged after removing the custom node:test rules. No application finding was fixed in this policy update.
+Runtime TypeScript and scripts in the two services allow only `console.info`, `console.warn`, and `console.error`. `console.log` and `console.debug` remain findings. Later cleanup slices can change those calls to `console.info` to preserve stdout. Tests and the named marketmaker test helpers retain the existing full `no-console` rule. All three finding counts and manifests remain unchanged after aligning the node:test scope with test discovery. No application finding was fixed in this policy update.
 
 ## Totals
 
@@ -49,7 +53,7 @@ Runtime TypeScript and scripts in the two services allow only `console.info`, `c
 | server      |                       52 |                  30 |      510 |              79 |              12 |
 | marketmaker |                       56 |                  39 |      670 |              88 |              15 |
 
-The initial registration and logging policy removed 746 runner-owned registration reports and 37 permitted service logging reports, reducing the census from 2,326 to 1,543 findings. Regeneration after simplifying node:test handling leaves all three manifests byte-identical: 363 frontend, 510 server, and 670 marketmaker findings. Existing registrations still fall within the narrower exemption, the removed custom rule had no findings, and the repository has no tracked node_modules paths. The plan contains 36 slices, each with 20 to 60 findings.
+The initial registration and logging policy removed 746 runner-owned registration reports and 37 permitted service logging reports, reducing the census from 2,326 to 1,543 findings. Aligning node:test exemptions with executed tests leaves all three manifests byte-identical: 363 frontend, 510 server, and 670 marketmaker findings. Existing registrations still fall within the narrower exemption, the inventory finds no unrun tests, and the repository has no tracked node_modules paths. The plan contains 36 slices, each with 20 to 60 findings.
 
 ## Findings by rule
 
@@ -297,13 +301,13 @@ Replace unsafe fixture casts with typed builders or guarded inputs. Review optio
 
 ## Validation
 
-Final re-scope gates used Node 22.22.3, `CI=true`, and externally supplied
+Test-discovery alignment gates used Node 22.22.3, `CI=true`, and externally supplied
 `TSESTREE_SINGLE_RUN=true` to exercise the checker's override. Commands ran
-from each package. Values below are process exit codes.
+from each package. Values below are final process exit codes. The manifests
+required no regeneration.
 
 | Command | Frontend | Server | Marketmaker |
 | --- | ---: | ---: | ---: |
-| `npm run lint:ratchet:update -- --base-ref origin/dev --integration-ref origin/dev` | 0 | 0 | 0 |
 | `npm run format:check` | 0 | 0 | 0 |
 | `npm run lint` | 0 | 0 | 0 |
 | `npm run lint:ratchet -- --base-ref origin/dev --integration-ref origin/dev` | 0 | 0 | 0 |
@@ -320,21 +324,23 @@ from each package. Values below are process exit codes.
 At validation, `origin/dev` is `798214a` and `origin/main` is `f83f53b`; both
 have legacy manifests. The literal main PR arguments therefore enforce the
 bootstrap freeze and reject the pre-existing `frontend/package-lock.json`
-difference between main and dev. No dependency files changed in this re-scope.
-Using `HEAD` (`424e622`) as the integration reference models dev adopting the
-versioned manifest: all three regenerated manifests are byte-identical to
+difference between main and dev. No dependency files changed in this fix.
+Using `HEAD` (`76b4146`) as the integration reference models dev adopting the
+versioned manifest: all three manifests are byte-identical to
 that reference, and the main comparison passes. The integration suites also
 verify this adoption path with isolated references. The bootstrap freeze and
 the CI integration reference of `origin/dev` remain intact.
 
 Application tests passed: frontend 475, server 217, and marketmaker 439.
-Server HTTP and federation smoke checks passed. Each package passed 20 policy
-unit tests and 28 ratchet integration tests. Separate Node runtime probes for
-a mutated `test.skip` rejection and subtests returned from an unjoined `map`
-callback both exited 1 as expected. The frontend build retains its existing
+Server HTTP and federation smoke checks passed. Each package passed 22 policy
+unit tests. Ratchet integration tests passed: frontend 28, server 30, and
+marketmaker 31. Nested test probes are reported by the guard in check and update
+modes, including after adoption, and receive no node:test promise exemption.
+The emitted top-level test filenames exactly match the scope reader's 17 server
+and 23 marketmaker test paths. The frontend build retains its existing
 bundle-size warnings.
 
 Shared tooling formatting, `git diff --check`, and scans for Unicode U+2014
 and private infrastructure details passed. TypeScript application sources,
 contracts, dependency declarations, and lockfiles remain unchanged. All
-re-scope edits remain uncommitted and the worktree index is unchanged.
+test-discovery alignment edits remain uncommitted and the worktree index is unchanged.

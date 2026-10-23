@@ -12,6 +12,7 @@ import {
   typedFiles,
 } from "../scripts/eslint-policy.mjs";
 import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
+import { nodeTestScope } from "../scripts/lint-ratchet-node-tests.mjs";
 
 export const strictConfig = tseslint.config(
   { ignores: generatedDirectories.map((directory) => `${directory}/**`) },
@@ -40,7 +41,7 @@ export const strictConfig = tseslint.config(
     },
   },
   {
-    files: ["**/*.test.ts"],
+    files: nodeTestScope(import.meta.dirname).files,
     rules: {
       "@typescript-eslint/no-floating-promises": [
         "error",

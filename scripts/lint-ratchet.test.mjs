@@ -16,6 +16,10 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { hardenedRules, suppressionGuard } from "./eslint-policy.mjs";
 import {
+  assertNodeTestsRun,
+  nodeTestScope,
+} from "./lint-ratchet-node-tests.mjs";
+import {
   assertExactFindings,
   assertNoGrowth,
   assertNoTrackedNodeModules,
@@ -117,6 +121,7 @@ test("bootstrap exceptions are confined to setup files", () => {
     "scripts/eslint-policy.mjs",
     "scripts/lint-ratchet.mjs",
     "scripts/lint-ratchet-lib.mjs",
+    "scripts/lint-ratchet-node-tests.mjs",
     "scripts/lint-ratchet.test.mjs",
     "scripts/lint-ratchet.integration.test.mjs",
     "scripts/eslint-node-test.mjs",
@@ -261,15 +266,19 @@ test("node:test allowance is confined to exact test scopes and keeps ordinary pr
     ),
   ];
   const helperPaths = [
-    "src/legacy-v1-test-helper.ts",
     "src/protocol-v2-test-helper.ts",
     "src/taker-test-harness.ts",
     "src/taker-survival-child.ts",
   ];
-  const testPaths = ["src/probe.test.ts", "test/probe.test.ts"];
+  // This existing test is selected by both Node packages' build/test commands.
+  const testPaths = ["src/config.test.ts"];
   const paths = [
     ...testPaths,
     ...helperPaths,
+    "test/probe.test.ts",
+    "src/nested/probe.test.ts",
+    "src/.hidden.test.ts",
+    "src/legacy-v1-test-helper.ts",
     "src/runtime.ts",
     "scripts/probe.mts",
     "src/probe.spec.ts",
@@ -319,6 +328,102 @@ test("node:test allowance is confined to exact test scopes and keeps ordinary pr
   }
 });
 
+test("unawaited context.test is checked outside executed test files", async () => {
+  const source = [
+    'import test from "node:test";',
+    'test("parent", (context) => {',
+    '  context.test("child", async () => {',
+    "    await new Promise((resolve) => setTimeout(resolve, 25));",
+    "  });",
+    "});",
+  ].join("\n");
+  const fixture = await makePolicyFixture({
+    "src/config.test.ts": source,
+    "src/nested/probe.test.ts": source,
+  });
+  try {
+    const results = await fixture.eslint.lintFiles(["."]);
+    for (const result of results) {
+      assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
+      const file = path.relative(fixture.root, result.filePath);
+      const exempt =
+        path.basename(root) !== "frontend" && file === "src/config.test.ts";
+      assert.deepEqual(
+        result.messages
+          .filter(
+            (message) =>
+              message.ruleId === "@typescript-eslint/no-floating-promises",
+          )
+          .map((message) => message.line),
+        exempt ? [] : [2, 3],
+        file,
+      );
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("node:test inventory reports nested, hidden, excluded and out-of-source tests", async (t) => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "qs-node-tests-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const packageRoot = path.join(temporary, "server");
+  await mkdir(path.join(packageRoot, "src"), { recursive: true });
+  await symlink(
+    path.join(root, "node_modules"),
+    path.join(packageRoot, "node_modules"),
+    "dir",
+  );
+  await writeFile(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({
+      scripts: {
+        build: "tsc",
+        test: "npm run build && node --test dist/*.test.js && node smoke.js && node federation-smoke.js",
+      },
+    }),
+  );
+  await writeFile(
+    path.join(packageRoot, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: { rootDir: "src", outDir: "dist" },
+      include: ["src"],
+      exclude: ["src/excluded.test.ts"],
+    }),
+  );
+  await writeFile(
+    path.join(packageRoot, "src/executed.test.ts"),
+    "export {};\n",
+  );
+  assert.deepEqual((await assertNodeTestsRun(packageRoot)).files, [
+    "src/executed.test.ts",
+  ]);
+  const unrun = [
+    "src/nested/probe.test.ts",
+    "src/build/probe.test.ts",
+    "src/.hidden.test.ts",
+    "src/.ignored/probe.test.ts",
+    "src/excluded.test.ts",
+    "test/probe.test.ts",
+    "scripts/probe.test.ts",
+    "probe.test.ts",
+    "dist/probe.test.ts",
+  ];
+  for (const file of unrun) {
+    await mkdir(path.dirname(path.join(packageRoot, file)), {
+      recursive: true,
+    });
+    await writeFile(path.join(packageRoot, file), "export {};\n");
+  }
+  assert.deepEqual(nodeTestScope(packageRoot).files, ["src/executed.test.ts"]);
+  await assert.rejects(
+    assertNodeTestsRun(packageRoot),
+    (error) =>
+      /test files not executed by npm test/u.test(error.message) &&
+      unrun.every((file) => error.message.includes(JSON.stringify(file))),
+  );
+});
+
 test("CI passes base and integration refs for main adoption", async () => {
   for (const name of [
     "frontend-ci",
@@ -352,6 +457,11 @@ test("CI passes base and integration refs for main adoption", async () => {
         source.split("'**/node_modules/**'").length - 1,
         2,
         `${name}: both event filters must cover tracked dependency paths`,
+      );
+      assert.equal(
+        source.split("'scripts/lint-ratchet*.mjs'").length - 1,
+        2,
+        `${name}: both event filters must cover the node:test scope guard`,
       );
       assert.match(
         source,
@@ -475,6 +585,8 @@ async function makePolicyFixture(sources) {
       path.join(temporary, "tsconfig.json"),
       JSON.stringify({
         compilerOptions: { strict: true, target: "ES2022", module: "NodeNext" },
+        // Explicit inputs let policy probes lint hidden paths too.
+        files: Object.keys(sources),
         include: ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
       }),
     );
@@ -814,6 +926,7 @@ async function makeFixture() {
   for (const file of [
     "eslint-policy.mjs",
     "lint-ratchet-lib.mjs",
+    "lint-ratchet-node-tests.mjs",
     "lint-ratchet.mjs",
   ]) {
     await copyFile(

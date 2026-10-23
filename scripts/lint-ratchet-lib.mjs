@@ -121,6 +121,7 @@ const bootstrapTooling = new Set([
   "scripts/eslint-policy.mjs",
   "scripts/lint-ratchet.mjs",
   "scripts/lint-ratchet-lib.mjs",
+  "scripts/lint-ratchet-node-tests.mjs",
   "scripts/lint-ratchet.test.mjs",
   "scripts/lint-ratchet.integration.test.mjs",
   // Retired tooling can remain in the index during an uncommitted setup edit.
