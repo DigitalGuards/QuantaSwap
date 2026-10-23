@@ -62,6 +62,33 @@ jobs:
         working-directory: server
         run: npm ci
 
+      - name: Verify lint policy guards
+        working-directory: server
+        run: node --test ../scripts/lint-ratchet.test.mjs
+
+      - name: Verify lint ratchet integration
+        working-directory: server
+        run: node --test ../scripts/lint-ratchet.integration.test.mjs
+
+      - name: Lint server
+        working-directory: server
+        run: npm run lint
+
+      - name: Check lint ratchet against base
+        working-directory: server
+        env:
+          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          LINT_INTEGRATION_REF: origin/dev
+        run: |
+          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            LINT_BASE_REF=HEAD
+          fi
+          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
+
+      - name: Typecheck server
+        working-directory: server
+        run: npm run typecheck
+
       - name: Run release tests
         working-directory: server
         run: npm test

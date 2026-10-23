@@ -1,53 +1,485 @@
 {
-  "src/admission.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/cors.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/federation-reset.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/federation.ts": {
-    "preserve-caught-error": 1
-  },
-  "src/lease-integration.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 2
-  },
-  "src/loadtest/main.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 5,
-    "no-useless-assignment": 7
-  },
-  "src/loadtest/probe-worker.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 2
-  },
-  "src/order-signing.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 3
-  },
-  "src/peer-sync.test.ts": {
-    "@typescript-eslint/no-base-to-string": 12,
-    "@typescript-eslint/no-unnecessary-condition": 12,
-    "@typescript-eslint/prefer-promise-reject-errors": 2,
-    "@typescript-eslint/require-await": 18
-  },
-  "src/peer-sync.ts": {
-    "@typescript-eslint/no-invalid-void-type": 2,
-    "no-useless-assignment": 1,
-    "no-useless-escape": 1,
-    "preserve-caught-error": 1
-  },
-  "src/peer-transport.test.ts": {
-    "@typescript-eslint/require-await": 1
-  },
-  "src/peer-transport.ts": {
-    "@typescript-eslint/prefer-promise-reject-errors": 1,
-    "@typescript-eslint/require-await": 1
-  },
-  "src/store-protocol.test.ts": {
-    "@typescript-eslint/require-await": 1
-  },
-  "src/store.ts": {
-    "@typescript-eslint/prefer-promise-reject-errors": 1,
-    "preserve-caught-error": 1
-  }
+  "version": 1,
+  "entries": [
+    {
+      "file": "src/admission.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 9
+    },
+    {
+      "file": "src/admission.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/client-ip.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 7
+    },
+    {
+      "file": "src/config.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 10
+    },
+    {
+      "file": "src/config.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 2
+    },
+    {
+      "file": "src/config.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 4
+    },
+    {
+      "file": "src/cors.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/cors.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/federation-reset.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 16
+    },
+    {
+      "file": "src/federation-reset.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 8
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 29
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "no-console",
+      "count": 6
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 2
+    },
+    {
+      "file": "src/federation.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 20
+    },
+    {
+      "file": "src/federation.ts",
+      "rule": "@typescript-eslint/no-empty-function",
+      "count": 2
+    },
+    {
+      "file": "src/federation.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 1
+    },
+    {
+      "file": "src/federation.ts",
+      "rule": "no-console",
+      "count": 1
+    },
+    {
+      "file": "src/federation.ts",
+      "rule": "preserve-caught-error",
+      "count": 1
+    },
+    {
+      "file": "src/guards.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/healthcheck.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/inflight-gate.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/inflight-gate.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 10
+    },
+    {
+      "file": "src/inflight-gate.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 11
+    },
+    {
+      "file": "src/inflight-gate.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 9
+    },
+    {
+      "file": "src/lease-integration.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 9
+    },
+    {
+      "file": "src/lease-integration.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 5
+    },
+    {
+      "file": "src/lease-integration.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/loadtest/consistency.ts",
+      "rule": "@typescript-eslint/consistent-type-imports",
+      "count": 1
+    },
+    {
+      "file": "src/loadtest/consistency.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 25
+    },
+    {
+      "file": "src/loadtest/main.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 11
+    },
+    {
+      "file": "src/loadtest/main.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 5
+    },
+    {
+      "file": "src/loadtest/main.ts",
+      "rule": "no-useless-assignment",
+      "count": 7
+    },
+    {
+      "file": "src/loadtest/probe-worker.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/loadtest/proofs.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/loadtest/reasons.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/loadtest/reasons.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/loadtest/scenarios.ts",
+      "rule": "@typescript-eslint/consistent-type-imports",
+      "count": 1
+    },
+    {
+      "file": "src/loadtest/scenarios.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 27
+    },
+    {
+      "file": "src/order-signing.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 2
+    },
+    {
+      "file": "src/order-signing.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 6
+    },
+    {
+      "file": "src/order-signing.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 24
+    },
+    {
+      "file": "src/order-signing.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/order-signing.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 41
+    },
+    {
+      "file": "src/order-signing.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 3
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 6
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 12
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 32
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 10
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 12
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/prefer-promise-reject-errors",
+      "count": 2
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 18
+    },
+    {
+      "file": "src/peer-sync.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 27
+    },
+    {
+      "file": "src/peer-sync.ts",
+      "rule": "@typescript-eslint/no-invalid-void-type",
+      "count": 2
+    },
+    {
+      "file": "src/peer-sync.ts",
+      "rule": "no-useless-assignment",
+      "count": 1
+    },
+    {
+      "file": "src/peer-sync.ts",
+      "rule": "no-useless-escape",
+      "count": 1
+    },
+    {
+      "file": "src/peer-sync.ts",
+      "rule": "preserve-caught-error",
+      "count": 1
+    },
+    {
+      "file": "src/peer-transport.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/peer-transport.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
+    },
+    {
+      "file": "src/peer-transport.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/peer-transport.ts",
+      "rule": "@typescript-eslint/prefer-promise-reject-errors",
+      "count": 1
+    },
+    {
+      "file": "src/peer-transport.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/process-lease.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/process-lease.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/process-lease.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 36
+    },
+    {
+      "file": "src/process-lease.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 3
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 8
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 2
+    },
+    {
+      "file": "src/protocol-v2-wire.ts",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/qip55.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 5
+    },
+    {
+      "file": "src/server.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 16
+    },
+    {
+      "file": "src/server.ts",
+      "rule": "@typescript-eslint/prefer-nullish-coalescing",
+      "count": 1
+    },
+    {
+      "file": "src/server.ts",
+      "rule": "no-console",
+      "count": 4
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 8
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 3
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 34
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 2
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/prefer-includes",
+      "count": 5
+    },
+    {
+      "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 2
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 3
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 2
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 2
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 118
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "@typescript-eslint/no-empty-function",
+      "count": 2
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 2
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "@typescript-eslint/prefer-promise-reject-errors",
+      "count": 1
+    },
+    {
+      "file": "src/store.ts",
+      "rule": "preserve-caught-error",
+      "count": 1
+    },
+    {
+      "file": "src/stream.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    }
+  ]
 }

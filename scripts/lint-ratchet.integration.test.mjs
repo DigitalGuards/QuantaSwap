@@ -1,0 +1,726 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import * as fs from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { collectPairs } from "./lint-ratchet-lib.mjs";
+
+const repository = fileURLToPath(new URL("../", import.meta.url));
+const anyRule = "@typescript-eslint/no-explicit-any";
+const packageNames = ["frontend", "server", "marketmaker"];
+const currentPackage = path.basename(process.cwd());
+const selectedPackage =
+  process.env.LINT_RATCHET_TEST_PACKAGE ??
+  (packageNames.includes(currentPackage) ? currentPackage : undefined);
+assert.ok(!selectedPackage || packageNames.includes(selectedPackage));
+const packages = selectedPackage ? [selectedPackage] : packageNames;
+const git = (args) =>
+  execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+const equalityFailure = /Bootstrap setup PR must not change sources:/u;
+const exactFailure = /Bootstrap manifest must equal current findings exactly:/u;
+
+async function fixture(t, pkg) {
+  const temporary = await fs.mkdtemp(path.join(tmpdir(), "qs ratchet test-"));
+  t.after(() => fs.rm(temporary, { recursive: true, force: true }));
+  const directory = path.join(temporary, "repository");
+  const objects = path.join(temporary, "objects");
+  await fs.mkdir(directory);
+  await fs.mkdir(objects);
+  const files = git([
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+  ])
+    .split("\0")
+    .filter(Boolean);
+  const copied = [];
+  // Keep every sibling and shared input in the fixture. Dependencies stay in
+  // the installed package; no dependency installation or ref mutation occurs.
+  for (const file of new Set(files)) {
+    await fs.mkdir(path.dirname(path.join(directory, file)), {
+      recursive: true,
+    });
+    try {
+      await fs.copyFile(
+        path.join(repository, file),
+        path.join(directory, file),
+      );
+      copied.push(file);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  await fs.writeFile(
+    path.join(directory, ".git"),
+    `gitdir: ${git(["rev-parse", "--absolute-git-dir"])}\n`,
+  );
+  const root = path.join(directory, pkg);
+  await fs.symlink(
+    path.join(repository, pkg, "node_modules"),
+    path.join(root, "node_modules"),
+    "dir",
+  );
+  const ledgerPath = path.join(root, "eslint-ratchet.json");
+  const original = await fs.readFile(ledgerPath, "utf8");
+  const env = {
+    ...process.env,
+    CI: "true",
+    TSESTREE_SINGLE_RUN: "true",
+    PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
+    GIT_OBJECT_DIRECTORY: objects,
+    GIT_INDEX_FILE: path.join(temporary, "index"),
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: git([
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "objects",
+    ]),
+  };
+  const fixtureGit = (args, input) =>
+    execFileSync("git", args, {
+      cwd: directory,
+      env,
+      input,
+      encoding: "utf8",
+    }).trim();
+
+  // Snapshot the checked sources so these tests survive later cleanup PRs.
+  // All synthetic Git objects live outside the fixture in its private store.
+  const entries = new Map();
+  for (const file of copied) {
+    let tree = entries;
+    const parts = file.split("/");
+    const name = parts.pop();
+    for (const part of parts) {
+      if (!tree.has(part)) tree.set(part, new Map());
+      tree = tree.get(part);
+    }
+    const blob = fixtureGit(
+      ["hash-object", "-w", "--stdin"],
+      await fs.readFile(path.join(directory, file)),
+    );
+    tree.set(name, blob);
+  }
+  function writeTree(tree) {
+    const rows = [...tree].map(([name, value]) =>
+      value instanceof Map
+        ? `040000 tree ${writeTree(value)}\t${name}`
+        : `100644 blob ${value}\t${name}`,
+    );
+    return fixtureGit(["mktree", "-z"], `${rows.join("\0")}\0`);
+  }
+  const sourceTree = writeTree(entries);
+  // Use a private index so tracked-path probes never touch the worktree index.
+  fixtureGit(["read-tree", sourceTree]);
+
+  function track(file, source = "tracked fixture\n") {
+    const blob = fixtureGit(["hash-object", "-w", "--stdin"], source);
+    fixtureGit(["update-index", "--add", "--cacheinfo", "100644", blob, file]);
+  }
+
+  function replaceTreeEntry(tree, name, entry) {
+    const rows = fixtureGit(["ls-tree", "-z", tree])
+      .split("\0")
+      .filter((line) => line && line.slice(line.indexOf("\t") + 1) !== name);
+    if (entry) rows.push(entry);
+    return fixtureGit(["mktree", "-z"], `${rows.join("\0")}\0`);
+  }
+
+  function replaceFile(tree, parts, source) {
+    const [name, ...rest] = parts;
+    if (rest.length) {
+      const childTree = fixtureGit([
+        "rev-parse",
+        "--verify",
+        `${tree}:${name}`,
+      ]);
+      const child = replaceFile(childTree, rest, source);
+      return replaceTreeEntry(tree, name, `040000 tree ${child}\t${name}`);
+    }
+    const blob =
+      source === undefined
+        ? undefined
+        : fixtureGit(["hash-object", "-w", "--stdin"], source);
+    return replaceTreeEntry(tree, name, blob && `100644 blob ${blob}\t${name}`);
+  }
+
+  function baseWithManifest(source, changedFiles = {}) {
+    let tree = replaceFile(sourceTree, [pkg, "eslint-ratchet.json"], source);
+    for (const [file, bytes] of Object.entries(changedFiles))
+      tree = replaceFile(tree, file.split("/"), bytes);
+    return fixtureGit(
+      ["hash-object", "-t", "commit", "-w", "--stdin"],
+      `tree ${tree}\nauthor Ratchet Test <ratchet@example.invalid> 0 +0000\ncommitter Ratchet Test <ratchet@example.invalid> 0 +0000\n\nRatchet fixture\n`,
+    );
+  }
+
+  function run(args, code, pattern, extraEnv = {}) {
+    const result = spawnSync("npm", args, {
+      cwd: root,
+      env: { ...env, ...extraEnv },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(result.error);
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, code, output);
+    if (pattern) assert.match(output, pattern);
+    return output;
+  }
+  const refs = (base, integration) => [
+    "--base-ref",
+    base,
+    ...(integration ? ["--integration-ref", integration] : []),
+  ];
+  const check = (base, code = 0, pattern, integration = base) =>
+    run(
+      ["run", "lint:ratchet", "--", ...refs(base, integration)],
+      code,
+      pattern,
+    );
+  const update = (base, code = 0, pattern, integration = base) =>
+    run(
+      ["run", "lint:ratchet:update", "--", ...refs(base, integration)],
+      code,
+      pattern,
+    );
+
+  async function ledger(data) {
+    collectPairs(data);
+    data.entries.sort(
+      (a, b) => a.file.localeCompare(b.file) || a.rule.localeCompare(b.rule),
+    );
+    await fs.writeFile(ledgerPath, `${JSON.stringify(data, null, 2)}\n`);
+  }
+  const backups = new Map();
+  async function edit(file, transform) {
+    const target = path.join(directory, file);
+    if (!backups.has(file)) {
+      backups.set(
+        file,
+        await fs.readFile(target).catch((error) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        }),
+      );
+    }
+    const value =
+      typeof transform === "function"
+        ? transform(backups.get(file).toString())
+        : transform;
+    if (value === undefined) await fs.rm(target, { force: true });
+    else {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, value);
+    }
+  }
+  async function restore() {
+    fixtureGit(["read-tree", sourceTree]);
+    await fs.writeFile(ledgerPath, original);
+    for (const [file, bytes] of backups) {
+      const target = path.join(directory, file);
+      await fs.rm(target, { force: true });
+      if (bytes !== undefined) await fs.writeFile(target, bytes);
+    }
+    backups.clear();
+  }
+  return {
+    directory,
+    root,
+    ledgerPath,
+    original,
+    run,
+    check,
+    update,
+    ledger,
+    edit,
+    track,
+    restore,
+    baseWithManifest,
+    bootstrap: baseWithManifest(),
+    withLedger: baseWithManifest(original),
+  };
+}
+
+for (const pkg of packages) {
+  test(`${pkg} lint ratchet integration`, async (t) => {
+    const f = await fixture(t, pkg);
+    t.beforeEach(f.restore);
+    t.afterEach(f.restore);
+    const probe = `${pkg}/src/review-bypass.ts`;
+    const newPair = JSON.parse(f.original);
+    const probeEntry = {
+      file: "src/review-bypass.ts",
+      rule: anyRule,
+      count: 1,
+    };
+    newPair.entries.push(probeEntry);
+
+    await t.test(
+      "unchanged sources and exact manifest pass bootstrap check and update",
+      async () => {
+        f.check(f.bootstrap, 0, /bootstrap source equality verified/u);
+        f.update(f.bootstrap, 0, /bootstrap source equality verified/u);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+        assert.doesNotMatch(
+          f.check(f.withLedger),
+          /bootstrap source equality/u,
+        );
+        for (const legacy of ["{}\n", "[]\n"])
+          f.check(
+            f.baseWithManifest(legacy),
+            0,
+            /bootstrap source equality verified/u,
+          );
+      },
+    );
+
+    await t.test(
+      "only allowed setup files and package scripts may differ",
+      async () => {
+        for (const file of [
+          `${pkg}/tsconfig.json`,
+          `${pkg}/tsconfig.eslint.json`,
+          `${pkg}/${pkg === "frontend" ? "eslint.config.js" : "eslint.config.mjs"}`,
+          "scripts/eslint-policy.mjs",
+          ".github/workflows/frontend-ci.yml",
+          "docs/LINT_CENSUS.md",
+        ])
+          await f.edit(file, (source) => `${source}\n`);
+        await f.edit(`${pkg}/package.json`, (source) => {
+          const data = JSON.parse(source);
+          data.scripts["lint:fixture"] = "node --version";
+          return `${JSON.stringify(data, null, 2)}\n`;
+        });
+        f.check(f.bootstrap);
+      },
+    );
+
+    await t.test(
+      "new any without an allowance fails checks and regeneration",
+      async () => {
+        await f.edit(probe, "export type ReviewEscape = any;\n");
+        f.check(f.bootstrap, 1, equalityFailure);
+        f.check(f.withLedger, 1, /against eslint-ratchet.json[\s\S]*0 -> 1/u);
+        f.update(f.withLedger, 1, /0 -> 1/u);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+      },
+    );
+
+    await t.test(
+      "new any plus its allowance fails bootstrap and saved bases",
+      async () => {
+        await f.edit(probe, "export type ReviewEscape = any;\n");
+        await f.ledger(newPair);
+        f.run(["run", "lint"], 0);
+        f.check(f.bootstrap, 1, equalityFailure);
+        f.check(f.withLedger, 1, /0 -> 1/u);
+        const before = await fs.readFile(f.ledgerPath, "utf8");
+        f.update(f.bootstrap, 1, equalityFailure);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), before);
+      },
+    );
+
+    await t.test(
+      "Git-ignored authored sources still fail bootstrap",
+      async () => {
+        const file = `${pkg}/src/.env.review.ts`;
+        await f.edit(file, "export type ReviewEscape = any;\n");
+        assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+      },
+    );
+
+    await t.test(
+      "tracked node_modules paths fail lint, base checks and updates repository-wide",
+      async () => {
+        const siblingPackage = pkg === "server" ? "marketmaker" : "server";
+        const paths = [
+          `${pkg}/src/node_modules/review.ts`,
+          `${pkg}/test/fixtures/node_modules/data.json`,
+          `${siblingPackage}/src/node_modules/review.ts`,
+          "docs/node_modules/guide.md",
+          "node_modules/review.txt",
+          `${pkg}/node_modules/review.txt`,
+          `${pkg}/src/space and\nnewline/node_modules/review.ts`,
+        ];
+        for (const file of paths) {
+          f.track(file);
+          const diagnostic =
+            /Tracked paths must not contain a node_modules directory segment/u;
+          const output = f.run(["run", "lint"], 1, diagnostic);
+          assert.ok(output.includes(JSON.stringify(file)), output);
+          f.run(["run", "lint:ratchet:update"], 1, diagnostic);
+          for (const base of [f.bootstrap, f.withLedger]) {
+            f.check(base, 1, diagnostic);
+            f.update(base, 1, diagnostic);
+          }
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          await f.restore();
+        }
+      },
+    );
+
+    await t.test(
+      "nested authored node_modules content is rejected as soon as it is tracked",
+      async () => {
+        const file = `${pkg}/src/node_modules/review.ts`;
+        const source =
+          '/* eslint-disable */\nexport type ReviewEscape = any;\nPromise.reject(new Error("unhandled work"));\n';
+        await f.edit(file, source);
+        // ESLint's default ignore hides the untracked file and installed deps.
+        f.run(["run", "lint"], 0);
+        f.track(file, source);
+        f.run(["run", "lint"], 1, /node_modules directory segment/u);
+        f.check(f.withLedger, 1, /node_modules directory segment/u);
+        f.update(f.withLedger, 1, /node_modules directory segment/u);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+      },
+    );
+
+    await t.test(
+      "src/build authored code is linted and frozen even when Git ignores it",
+      async () => {
+        const file = `${pkg}/src/build/review-ignored.ts`;
+        const source =
+          'export type ReviewEscape = any;\nPromise.reject(new Error("unhandled work"));\n';
+        await f.edit(file, `/* eslint-disable */\n${source}`);
+        f.run(["run", "typecheck"], 0);
+        f.run(["run", "lint"], 1, /lint-policy\/no-inline-config/u);
+        f.check(f.withLedger, 1, /lint-policy\/no-inline-config/u);
+        assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+        await f.edit(file, source);
+        const output = f.run(["run", "lint"], 1, /no-explicit-any/u);
+        assert.match(output, /no-floating-promises/u);
+        f.check(f.withLedger, 1, /no-floating-promises/u);
+        await f.edit(file, "export const authored = true;\n");
+        f.run(["run", "lint"], 0);
+        assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+        const before = await fs.readFile(f.ledgerPath, "utf8");
+        f.update(f.bootstrap, 1, equalityFailure);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), before);
+      },
+    );
+
+    const sibling = {
+      frontend: "server/src/guards.ts",
+      server: "marketmaker/src/guards.ts",
+      marketmaker: "frontend/src/lib/protocol-v2-wire.ts",
+    }[pkg];
+    for (const file of [
+      "config/protocol-v2.json",
+      "config/protocol-v2-vectors.json",
+      sibling,
+    ]) {
+      await t.test(
+        `shared or sibling source plus allowance fails: ${file}`,
+        async () => {
+          await f.edit(file, (source) => `${source}\n`);
+          const data = JSON.parse(f.original);
+          data.entries[0].count += 1;
+          await f.ledger(data);
+          const before = await fs.readFile(f.ledgerPath, "utf8");
+          assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+          f.update(f.bootstrap, 1, equalityFailure);
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), before);
+        },
+      );
+    }
+
+    for (const [label, mutate] of [
+      [
+        "raised count",
+        (data) => {
+          data.entries[0].count += 1;
+        },
+      ],
+      [
+        "lowered count",
+        (data) => {
+          data.entries.find((entry) => entry.count > 1).count -= 1;
+        },
+      ],
+      [
+        "extra pair",
+        (data) => {
+          data.entries.push(probeEntry);
+        },
+      ],
+      [
+        "missing pair",
+        (data) => {
+          data.entries.shift();
+        },
+      ],
+    ]) {
+      await t.test(
+        `unchanged sources with ${label} fail bootstrap check and update`,
+        async () => {
+          const data = JSON.parse(f.original);
+          mutate(data);
+          await f.ledger(data);
+          const before = await fs.readFile(f.ledgerPath, "utf8");
+          f.check(f.bootstrap, 1, exactFailure);
+          f.update(f.bootstrap, 1, exactFailure);
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), before);
+        },
+      );
+    }
+
+    await t.test(
+      "deleted, renamed and symlinked sources fail bootstrap",
+      async () => {
+        const file = `${pkg}/${JSON.parse(f.original).entries[0].file}`;
+        const bytes = await fs.readFile(path.join(f.directory, file));
+        await f.edit(file, undefined);
+        f.check(f.bootstrap, 1, equalityFailure);
+        await f.edit(`${pkg}/src/renamed.ts`, bytes);
+        f.check(f.bootstrap, 1, equalityFailure);
+        await fs.symlink(
+          path.join(f.directory, pkg, "src/renamed.ts"),
+          path.join(f.directory, file),
+        );
+        f.check(f.bootstrap, 1, equalityFailure);
+      },
+    );
+
+    await t.test(
+      "package dependency metadata and lockfiles stay frozen",
+      async () => {
+        for (const file of [
+          `${pkg}/package.json`,
+          `${pkg}/package-lock.json`,
+        ]) {
+          await f.edit(file, (source) => {
+            const data = JSON.parse(source);
+            data.version = "0.0.0-fixture";
+            return `${JSON.stringify(data, null, 2)}\n`;
+          });
+          f.check(f.bootstrap, 1, equalityFailure);
+          await f.restore();
+        }
+      },
+    );
+
+    await t.test(
+      "saved bases preserve ceilings and permit shrinking resolved debt",
+      async () => {
+        const data = JSON.parse(f.original);
+        data.entries[0].count += 1;
+        await f.ledger(data);
+        f.check(f.withLedger, 1, /Ratchet growth/u);
+        const largerBase = f.baseWithManifest(JSON.stringify(data));
+        f.check(largerBase, 1, /Ratchet shrank or is not canonical/u);
+        f.update(largerBase);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+        const file = `${pkg}/${data.entries[0].file}`;
+        await f.edit(file, (source) => `${source}\n`);
+        f.check(f.withLedger);
+        f.check(f.baseWithManifest("{}\n"), 1, equalityFailure);
+      },
+    );
+
+    await t.test(
+      "legacy manifests enforce the repository freeze for config and dependency mutations",
+      async () => {
+        const bases = [
+          f.bootstrap,
+          f.baseWithManifest("{}\n"),
+          f.baseWithManifest("[]\n"),
+        ];
+        for (const [file, mutate] of [
+          [
+            "config/protocol-v2.json",
+            (data) => {
+              data.qrlChainId += 1;
+            },
+          ],
+          [
+            "server/package.json",
+            (data) => {
+              data.dependencies.ethers = "0.0.0-fixture";
+            },
+          ],
+          [
+            "server/package-lock.json",
+            (data) => {
+              data.packages[""].dependencies.ethers = "0.0.0-fixture";
+            },
+          ],
+          [
+            "package.json",
+            (data) => {
+              data.exports = "./changed.js";
+            },
+          ],
+        ]) {
+          await f.edit(file, (source) => {
+            const data = JSON.parse(source);
+            mutate(data);
+            return `${JSON.stringify(data, null, 2)}\n`;
+          });
+          for (const base of bases) {
+            assert.ok(f.check(base, 1, equalityFailure, base).includes(file));
+            f.update(base, 1, equalityFailure, base);
+            assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          }
+          await f.restore();
+        }
+        // Reproduce the combined package and lockfile dependency edit too.
+        for (const file of ["server/package.json", "server/package-lock.json"])
+          await f.edit(file, (source) =>
+            source.replaceAll('"6.17.0"', '"0.0.0-fixture"'),
+          );
+        f.check(bases[1], 1, equalityFailure, bases[2]);
+      },
+    );
+
+    await t.test("legacy bootstrap requires exact findings", async () => {
+      const data = JSON.parse(f.original);
+      data.entries[0].count += 1;
+      await f.ledger(data);
+      for (const legacy of ["{}\n", "[]\n"]) {
+        const base = f.baseWithManifest(legacy);
+        f.check(base, 1, exactFailure, f.bootstrap);
+        f.update(base, 1, exactFailure, f.bootstrap);
+        assert.equal(
+          await fs.readFile(f.ledgerPath, "utf8"),
+          `${JSON.stringify(data, null, 2)}\n`,
+        );
+      }
+    });
+
+    await t.test(
+      "dev to main promotion uses the adopted integration manifest",
+      async () => {
+        const source = `${pkg}/${JSON.parse(f.original).entries[0].file}`;
+        const changedFiles = {
+          [source]: "// Earlier main source before dev adoption.\nexport {};\n",
+          "config/protocol-v2.json": "{}\n",
+        };
+        for (const oldManifest of [undefined, "{}\n", "[]\n"]) {
+          const main = f.baseWithManifest(oldManifest, changedFiles);
+          // Neither ref has adopted the new format yet: freeze against main.
+          f.check(main, 1, equalityFailure, f.bootstrap);
+          // Once dev adopts it, both PR and push base checks use its ceiling.
+          const output = f.check(
+            main,
+            0,
+            /allowances did not grow/u,
+            f.withLedger,
+          );
+          assert.ok(output.includes(`against ${f.withLedger}`));
+          assert.doesNotMatch(output, /bootstrap source equality/u);
+          f.update(main, 0, /allowances did not grow/u, f.withLedger);
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          const grown = JSON.parse(f.original);
+          grown.entries[0].count += 1;
+          await f.ledger(grown);
+          f.check(main, 1, /Ratchet growth/u, f.withLedger);
+          f.update(main, 1, /Ratchet growth/u, f.withLedger);
+          await f.restore();
+        }
+        // A versioned main remains authoritative even if dev has more debt.
+        const stricterMain = f.baseWithManifest('{"version":1,"entries":[]}\n');
+        const output = f.check(
+          stricterMain,
+          1,
+          /Ratchet growth/u,
+          f.withLedger,
+        );
+        assert.ok(output.includes(`against ${stricterMain}`));
+        // A valid base needs no integration fallback, even for an unknown ref.
+        f.check(
+          f.withLedger,
+          0,
+          /allowances did not grow/u,
+          "absent-integration-ref",
+        );
+      },
+    );
+
+    await t.test(
+      "typed debt in an existing file cannot gain an allowance",
+      async () => {
+        const file = JSON.parse(f.original).entries[0].file;
+        await f.edit(
+          `${pkg}/${file}`,
+          (source) =>
+            `${source}\nexport const reviewUnsafe = JSON.parse("null");\n`,
+        );
+        const data = JSON.parse(f.original);
+        const rule = "@typescript-eslint/no-unsafe-assignment";
+        const entry = data.entries.find(
+          (item) => item.file === file && item.rule === rule,
+        );
+        if (entry) entry.count += 1;
+        else data.entries.push({ file, rule, count: 1 });
+        await f.ledger(data);
+        f.run(["run", "lint"], 0);
+        f.check(f.bootstrap, 1, equalityFailure);
+        f.check(f.withLedger, 1, /no-unsafe-assignment/u);
+      },
+    );
+
+    await t.test("bulk suppressions cannot hide new debt", async () => {
+      await f.edit(probe, "export type ReviewEscape = any;\n");
+      for (const name of [
+        "eslint-suppressions.json",
+        "custom-suppressions.json",
+      ]) {
+        await f.edit(
+          `${pkg}/${name}`,
+          JSON.stringify({
+            "src/review-bypass.ts": { [anyRule]: { count: 1 } },
+          }),
+        );
+        f.run(
+          ["run", "lint:ratchet", "--", "--base-ref", f.withLedger],
+          1,
+          /against eslint-ratchet.json[\s\S]*0 -> 1/u,
+          name.startsWith("custom")
+            ? { ESLINT_SUPPRESSIONS_LOCATION: path.join(f.root, name) }
+            : {},
+        );
+      }
+    });
+
+    for (const [label, comment, diagnostic] of [
+      [
+        "disable",
+        "/* eslint-disable @typescript-eslint/no-explicit-any */",
+        /lint-policy\/no-inline-config/u,
+      ],
+      [
+        "inline override",
+        '/* eslint "@typescript-eslint/no-explicit-any": "off" */',
+        /lint-policy\/no-inline-config/u,
+      ],
+      ["mixed-case nocheck", "/// @Ts-NoChEcK", /@ts-nocheck/iu],
+    ]) {
+      await t.test(`${label} is rejected`, async () => {
+        await f.edit(probe, `${comment}\nexport const reviewValue = 1;\n`);
+        f.check(f.withLedger, 1, diagnostic);
+      });
+    }
+
+    await t.test(
+      "invalid saved manifests fail without a bootstrap fallback",
+      () => {
+        f.check(
+          f.baseWithManifest('{"version":2,"entries":[]}\n'),
+          1,
+          /Unrecognized legacy ratchet/u,
+        );
+        f.check(f.baseWithManifest("invalid JSON\n"), 1, /JSON/u);
+        const invalid = f.baseWithManifest('{"version":1,"entries":null}\n');
+        f.check(invalid, 1, /version 1 ratchet/u, f.withLedger);
+        f.check(f.bootstrap, 1, /version 1 ratchet/u, invalid);
+        f.check(f.baseWithManifest("{}\n"), 1, /version 1 ratchet/u, invalid);
+      },
+    );
+  });
+}

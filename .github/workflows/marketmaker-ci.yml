@@ -3,15 +3,22 @@ name: Market maker CI
 on:
   pull_request:
     paths:
+      - '**/node_modules/**'
       - 'config/protocol-v2*.json'
+      - 'scripts/eslint-policy.mjs'
+      - 'scripts/lint-ratchet*.mjs'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
       - '.github/workflows/marketmaker-release.yml'
   push:
     branches:
       - dev
+      - main
     paths:
+      - '**/node_modules/**'
       - 'config/protocol-v2*.json'
+      - 'scripts/eslint-policy.mjs'
+      - 'scripts/lint-ratchet*.mjs'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
       - '.github/workflows/marketmaker-release.yml'
@@ -33,6 +40,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -44,6 +53,33 @@ jobs:
       - name: Install locked dependencies
         working-directory: marketmaker
         run: npm ci
+
+      - name: Verify lint policy guards
+        working-directory: marketmaker
+        run: node --test ../scripts/lint-ratchet.test.mjs
+
+      - name: Verify lint ratchet integration
+        working-directory: marketmaker
+        run: node --test ../scripts/lint-ratchet.integration.test.mjs
+
+      - name: Lint marketmaker
+        working-directory: marketmaker
+        run: npm run lint
+
+      - name: Check lint ratchet against base
+        working-directory: marketmaker
+        env:
+          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          LINT_INTEGRATION_REF: origin/dev
+        run: |
+          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            LINT_BASE_REF=HEAD
+          fi
+          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
+
+      - name: Typecheck marketmaker
+        working-directory: marketmaker
+        run: npm run typecheck
 
       - name: Run market maker tests
         working-directory: marketmaker

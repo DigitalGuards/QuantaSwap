@@ -1,85 +1,71 @@
-import { readFileSync } from "node:fs";
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import prettier from "eslint-config-prettier";
+import {
+  arrayGuard,
+  doubleAssertionGuard,
+  generatedDirectories,
+  hardenedRules,
+  suppressionGuard,
+  testConsoleFiles,
+  typedFiles,
+} from "../scripts/eslint-policy.mjs";
+import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
+
+const testHelpers = [
+  "src/legacy-v1-test-helper.ts",
+  "src/protocol-v2-test-helper.ts",
+  "src/taker-test-harness.ts",
+  "src/taker-survival-child.ts",
+];
 
 export const strictConfig = tseslint.config(
-  { ignores: ["node_modules/**", "dist/**", "dist-loadtest/**"] },
+  { ignores: generatedDirectories.map((directory) => `${directory}/**`) },
+  suppressionGuard,
   {
-    files: ["src/**/*.{ts,tsx,mts,cts}"],
-    extends: [js.configs.recommended, ...tseslint.configs.strictTypeChecked],
+    files: typedFiles,
+    extends: [
+      js.configs.recommended,
+      ...tseslint.configs.strictTypeChecked,
+      ...tseslint.configs.stylisticTypeChecked,
+      prettier,
+    ],
     languageOptions: {
       parserOptions: {
         project: "./tsconfig.eslint.json",
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    linterOptions: {
-      noInlineConfig: true,
-      reportUnusedDisableDirectives: "error",
-    },
     rules: {
-      "@typescript-eslint/consistent-type-assertions": [
-        "error",
-        { assertionStyle: "never" },
-      ],
-      "@typescript-eslint/no-explicit-any": "error",
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector:
-            "CallExpression[callee.object.name='Array'][callee.property.name='isArray']",
-          message: "Use the isArray guard to preserve unknown elements.",
-        },
-      ],
-      "@typescript-eslint/restrict-template-expressions": [
-        "error",
-        { allowNumber: true },
-      ],
+      ...hardenedRules,
+      "no-restricted-syntax": ["error", doubleAssertionGuard, arrayGuard],
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", ignoreRestSiblings: true },
       ],
-      "@typescript-eslint/no-non-null-assertion": "error",
-      "@typescript-eslint/ban-ts-comment": [
-        "error",
-        {
-          "ts-ignore": true,
-          "ts-expect-error": true,
-          "ts-nocheck": true,
-          "ts-check": true,
-        },
-      ],
     },
   },
   {
+    files: typedFiles,
+    ignores: [...testConsoleFiles, ...testHelpers],
+    // Services and scripts write to container stdout/stderr through console.
+    rules: { "no-console": ["error", { allow: ["info", "warn", "error"] }] },
+  },
+  {
+    // Preserve the existing native array checks in guards and fixtures.
+    // The double-assertion ban and all type-aware rules apply here as well.
     files: [
+      "src/guards.ts",
       "src/**/*.test.ts",
       "src/legacy-v1-test-helper.ts",
       "src/protocol-v2-test-helper.ts",
       "src/taker-test-harness.ts",
       "src/taker-survival-child.ts",
     ],
-    rules: {
-      "no-restricted-syntax": "off",
-      // Node's test runner owns the promises returned by test registration.
-      "@typescript-eslint/no-floating-promises": "off",
-      "@typescript-eslint/consistent-type-assertions": "off",
-      "@typescript-eslint/no-non-null-assertion": "off",
-    },
+    rules: { "no-restricted-syntax": ["error", doubleAssertionGuard] },
   },
-  { files: ["src/guards.ts"], rules: { "no-restricted-syntax": "off" } },
-  prettier,
 );
 
-// Generated exact file/rule debt. npm run lint enforces each diagnostic ceiling.
-export const ratchet = JSON.parse(
-  readFileSync(new URL("./eslint-ratchet.json", import.meta.url), "utf8"),
-);
-export default [
-  ...strictConfig,
-  ...Object.entries(ratchet).map(([file, rules]) => ({
-    files: [file],
-    rules: Object.fromEntries(Object.keys(rules).map((rule) => [rule, "off"])),
-  })),
-];
+// Editor exceptions are counted under the full policy by both lint commands.
+const ratchet = readRatchet(new URL("./eslint-ratchet.json", import.meta.url));
+export default [...strictConfig, ...editorOverrides(ratchet)];
