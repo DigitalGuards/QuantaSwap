@@ -10,16 +10,6 @@ export const generatedDirectories = [
   "coverage",
 ];
 
-// Type-based registration allowance, used only in named test scopes. See each
-// package's type-hardening guide for its limits and the CI test-runner checks.
-export const nodeTestSafeCalls = [
-  {
-    from: "package",
-    name: ["test", "describe", "it", "suite", "skip", "only", "todo"],
-    package: "node:test",
-  },
-];
-
 // Preserve the existing console policy across conventional test paths.
 export const testConsoleFiles = [
   "**/*.{test,spec}.{ts,tsx,mts,cts}",

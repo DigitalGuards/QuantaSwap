@@ -18,13 +18,12 @@ uses the same hardened rules. `tsconfig.eslint.json` supplies type information a
 `npm run typecheck` scope. Const assertions remain allowed. Existing numeric template and concise
 void-callback options remain in place.
 
-Frontend uses Vitest and keeps `no-floating-promises` without a node:test exemption in every file.
-The [server](../server/TYPE_HARDENING.md) and [marketmaker](../marketmaker/TYPE_HARDENING.md)
-use typescript-eslint's documented `allowForKnownSafeCalls` for node:test registrations and their
-`skip`, `only`, and `todo` members in `**/*.test.ts` and marketmaker's four exactly named helpers.
-That exemption is type-based and can be bypassed by a test author deliberately aliasing or mutating
-node:test functions or borrowing their types. Node's test runner fails the run on unhandled
-rejections and cancelled subtests; CI runs the Node packages' tests through `npm test`.
+`no-floating-promises` applies to every authored TypeScript file in all three packages,
+including tests and helpers. Frontend uses Vitest. The
+[server](../server/TYPE_HARDENING.md) and [marketmaker](../marketmaker/TYPE_HARDENING.md)
+record existing node:test registration findings as manifest debt. Their
+[cleanup guidance](../docs/LINT_CENSUS.md#node-test-registrations-and-service-logging)
+uses `void` for intentionally unawaited top-level registrations and awaits or returns subtests.
 
 Before every check or update, the ratchet rejects any tracked repository path containing a
 `node_modules` directory segment, at any depth and for any file type. This covers ESLint's default

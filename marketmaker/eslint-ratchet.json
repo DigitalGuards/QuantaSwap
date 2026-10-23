@@ -8,6 +8,11 @@
     },
     {
       "file": "src/admission.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/admission.test.ts",
       "rule": "no-restricted-syntax",
       "count": 1
     },
@@ -15,6 +20,11 @@
       "file": "src/chains.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 4
+    },
+    {
+      "file": "src/chains.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 10
     },
     {
       "file": "src/chains.test.ts",
@@ -32,6 +42,11 @@
       "count": 2
     },
     {
+      "file": "src/config.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 8
+    },
+    {
       "file": "src/config.ts",
       "rule": "preserve-caught-error",
       "count": 1
@@ -47,9 +62,19 @@
       "count": 9
     },
     {
+      "file": "src/deployment.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 7
+    },
+    {
       "file": "src/deployment.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 1
+    },
+    {
+      "file": "src/drain.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
     },
     {
       "file": "src/drain.test.ts",
@@ -67,6 +92,11 @@
       "count": 1
     },
     {
+      "file": "src/health.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 7
+    },
+    {
       "file": "src/htlc.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 1
@@ -80,6 +110,11 @@
       "file": "src/htlc.test.ts",
       "rule": "@typescript-eslint/no-base-to-string",
       "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 32
     },
     {
       "file": "src/htlc.test.ts",
@@ -110,6 +145,11 @@
       "file": "src/index.ts",
       "rule": "no-console",
       "count": 1
+    },
+    {
+      "file": "src/init-keys.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 3
     },
     {
       "file": "src/init-keys.ts",
@@ -148,6 +188,11 @@
     },
     {
       "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 12
+    },
+    {
+      "file": "src/orderbook.test.ts",
       "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 1
     },
@@ -167,6 +212,16 @@
       "count": 2
     },
     {
+      "file": "src/policy.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 95
+    },
+    {
+      "file": "src/price.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 33
+    },
+    {
       "file": "src/price.ts",
       "rule": "@typescript-eslint/dot-notation",
       "count": 6
@@ -180,6 +235,11 @@
       "file": "src/protocol-signing.test.ts",
       "rule": "@typescript-eslint/dot-notation",
       "count": 7
+    },
+    {
+      "file": "src/protocol-signing.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 13
     },
     {
       "file": "src/protocol-signing.test.ts",
@@ -218,6 +278,11 @@
     },
     {
       "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
       "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 2
     },
@@ -227,9 +292,19 @@
       "count": 1
     },
     {
+      "file": "src/qip55.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
+    },
+    {
       "file": "src/qrl-web3-compat.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 3
+    },
+    {
+      "file": "src/qrl-web3-compat.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 2
     },
     {
       "file": "src/qrl-web3-compat.test.ts",
@@ -253,6 +328,11 @@
     },
     {
       "file": "src/qrvmHtlc.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
+    },
+    {
+      "file": "src/qrvmHtlc.test.ts",
       "rule": "@typescript-eslint/require-await",
       "count": 1
     },
@@ -260,6 +340,11 @@
       "file": "src/state.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 19
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 63
     },
     {
       "file": "src/state.test.ts",
@@ -302,6 +387,11 @@
       "count": 4
     },
     {
+      "file": "src/taker-cli.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 22
+    },
+    {
       "file": "src/taker-cli.ts",
       "rule": "@typescript-eslint/only-throw-error",
       "count": 1
@@ -315,6 +405,11 @@
       "file": "src/taker-e2e.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 1
+    },
+    {
+      "file": "src/taker-e2e.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 31
     },
     {
       "file": "src/taker-e2e.test.ts",
@@ -333,6 +428,11 @@
     },
     {
       "file": "src/taker-policy.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 76
+    },
+    {
+      "file": "src/taker-policy.test.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 1
     },
@@ -340,6 +440,11 @@
       "file": "src/taker-policy.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 2
+    },
+    {
+      "file": "src/taker-proofs.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 39
     },
     {
       "file": "src/taker-proofs.test.ts",
@@ -373,6 +478,11 @@
     },
     {
       "file": "src/taker-state.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 25
+    },
+    {
+      "file": "src/taker-state.test.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 7
     },
@@ -390,6 +500,11 @@
       "file": "src/taker-survival-child.ts",
       "rule": "no-console",
       "count": 5
+    },
+    {
+      "file": "src/taker-survival.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
     },
     {
       "file": "src/taker-test-harness.ts",

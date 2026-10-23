@@ -21,8 +21,8 @@ Legacy and missing manifests both require every repository source and input to r
 The complete bootstrap exception list is:
 
 - The three packages' `eslint.config.js` or `eslint.config.mjs`, `eslint-ratchet.json`, `tsconfig.json`, and `tsconfig.eslint.json`. The main tsconfigs are inherited by the lint projects.
-- `scripts/eslint-policy.mjs`, `scripts/lint-ratchet.mjs`, `scripts/lint-ratchet-lib.mjs`, `scripts/lint-ratchet-node-tests.mjs`, `scripts/lint-ratchet.test.mjs`, and `scripts/lint-ratchet.integration.test.mjs`.
-- The retired tooling paths `scripts/eslint-node-test.mjs`, `frontend/scripts/check-lint-ratchet.mjs`, `server/lint.mjs`, and `marketmaker/lint.mjs`. These remain setup exceptions so their deletion passes the bootstrap freeze while the old paths are still in an uncommitted index.
+- `scripts/eslint-policy.mjs`, `scripts/lint-ratchet.mjs`, `scripts/lint-ratchet-lib.mjs`, `scripts/lint-ratchet.test.mjs`, and `scripts/lint-ratchet.integration.test.mjs`.
+- The retired tooling paths `scripts/lint-ratchet-node-tests.mjs`, `scripts/eslint-node-test.mjs`, `frontend/scripts/check-lint-ratchet.mjs`, `server/lint.mjs`, and `marketmaker/lint.mjs`. These remain setup exceptions so their deletion passes the bootstrap freeze while the old paths are still in an uncommitted index.
 - The `scripts` object in an existing `package.json`. Every other parsed field must remain equal, including dependency declarations, exports, type entry points, and package identity. JSON formatting and key order may change.
 - `.github/workflows/*.yml` and `.github/workflows/*.yaml`.
 - Markdown documentation (`*.md`) outside `config/`.
@@ -33,27 +33,23 @@ After equality passes, one scan of the checked package must produce exactly the 
 
 ### Node test registrations and service logging
 
-Server and marketmaker use typescript-eslint's documented [`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls) with `from: "package"`, `package: "node:test"`, and names `test`, `describe`, `it`, `suite`, `skip`, `only`, and `todo`. The exemption covers runner-owned registrations and their `.skip`, `.only`, and `.todo` members only in compiled, non-hidden top-level `src/*.test.ts` files selected by `node --test dist/*.test.js`. Marketmaker also includes exactly `src/protocol-v2-test-helper.ts`, `src/taker-test-harness.ts`, and `src/taker-survival-child.ts`. The legacy V1 helper has no test importer and receives no promise exemption. Server has no helper exemptions. Production code and every frontend file keep `no-floating-promises` without the exemption. Ordinary floating promises remain findings in tests too.
+`no-floating-promises` applies to every authored TypeScript file in all three packages, including node:test registrations, subtests, and helpers. Existing unhandled registration promises are recorded as debt: 240 server findings and 506 marketmaker findings. All other rules and their counts remain unchanged.
 
-Both ESLint configs receive concrete paths from `scripts/lint-ratchet-node-tests.mjs`. It checks the complete package test script and `build: tsc`, then uses the installed TypeScript compiler to read `tsconfig.json`, honoring JSONC, inherited settings, include and exclude. Emission must produce JavaScript from `src` into `dist`; only compiled top-level test inputs qualify. The exact supported test commands are `npm run build && node --test dist/*.test.js && node smoke.js && node federation-smoke.js` for server and `npm run build && node --test dist/*.test.js` for marketmaker. Changing either command or the output mapping requires updating the scope contract and its tests. Named helper checks require compiled helpers and executed loader tests: value imports in `protocol-signing.test.ts` and `taker-e2e.test.ts`, and the child-script URL in `taker-survival.test.ts`. The existing survival suite launches and checks that child process.
+During cleanup, mark top-level registrations that are intentionally not awaited with `void`, for example `void test("case", () => { /* assertions */ });`. Node supports discarding these top-level return values by design. Inside tests, await or return subtest promises, including any `Promise.all` that joins concurrent subtests, so the parent waits for completion. Review the nesting of each call before changing it. See the [Node test registration documentation](https://nodejs.org/api/test.html#testname-options-fn) and [subtest guidance](https://nodejs.org/api/test.html#subtests).
 
-Before any manifest comparison or write, the ratchet recursively inventories every package `*.test.ts` file, including hidden, Git-ignored, and generated-looking paths, skipping only `node_modules` and `.git` directories. Any file outside the executed set fails with a package-relative path. Nested tests, tests outside `src`, hidden tests omitted by the shell glob, and compiler-excluded tests all fail. The guard runs through existing CI lint and ratchet steps; the new shared module matches their `scripts/lint-ratchet*.mjs` path filters. The current inventory contains 17 server and 23 marketmaker test files, with zero unrun files. Test discovery and application sources remain unchanged.
+Policy tests check registrations, aliases, borrowed types, mutated members, ordinary promises, helpers, nested and hidden files, and all TypeScript test extensions under the same rule. They also check unhandled subtests and the intended `void`/await/return cleanup patterns. Ratchet unit and integration tests retain rejection of tracked `node_modules` segments at every depth, across packages and file types, in check and update modes without writing manifests. The integration tests use a private temporary Git index and leave the worktree index intact. Root-only output ignores, the bootstrap source freeze, suppression rejection, and saved count ceilings retain their existing coverage.
 
-This is a type-based exemption. A test author can deliberately bypass the promise check by aliasing node:test functions, borrowing their types, or mutating members such as `test.skip`. `TestContext.test` can share the allowed registration type. Authors must await, return, or join subtests so their parent waits for them. Node's test runner fails the run on unhandled rejections and cancelled subtests, including children returned from unrelated callbacks that the parent does not join. CI runs these tests through `npm test`. See the [Node test runner documentation](https://nodejs.org/api/test.html#subtests) for runtime behavior.
-
-Policy tests verify the exemption's exact file scope, registrations and members, ordinary promises, production enforcement, and an unawaited nested `context.test`. Inventory tests report nested, hidden, excluded, and out-of-source tests. Integration tests reject unrun tests during lint, bootstrap, adoption, and versioned checks and updates, preserve manifests on failure, and reject command, compiler, and helper-loader drift. Ratchet unit and integration tests also verify rejection of tracked `node_modules` segments at every depth, across packages and file types, in check and update modes without writing manifests. They use a private temporary Git index and leave the worktree index intact. Existing tests still cover root-only output ignores and the bootstrap source freeze.
-
-Runtime TypeScript and scripts in the two services allow only `console.info`, `console.warn`, and `console.error`. `console.log` and `console.debug` remain findings. Later cleanup slices can change those calls to `console.info` to preserve stdout. Tests and the named marketmaker test helpers retain the existing full `no-console` rule. All three finding counts and manifests remain unchanged after aligning the node:test scope with test discovery. No application finding was fixed in this policy update.
+Runtime TypeScript and scripts in the two services allow only `console.info`, `console.warn`, and `console.error`. `console.log` and `console.debug` remain findings. Later cleanup slices can change those calls to `console.info` to preserve stdout. Tests and the named marketmaker test helpers retain the existing full `no-console` rule. No application finding was fixed in this policy update.
 
 ## Totals
 
-| Package     | TypeScript files scanned | Files with findings | Findings | File/rule pairs | Proposed slices |
-| ----------- | -----------------------: | ------------------: | -------: | --------------: | --------------: |
-| frontend    |                       97 |                  37 |      363 |              86 |               9 |
-| server      |                       52 |                  30 |      510 |              79 |              12 |
-| marketmaker |                       56 |                  39 |      670 |              88 |              15 |
+| Package | TypeScript files scanned | Files with findings | Findings | File/rule pairs | Proposed slices |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| frontend | 97 | 37 | 363 | 86 | 9 |
+| server | 52 | 34 | 750 | 96 | 17 |
+| marketmaker | 56 | 45 | 1,176 | 111 | 26 |
 
-The initial registration and logging policy removed 746 runner-owned registration reports and 37 permitted service logging reports, reducing the census from 2,326 to 1,543 findings. Aligning node:test exemptions with executed tests leaves all three manifests byte-identical: 363 frontend, 510 server, and 670 marketmaker findings. Existing registrations still fall within the narrower exemption, the inventory finds no unrun tests, and the repository has no tracked node_modules paths. The plan contains 36 slices, each with 20 to 60 findings.
+The census records 2,289 findings across 293 file/rule pairs. The 746 node:test registration findings are included in the manifests. The 37 permitted service logging calls remain outside the census under the existing logging policy. The plan contains 52 slices, each with 20 to 60 findings: the existing 36 slices cover 1,543 findings from other rules, and 16 registration slices cover the additional 746 findings.
 
 ## Findings by rule
 
@@ -62,7 +58,7 @@ Rule names beginning with `@typescript-eslint/` are shortened in this table. Zer
 | Rule                                | Frontend | Server | Marketmaker |
 | ----------------------------------- | -------: | -----: | ----------: |
 | `dot-notation`                      |       60 |    324 |         385 |
-| `no-floating-promises`              |        0 |      0 |           0 |
+| `no-floating-promises`              | 0 | 240 | 506 |
 | `consistent-type-assertions`        |       73 |     43 |          94 |
 | `require-await`                     |       83 |     21 |          20 |
 | `no-console`                        |        0 |     11 |          60 |
@@ -98,155 +94,144 @@ Rule names beginning with `@typescript-eslint/` are shortened in this table. Zer
 
 Paths are relative to the package. All nonzero files are listed, largest first.
 
-| File                                          | Findings |
-| --------------------------------------------- | -------: |
-| `src/lib/orderbookClient.ts`                  |       46 |
-| `src/lib/orderSigning.test.ts`                |       39 |
-| `src/lib/orderbookClient.test.ts`             |       37 |
-| `src/lib/legSender.test.ts`                   |       29 |
-| `src/lib/mirrorBook.test.ts`                  |       25 |
-| `src/lib/payoutCredits.test.ts`               |       19 |
-| `src/lib/swapMachine.ts`                      |       19 |
-| `src/lib/relayReset.test.ts`                  |       15 |
-| `src/hooks/useEthWallet.test.tsx`             |       13 |
-| `src/lib/orderSigning.ts`                     |       13 |
-| `src/hooks/useQrlWallet.test.tsx`             |       12 |
-| `src/lib/htlc.v3.test.ts`                     |       11 |
-| `src/lib/mirrorBook.ts`                       |       11 |
-| `src/lib/signedOrderRecovery.test.ts`         |        9 |
-| `src/components/signedOrderFlow.test.ts`      |        7 |
-| `src/components/PostOrderCard.tsx`            |        6 |
-| `src/config.ts`                               |        6 |
-| `src/lib/htlc.test.ts`                        |        6 |
-| `src/components/SwapFlow.credits.test.tsx`    |        5 |
-| `src/lib/payoutCreditedTopics.test.ts`        |        4 |
-| `src/components/MyOrderCard.tsx`              |        3 |
-| `src/hooks/useAnnounceReconcile.test.ts`      |        3 |
-| `src/lib/orderbook.ts`                        |        3 |
-| `src/lib/walletConnect.test.ts`               |        3 |
-| `src/components/DeferredPayoutPanel.test.tsx` |        2 |
-| `src/components/SwapFlow.tsx`                 |        2 |
-| `src/components/signedOrderFlow.ts`           |        2 |
-| `src/hooks/useAnnounceReconcile.ts`           |        2 |
-| `src/lib/orderbook.test.ts`                   |        2 |
-| `src/pages/SwapStatusPage.tsx`                |        2 |
-| `src/components/OrderBookPanel.tsx`           |        1 |
-| `src/components/PairingModal.test.tsx`        |        1 |
-| `src/hooks/useQrlWallet.ts`                   |        1 |
-| `src/lib/protocol-v2-wire.ts`                 |        1 |
-| `src/lib/relayReset.ts`                       |        1 |
-| `src/pages/SwapPage.tsx`                      |        1 |
-| `vite.config.ts`                              |        1 |
+| File | Findings |
+| --- | ---: |
+| `src/lib/orderbookClient.ts` | 46 |
+| `src/lib/orderSigning.test.ts` | 39 |
+| `src/lib/orderbookClient.test.ts` | 37 |
+| `src/lib/legSender.test.ts` | 29 |
+| `src/lib/mirrorBook.test.ts` | 25 |
+| `src/lib/payoutCredits.test.ts` | 19 |
+| `src/lib/swapMachine.ts` | 19 |
+| `src/lib/relayReset.test.ts` | 15 |
+| `src/hooks/useEthWallet.test.tsx` | 13 |
+| `src/lib/orderSigning.ts` | 13 |
+| `src/hooks/useQrlWallet.test.tsx` | 12 |
+| `src/lib/htlc.v3.test.ts` | 11 |
+| `src/lib/mirrorBook.ts` | 11 |
+| `src/lib/signedOrderRecovery.test.ts` | 9 |
+| `src/components/signedOrderFlow.test.ts` | 7 |
+| `src/components/PostOrderCard.tsx` | 6 |
+| `src/config.ts` | 6 |
+| `src/lib/htlc.test.ts` | 6 |
+| `src/components/SwapFlow.credits.test.tsx` | 5 |
+| `src/lib/payoutCreditedTopics.test.ts` | 4 |
+| `src/components/MyOrderCard.tsx` | 3 |
+| `src/hooks/useAnnounceReconcile.test.ts` | 3 |
+| `src/lib/orderbook.ts` | 3 |
+| `src/lib/walletConnect.test.ts` | 3 |
+| `src/components/DeferredPayoutPanel.test.tsx` | 2 |
+| `src/components/SwapFlow.tsx` | 2 |
+| `src/components/signedOrderFlow.ts` | 2 |
+| `src/hooks/useAnnounceReconcile.ts` | 2 |
+| `src/lib/orderbook.test.ts` | 2 |
+| `src/pages/SwapStatusPage.tsx` | 2 |
+| `src/components/OrderBookPanel.tsx` | 1 |
+| `src/components/PairingModal.test.tsx` | 1 |
+| `src/hooks/useQrlWallet.ts` | 1 |
+| `src/lib/protocol-v2-wire.ts` | 1 |
+| `src/lib/relayReset.ts` | 1 |
+| `src/pages/SwapPage.tsx` | 1 |
+| `vite.config.ts` | 1 |
 
 ## server: findings by file
 
 Paths are relative to the package. All nonzero files are listed, largest first.
 
-| File                            | Findings |
-| ------------------------------- | -------: |
-| `src/store.ts`                  |      126 |
-| `src/peer-sync.test.ts`         |       60 |
-| `src/order-signing.ts`          |       44 |
-| `src/peer-sync.ts`              |       32 |
-| `src/loadtest/scenarios.ts`     |       28 |
-| `src/loadtest/consistency.ts`   |       26 |
-| `src/federation.ts`             |       25 |
-| `src/loadtest/main.ts`          |       23 |
-| `src/inflight-gate.test.ts`     |       22 |
-| `src/server.ts`                 |       21 |
-| `src/store-protocol.test.ts`    |       20 |
-| `src/federation.test.ts`        |       18 |
-| `src/lease-integration.test.ts` |       11 |
-| `src/protocol-v2-wire.test.ts`  |       11 |
-| `src/order-signing.test.ts`     |        9 |
-| `src/store.test.ts`             |        8 |
-| `src/config.ts`                 |        6 |
-| `src/process-lease.ts`          |        3 |
-| `src/loadtest/probe-worker.ts`  |        2 |
-| `src/loadtest/reasons.ts`       |        2 |
-| `src/peer-transport.test.ts`    |        2 |
-| `src/peer-transport.ts`         |        2 |
-| `src/process-lease.test.ts`     |        2 |
-| `src/admission.test.ts`         |        1 |
-| `src/cors.test.ts`              |        1 |
-| `src/federation-reset.test.ts`  |        1 |
-| `src/guards.ts`                 |        1 |
-| `src/healthcheck.ts`            |        1 |
-| `src/loadtest/proofs.ts`        |        1 |
-| `src/protocol-v2-wire.ts`       |        1 |
+| File | Findings |
+| --- | ---: |
+| `src/store.ts` | 126 |
+| `src/peer-sync.test.ts` | 92 |
+| `src/store-protocol.test.ts` | 54 |
+| `src/federation.test.ts` | 47 |
+| `src/order-signing.ts` | 44 |
+| `src/process-lease.test.ts` | 38 |
+| `src/order-signing.test.ts` | 33 |
+| `src/peer-sync.ts` | 32 |
+| `src/inflight-gate.test.ts` | 31 |
+| `src/loadtest/scenarios.ts` | 28 |
+| `src/loadtest/consistency.ts` | 26 |
+| `src/federation.ts` | 25 |
+| `src/loadtest/main.ts` | 23 |
+| `src/server.ts` | 21 |
+| `src/federation-reset.test.ts` | 17 |
+| `src/lease-integration.test.ts` | 16 |
+| `src/protocol-v2-wire.test.ts` | 15 |
+| `src/store.test.ts` | 14 |
+| `src/admission.test.ts` | 10 |
+| `src/config.test.ts` | 10 |
+| `src/peer-transport.test.ts` | 8 |
+| `src/client-ip.test.ts` | 7 |
+| `src/config.ts` | 6 |
+| `src/cors.test.ts` | 5 |
+| `src/qip55.test.ts` | 5 |
+| `src/stream.test.ts` | 4 |
+| `src/process-lease.ts` | 3 |
+| `src/loadtest/probe-worker.ts` | 2 |
+| `src/loadtest/reasons.ts` | 2 |
+| `src/peer-transport.ts` | 2 |
+| `src/guards.ts` | 1 |
+| `src/healthcheck.ts` | 1 |
+| `src/loadtest/proofs.ts` | 1 |
+| `src/protocol-v2-wire.ts` | 1 |
 
 ## marketmaker: findings by file
 
 Paths are relative to the package. All nonzero files are listed, largest first.
 
-| File                             | Findings |
-| -------------------------------- | -------: |
-| `src/state.ts`                   |       93 |
-| `src/orderbook.ts`               |       90 |
-| `src/taker-proofs.ts`            |       75 |
-| `src/taker-state.ts`             |       75 |
-| `src/taker-test-harness.ts`      |       46 |
-| `src/state.test.ts`              |       45 |
-| `src/taker-cli.ts`               |       40 |
-| `src/protocol-signing.ts`        |       25 |
-| `src/taker-state.test.ts`        |       22 |
-| `src/orderbook.test.ts`          |       15 |
-| `src/chains.test.ts`             |       12 |
-| `src/htlc.ts`                    |       12 |
-| `src/protocol-signing.test.ts`   |       11 |
-| `src/protocol-v2-wire.test.ts`   |       11 |
-| `src/taker-e2e.test.ts`          |       11 |
-| `src/credits-cli.ts`             |       10 |
-| `src/htlc.test.ts`               |       10 |
-| `src/index.ts`                   |        7 |
-| `src/init-keys.ts`               |        6 |
-| `src/price.ts`                   |        6 |
-| `src/taker.ts`                   |        6 |
-| `src/qrl-web3-compat.test.ts`    |        5 |
-| `src/taker-survival-child.ts`    |        5 |
-| `src/admission.test.ts`          |        4 |
-| `src/drain.test.ts`              |        4 |
-| `src/qrvmHtlc.test.ts`           |        3 |
-| `src/taker-orderbook.ts`         |        3 |
-| `src/config.test.ts`             |        2 |
-| `src/legacy-v1-test-helper.ts`   |        2 |
-| `src/policy.test.ts`             |        2 |
-| `src/protocol-v2-test-helper.ts` |        2 |
-| `src/taker-policy.ts`            |        2 |
-| `src/taker-proofs.test.ts`       |        2 |
-| `src/config.ts`                  |        1 |
-| `src/deployment.ts`              |        1 |
-| `src/guards.ts`                  |        1 |
-| `src/health.test.ts`             |        1 |
-| `src/protocol-v2-wire.ts`        |        1 |
-| `src/taker-policy.test.ts`       |        1 |
-
-## Floating-promise verification
-
-There are zero remaining `no-floating-promises` findings in both services under the documented exemption.
-
-An independent scan with the safe-call allowance removed reproduced all 240 server and 506 marketmaker reports. Each call's resolved TypeScript signature was checked against the `node:test` module declaration: all 746 matched. Server has 25 `describe` and 215 `it` calls; marketmaker has 72 `describe` and 434 `it` calls. The regression suite also checks that ordinary rejected promises and unrelated functions named `test`, `describe`, or `skip` remain findings, and that registrations in production files receive no exemption. Subtest completion is checked by Node's test runner in CI.
-
-These five examples per package are verified registrations removed by the policy, provided as audit samples. They are resolved policy reports, with no source edits:
-
-| Package     | File and line                          | Resolved call       |
-| ----------- | -------------------------------------- | ------------------- |
-| server      | `server/src/admission.test.ts:32`      | `node:test.it(...)` |
-| server      | `server/src/client-ip.test.ts:6`       | `node:test.it(...)` |
-| server      | `server/src/federation.test.ts:79`     | `node:test.it(...)` |
-| server      | `server/src/peer-sync.test.ts:50`      | `node:test.it(...)` |
-| server      | `server/src/store.test.ts:38`          | `node:test.it(...)` |
-| marketmaker | `marketmaker/src/admission.test.ts:11` | `node:test.it(...)` |
-| marketmaker | `marketmaker/src/chains.test.ts:189`   | `node:test.it(...)` |
-| marketmaker | `marketmaker/src/htlc.test.ts:88`      | `node:test.it(...)` |
-| marketmaker | `marketmaker/src/policy.test.ts:164`   | `node:test.it(...)` |
-| marketmaker | `marketmaker/src/state.test.ts:249`    | `node:test.it(...)` |
+| File | Findings |
+| --- | ---: |
+| `src/state.test.ts` | 108 |
+| `src/policy.test.ts` | 97 |
+| `src/state.ts` | 93 |
+| `src/orderbook.ts` | 90 |
+| `src/taker-policy.test.ts` | 77 |
+| `src/taker-proofs.ts` | 75 |
+| `src/taker-state.ts` | 75 |
+| `src/taker-state.test.ts` | 47 |
+| `src/taker-test-harness.ts` | 46 |
+| `src/htlc.test.ts` | 42 |
+| `src/taker-e2e.test.ts` | 42 |
+| `src/taker-proofs.test.ts` | 41 |
+| `src/taker-cli.ts` | 40 |
+| `src/price.test.ts` | 33 |
+| `src/orderbook.test.ts` | 27 |
+| `src/protocol-signing.ts` | 25 |
+| `src/protocol-signing.test.ts` | 24 |
+| `src/chains.test.ts` | 22 |
+| `src/taker-cli.test.ts` | 22 |
+| `src/protocol-v2-wire.test.ts` | 15 |
+| `src/htlc.ts` | 12 |
+| `src/config.test.ts` | 10 |
+| `src/credits-cli.ts` | 10 |
+| `src/qrvmHtlc.test.ts` | 9 |
+| `src/admission.test.ts` | 8 |
+| `src/drain.test.ts` | 8 |
+| `src/health.test.ts` | 8 |
+| `src/deployment.test.ts` | 7 |
+| `src/index.ts` | 7 |
+| `src/qrl-web3-compat.test.ts` | 7 |
+| `src/init-keys.ts` | 6 |
+| `src/price.ts` | 6 |
+| `src/qip55.test.ts` | 6 |
+| `src/taker.ts` | 6 |
+| `src/taker-survival-child.ts` | 5 |
+| `src/taker-survival.test.ts` | 4 |
+| `src/init-keys.test.ts` | 3 |
+| `src/taker-orderbook.ts` | 3 |
+| `src/legacy-v1-test-helper.ts` | 2 |
+| `src/protocol-v2-test-helper.ts` | 2 |
+| `src/taker-policy.ts` | 2 |
+| `src/config.ts` | 1 |
+| `src/deployment.ts` | 1 |
+| `src/guards.ts` | 1 |
+| `src/protocol-v2-wire.ts` | 1 |
 
 ## Proposed cleanup slices
 
 Each slice must preserve runtime behavior, shrink only its manifest allowances, and pass the full package gates. This policy update implements no cleanup slice. Counts partition every remaining finding exactly once; line ranges refer to this snapshot and identify diagnostic locations within large files.
 
-Replace unsafe fixture casts with typed builders or guarded inputs. Review optional/nullish rewrites for behavioral equivalence. Runtime logging cleanup uses `console.info` for `console.log` and `console.debug`, preserving stdout; tests retain their existing console policy. Keep deterministic wire vectors aligned whenever a later slice changes the shared protocol encoder. Node registration findings need no cleanup under the configured policy.
+Replace unsafe fixture casts with typed builders or guarded inputs. Review optional/nullish rewrites for behavioral equivalence. Runtime logging cleanup uses `console.info` for `console.log` and `console.debug`, preserving stdout; tests retain their existing console policy. Keep deterministic wire vectors aligned whenever a later slice changes the shared protocol encoder. Handle node:test registration findings using the `void` and subtest guidance above. The first 12 server slices and first 15 marketmaker slices count only findings from other rules; their registration-only slices follow and cover each `no-floating-promises` finding exactly once. Prioritize those registration slices for straightforward, reviewed debt reduction.
 
 ### frontend
 
@@ -278,6 +263,11 @@ Replace unsafe fixture casts with typed builders or guarded inputs. Review optio
 | 10. Store and wire fixtures                | `src/store-protocol.test.ts` (20); `src/store.test.ts` (8); `src/protocol-v2-wire.test.ts` (11); `src/protocol-v2-wire.ts` (1)               |       40 |
 | 11. Admission and lease fixtures           | `src/inflight-gate.test.ts` (22); `src/lease-integration.test.ts` (11); `src/process-lease.test.ts` (2); `src/admission.test.ts` (1)         |       36 |
 | 12. Server, configuration and process tail | `src/server.ts` (21); `src/config.ts` (6); `src/process-lease.ts` (3); `src/guards.ts` (1); `src/healthcheck.ts` (1); `src/cors.test.ts` (1) |       33 |
+| 13. Registrations 1 | `src/admission.test.ts` lines 31-174 (9); `src/client-ip.test.ts` lines 5-91 (7); `src/config.test.ts` lines 7-370 (10); `src/cors.test.ts` lines 7-39 (4); `src/federation-reset.test.ts` lines 11-195 (16); `src/federation.test.ts` lines 78-79 (2) | 48 |
+| 14. Registrations 2 | `src/federation.test.ts` lines 98-809 (27); `src/inflight-gate.test.ts` lines 230-578 (9); `src/lease-integration.test.ts` lines 154-394 (5); `src/order-signing.test.ts` lines 312-374 (7) | 48 |
+| 15. Registrations 3 | `src/order-signing.test.ts` lines 395-869 (17); `src/peer-sync.test.ts` lines 49-1467 (31) | 48 |
+| 16. Registrations 4 | `src/peer-sync.test.ts` lines 1584-1584 (1); `src/peer-transport.test.ts` lines 99-177 (6); `src/process-lease.test.ts` lines 106-672 (36); `src/protocol-v2-wire.test.ts` lines 103-219 (4); `src/qip55.test.ts` lines 12-12 (1) | 48 |
+| 17. Registrations 5 | `src/qip55.test.ts` lines 17-43 (4); `src/store-protocol.test.ts` lines 342-1701 (34); `src/store.test.ts` lines 37-112 (6); `src/stream.test.ts` lines 28-61 (4) | 48 |
 
 ### marketmaker
 
@@ -298,13 +288,26 @@ Replace unsafe fixture casts with typed builders or guarded inputs. Review optio
 | 13. Orderbook, chain and HTLC adapters  | `src/orderbook.test.ts` (15); `src/chains.test.ts` (12); `src/htlc.ts` (12); `src/htlc.test.ts` (10); `src/qrl-web3-compat.test.ts` (5); `src/qrvmHtlc.test.ts` (3)                                                                                                                              |       57 |
 | 14. Taker state and lifecycle           | `src/taker-state.test.ts` (22); `src/taker-e2e.test.ts` (11); `src/taker-orderbook.ts` (3); `src/taker-policy.ts` (2); `src/taker-policy.test.ts` (1); `src/taker-proofs.test.ts` (2); `src/taker.ts` (6); `src/taker-survival-child.ts` (5)                                                     |       52 |
 | 15. Service CLI, pricing and guard tail | `src/credits-cli.ts` (10); `src/index.ts` (7); `src/init-keys.ts` (6); `src/price.ts` (6); `src/config.ts` (1); `src/deployment.ts` (1); `src/guards.ts` (1); `src/health.test.ts` (1); `src/config.test.ts` (2); `src/policy.test.ts` (2); `src/admission.test.ts` (4); `src/drain.test.ts` (4) |       45 |
+| 16. Registrations 1 | `src/admission.test.ts` lines 10-74 (4); `src/chains.test.ts` lines 144-272 (10); `src/config.test.ts` lines 8-106 (8); `src/deployment.test.ts` lines 19-107 (7); `src/drain.test.ts` lines 5-32 (4); `src/health.test.ts` lines 20-128 (7); `src/htlc.test.ts` lines 87-170 (6) | 46 |
+| 17. Registrations 2 | `src/htlc.test.ts` lines 187-580 (26); `src/init-keys.test.ts` lines 22-44 (3); `src/orderbook.test.ts` lines 106-559 (12); `src/policy.test.ts` lines 161-208 (5) | 46 |
+| 18. Registrations 3 | `src/policy.test.ts` lines 222-588 (46) | 46 |
+| 19. Registrations 4 | `src/policy.test.ts` lines 597-1111 (44); `src/price.test.ts` lines 20-21 (2) | 46 |
+| 20. Registrations 5 | `src/price.test.ts` lines 29-439 (31); `src/protocol-signing.test.ts` lines 75-603 (13); `src/protocol-v2-wire.test.ts` lines 103-118 (2) | 46 |
+| 21. Registrations 6 | `src/protocol-v2-wire.test.ts` lines 143-219 (2); `src/qip55.test.ts` lines 14-56 (6); `src/qrl-web3-compat.test.ts` lines 29-30 (2); `src/qrvmHtlc.test.ts` lines 11-72 (6); `src/state.test.ts` lines 248-764 (30) | 46 |
+| 22. Registrations 7 | `src/state.test.ts` lines 779-1633 (33); `src/taker-cli.test.ts` lines 27-135 (13) | 46 |
+| 23. Registrations 8 | `src/taker-cli.test.ts` lines 144-197 (9); `src/taker-e2e.test.ts` lines 255-1152 (31); `src/taker-policy.test.ts` lines 143-167 (6) | 46 |
+| 24. Registrations 9 | `src/taker-policy.test.ts` lines 173-574 (46) | 46 |
+| 25. Registrations 10 | `src/taker-policy.test.ts` lines 586-851 (24); `src/taker-proofs.test.ts` lines 239-498 (22) | 46 |
+| 26. Registrations 11 | `src/taker-proofs.test.ts` lines 512-733 (17); `src/taker-state.test.ts` lines 165-556 (25); `src/taker-survival.test.ts` lines 17-32 (4) | 46 |
 
 ## Validation
 
-Test-discovery alignment gates used Node 22.22.3, `CI=true`, and externally supplied
+Validation used Node 22.22.3, `CI=true`, and externally supplied
 `TSESTREE_SINGLE_RUN=true` to exercise the checker's override. Commands ran
-from each package. Values below are final process exit codes. The manifests
-required no regeneration.
+from each package with `DISPLAY` and `WAYLAND_DISPLAY` unset. Values below are
+process exit codes. All three manifests were regenerated from the full strict
+scan; frontend remains byte-identical to its previous manifest. Ordinary
+ratchet updates retain their zero-growth checks.
 
 | Command | Frontend | Server | Marketmaker |
 | --- | ---: | ---: | ---: |
@@ -312,7 +315,7 @@ required no regeneration.
 | `npm run lint` | 0 | 0 | 0 |
 | `npm run lint:ratchet -- --base-ref origin/dev --integration-ref origin/dev` | 0 | 0 | 0 |
 | `npm run lint:ratchet -- --base-ref origin/main --integration-ref origin/dev` | 1 | 1 | 1 |
-| `npm run lint:ratchet -- --base-ref origin/main --integration-ref HEAD` | 0 | 0 | 0 |
+| `npm run lint:ratchet -- --base-ref origin/main --integration-ref HEAD` | 0 | 1 | 1 |
 | `npm run typecheck` | 0 | 0 | 0 |
 | `npm test` | 0 | 0 | 0 |
 | `npm run build` | 0 | 0 | 0 |
@@ -321,26 +324,29 @@ required no regeneration.
 | `actionlint` | 0 | 0 | 0 |
 | `npm run typecheck:loadtest` | N/A | 0 | N/A |
 
-At validation, `origin/dev` is `798214a` and `origin/main` is `f83f53b`; both
-have legacy manifests. The literal main PR arguments therefore enforce the
-bootstrap freeze and reject the pre-existing `frontend/package-lock.json`
-difference between main and dev. No dependency files changed in this fix.
-Using `HEAD` (`76b4146`) as the integration reference models dev adopting the
-versioned manifest: all three manifests are byte-identical to
-that reference, and the main comparison passes. The integration suites also
-verify this adoption path with isolated references. The bootstrap freeze and
-the CI integration reference of `origin/dev` remain intact.
+At validation, `origin/dev` is `798214a`, `origin/main` is `f83f53b`, and
+`HEAD` is `17c8d08`. Both remote-tracking refs have legacy manifests. The main
+comparison therefore enforces bootstrap equality and rejects the pre-existing
+`frontend/package-lock.json` difference between main and dev in all three
+packages. Dependency declarations and lockfiles are unchanged in this update.
+
+The committed-HEAD adoption comparison passes for frontend. Server and
+marketmaker correctly reject growth against HEAD's older versioned manifests,
+which recorded zero `no-floating-promises` findings. The new registration debt
+is still uncommitted. Each integration suite separately verifies successful
+adoption using isolated references built from the regenerated manifests,
+including promotion from an older main source tree and rejection of subsequent
+count growth. The actual refs and their count ceilings remain unchanged.
 
 Application tests passed: frontend 475, server 217, and marketmaker 439.
-Server HTTP and federation smoke checks passed. Each package passed 22 policy
-unit tests. Ratchet integration tests passed: frontend 28, server 30, and
-marketmaker 31. Nested test probes are reported by the guard in check and update
-modes, including after adoption, and receive no node:test promise exemption.
-The emitted top-level test filenames exactly match the scope reader's 17 server
-and 23 marketmaker test paths. The frontend build retains its existing
-bundle-size warnings.
+Server HTTP and federation smoke checks passed. Each package passed 21 policy
+unit tests and 28 ratchet integration tests. These include the retained tracked
+`node_modules` rejection and the uniform floating-promise policy. The frontend
+build retains its existing bundle-size warnings.
 
-Shared tooling formatting, `git diff --check`, and scans for Unicode U+2014
-and private infrastructure details passed. TypeScript application sources,
-contracts, dependency declarations, and lockfiles remain unchanged. All
-test-discovery alignment edits remain uncommitted and the worktree index is unchanged.
+Shared tooling formatting, census rule totals and slice coverage,
+`git diff --check`, and scans for Unicode U+2014, private infrastructure details,
+and obsolete policy documentation passed with exit code 0. The 52 slices cover
+all 2,289 findings exactly once. TypeScript application sources, contracts,
+dependency declarations, and lockfiles remain unchanged. All edits remain
+uncommitted and the worktree index is unchanged.

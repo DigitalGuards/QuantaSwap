@@ -6,13 +6,11 @@ import {
   doubleAssertionGuard,
   generatedDirectories,
   hardenedRules,
-  nodeTestSafeCalls,
   suppressionGuard,
   testConsoleFiles,
   typedFiles,
 } from "../scripts/eslint-policy.mjs";
 import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
-import { nodeTestScope } from "../scripts/lint-ratchet-node-tests.mjs";
 
 const testHelpers = [
   "src/legacy-v1-test-helper.ts",
@@ -44,17 +42,6 @@ export const strictConfig = tseslint.config(
       "@typescript-eslint/no-unused-vars": [
         "error",
         { argsIgnorePattern: "^_", ignoreRestSiblings: true },
-      ],
-    },
-  },
-  {
-    files: nodeTestScope(import.meta.dirname).files,
-    rules: {
-      "@typescript-eslint/no-floating-promises": [
-        "error",
-        {
-          allowForKnownSafeCalls: nodeTestSafeCalls,
-        },
       ],
     },
   },

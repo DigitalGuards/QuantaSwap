@@ -13,50 +13,12 @@ the wallet policy. Existing unused-binding options remain in place. Production
 native array checks stay confined to `src/guards.ts`; the existing fixture scope
 retains its native array checks. Tests have the same typed rule set as app code.
 
-The node:test promise exemption applies only to compiled, non-hidden top-level
-`src/*.test.ts` files selected by `node --test dist/*.test.js` and these
-exact helper paths:
-`src/protocol-v2-test-helper.ts`, `src/taker-test-harness.ts`, and
-`src/taker-survival-child.ts`. The shared
-`scripts/lint-ratchet-node-tests.mjs` scope reader supplies exact file paths to
-ESLint. It checks the complete `package.json` test command, requires `build` to
-remain `tsc`, and uses the installed TypeScript compiler to read `tsconfig.json`,
-including inherited settings and file exclusions. JavaScript emission must map
-`src` to `dist`. A command or output mapping change fails until the scope
-contract is reviewed and updated.
-
-The helper check requires each helper and its named loader to be compiled, with
-the loader in the executed test set. It checks value imports from
-`protocol-signing.test.ts` and `taker-e2e.test.ts`, plus the child-script URL in
-`taker-survival.test.ts`. The survival test launches and checks that child.
-`src/legacy-v1-test-helper.ts` has no test importer and receives no node:test
-promise exemption. Its existing console and native-array policies remain.
-
-Every lint and ratchet check or update also inventories all package `*.test.ts`
-files recursively, including hidden and Git-ignored paths. Only `node_modules`
-and `.git` directories are skipped. Any test outside the executed set fails
-with its path before manifest comparisons or writes. This includes nested,
-compiler-excluded, and out-of-source tests. The existing CI lint and ratchet
-steps run this guard. The current inventory has 23 executed test files and no
-unrun test files; test discovery remains unchanged.
-
-The exemption uses typescript-eslint's documented
-[`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls)
-package specifier with `from: "package"`, `package: "node:test"`, and names
-`test`, `describe`, `it`, `suite`, `skip`, `only`, and `todo`. It allows
-runner-owned registrations and their `.skip`, `.only`, and `.todo` members to
-float. Production code keeps `no-floating-promises` without this exemption;
-ordinary promises in tests remain subject to that rule.
-
-This exemption is type-based. A test author can deliberately bypass the promise
-check by aliasing node:test functions, borrowing their types, or mutating members
-such as `test.skip`. It can also cover `TestContext.test` through its shared
-registration type. Authors must await, return, or join subtests so their parent
-waits for them. Node's test runner fails the run on unhandled rejections and
-cancelled subtests, including children returned from unrelated callbacks that
-the parent does not join. CI runs these tests through `npm test`. See Node's
-[test runner documentation](https://nodejs.org/api/test.html#subtests) for the
-runtime behavior.
+`no-floating-promises` applies to every authored TypeScript file, including
+node:test registrations, subtests, and test helpers. Existing findings are
+recorded in the manifest. For cleanup, mark top-level registrations that are
+intentionally not awaited with `void`; Node's test runner supports that usage
+by design. Await or return subtest promises so the parent waits for completion.
+See the [registration cleanup guidance](../docs/LINT_CENSUS.md#node-test-registrations-and-service-logging).
 
 Runtime TypeScript and scripts allow `console.info`, `console.warn`, and
 `console.error`. `console.log` and `console.debug` remain findings; cleanup

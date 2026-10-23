@@ -3,8 +3,23 @@
   "entries": [
     {
       "file": "src/admission.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 9
+    },
+    {
+      "file": "src/admission.test.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 1
+    },
+    {
+      "file": "src/client-ip.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 7
+    },
+    {
+      "file": "src/config.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 10
     },
     {
       "file": "src/config.ts",
@@ -18,8 +33,18 @@
     },
     {
       "file": "src/cors.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/cors.test.ts",
       "rule": "@typescript-eslint/no-unnecessary-condition",
       "count": 1
+    },
+    {
+      "file": "src/federation-reset.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 16
     },
     {
       "file": "src/federation-reset.test.ts",
@@ -40,6 +65,11 @@
       "file": "src/federation.test.ts",
       "rule": "@typescript-eslint/dot-notation",
       "count": 1
+    },
+    {
+      "file": "src/federation.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 29
     },
     {
       "file": "src/federation.test.ts",
@@ -102,9 +132,19 @@
       "count": 11
     },
     {
+      "file": "src/inflight-gate.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 9
+    },
+    {
       "file": "src/lease-integration.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
       "count": 9
+    },
+    {
+      "file": "src/lease-integration.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 5
     },
     {
       "file": "src/lease-integration.test.ts",
@@ -178,6 +218,11 @@
     },
     {
       "file": "src/order-signing.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 24
+    },
+    {
+      "file": "src/order-signing.test.ts",
       "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 1
     },
@@ -200,6 +245,11 @@
       "file": "src/peer-sync.test.ts",
       "rule": "@typescript-eslint/no-base-to-string",
       "count": 12
+    },
+    {
+      "file": "src/peer-sync.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 32
     },
     {
       "file": "src/peer-sync.test.ts",
@@ -253,6 +303,11 @@
     },
     {
       "file": "src/peer-transport.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
+    },
+    {
+      "file": "src/peer-transport.test.ts",
       "rule": "@typescript-eslint/require-await",
       "count": 1
     },
@@ -277,6 +332,11 @@
       "count": 1
     },
     {
+      "file": "src/process-lease.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 36
+    },
+    {
       "file": "src/process-lease.ts",
       "rule": "@typescript-eslint/prefer-optional-chain",
       "count": 3
@@ -293,6 +353,11 @@
     },
     {
       "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
       "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 2
     },
@@ -300,6 +365,11 @@
       "file": "src/protocol-v2-wire.ts",
       "rule": "@typescript-eslint/consistent-type-definitions",
       "count": 1
+    },
+    {
+      "file": "src/qip55.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 5
     },
     {
       "file": "src/server.ts",
@@ -333,6 +403,11 @@
     },
     {
       "file": "src/store-protocol.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 34
+    },
+    {
+      "file": "src/store-protocol.test.ts",
       "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 2
     },
@@ -360,6 +435,11 @@
       "file": "src/store.test.ts",
       "rule": "@typescript-eslint/dot-notation",
       "count": 2
+    },
+    {
+      "file": "src/store.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 6
     },
     {
       "file": "src/store.test.ts",
@@ -395,6 +475,11 @@
       "file": "src/store.ts",
       "rule": "preserve-caught-error",
       "count": 1
+    },
+    {
+      "file": "src/stream.test.ts",
+      "rule": "@typescript-eslint/no-floating-promises",
+      "count": 4
     }
   ]
 }
