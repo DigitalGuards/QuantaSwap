@@ -1,79 +1,445 @@
 {
-  "src/chains.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/config.test.ts": {
-    "@typescript-eslint/no-dynamic-delete": 2
-  },
-  "src/config.ts": {
-    "preserve-caught-error": 1
-  },
-  "src/credits-cli.ts": {
-    "@typescript-eslint/require-await": 1
-  },
-  "src/deployment.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/drain.test.ts": {
-    "@typescript-eslint/require-await": 4
-  },
-  "src/htlc.test.ts": {
-    "@typescript-eslint/no-base-to-string": 1,
-    "@typescript-eslint/no-unnecessary-condition": 1,
-    "@typescript-eslint/require-await": 6
-  },
-  "src/index.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 5,
-    "@typescript-eslint/only-throw-error": 1
-  },
-  "src/init-keys.ts": {
-    "@typescript-eslint/require-await": 1
-  },
-  "src/orderbook.test.ts": {
-    "@typescript-eslint/no-base-to-string": 1
-  },
-  "src/protocol-signing.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 5
-  },
-  "src/qrvmHtlc.test.ts": {
-    "@typescript-eslint/no-base-to-string": 1,
-    "@typescript-eslint/require-await": 1
-  },
-  "src/state.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 7,
-    "@typescript-eslint/no-unsafe-member-access": 2
-  },
-  "src/state.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 5
-  },
-  "src/taker-cli.ts": {
-    "@typescript-eslint/only-throw-error": 1
-  },
-  "src/taker-e2e.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 5,
-    "@typescript-eslint/require-await": 5
-  },
-  "src/taker-policy.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1
-  },
-  "src/taker-policy.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 2
-  },
-  "src/taker-proofs.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 2
-  },
-  "src/taker-proofs.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 2
-  },
-  "src/taker-state.test.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 7
-  },
-  "src/taker-test-harness.ts": {
-    "@typescript-eslint/no-unnecessary-condition": 1,
-    "@typescript-eslint/no-unsafe-return": 2,
-    "@typescript-eslint/require-await": 2
-  },
-  "src/taker.ts": {
-    "preserve-caught-error": 1
-  }
+  "version": 1,
+  "entries": [
+    {
+      "file": "src/admission.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 3
+    },
+    {
+      "file": "src/admission.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 1
+    },
+    {
+      "file": "src/chains.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 4
+    },
+    {
+      "file": "src/chains.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 7
+    },
+    {
+      "file": "src/chains.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/config.test.ts",
+      "rule": "@typescript-eslint/no-dynamic-delete",
+      "count": 2
+    },
+    {
+      "file": "src/config.ts",
+      "rule": "preserve-caught-error",
+      "count": 1
+    },
+    {
+      "file": "src/credits-cli.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/credits-cli.ts",
+      "rule": "no-console",
+      "count": 9
+    },
+    {
+      "file": "src/deployment.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/drain.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 4
+    },
+    {
+      "file": "src/guards.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/health.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/htlc.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 6
+    },
+    {
+      "file": "src/htlc.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 12
+    },
+    {
+      "file": "src/index.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 5
+    },
+    {
+      "file": "src/index.ts",
+      "rule": "@typescript-eslint/only-throw-error",
+      "count": 1
+    },
+    {
+      "file": "src/index.ts",
+      "rule": "no-console",
+      "count": 1
+    },
+    {
+      "file": "src/init-keys.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/init-keys.ts",
+      "rule": "no-console",
+      "count": 5
+    },
+    {
+      "file": "src/legacy-v1-test-helper.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 2
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 3
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 7
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 1
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/orderbook.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 2
+    },
+    {
+      "file": "src/orderbook.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 90
+    },
+    {
+      "file": "src/policy.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 2
+    },
+    {
+      "file": "src/price.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 6
+    },
+    {
+      "file": "src/protocol-signing.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 3
+    },
+    {
+      "file": "src/protocol-signing.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 7
+    },
+    {
+      "file": "src/protocol-signing.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/protocol-signing.ts",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/protocol-signing.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 19
+    },
+    {
+      "file": "src/protocol-signing.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 5
+    },
+    {
+      "file": "src/protocol-v2-test-helper.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 2
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 8
+    },
+    {
+      "file": "src/protocol-v2-wire.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 2
+    },
+    {
+      "file": "src/protocol-v2-wire.ts",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/qrl-web3-compat.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 3
+    },
+    {
+      "file": "src/qrl-web3-compat.test.ts",
+      "rule": "@typescript-eslint/prefer-function-type",
+      "count": 1
+    },
+    {
+      "file": "src/qrl-web3-compat.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 1
+    },
+    {
+      "file": "src/qrvmHtlc.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/qrvmHtlc.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 1
+    },
+    {
+      "file": "src/qrvmHtlc.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 19
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 15
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 7
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-member-access",
+      "count": 2
+    },
+    {
+      "file": "src/state.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 2
+    },
+    {
+      "file": "src/state.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 83
+    },
+    {
+      "file": "src/state.ts",
+      "rule": "@typescript-eslint/no-empty-function",
+      "count": 1
+    },
+    {
+      "file": "src/state.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 5
+    },
+    {
+      "file": "src/state.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 4
+    },
+    {
+      "file": "src/taker-cli.ts",
+      "rule": "@typescript-eslint/only-throw-error",
+      "count": 1
+    },
+    {
+      "file": "src/taker-cli.ts",
+      "rule": "no-console",
+      "count": 39
+    },
+    {
+      "file": "src/taker-e2e.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/taker-e2e.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 5
+    },
+    {
+      "file": "src/taker-e2e.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 5
+    },
+    {
+      "file": "src/taker-orderbook.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 3
+    },
+    {
+      "file": "src/taker-policy.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/taker-policy.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/taker-proofs.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/taker-proofs.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 72
+    },
+    {
+      "file": "src/taker-proofs.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/taker-proofs.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 1
+    },
+    {
+      "file": "src/taker-state.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 11
+    },
+    {
+      "file": "src/taker-state.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 4
+    },
+    {
+      "file": "src/taker-state.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 7
+    },
+    {
+      "file": "src/taker-state.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 74
+    },
+    {
+      "file": "src/taker-state.ts",
+      "rule": "@typescript-eslint/no-empty-function",
+      "count": 1
+    },
+    {
+      "file": "src/taker-survival-child.ts",
+      "rule": "no-console",
+      "count": 5
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 33
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 4
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/no-unsafe-return",
+      "count": 2
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 4
+    },
+    {
+      "file": "src/taker-test-harness.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 2
+    },
+    {
+      "file": "src/taker.ts",
+      "rule": "@typescript-eslint/consistent-type-imports",
+      "count": 1
+    },
+    {
+      "file": "src/taker.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 3
+    },
+    {
+      "file": "src/taker.ts",
+      "rule": "no-console",
+      "count": 1
+    },
+    {
+      "file": "src/taker.ts",
+      "rule": "preserve-caught-error",
+      "count": 1
+    }
+  ]
 }

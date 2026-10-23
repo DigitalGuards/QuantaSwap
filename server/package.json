@@ -16,11 +16,12 @@
     "typecheck:loadtest": "tsc --project tsconfig.loadtest.json --noEmit",
     "loadtest": "npm run build:loadtest && node dist-loadtest/loadtest/main.js",
     "smoke:federation": "npm run build && node federation-smoke.js",
-    "lint": "node lint.mjs",
-    "typecheck": "tsc --noEmit",
+    "lint": "node ../scripts/lint-ratchet.mjs --check",
+    "typecheck": "tsc --noEmit -p tsconfig.eslint.json",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,mts,cts}\" \"*.json\" \"*.mjs\"",
     "pretest": "npm run format:check && npm run lint && npm run typecheck",
-    "lint:prune": "node lint.mjs --prune"
+    "lint:ratchet": "node ../scripts/lint-ratchet.mjs --check",
+    "lint:ratchet:update": "node ../scripts/lint-ratchet.mjs"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

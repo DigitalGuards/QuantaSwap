@@ -10,10 +10,11 @@
     "preview": "vite preview",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
-    "lint": "eslint . --max-warnings 0 && node scripts/check-lint-ratchet.mjs",
-    "typecheck": "tsc --noEmit",
+    "lint": "node ../scripts/lint-ratchet.mjs --check",
+    "typecheck": "tsc --noEmit -p tsconfig.eslint.json",
     "prebuild": "npm run format:check && npm run lint && npm run typecheck",
-    "lint:ratchet": "node scripts/check-lint-ratchet.mjs --update"
+    "lint:ratchet": "node ../scripts/lint-ratchet.mjs --check",
+    "lint:ratchet:update": "node ../scripts/lint-ratchet.mjs"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.2.8",

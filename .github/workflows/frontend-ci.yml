@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - 'config/protocol-v2*.json'
+      - 'scripts/eslint-policy.mjs'
+      - 'scripts/lint-ratchet*.mjs'
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
   push:
@@ -15,6 +17,8 @@ on:
       - main
     paths:
       - 'config/protocol-v2*.json'
+      - 'scripts/eslint-policy.mjs'
+      - 'scripts/lint-ratchet*.mjs'
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
   workflow_dispatch:
@@ -30,11 +34,13 @@ jobs:
   verify:
     name: Test and build frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -46,6 +52,32 @@ jobs:
       - name: Install locked dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Verify lint policy guards
+        working-directory: frontend
+        run: node --test ../scripts/lint-ratchet.test.mjs
+
+      - name: Verify lint ratchet integration
+        working-directory: frontend
+        run: node --test ../scripts/lint-ratchet.integration.test.mjs
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Check lint ratchet against base
+        working-directory: frontend
+        env:
+          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            LINT_BASE_REF=HEAD
+          fi
+          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF"
+
+      - name: Typecheck frontend
+        working-directory: frontend
+        run: npm run typecheck
 
       - name: Run frontend tests
         working-directory: frontend

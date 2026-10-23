@@ -1,5 +1,15 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src"],
-  "exclude": []
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["**/*.ts", "**/*.tsx", "**/*.mts", "**/*.cts"],
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/dist-loadtest/**",
+    "**/build/**",
+    "**/coverage/**"
+  ]
 }
