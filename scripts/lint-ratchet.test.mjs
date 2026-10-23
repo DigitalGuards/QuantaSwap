@@ -18,6 +18,7 @@ import { hardenedRules, suppressionGuard } from "./eslint-policy.mjs";
 import {
   assertExactFindings,
   assertNoGrowth,
+  assertNoTrackedNodeModules,
   collectFindings,
   collectPairs,
   isBootstrapSetupFile,
@@ -37,6 +38,40 @@ const { strictConfig } = await import(
 );
 const entry = { file: "src/example.ts", rule: "no-console", count: 2 };
 const manifest = (entries) => ({ version: 1, entries });
+
+test("tracked node_modules path segments are forbidden at every depth", () => {
+  assert.doesNotThrow(() =>
+    assertNoTrackedNodeModules([
+      "src/node_modules.ts",
+      "src/my_node_modules/probe.ts",
+      "src/node_modules_backup/probe.ts",
+      "docs/node_modules-guide.md",
+    ]),
+  );
+  const forbidden = [
+    "node_modules/dependency/index.js",
+    "frontend/node_modules/dependency/package.json",
+    "server/src/node_modules/probe.ts",
+    "marketmaker/test/fixtures/node_modules/data.json",
+    "packages/shared/node_modules/types.d.ts",
+    "docs/node_modules/README.md",
+    "src/space and\nnewline/node_modules/probe.ts",
+  ];
+  for (const file of forbidden) {
+    assert.throws(
+      () => assertNoTrackedNodeModules(["src/allowed.ts", file]),
+      (error) =>
+        /node_modules directory segment/u.test(error.message) &&
+        error.message.includes(JSON.stringify(file)),
+      file,
+    );
+  }
+  assert.throws(
+    () => assertNoTrackedNodeModules(forbidden),
+    (error) =>
+      forbidden.every((file) => error.message.includes(JSON.stringify(file))),
+  );
+});
 
 test("a pair cannot move to another file or rule, or increase its count", () => {
   const base = collectPairs(manifest([entry]));
@@ -80,11 +115,11 @@ test("bootstrap requires identical pairs and counts in both directions", () => {
 test("bootstrap exceptions are confined to setup files", () => {
   for (const file of [
     "scripts/eslint-policy.mjs",
-    "scripts/eslint-node-test.mjs",
     "scripts/lint-ratchet.mjs",
     "scripts/lint-ratchet-lib.mjs",
     "scripts/lint-ratchet.test.mjs",
     "scripts/lint-ratchet.integration.test.mjs",
+    "scripts/eslint-node-test.mjs",
     "frontend/scripts/check-lint-ratchet.mjs",
     "server/lint.mjs",
     "marketmaker/lint.mjs",
@@ -154,7 +189,6 @@ test("ratchets reject globs, traversal, duplicates, invalid counts and suppressi
     { ...entry, rule: "no-warning-comments" },
     { ...entry, rule: "@typescript-eslint/ban-ts-comment" },
     { ...entry, rule: "lint-policy/no-inline-config" },
-    { ...entry, rule: "node-test/direct-calls" },
   ]) {
     assert.throws(() => collectPairs(manifest([changed])), /Invalid ratchet/u);
   }
@@ -214,142 +248,76 @@ test("strict and stylistic type-aware rules cover apps, tests, tooling and every
   }
 });
 
-test(
-  "node:test subtests require the enclosing callback binding and handled results",
-  { skip: path.basename(root) === "frontend" },
-  async () => {
-    const source = `
-import test from "node:test";
-import type { TestContext } from "node:test";
-test("parent", async (t) => {
-  t.skip("context skip control");
-  t.todo("context todo control");
-  t.test("direct", () => {}); // guarded
-  t["test"]("computed", () => {}); // guarded
-  t.test?.("optional", () => {}); // guarded
-  const alias = t.test;
-  alias("alias", () => {}); // guarded
-  const { test: renamed } = t;
-  renamed("destructured", () => {}); // guarded
-  const bound = t.test.bind(t);
-  bound("bound", () => {}); // guarded
-  t.test.bind(t)("inline bound", () => {}); // guarded
-  const helper = { subtest: t.test.bind(t) };
-  helper.subtest("object alias", () => {}); // guarded
-  const methods = [t.test];
-  methods[0]("array alias", () => {}); // guarded
-  let assigned = t.test;
-  assigned = t.test;
-  assigned("assigned", () => {}); // guarded
-  ({ test: assigned } = t);
-  assigned("destructuring assignment", () => {}); // guarded
-  const { ["test"]: computed } = t;
-  computed("computed binding", () => {}); // guarded
-  const key = "test";
-  const byKey = t[key];
-  byKey("indexed", () => {}); // guarded
-  const unionKey = Date.now() ? "test" : "name";
-  const { [unionKey]: mixedMethod } = t;
-  if (typeof mixedMethod === "function") mixedMethod("narrowed", () => {}); // guarded
-  const byUnionKey = t[unionKey];
-  if (typeof byUnionKey === "function") byUnionKey("narrowed value", () => {}); // guarded
-  type Method = typeof t.test;
-  const borrowed: Method = t.test;
-  borrowed("borrowed type", () => {}); // guarded
-  const getter = get(t, "test").bind(t);
-  getter("generic getter", () => {}); // guarded
-  get(t, "test").bind(t)("inline getter", () => {}); // guarded
-  helperSubtest(t); // ordinary
-  const context = t;
-  await context.test("context alias", () => {}); // guarded
-  await get(t, "test")("returned method", () => {}); // guarded
-  void t.test("voided", () => {}); // guarded
-  const deferred = t.test("stored result", () => {}); // guarded
-  t.test.call(t, "call", () => {}); // ordinary
-  t.test.apply(t, ["apply", () => {}]); // ordinary
-  true && t.test("logical", () => {}); // guarded
-  true ? t.test("conditional", () => {}) : undefined; // guarded
-  [t.test("array", () => {})]; // guarded
-  (t.test("sequence", () => {}), undefined); // guarded
-  await Promise.race([t.test("race", () => {})]); // guarded
-  await Promise.any([t.test("any", () => {})]); // guarded
-  await consume(t.test("argument", () => {})); // guarded
-  await t.test("awaited", () => {});
-  await t["test"]("computed awaited", () => {}); // guarded
-  await t.test?.("optional awaited", () => {}); // guarded
-  await t.test.skip("skipped", () => {});
-  await t.test.only("only", () => {});
-  await t.test.todo("todo");
-  t.test.skip("unhandled skip", () => {}); // guarded
-  t.test.only("unhandled only", () => {}); // guarded
-  t.test.todo("unhandled todo"); // guarded
-  await Promise.all([t.test("collected", () => {})]);
-  await Promise.allSettled([t.test("settled", () => {})]);
-  await untrustedJoin.all([t.test("borrowed join type", () => {})]); // guarded
-  {
-    const Promise = { all: (_values: unknown[]) => undefined };
-    await Promise.all([t.test("unhandled by shadow", () => {})]); // guarded
-  }
-  return t.test("returned", () => {});
-});
-test("expression body", (t) => t.test("returned", () => {}));
-test("joined expression", (t) => Promise.all([t.test("returned", () => {})]));
-test("function callback", function (context) { return context.test("child", () => {}); });
-test("parameter extraction", ({ test: child }) => child("extracted", () => {})); // guarded
-test("nested", async (t) => {
-  await t.test("child", async (child) => {
-    const methods = { child: child.test };
-    methods.child("helper", () => {}); // guarded
-    await child.test("grandchild", () => {});
-    await t.test("outer context", () => {});
-    { const child = t; await child.test("shadow", () => {}); } // guarded
-  });
-});
-function helperSubtest(context: TestContext) {
-  return context.test("helper child", () => {}); // guarded
-}
-function get<T, K extends keyof T>(object: T, key: K): T[K] { return object[key]; }
-declare function consume(value: unknown): Promise<void>;
-declare const untrustedJoin: PromiseConstructor;
-Promise.reject(new Error("unhandled")); // ordinary
-{ const test = () => Promise.resolve(); test(); } // ordinary
-{ const describe = () => Promise.resolve(); describe(); } // ordinary
-{ const skip = () => Promise.resolve(); skip(); } // ordinary
-{ const context = { test: () => Promise.resolve() }; context.test(); } // ordinary
-`;
-    await assertNodeTestCalls(source);
-  },
-);
-
-async function assertNodeTestCalls(source) {
-  const fixture = await makePolicyFixture({ "src/probe.test.ts": source });
+test("node:test allowance is confined to exact test scopes and keeps ordinary promises checked", async () => {
+  const registrations = ["test", "register", "describe", "it", "suite"]
+    .flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`])
+    .concat(["skip", "only", "todo"]);
+  const lines = [
+    'import test, { test as register, describe, it, suite, skip, only, todo } from "node:test";',
+    ...registrations.map((name) => `${name}("registration", () => {});`),
+    'Promise.reject(new Error("ordinary rejection"));',
+    ...["test", "describe", "it", "suite", "skip", "only", "todo"].map(
+      (name) => `{ const ${name} = () => Promise.resolve(); ${name}(); }`,
+    ),
+  ];
+  const helperPaths = [
+    "src/legacy-v1-test-helper.ts",
+    "src/protocol-v2-test-helper.ts",
+    "src/taker-test-harness.ts",
+    "src/taker-survival-child.ts",
+  ];
+  const testPaths = ["src/probe.test.ts", "test/probe.test.ts"];
+  const paths = [
+    ...testPaths,
+    ...helperPaths,
+    "src/runtime.ts",
+    "scripts/probe.mts",
+    "src/probe.spec.ts",
+    "test/probe.ts",
+    "tests/probe.cts",
+    "src/__tests__/probe.ts",
+    "src/jsx-probe.test.tsx",
+    "src/module-probe.test.mts",
+    "src/common-probe.test.cts",
+    "src/other-test-helper.ts",
+    "src/nested/taker-test-harness.ts",
+  ];
+  const fixture = await makePolicyFixture(
+    Object.fromEntries(paths.map((file) => [file, lines.join("\n")])),
+  );
   try {
-    const [result] = await fixture.eslint.lintFiles(["src/probe.test.ts"]);
-    assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
-    for (const [rule, marker] of [
-      ["node-test/direct-calls", "guarded"],
-      ["@typescript-eslint/no-floating-promises", "ordinary"],
-    ]) {
-      const lines = source.split("\n");
+    const results = await fixture.eslint.lintFiles(["."]);
+    assert.equal(results.length, paths.length);
+    for (const result of results) {
+      assert.equal(result.fatalErrorCount, 0, JSON.stringify(result.messages));
+      const file = path.relative(fixture.root, result.filePath);
+      const exempt =
+        (path.basename(root) !== "frontend" && testPaths.includes(file)) ||
+        (path.basename(root) === "marketmaker" && helperPaths.includes(file));
+      const config = await fixture.eslint.calculateConfigForFile(
+        result.filePath,
+      );
+      const allowance =
+        config.rules["@typescript-eslint/no-floating-promises"][1]
+          ?.allowForKnownSafeCalls ?? [];
+      assert.equal(allowance.length, exempt ? 1 : 0, file);
       assert.deepEqual(
         result.messages
           .filter(
             (message) =>
-              message.ruleId === rule &&
-              (marker !== "ordinary" ||
-                !lines[message.line - 1].endsWith("// guarded")),
+              message.ruleId === "@typescript-eslint/no-floating-promises",
           )
           .map((message) => message.line),
-        lines.flatMap((line, index) =>
-          line.endsWith(`// ${marker}`) ? [index + 1] : [],
+        lines.flatMap((_, index) =>
+          index > (exempt ? registrations.length : 0) ? [index + 1] : [],
         ),
-        rule,
+        file,
       );
     }
   } finally {
     await fixture.cleanup();
   }
-}
+});
 
 test("CI passes base and integration refs for main adoption", async () => {
   for (const name of [
@@ -379,118 +347,20 @@ test("CI passes base and integration refs for main adoption", async () => {
       commands.length,
     );
     assert.ok(source.includes("fetch-depth: 0"), name);
-    if (name.endsWith("-ci"))
+    if (name.endsWith("-ci")) {
+      assert.equal(
+        source.split("'**/node_modules/**'").length - 1,
+        2,
+        `${name}: both event filters must cover tracked dependency paths`,
+      );
       assert.match(
         source,
         /  push:\n    branches:\n(?:      - [^\n]+\n)*      - main\n/u,
         name,
       );
+    }
   }
 });
-
-test(
-  "node:test resolves type constructions before validating call bindings",
-  { skip: path.basename(root) === "frontend" },
-  async () => {
-    const direct = [
-      "defaultTest",
-      "renamedTest",
-      "describeCase",
-      "itCase",
-      "suiteCase",
-    ].flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`]);
-    const indirect = [
-      "runner.test",
-      "runner.describe",
-      "runner.it",
-      "runner.suite",
-    ].flatMap((name) => [name, `${name}.skip`, `${name}.only`, `${name}.todo`]);
-    indirect.push(
-      "renamedSkip",
-      "renamedOnly",
-      "renamedTodo",
-      'runner["test"]["skip"]',
-      'defaultTest["skip"]',
-    );
-    const source = [
-      'import defaultTest, { test as renamedTest, describe as describeCase, it as itCase, suite as suiteCase, skip as renamedSkip, only as renamedOnly, todo as renamedTodo } from "node:test";',
-      'import * as runner from "node:test";',
-      'import type typeTest from "node:test";',
-      'import type { test as typeNamed, TestContext } from "node:test";',
-      ...direct.map((name) => `${name}("direct", () => {});`),
-      ...indirect.map((name) => `${name}("indirect", () => {}); // guarded`),
-      ...direct.flatMap((name, index) => [
-        `{ const alias = ${name}; alias("value alias", () => {}); } // guarded`,
-        `{ const helper = { register: ${name} }; helper.register("helper", () => {}); } // guarded`,
-        `type Registration${index} = typeof ${name};`,
-        `declare const constructed${index}: Registration${index};`,
-        `constructed${index}("constructed type", () => {}); // guarded`,
-      ]),
-      'const work: typeof typeTest.skip = () => Promise.reject(new Error("unhandled work"));',
-      "work(); // guarded",
-      'const other: typeof typeNamed.only = () => Promise.reject(new Error("unhandled work"));',
-      "other(); // guarded",
-      "type Property<T, K extends keyof T> = T[K];",
-      'const indexed: Property<Property<TestContext, "test">, "skip"> = () => Promise.reject(new Error("unhandled work"));',
-      'indexed("work"); // guarded',
-      "type First = typeof typeTest.skip;",
-      "type Second = First;",
-      "type Third = Second;",
-      'const chained: Third = () => Promise.reject(new Error("unhandled work"));',
-      "chained(); // guarded",
-      "function getTest() { return renamedTest; }",
-      'getTest()("returned function", () => {}); // guarded',
-      "function getSkip() { return defaultTest.skip; }",
-      'const returned: ReturnType<typeof getSkip> = () => Promise.reject(new Error("unhandled work"));',
-      "returned(); // guarded",
-      'type ViaImport = typeof import("node:test").test.skip;',
-      "declare const viaImport: ViaImport;",
-      "viaImport(); // guarded",
-      "function identity<T>(value: T): T { return value; }",
-      'identity(defaultTest)("generic", () => {}); // guarded',
-      'function constrained<T extends typeof defaultTest>(value: T) { value("constrained", () => {}); } // guarded',
-      "type Conditional<T> = T extends { test: infer F } ? F : never;",
-      "declare const conditional: Conditional<TestContext>;",
-      'conditional("conditional", () => {}); // guarded',
-      "type Mapped<T> = { [K in keyof T]: T[K] };",
-      "declare const mapped: Mapped<TestContext>;",
-      'mapped.test("mapped", () => {}); // guarded',
-      "declare const intersection: typeof defaultTest.skip & { label: string };",
-      'intersection("intersection", () => {}); // guarded',
-      "declare const union: typeof defaultTest.skip | (() => Promise<void>);",
-      "union(); // guarded",
-      'defaultTest?.("optional", () => {}); // guarded',
-      'defaultTest.bind(undefined)("bound", () => {}); // guarded',
-      "const { skip } = runner; skip(); // guarded",
-      'const [first] = [renamedTest]; first("array", () => {}); // guarded',
-      '{ let assigned = renamedTest; assigned = defaultTest; assigned("assigned", () => {}); } // guarded',
-      "{ const renamedTest: typeof defaultTest.skip = () => Promise.resolve(); renamedTest(); } // guarded",
-      "{ const renamedTest = () => Promise.resolve(); renamedTest(); } // ordinary",
-      "{ const runner = { test: () => Promise.resolve() }; runner.test(); } // ordinary",
-    ].join("\n");
-    await assertNodeTestCalls(source);
-  },
-);
-
-test(
-  "node:test value-name allowances also require approved call bindings",
-  { skip: path.basename(root) === "frontend" },
-  async () => {
-    const source = [
-      'import { test as register } from "node:test";',
-      'import type { HookFn } from "node:test";',
-      ...["test", "describe", "it", "suite", "skip", "only", "todo"].flatMap(
-        (name) => [
-          "{",
-          `const ${name}: HookFn = () => Promise.reject(new Error("unhandled work"));`,
-          `register("parent", (context) => { ${name}(context, () => {}); }); // guarded`,
-          "}",
-        ],
-      ),
-    ].join("\n");
-    await assertNodeTestCalls(source);
-  },
-);
 
 test("generated output exclusions apply only at repository and package roots", () => {
   assert.equal(isSourceFile("frontend/dist/authored.ts"), true);
@@ -826,7 +696,7 @@ test("versioned and legacy bases preserve their growth guards", async () => {
     const current = JSON.stringify(manifest([entry]), null, 2) + "\n";
     await writeFile(fixture.manifest, current);
     const bin = path.join(fixture.root, "bin");
-    await mkdir(bin);
+    await mkdir(bin, { recursive: true });
     const basePath = path.join(fixture.root, "base.json");
     const baseSourcePath = path.join(bin, "base-source");
     await copyFile(fixture.source, baseSourcePath);
@@ -965,6 +835,15 @@ async function makeFixture() {
     'export const strictConfig = [{ files: ["**/*.ts"], rules: { "no-console": "error" } }];\n',
   );
   const env = { ...process.env, CI: "true", TSESTREE_SINGLE_RUN: "true" };
+  const bin = path.join(temporary, "bin");
+  await mkdir(bin);
+  // CLI-only fixtures have an empty read-only index. Integration tests use Git.
+  await writeFile(
+    path.join(bin, "git"),
+    '#!/usr/bin/env node\nprocess.exit(process.argv[2] === "ls-files" ? 0 : 2);\n',
+    { mode: 0o700 },
+  );
+  env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
   return {
     root: temporary,
     package: packageRoot,

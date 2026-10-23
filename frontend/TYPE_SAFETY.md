@@ -18,6 +18,20 @@ uses the same hardened rules. `tsconfig.eslint.json` supplies type information a
 `npm run typecheck` scope. Const assertions remain allowed. Existing numeric template and concise
 void-callback options remain in place.
 
+Frontend uses Vitest and keeps `no-floating-promises` without a node:test exemption in every file.
+The [server](../server/TYPE_HARDENING.md) and [marketmaker](../marketmaker/TYPE_HARDENING.md)
+use typescript-eslint's documented `allowForKnownSafeCalls` for node:test registrations and their
+`skip`, `only`, and `todo` members in `**/*.test.ts` and marketmaker's four exactly named helpers.
+That exemption is type-based and can be bypassed by a test author deliberately aliasing or mutating
+node:test functions or borrowing their types. Node's test runner fails the run on unhandled
+rejections and cancelled subtests; CI runs the Node packages' tests through `npm test`.
+
+Before every check or update, the ratchet rejects any tracked repository path containing a
+`node_modules` directory segment, at any depth and for any file type. This covers ESLint's default
+recursive `node_modules` ignore and runs in CI through the existing lint and ratchet gates.
+Untracked installed dependencies remain ignored. Other generated-output exclusions apply only at
+package roots; authored nested paths such as `src/build/` remain checked.
+
 `npm run lint` and `npm run lint:ratchet` use the shared `scripts/lint-ratchet.mjs` checker.
 The package's versioned `eslint-ratchet.json` records exact file/rule pairs and occurrence counts.
 The editor config applies those exceptions; the checker always scans the full strict configuration.

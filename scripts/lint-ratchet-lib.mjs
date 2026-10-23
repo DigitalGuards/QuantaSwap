@@ -7,10 +7,23 @@ import { generatedDirectories } from "./eslint-policy.mjs";
 
 const protectedRules = new Set([
   "lint-policy/no-inline-config",
-  "node-test/direct-calls",
   "no-warning-comments",
   "@typescript-eslint/ban-ts-comment",
 ]);
+
+export function assertNoTrackedNodeModules(files) {
+  const forbidden = [...new Set(files)].filter((file) =>
+    file.split("/").includes("node_modules"),
+  );
+  if (forbidden.length) {
+    throw new Error(
+      `Tracked paths must not contain a node_modules directory segment:\n${forbidden
+        .sort()
+        .map((file) => JSON.stringify(file))
+        .join("\n")}`,
+    );
+  }
+}
 
 export function isTypeScript(file) {
   return /\.(?:ts|tsx|mts|cts)$/u.test(file);
@@ -106,11 +119,12 @@ export function assertExactFindings(current, manifest) {
 
 const bootstrapTooling = new Set([
   "scripts/eslint-policy.mjs",
-  "scripts/eslint-node-test.mjs",
   "scripts/lint-ratchet.mjs",
   "scripts/lint-ratchet-lib.mjs",
   "scripts/lint-ratchet.test.mjs",
   "scripts/lint-ratchet.integration.test.mjs",
+  // Retired tooling can remain in the index during an uncommitted setup edit.
+  "scripts/eslint-node-test.mjs",
   "frontend/scripts/check-lint-ratchet.mjs",
   "server/lint.mjs",
   "marketmaker/lint.mjs",

@@ -1,12 +1,29 @@
 export const typedFiles = ["**/*.{ts,tsx,mts,cts}"];
 // These names are excluded only directly under a package or repository root.
-// Authored subdirectories with these names remain in lint and source inventory.
+// Nested output names remain in lint and source inventory. ESLint also ignores
+// nested node_modules; the ratchet rejects tracked paths containing that segment.
 export const generatedDirectories = [
   "node_modules",
   "dist",
   "dist-loadtest",
   "build",
   "coverage",
+];
+
+// Type-based registration allowance, used only in named test scopes. See each
+// package's type-hardening guide for its limits and the CI test-runner checks.
+export const nodeTestSafeCalls = [
+  {
+    from: "package",
+    name: ["test", "describe", "it", "suite", "skip", "only", "todo"],
+    package: "node:test",
+  },
+];
+
+// Preserve the existing console policy across conventional test paths.
+export const testConsoleFiles = [
+  "**/*.{test,spec}.{ts,tsx,mts,cts}",
+  "**/{test,tests,__tests__}/**/*.{ts,tsx,mts,cts}",
 ];
 
 export const doubleAssertionGuard = {

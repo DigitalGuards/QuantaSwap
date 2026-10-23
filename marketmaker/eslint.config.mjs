@@ -1,23 +1,20 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import prettier from "eslint-config-prettier";
-import ts from "typescript";
-import createNodeTestPlugin, {
-  nodeTestFiles,
-  nodeTestSafeCalls,
-} from "../scripts/eslint-node-test.mjs";
 import {
   arrayGuard,
   doubleAssertionGuard,
   generatedDirectories,
   hardenedRules,
+  nodeTestSafeCalls,
   suppressionGuard,
+  testConsoleFiles,
   typedFiles,
 } from "../scripts/eslint-policy.mjs";
 import { editorOverrides, readRatchet } from "../scripts/lint-ratchet-lib.mjs";
 
 const testFiles = [
-  ...nodeTestFiles,
+  "**/*.test.ts",
   "src/legacy-v1-test-helper.ts",
   "src/protocol-v2-test-helper.ts",
   "src/taker-test-harness.ts",
@@ -41,10 +38,8 @@ export const strictConfig = tseslint.config(
         tsconfigRootDir: import.meta.dirname,
       },
     },
-    plugins: { "node-test": createNodeTestPlugin(ts, import.meta.url) },
     rules: {
       ...hardenedRules,
-      "node-test/direct-calls": "error",
       "no-restricted-syntax": ["error", doubleAssertionGuard, arrayGuard],
       "@typescript-eslint/no-unused-vars": [
         "error",
@@ -55,8 +50,6 @@ export const strictConfig = tseslint.config(
   {
     files: testFiles,
     rules: {
-      // The type-aware companion rule checks every call covered by this allowance
-      // and requires direct bindings plus awaited or returned subtests.
       "@typescript-eslint/no-floating-promises": [
         "error",
         {
@@ -67,7 +60,7 @@ export const strictConfig = tseslint.config(
   },
   {
     files: typedFiles,
-    ignores: testFiles,
+    ignores: [...testConsoleFiles, ...testFiles],
     // Services and scripts write to container stdout/stderr through console.
     rules: { "no-console": ["error", { allow: ["info", "warn", "error"] }] },
   },

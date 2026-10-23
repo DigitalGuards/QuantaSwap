@@ -13,15 +13,25 @@ the wallet policy. Existing unused-binding options remain in place. Production
 native array checks stay confined to `src/guards.ts`; the existing fixture scope
 retains its native array checks. Tests have the same typed rule set as app code.
 
-Node test registrations use the package-qualified `allowForKnownSafeCalls`
-exception for `node:test` (`test`, `describe`, `it`, `suite`, and their
-`skip`, `only`, and `todo` variants). The `node-test/direct-registrations` rule
-requires direct calls on imported bindings and rejects value aliases and type
-references. The `node-test/no-floating-subtests` rule requires a direct
-`TestContext.test` call with an awaited or returned result, including calls joined
-by the built-in `Promise.all` or `Promise.allSettled`. Method extraction through
-properties, arrays, binding, arguments, assignments, and destructuring fails.
-Other floating promises remain findings.
+The node:test promise exemption applies only to `**/*.test.ts`.
+
+The exemption uses typescript-eslint's documented
+[`allowForKnownSafeCalls`](https://typescript-eslint.io/rules/no-floating-promises/#allowforknownsafecalls)
+package specifier with `from: "package"`, `package: "node:test"`, and names
+`test`, `describe`, `it`, `suite`, `skip`, `only`, and `todo`. It allows
+runner-owned registrations and their `.skip`, `.only`, and `.todo` members to
+float. Production code keeps `no-floating-promises` without this exemption;
+ordinary promises in tests remain subject to that rule.
+
+This exemption is type-based. A test author can deliberately bypass the promise
+check by aliasing node:test functions, borrowing their types, or mutating members
+such as `test.skip`. It can also cover `TestContext.test` through its shared
+registration type. Authors must await, return, or join subtests so their parent
+waits for them. Node's test runner fails the run on unhandled rejections and
+cancelled subtests, including children returned from unrelated callbacks that
+the parent does not join. CI runs these tests through `npm test`. See Node's
+[test runner documentation](https://nodejs.org/api/test.html#subtests) for the
+runtime behavior.
 
 Runtime TypeScript and scripts allow `console.info`, `console.warn`, and
 `console.error`. `console.log` and `console.debug` remain findings; cleanup
@@ -49,6 +59,13 @@ exceptions in [the bootstrap policy](../docs/LINT_CENSUS.md#bootstrap-source-equ
 may differ. One current scan must exactly match the manifest's pairs and counts,
 in check and update modes. Source differences, extra or missing pairs, and raised
 or lowered counts fail before any manifest write.
+
+Before every check or update, the ratchet rejects any tracked repository path
+containing a `node_modules` directory segment, at any depth and for any file
+type. This covers ESLint's default recursive `node_modules` ignore and runs in
+CI through the existing lint and ratchet gates. Untracked installed dependencies
+remain ignored. Other generated-output exclusions apply only at package roots;
+authored nested paths such as `src/build/` remain checked.
 
 Bulk suppressions are ignored. Inline ESLint disables and rule overrides fail,
 even if they would hide no finding. The case-insensitive core comment guard

@@ -72,6 +72,7 @@ async function fixture(t, pkg) {
     TSESTREE_SINGLE_RUN: "true",
     PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
     GIT_OBJECT_DIRECTORY: objects,
+    GIT_INDEX_FILE: path.join(temporary, "index"),
     GIT_ALTERNATE_OBJECT_DIRECTORIES: git([
       "rev-parse",
       "--path-format=absolute",
@@ -113,6 +114,13 @@ async function fixture(t, pkg) {
     return fixtureGit(["mktree", "-z"], `${rows.join("\0")}\0`);
   }
   const sourceTree = writeTree(entries);
+  // Use a private index so tracked-path probes never touch the worktree index.
+  fixtureGit(["read-tree", sourceTree]);
+
+  function track(file, source = "tracked fixture\n") {
+    const blob = fixtureGit(["hash-object", "-w", "--stdin"], source);
+    fixtureGit(["update-index", "--add", "--cacheinfo", "100644", blob, file]);
+  }
 
   function replaceTreeEntry(tree, name, entry) {
     const rows = fixtureGit(["ls-tree", "-z", tree])
@@ -211,6 +219,7 @@ async function fixture(t, pkg) {
     }
   }
   async function restore() {
+    fixtureGit(["read-tree", sourceTree]);
     await fs.writeFile(ledgerPath, original);
     for (const [file, bytes] of backups) {
       const target = path.join(directory, file);
@@ -229,6 +238,7 @@ async function fixture(t, pkg) {
     update,
     ledger,
     edit,
+    track,
     restore,
     baseWithManifest,
     bootstrap: baseWithManifest(),
@@ -321,6 +331,53 @@ for (const pkg of packages) {
         const file = `${pkg}/src/.env.review.ts`;
         await f.edit(file, "export type ReviewEscape = any;\n");
         assert.ok(f.check(f.bootstrap, 1, equalityFailure).includes(file));
+      },
+    );
+
+    await t.test(
+      "tracked node_modules paths fail lint, base checks and updates repository-wide",
+      async () => {
+        const siblingPackage = pkg === "server" ? "marketmaker" : "server";
+        const paths = [
+          `${pkg}/src/node_modules/review.ts`,
+          `${pkg}/test/fixtures/node_modules/data.json`,
+          `${siblingPackage}/src/node_modules/review.ts`,
+          "docs/node_modules/guide.md",
+          "node_modules/review.txt",
+          `${pkg}/node_modules/review.txt`,
+          `${pkg}/src/space and\nnewline/node_modules/review.ts`,
+        ];
+        for (const file of paths) {
+          f.track(file);
+          const diagnostic =
+            /Tracked paths must not contain a node_modules directory segment/u;
+          const output = f.run(["run", "lint"], 1, diagnostic);
+          assert.ok(output.includes(JSON.stringify(file)), output);
+          f.run(["run", "lint:ratchet:update"], 1, diagnostic);
+          for (const base of [f.bootstrap, f.withLedger]) {
+            f.check(base, 1, diagnostic);
+            f.update(base, 1, diagnostic);
+          }
+          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
+          await f.restore();
+        }
+      },
+    );
+
+    await t.test(
+      "nested authored node_modules content is rejected as soon as it is tracked",
+      async () => {
+        const file = `${pkg}/src/node_modules/review.ts`;
+        const source =
+          '/* eslint-disable */\nexport type ReviewEscape = any;\nPromise.reject(new Error("unhandled work"));\n';
+        await f.edit(file, source);
+        // ESLint's default ignore hides the untracked file and installed deps.
+        f.run(["run", "lint"], 0);
+        f.track(file, source);
+        f.run(["run", "lint"], 1, /node_modules directory segment/u);
+        f.check(f.withLedger, 1, /node_modules directory segment/u);
+        f.update(f.withLedger, 1, /node_modules directory segment/u);
+        assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
       },
     );
 
@@ -584,74 +641,6 @@ for (const pkg of packages) {
         );
       },
     );
-
-    if (pkg !== "frontend") {
-      for (const [label, source, rule, runtimePattern] of [
-        [
-          "ordinary rejected promise typed as a registration",
-          'import type test from "node:test";\nconst work: typeof test.skip = () => Promise.reject(new Error("unhandled work"));\nwork();\n',
-          /node-test\/direct-calls/u,
-          /unhandled work/u,
-        ],
-        [
-          "generic indexed-access rejected promise",
-          'import type { TestContext } from "node:test";\ntype Property<T, K extends keyof T> = T[K];\nconst work: Property<Property<TestContext, "test">, "skip"> = () => Promise.reject(new Error("unhandled work"));\nwork("work");\n',
-          /node-test\/direct-calls/u,
-          /unhandled work/u,
-        ],
-        [
-          "alias-chain rejected promise",
-          'import type test from "node:test";\ntype First = typeof test.skip;\ntype Second = First;\ntype Third = Second;\nconst work: Third = () => Promise.reject(new Error("unhandled work"));\nwork("work");\n',
-          /node-test\/direct-calls/u,
-          /unhandled work/u,
-        ],
-        [
-          "generic getter bound subtest",
-          'import test from "node:test";\nimport { setTimeout } from "node:timers/promises";\nfunction get<T, K extends keyof T>(object: T, key: K): T[K] { return object[key]; }\ntest("parent", async (t) => {\n  const subtest = get(t, "test").bind(t);\n  subtest("child", async () => { await setTimeout(50); });\n  await setTimeout(1);\n});\n',
-          /node-test\/direct-calls/u,
-          /cancelledByParent/u,
-        ],
-        [
-          "un-awaited subtest through a helper",
-          'import test from "node:test";\nimport type { TestContext } from "node:test";\nimport { setTimeout } from "node:timers/promises";\nfunction child(t: TestContext) { return t.test("child", async () => { await setTimeout(50); }); }\ntest("parent", async (t) => {\n  child(t);\n  await setTimeout(1);\n});\n',
-          /node-test\/direct-calls/u,
-          /cancelledByParent/u,
-        ],
-        [
-          "hook borrowing an allowed local function name",
-          'import { test as register } from "node:test";\nimport type { HookFn } from "node:test";\nconst test: HookFn = () => Promise.reject(new Error("unhandled work"));\nregister("parent", (context) => { test(context, () => {}); });\n',
-          /node-test\/direct-calls/u,
-          /unhandled work/u,
-        ],
-        [
-          "bound subtest in an object property",
-          'import test from "node:test";\nimport { setTimeout } from "node:timers/promises";\ntest("parent", async (t) => {\n  const helper = { subtest: t.test.bind(t) };\n  helper.subtest("child", async () => { await setTimeout(50); });\n  await setTimeout(1);\n});\n',
-          /node-test\/direct-calls/u,
-          /cancelledByParent/u,
-        ],
-      ]) {
-        await t.test(`node:test review reproduction: ${label}`, async () => {
-          const file = `${pkg}/src/review-node.test.ts`;
-          await f.edit(file, source);
-          f.run(["run", "typecheck"], 0);
-          f.run(["run", "lint"], 1, rule);
-          f.check(f.withLedger, 1, rule);
-          f.update(f.withLedger, 1, rule);
-          assert.equal(await fs.readFile(f.ledgerPath, "utf8"), f.original);
-          const runtime = spawnSync(
-            process.execPath,
-            ["--experimental-strip-types", path.join(f.directory, file)],
-            {
-              encoding: "utf8",
-              timeout: 10_000,
-            },
-          );
-          assert.ifError(runtime.error);
-          assert.equal(runtime.status, 1, runtime.stdout + runtime.stderr);
-          assert.match(runtime.stdout + runtime.stderr, runtimePattern);
-        });
-      }
-    }
 
     await t.test(
       "typed debt in an existing file cannot gain an allowance",

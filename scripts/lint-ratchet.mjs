@@ -9,6 +9,7 @@ import {
   assertBootstrapSources,
   assertExactFindings,
   assertNoGrowth,
+  assertNoTrackedNodeModules,
   collectFindings,
   collectPairs,
   legacyManifest,
@@ -74,6 +75,11 @@ async function main() {
   if (integrationRef !== undefined && baseRef === undefined) {
     throw new Error("--integration-ref requires --base-ref");
   }
+  // ESLint recursively ignores node_modules, even below authored directories.
+  // Check the whole Git index before either checking or updating any manifest.
+  assertNoTrackedNodeModules(
+    git(["ls-files", "--cached", "-z"]).split("\0").filter(Boolean),
+  );
   const manifestPath = path.join(root, "eslint-ratchet.json");
   const expected = readRatchet(manifestPath);
   const previous = collectPairs(expected);

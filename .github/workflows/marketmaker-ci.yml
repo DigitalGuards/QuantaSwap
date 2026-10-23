@@ -3,9 +3,9 @@ name: Market maker CI
 on:
   pull_request:
     paths:
+      - '**/node_modules/**'
       - 'config/protocol-v2*.json'
       - 'scripts/eslint-policy.mjs'
-      - 'scripts/eslint-node-test.mjs'
       - 'scripts/lint-ratchet*.mjs'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
@@ -15,9 +15,9 @@ on:
       - dev
       - main
     paths:
+      - '**/node_modules/**'
       - 'config/protocol-v2*.json'
       - 'scripts/eslint-policy.mjs'
-      - 'scripts/eslint-node-test.mjs'
       - 'scripts/lint-ratchet*.mjs'
       - 'marketmaker/**'
       - '.github/workflows/marketmaker-ci.yml'
