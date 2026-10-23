@@ -38,6 +38,7 @@
     "typescript-eslint": "8.71.1"
   },
   "overrides": {
+    "zod": "4.6.6",
     "@theqrl/mldsa87": "$@theqrl/mldsa87",
     "@theqrl/wallet.js": "$@theqrl/wallet.js",
     "@theqrl/qrl-cryptography": "0.3.3"
