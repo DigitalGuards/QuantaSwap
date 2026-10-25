@@ -31,8 +31,38 @@ secret at all. Liquidity provision is a separate role and is documented in
 
 Tagged releases publish multi-architecture images through the order-book
 release workflow. Pin an immutable digest, verify its keyless signature and
-GitHub attestation as shown in [the server README](../server/README.md), and
-record the source tag plus digest in your change log.
+provenance, and record the source tag plus digest in your change log.
+
+You need Docker with Compose v2 (root or membership of the `docker` group,
+which is root-equivalent on that host), `cosign` v2 or later from a verified
+[sigstore release](https://github.com/sigstore/cosign/releases), `jq`, `gpg`
+and `openssl`. No GitHub account is needed.
+
+Each release tag `orderbook-vX.Y.Z` is also published as the image tag `X.Y.Z`.
+Resolve it to a digest once, then verify that digest against the exact release
+tag you chose. Pinning the full tag identity rejects a validly signed older
+release presented under a newer name:
+
+```bash
+release=0.4.0
+image=ghcr.io/digitalguards/quantaswap-orderbook
+identity="https://github.com/DigitalGuards/QuantaSwap/.github/workflows/orderbook-release.yml@refs/tags/orderbook-v${release}"
+issuer=https://token.actions.githubusercontent.com
+docker pull "$image:$release"
+digest=$(docker image inspect "$image:$release" \
+  --format '{{index .RepoDigests 0}}' | cut -d@ -f2)
+cosign verify --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" "$image@$digest" >/dev/null
+cosign verify-attestation --type slsaprovenance1 \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" "$image@$digest" >/dev/null
+echo "$image@$digest"
+```
+
+Both commands exit 0 only for a digest signed by that tag's release run. The
+GitHub artifact attestation in [the server README](../server/README.md) is an
+additional check; `gh attestation` needs GitHub CLI 2.49 or later and a GitHub
+login.
 
 Put the verified digest in `.env`, then pull and start without rebuilding:
 
@@ -101,7 +131,21 @@ location /api/ {
 
 Never combine proxy trust `all` with a publicly bound container port. When a
 CDN is in front, first configure the proxy to trust only that CDN's published
-networks and derive `$remote_addr` from its authenticated edge header.
+networks and derive `$remote_addr` from its authenticated edge header. For
+Cloudflare, at the nginx `http` level, with one `set_real_ip_from` line per
+range published at https://www.cloudflare.com/ips/. nginx applies the header
+only to connections from those ranges, so a direct client cannot choose its own
+address:
+
+```nginx
+set_real_ip_from 173.245.48.0/20;
+# ...every other published Cloudflare IPv4 and IPv6 range...
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+```
+
+The location block above then forwards the edge-derived address and clears the
+edge header, so the book sees one trustworthy client address.
 
 ### Single active writer
 
@@ -379,7 +423,10 @@ or the literal `-` public-lane sentinel. The onion-only profile in the next
 section uses `-` for every peer.
 
 Every peer paired with a bearer token must use HTTPS. Startup fails if an
-authenticated peer uses HTTP. The
+authenticated peer uses HTTP. A book moved from the onion profile to HTTPS
+peers must also set `ORDERBOOK_FEDERATION_ONION_ONLY=false` and clear
+`ORDERBOOK_FEDERATION_ONION_PROXY`; otherwise startup stops with
+`ORDERBOOK_FEDERATION_ONION_ONLY requires every peer to use a v3 onion URL`. The
 `ORDERBOOK_FEDERATION_ALLOW_INSECURE_PEER_TOKENS=true` escape hatch is reserved
 for the disposable two-container lab on its isolated Docker network. Never use
 that escape hatch between hosts or on an operator deployment.
@@ -694,16 +741,17 @@ guidance](https://community.torproject.org/onion-services/advanced/opsec/).
 Each operator first confirms their own local service:
 
 ```bash
-docker compose up -d
+docker compose up -d --no-build orderbook
 docker compose ps
 curl --fail https://book.example/api/health
 curl --fail https://book.example/api/status | jq
-curl --fail 'https://book.example/api/federation/v1/events?limit=1' | jq
+curl --fail 'https://book.example/api/federation/v2/events?limit=1' | jq
 ```
 
 Then both operators add the other's reviewed HTTPS API base and restart with
-the same state volume. An initial reset snapshot is normal. A healthy status
-eventually reports:
+the same state volume (`docker compose up -d --no-build orderbook` recreates the
+container with the new `.env`). An initial reset snapshot is normal. A healthy
+status eventually reports:
 
 ```bash
 curl --fail https://book.example/api/status \
