@@ -763,6 +763,48 @@ has its own identity and sequence, while mirrors converge on authenticated
 protocol evidence. A restart intentionally forgets pull cursors and requests a
 fresh bounded reset snapshot.
 
+### Catching up with a busy peer
+
+The feed retains 4,096 events, while reset snapshots contain the store's
+currently retained public proofs. Order churn can leave historical releases
+or cancellations in the feed after their prerequisites have expired from the
+store. An intent is retained through its expiry plus 20 minutes. A slow pull
+can import an old intent that the next store sweep removes before its release
+is processed. That release must remain unapplied until its dependency is
+available.
+
+Earlier followers kept these deferred records across resets. Once records
+aged out, each expiry cleared the cursor again, even when a new snapshot could
+no longer supply the dependency. Operators saw repeated
+`expired deferred events; cursor reset` messages, a `degraded` peer, and
+backoff while the serving book's `feed.ready` stayed true.
+
+Followers now request a recovery snapshot after one hour or 512 deferred
+attempts. After fully processing a snapshot without rejections, they retry
+pending events through the bounded causal passes. An event still unresolved
+and absent from that source's snapshot loses that source's pending claim.
+Claims from other peers remain eligible for recovery. The event is never
+applied without verification, and locally verified evidence keeps its normal
+retention. A successful requested recovery leaves the peer healthy and resumes
+incremental pulls from the returned cursor. `federation.deferredEvents` should
+fall as obsolete claims are retired or dependencies arrive.
+
+Upgrade the follower to obtain this behavior; the serving peer may continue
+using orderbook v0.4.0. The V2 endpoints, event envelopes, and persisted schemas
+are unchanged. Keep the existing state volume. No manual cursor or state-file
+cleanup is required.
+
+Persistent failures still warrant investigation. An expired event that the
+recovery snapshot continues to advertise but the follower cannot apply still
+degrades that peer and resets its cursor. Local capacity pressure, rejected
+proofs, transport failures, repeated unsolicited resets, and deferred quota
+violations retain their existing isolation and backoff. A failed or rejected
+snapshot preserves pending claims until the original retry lifetime ends;
+expired claims then trigger the existing cursor reset and backoff. This keeps
+unavailable sources from holding queue capacity indefinitely. The global
+4,096-event queue, 512 claims per peer, and shared eight-rejection budget remain
+in force.
+
 ## 6. Monitor the right signals
 
 Use both endpoints:
