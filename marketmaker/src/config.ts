@@ -164,6 +164,27 @@ export function readRequiredSecret(name: string): string {
   return value;
 }
 
+/** A 51-byte QRL extended seed in any spelling @theqrl/web3 1.0.3 parsed. */
+const QRL_HEXSEED_SPELLING = /^(?:0[xX])?([0-9a-fA-F]{102})$/;
+
+/**
+ * Spell a QRL extended seed the one way @theqrl/web3 2.0.0 parses it: with
+ * a lowercase 0x prefix. 2.0.0 throws InvalidSeedError on the bare hex and
+ * on 0X, both of which 1.0.3 signed with, and a seed file written by hand
+ * can carry either. Surrounding whitespace is dropped and the hex digits
+ * keep their case. Any other value comes back unchanged, so the signer
+ * refuses it as it did before. The value never enters a message here.
+ */
+export function normalizeQrlHexseed(value: string): string {
+  const digits = QRL_HEXSEED_SPELLING.exec(value.trim())?.[1];
+  return digits === undefined ? value : `0x${digits}`;
+}
+
+/** readRequiredSecret for a QRL extended seed, spelled for @theqrl/web3. */
+export function readQrlHexseed(name: string): string {
+  return normalizeQrlHexseed(readRequiredSecret(name));
+}
+
 /** Human-unit decimal amount (e.g. "5" or "2.5" USDC) to base units. */
 function envUnits(name: string, fallback: string, decimals: number): bigint {
   const raw = env(name, fallback);
@@ -279,7 +300,7 @@ export function loadConfig(): Config {
     ethHtlc: env("MM_ETH_HTLC", protocolV2Config.ethHtlc),
     qrlHtlc: env("MM_QRL_HTLC", protocolV2Config.qrlHtlc),
     ethPrivateKey: readRequiredSecret("MM_ETH_PRIVATE_KEY"),
-    qrlHexseed: readRequiredSecret("MM_QRL_HEXSEED"),
+    qrlHexseed: readQrlHexseed("MM_QRL_HEXSEED"),
     ordersPerDirection,
     ordersPerLevel: envInt("MM_ORDERS_PER_LEVEL", 1),
     orderLifetimeS,
