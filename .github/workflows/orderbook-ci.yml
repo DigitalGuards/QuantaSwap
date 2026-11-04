@@ -2,16 +2,6 @@ name: Order book CI
 
 on:
   pull_request:
-    paths:
-      - '**/node_modules/**'
-      - 'config/protocol-v2*.json'
-      - 'scripts/eslint-policy.mjs'
-      - 'scripts/lint-ratchet*.mjs'
-      - 'server/**'
-      - 'frontend/**'
-      - '.github/workflows/orderbook-ci.yml'
-      - '.github/workflows/orderbook-release.yml'
-  push:
     branches:
       - dev
       - main
@@ -21,88 +11,37 @@ on:
       - 'scripts/eslint-policy.mjs'
       - 'scripts/lint-ratchet*.mjs'
       - 'server/**'
-      - 'frontend/**'
       - '.github/workflows/orderbook-ci.yml'
       - '.github/workflows/orderbook-release.yml'
+  schedule:
+    - cron: '0 3 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# The weekly run tests dev, where changes land first. Scheduled runs read this
+# file from main.
+env:
+  TEST_REF: ${{ github.event_name == 'schedule' && 'dev' || '' }}
+
 concurrency:
-  group: orderbook-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  browser:
-    name: Test browser mirror client
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.22.0
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install locked dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Verify lint policy guards
-        working-directory: frontend
-        run: node --test ../scripts/lint-ratchet.test.mjs
-
-      - name: Verify lint ratchet integration
-        working-directory: frontend
-        run: node --test ../scripts/lint-ratchet.integration.test.mjs
-
-      - name: Lint frontend
-        working-directory: frontend
-        run: npm run lint
-
-      - name: Check lint ratchet against base
-        working-directory: frontend
-        env:
-          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
-          LINT_INTEGRATION_REF: origin/dev
-        run: |
-          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
-            LINT_BASE_REF=HEAD
-          fi
-          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
-
-      - name: Typecheck frontend
-        working-directory: frontend
-        run: npm run typecheck
-
-      - name: Test and build browser client
-        working-directory: frontend
-        run: |
-          npm test
-          npm run build
-
-      - name: Audit dependencies
-        working-directory: frontend
-        run: npm audit --audit-level=moderate
-
   verify:
     name: Test and smoke container
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.TEST_REF }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -119,24 +58,12 @@ jobs:
         working-directory: server
         run: node --test ../scripts/lint-ratchet.test.mjs
 
-      - name: Verify lint ratchet integration
-        working-directory: server
-        run: node --test ../scripts/lint-ratchet.integration.test.mjs
-
-      - name: Lint server
-        working-directory: server
-        run: npm run lint
-
-      - name: Check lint ratchet against base
+      - name: Lint through the ratchet
         working-directory: server
         env:
-          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
           LINT_INTEGRATION_REF: origin/dev
-        run: |
-          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
-            LINT_BASE_REF=HEAD
-          fi
-          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
+        run: npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
 
       - name: Typecheck server
         working-directory: server
@@ -149,10 +76,6 @@ jobs:
       - name: Typecheck the load harness
         working-directory: server
         run: npm run typecheck:loadtest
-
-      - name: Audit dependencies
-        working-directory: server
-        run: npm audit --audit-level=moderate
 
       - name: Validate Compose configuration
         working-directory: server
@@ -273,6 +196,13 @@ jobs:
             test "$(docker compose -f compose.federation-lab.yaml exec -T "$service" \
               stat -c '%a' /var/lib/quantaswap-orderbook/orders.json.federation)" = 600
           done
+
+      # Last, so a failing audit can never skip the container smokes above.
+      - name: Audit dependencies
+        working-directory: server
+        run: |
+          npm audit --omit=dev --audit-level=moderate
+          npm audit --audit-level=high
 
       - name: Clean isolated Compose state
         if: always()

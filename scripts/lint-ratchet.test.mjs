@@ -394,21 +394,32 @@ test("CI passes base and integration refs for main adoption", async () => {
     if (name.endsWith("-ci")) {
       assert.equal(
         source.split("'**/node_modules/**'").length - 1,
-        2,
-        `${name}: both event filters must cover tracked dependency paths`,
+        1,
+        `${name}: the pull request filter must cover tracked dependency paths`,
       );
       assert.equal(
         source.split("'scripts/lint-ratchet*.mjs'").length - 1,
-        2,
-        `${name}: both event filters must cover shared ratchet tooling`,
+        1,
+        `${name}: the pull request filter must cover shared ratchet tooling`,
       );
       assert.match(
         source,
-        /  push:\n    branches:\n(?:      - [^\n]+\n)*      - main\n/u,
+        /  pull_request:\n    branches:\n(?:      - [^\n]+\n)*      - main\n/u,
         name,
       );
     }
   }
+  const tooling = await readFile(
+    new URL("../.github/workflows/lint-tooling-ci.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(tooling, /package: \[frontend, server, marketmaker\]/u);
+  assert.match(
+    tooling,
+    /node --test \.\.\/scripts\/lint-ratchet\.integration\.test\.mjs/u,
+  );
+  assert.ok(tooling.includes("'scripts/lint-ratchet*.mjs'"));
+  assert.ok(tooling.includes("'scripts/eslint-policy.mjs'"));
 });
 
 test("generated output exclusions apply only at repository and package roots", () => {
