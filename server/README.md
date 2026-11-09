@@ -362,6 +362,11 @@ gh attestation verify \
   --repo DigitalGuards/QuantaSwap
 ```
 
+The regular expression accepts any order-book release. To pin the exact
+release, pass `--certificate-identity` with the full workflow ref of that tag;
+[the mirror operator guide](../docs/MIRROR_OPERATORS.md#1-select-and-verify-the-software)
+shows the commands, including a provenance check that needs no GitHub login.
+
 ## Reverse proxies and client identity
 
 `ORDERBOOK_TRUST_PROXY=none` ignores forwarding headers and is correct for a

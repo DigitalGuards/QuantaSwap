@@ -10,10 +10,11 @@
     "preview": "vite preview",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
-    "lint": "eslint . --max-warnings 0 && node scripts/check-lint-ratchet.mjs",
-    "typecheck": "tsc --noEmit",
+    "lint": "node ../scripts/lint-ratchet.mjs --check",
+    "typecheck": "tsc --noEmit -p tsconfig.eslint.json",
     "prebuild": "npm run format:check && npm run lint && npm run typecheck",
-    "lint:ratchet": "node scripts/check-lint-ratchet.mjs --update"
+    "lint:ratchet": "node ../scripts/lint-ratchet.mjs --check",
+    "lint:ratchet:update": "node ../scripts/lint-ratchet.mjs"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.2.8",
@@ -41,7 +42,7 @@
     "@tailwindcss/vite": "^4.1.18",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
-    "@theqrl/web3-qrl-abi": "1.0.3",
+    "@theqrl/web3-qrl-abi": "2.0.0",
     "@types/node": "^22.20.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
@@ -53,20 +54,20 @@
     "tailwindcss": "^4.1.18",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.71.1",
-    "vite": "^7.3.2",
-    "vitest": "^4.1.11"
+    "vite": "^7.3.7",
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=22.22.0"
   },
   "overrides": {
+    "zod": "4.6.7",
     "postcss": "8.5.25",
+    "follow-redirects": "1.16.2",
     "socket.io-parser": "4.2.7",
+    "undici": "7.30.1",
     "@metamask/utils": {
       "uuid": "11.1.1"
-    },
-    "@theqrl/mldsa87": "$@theqrl/mldsa87",
-    "@theqrl/wallet.js": "6.3.0",
-    "@theqrl/qrl-cryptography": "0.3.3"
+    }
   }
 }

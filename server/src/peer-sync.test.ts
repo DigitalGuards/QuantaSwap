@@ -1091,18 +1091,21 @@ describe("federation peer pages", () => {
     assert.equal(applied, 1);
   });
 
-  it("aggregates deferred expiry into peer health and backoff", async () => {
+  it("backs off unresolved events still advertised by a recovery snapshot", async () => {
     const peer = "https://mirror.example/api";
     const candidates = [releaseEvent(40), releaseEvent(41)];
     const originalFetch = globalThis.fetch;
     const originalNow = Date.now;
     const errors: string[] = [];
     let clock = 1_000;
-    let fetches = 0;
+    const cursors: (string | null)[] = [];
     Date.now = () => clock;
-    globalThis.fetch = async () => {
-      fetches += 1;
-      if (fetches === 1) {
+    globalThis.fetch = async (input) => {
+      const cursor = new URL(
+        input instanceof Request ? input.url : input,
+      ).searchParams.get("cursor");
+      cursors.push(cursor);
+      if (cursor === null) {
         return federationResponse({
           reset: true,
           cursor: `${"ab".repeat(16)}:2`,
@@ -1136,6 +1139,7 @@ describe("federation peer pages", () => {
 
       clock += 60 * 60 * 1_000;
       await sync.syncAll();
+      assert.deepEqual(cursors, [null, null]);
       const status = sync.status(clock);
       assert.equal(status.deferredEvents, 0);
       assert.equal(status.peers[0]?.state, "degraded");

@@ -8,6 +8,7 @@ import {
   envChainId,
   envInt,
   envWei,
+  readQrlHexseed,
   readRequiredSecret,
 } from "./config.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
@@ -116,7 +117,7 @@ export function loadTakerConfig(): TakerConfig {
   const cfg = {
     ...loadTakerReadConfig(),
     ethPrivateKey: readRequiredSecret("TAKER_ETH_PRIVATE_KEY"),
-    qrlHexseed: readRequiredSecret("TAKER_QRL_HEXSEED"),
+    qrlHexseed: readQrlHexseed("TAKER_QRL_HEXSEED"),
   };
   assertClaimWindowIsUsable(cfg);
   return cfg;

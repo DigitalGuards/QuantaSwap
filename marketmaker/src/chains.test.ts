@@ -13,6 +13,7 @@ import {
   QrlLeg,
   suggestedQrlTip,
 } from "./chains.js";
+import { isContractRejection } from "./htlc.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { canonicalQip55QrlAddress } from "./qip55.js";
 
@@ -20,6 +21,9 @@ const BASE_FEE = 7n;
 const GWEI = 1_000_000_000n;
 
 let tipAnswer: { result?: unknown; error?: { code: number; message: string } };
+/** Node faults a test injects per method; cleared before each test. */
+type NodeFault = "revert" | "http502";
+let faults: Partial<Record<string, NodeFault>> = {};
 let methods: string[] = [];
 let rawTx: string | undefined;
 let server: Server;
@@ -41,8 +45,13 @@ function answer(
   params: unknown[],
 ): {
   result?: unknown;
-  error?: { code: number; message: string };
+  error?: { code: number; message: string; data?: string };
 } {
+  if (faults[method] === "revert") {
+    return {
+      error: { code: 3, message: "execution reverted", data: "0xb5d5b5ba" },
+    };
+  }
   switch (method) {
     case "qrl_chainId":
       return {
@@ -152,6 +161,11 @@ describe("QrlLeg fee inputs", () => {
             params: unknown[];
           };
           methods.push(method);
+          if (faults[method] === "http502") {
+            res.writeHead(502, { "Content-Type": "text/html" });
+            res.end("<html><body>Bad gateway</body></html>");
+            return;
+          }
           const reply = JSON.stringify({
             jsonrpc: "2.0",
             id,
@@ -182,8 +196,37 @@ describe("QrlLeg fee inputs", () => {
 
   beforeEach(() => {
     tipAnswer = { result: "0x9502f900" }; // 2.5 gwei
+    faults = {};
     methods = [];
     rawTx = undefined;
+  });
+
+  void it("sorts the installed web3's send failures the way the credit cap expects", async () => {
+    // isContractRejection decides whether a failed credit withdrawal or push
+    // counts towards giving up on that credit. Since @theqrl/web3 2.0.0 an
+    // HTTP 5xx arrives as HttpStatusError (1.0.3 raised ResponseError) and
+    // must stay transient, as must a broadcast the node refuses. A revert at
+    // the estimate or at the pre-flight call must stay a contract refusal.
+    const cases: [Partial<Record<string, NodeFault>>, boolean][] = [
+      [{ qrl_estimateGas: "revert" }, true],
+      [{ qrl_call: "revert" }, true],
+      [{ qrl_estimateGas: "http502" }, false],
+      [{ qrl_call: "http502" }, false],
+      [{ qrl_sendRawTransaction: "http502" }, false],
+      [{}, false],
+    ];
+    for (const [fault, rejection] of cases) {
+      faults = fault;
+      const failure: unknown = await newLeg()
+        .send("0x", 0n, undefined, { settlement: true })
+        .then(
+          () => undefined,
+          (err: unknown) => err,
+        );
+      const label = JSON.stringify(fault);
+      assert.ok(failure !== undefined, `the send failed under ${label}`);
+      assert.equal(isContractRejection(failure), rejection, label);
+    }
   });
 
   it("tips the node's suggestion with 2x base-fee headroom", async () => {

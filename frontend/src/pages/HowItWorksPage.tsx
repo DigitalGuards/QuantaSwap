@@ -151,8 +151,8 @@ export function HowItWorksPage() {
       <Section icon={ShieldCheck} title="Security model">
         <ul className="list-disc space-y-1 pl-5">
           <li>
-            <strong>No owner, no pause, no upgrade.</strong> The HTLC contracts cannot be changed,
-            halted, or drained by anyone, including us.
+            <strong>Fixed contracts.</strong> The HTLC contracts cannot be upgraded or paused once
+            deployed.
           </li>
           <li>
             <strong>Single-use hashlocks.</strong> Each hashlock works exactly once and is retired

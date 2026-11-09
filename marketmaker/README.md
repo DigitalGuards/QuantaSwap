@@ -174,7 +174,7 @@ is not lost.
 ## QRL network compatibility gate
 
 The private v3 deployment uses chain ID `3151909`, 64-byte Q-prefixed addresses,
-and `@theqrl/web3` 1.0.3. Its exact genesis and fresh HTLC addresses are pinned in
+and `@theqrl/web3` 2.0.0. Its exact genesis and fresh HTLC addresses are pinned in
 `config/protocol-v2.json`. RPC reads and signing verify the network identity.
 The same extended seed derives a different full-length account, so fund its v3
 address explicitly with testnet inventory.
@@ -279,6 +279,9 @@ untracked files:
 - `secrets/qrl-hexseed`, mode `0600`.
 
 It refuses to overwrite either file. Back them up before funding the addresses.
+A QRL seed written by hand, in the file or in `MM_QRL_HEXSEED`, may use the bare
+102-digit hex or a `0x` or `0X` prefix; the maker signs with the lowercase `0x`
+spelling that `@theqrl/web3` 2.0.0 requires.
 Edit `.env` and review every endpoint, chain id, HTLC address, asset, reserve,
 order size, price source, and timeout. The example points to the current public
 testnet services, but an independent operator should use RPC infrastructure it

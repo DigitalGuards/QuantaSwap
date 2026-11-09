@@ -78,8 +78,8 @@ export function NetworkPanel() {
           {cell(ETH_LEG, heights.eth, `https://sepolia.etherscan.io/address/${ETH_LEG.htlc}`)}
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">
-          One reviewed Hyperion source, compiled for each chain. No owner, no pause, no upgrade
-          path: claims and refunds are enforced by the contracts alone.
+          One reviewed Hyperion source, compiled for each chain. The contracts settle every claim
+          and refund on their own and cannot be upgraded or paused.
         </p>
       </CardContent>
     </Card>

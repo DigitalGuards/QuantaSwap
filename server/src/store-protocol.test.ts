@@ -45,7 +45,11 @@ import {
   type VerifiedOrderV1,
 } from "./order-signing.js";
 import { ApiError, OrderStore, OrderStorePersistenceError } from "./store.js";
-import { federationEventId, type FederationEvent } from "./federation.js";
+import {
+  FederationFeed,
+  federationEventId,
+  type FederationEvent,
+} from "./federation.js";
 import { FederationPeerSync } from "./peer-sync.js";
 
 const descriptor = new Uint8Array([1, 0, 0]);
@@ -340,6 +344,169 @@ afterEach(() => {
 });
 
 describe("single-use signed order store", () => {
+  void it("converges through continuous churn after deferred dependencies leave the feed and snapshot", async () => {
+    const originalNow = Date.now;
+    let clock = originalNow();
+    Date.now = () => clock;
+    const source = new OrderStore(storeFile());
+    const receiver = new OrderStore(storeFile());
+    const feed = new FederationFeed(`${storeFile()}.federation`, 8);
+    source.subscribeFederation((events) => feed.appendBatch(events));
+    const errors: string[] = [];
+    const states: string[] = [];
+    let resets = 0;
+    const createFollower = (target: OrderStore) =>
+      new FederationPeerSync({
+        peers: ["https://busy.example/api"],
+        timeoutMs: 10_000,
+        fetch: (input) => {
+          const cursor = new URL(String(input)).searchParams.get("cursor");
+          const page = feed.page(cursor, 256, () =>
+            source.federationSnapshot({ sweep: false }),
+          );
+          if (page.reset) resets += 1;
+          return Promise.resolve(
+            new Response(JSON.stringify(page), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        },
+        apply: async (event) => {
+          try {
+            target.applyFederationEvent(event, "busy");
+            await target.flush();
+            return "applied";
+          } catch (error) {
+            if (
+              error instanceof ApiError &&
+              (error.code === "federation_dependency" ||
+                error.code === "transient_capacity")
+            ) {
+              return "deferred";
+            }
+            throw error;
+          }
+        },
+        onError: (_peer, error) => errors.push(String(error)),
+      });
+    const sync = createFollower(receiver);
+    try {
+      const filledOrder = makeOrder(Math.floor(clock / 1000), {
+        nonceByte: 90,
+      });
+      const filled = makeFill(Math.floor(clock / 1000), filledOrder);
+      source.importVerifiedOrder(filledOrder, "origin");
+      const locking = source.importFill(
+        filledOrder.orderId,
+        filled.fillBody,
+        filled.fillAuth,
+        filled.intentBody,
+        filled.intentAuth,
+      );
+      source.importRelease(filledOrder.orderId, {
+        fillDigest: locking.fillDigest,
+        releaseSecret: filled.releaseSecret,
+      });
+      await source.flush();
+      await sync.syncAll();
+      let firstOrderEventId = "";
+      let latestOrderId = "";
+      for (let round = 0; round < 12; round += 1) {
+        const now = Math.floor(clock / 1000);
+        const order = makeOrder(now, {
+          nonceByte: 100 + round,
+          expiresAt: now + 300,
+        });
+        source.importVerifiedOrder(order, "origin");
+        const fill = makeFill(now, order);
+        const intent = source.importFillIntent(
+          order.orderId,
+          fill.intentBody,
+          fill.intentAuth,
+        );
+        const release = {
+          intentDigest: intent.intentDigest,
+          releaseSecret: fill.releaseSecret,
+        };
+        source.importRelease(order.orderId, release);
+        const cancel = makeCancel(now, order);
+        source.importSignedCancel(order.orderId, cancel.cancel, cancel.auth);
+        await source.flush();
+
+        // A slow follower still has a valid ring cursor, but these intent
+        // proofs have passed the store's 20-minute retention grace.
+        clock += 25 * 60 * 1000;
+        source.federationSnapshot();
+        await source.flush();
+        assert.equal(
+          source
+            .federationSnapshot()
+            .some((event) => event.payload.orderId === order.orderId),
+          false,
+        );
+        const live = makeOrder(Math.floor(clock / 1000), {
+          nonceByte: 150 + round,
+          expiresAt: Math.floor(clock / 1000) + 300,
+        });
+        source.importVerifiedOrder(live, "origin");
+        latestOrderId = live.orderId;
+        await source.flush();
+        await sync.syncAll();
+        states.push(sync.status().state);
+        assert.equal(receiver.get(live.orderId).status, "open");
+
+        if (round === 0) {
+          firstOrderEventId = federationEventId({
+            kind: "order-v2",
+            payload: { order: order.order, auth: order.auth },
+          });
+          assert.equal(sync.status().deferredEvents, 1);
+          assert.throws(
+            () => receiver.importRelease(order.orderId, release),
+            (error) =>
+              error instanceof ApiError &&
+              error.code === "federation_dependency",
+          );
+        } else {
+          assert.equal(feed.status().retainedEvents, 8);
+          assert.equal(feed.has(firstOrderEventId), false);
+        }
+      }
+      // A brand-new follower also bootstraps after the ring has compacted
+      // repeatedly, using the serving peer's unchanged snapshot format.
+      const freshReceiver = new OrderStore(storeFile());
+      const freshSync = createFollower(freshReceiver);
+      await freshSync.syncAll();
+      assert.equal(freshSync.status().state, "healthy");
+      assert.equal(freshSync.status().deferredEvents, 0);
+      assert.equal(freshReceiver.get(latestOrderId).status, "open");
+      assert.equal(freshReceiver.get(filledOrder.orderId).released, true);
+      await freshReceiver.flush();
+      clock += 60 * 60 * 1000;
+      source.federationSnapshot();
+      await source.flush();
+      await sync.syncAll();
+      await sync.syncAll();
+      assert.deepEqual(errors, []);
+      assert.ok(
+        states.every((state) => state === "healthy"),
+        states.join(","),
+      );
+      assert.equal(sync.status().state, "healthy");
+      assert.equal(sync.status().deferredEvents, 0);
+      assert.equal(
+        receiver.get(filledOrder.orderId).fillDigest,
+        locking.fillDigest,
+      );
+      assert.equal(receiver.get(filledOrder.orderId).released, true);
+      assert.ok(resets <= 5, `unexpected reset loop: ${resets} snapshots`);
+    } finally {
+      await source.flush();
+      await receiver.flush();
+      Date.now = originalNow;
+    }
+  });
+
   it("reconstructs a swept expired parent from a reset with eight intents and a live fill", async () => {
     const now = Math.floor(Date.now() / 1000);
     const historicalNow = now - 500;

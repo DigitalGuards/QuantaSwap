@@ -44,6 +44,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { compileDirs } = require("./hypc");
 const { loadArtifact } = require("./artifacts");
+const { normalizeQrlHexseed } = require("./qrl-seed");
 
 const repoRoot = path.join(__dirname, "..");
 const deployment = require("../config/protocol-v2.json");
@@ -98,7 +99,7 @@ async function qrlTransport() {
     throw new Error("QRL_RPC_URL and QRL_HEXSEED_FILE are required for a QRL run");
   }
   // Read, use, and never surface. Nothing below logs this value.
-  const hexseed = fs.readFileSync(seedFile, "utf8").trim();
+  const hexseed = normalizeQrlHexseed(fs.readFileSync(seedFile, "utf8").trim());
   if (!/^(0x)?[0-9a-fA-F]{102,}$/.test(hexseed)) {
     throw new Error("QRL_HEXSEED_FILE does not contain a hex seed");
   }

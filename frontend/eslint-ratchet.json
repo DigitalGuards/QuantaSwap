@@ -1,112 +1,435 @@
-[
-  {
-    "file": "src/components/MyOrderCard.tsx",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  },
-  {
-    "file": "src/components/PostOrderCard.tsx",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 3
-  },
-  {
-    "file": "src/components/signedOrderFlow.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 2
-  },
-  {
-    "file": "src/lib/htlc.v3.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-member-access",
-    "count": 1
-  },
-  {
-    "file": "src/lib/legSender.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-assignment",
-    "count": 1
-  },
-  {
-    "file": "src/lib/mirrorBook.test.ts",
-    "rule": "@typescript-eslint/no-base-to-string",
-    "count": 1
-  },
-  {
-    "file": "src/lib/mirrorBook.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-argument",
-    "count": 1
-  },
-  {
-    "file": "src/lib/mirrorBook.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-assignment",
-    "count": 3
-  },
-  {
-    "file": "src/lib/mirrorBook.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 3
-  },
-  {
-    "file": "src/lib/orderbook.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderbookClient.test.ts",
-    "rule": "@typescript-eslint/no-base-to-string",
-    "count": 7
-  },
-  {
-    "file": "src/lib/orderbookClient.test.ts",
-    "rule": "@typescript-eslint/no-this-alias",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderbookClient.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-member-access",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderbookClient.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderSigning.test.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderSigning.test.ts",
-    "rule": "no-control-regex",
-    "count": 1
-  },
-  {
-    "file": "src/lib/orderSigning.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 12
-  },
-  {
-    "file": "src/lib/payoutCreditedTopics.test.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 4
-  },
-  {
-    "file": "src/lib/relayReset.ts",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  },
-  {
-    "file": "src/lib/signedOrderRecovery.test.ts",
-    "rule": "@typescript-eslint/no-base-to-string",
-    "count": 2
-  },
-  {
-    "file": "src/lib/walletConnect.test.ts",
-    "rule": "@typescript-eslint/no-unsafe-assignment",
-    "count": 3
-  },
-  {
-    "file": "src/pages/SwapStatusPage.tsx",
-    "rule": "@typescript-eslint/no-unnecessary-condition",
-    "count": 1
-  }
-]
+{
+  "version": 1,
+  "entries": [
+    {
+      "file": "src/components/DeferredPayoutPanel.test.tsx",
+      "rule": "@typescript-eslint/require-await",
+      "count": 2
+    },
+    {
+      "file": "src/components/MyOrderCard.tsx",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/components/MyOrderCard.tsx",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 2
+    },
+    {
+      "file": "src/components/OrderBookPanel.tsx",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 1
+    },
+    {
+      "file": "src/components/PairingModal.test.tsx",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/components/PostOrderCard.tsx",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 3
+    },
+    {
+      "file": "src/components/PostOrderCard.tsx",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 3
+    },
+    {
+      "file": "src/components/signedOrderFlow.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 5
+    },
+    {
+      "file": "src/components/signedOrderFlow.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 2
+    },
+    {
+      "file": "src/components/signedOrderFlow.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 2
+    },
+    {
+      "file": "src/components/SwapFlow.credits.test.tsx",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/components/SwapFlow.credits.test.tsx",
+      "rule": "@typescript-eslint/require-await",
+      "count": 4
+    },
+    {
+      "file": "src/components/SwapFlow.tsx",
+      "rule": "@typescript-eslint/prefer-nullish-coalescing",
+      "count": 1
+    },
+    {
+      "file": "src/components/SwapFlow.tsx",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 1
+    },
+    {
+      "file": "src/config.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 6
+    },
+    {
+      "file": "src/hooks/useAnnounceReconcile.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 1
+    },
+    {
+      "file": "src/hooks/useAnnounceReconcile.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 2
+    },
+    {
+      "file": "src/hooks/useAnnounceReconcile.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 2
+    },
+    {
+      "file": "src/hooks/useEthWallet.test.tsx",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 4
+    },
+    {
+      "file": "src/hooks/useEthWallet.test.tsx",
+      "rule": "@typescript-eslint/require-await",
+      "count": 7
+    },
+    {
+      "file": "src/hooks/useEthWallet.test.tsx",
+      "rule": "no-restricted-syntax",
+      "count": 2
+    },
+    {
+      "file": "src/hooks/useQrlWallet.test.tsx",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 2
+    },
+    {
+      "file": "src/hooks/useQrlWallet.test.tsx",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/hooks/useQrlWallet.test.tsx",
+      "rule": "@typescript-eslint/require-await",
+      "count": 9
+    },
+    {
+      "file": "src/hooks/useQrlWallet.ts",
+      "rule": "@typescript-eslint/prefer-nullish-coalescing",
+      "count": 1
+    },
+    {
+      "file": "src/lib/htlc.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 3
+    },
+    {
+      "file": "src/lib/htlc.test.ts",
+      "rule": "@typescript-eslint/non-nullable-type-assertion-style",
+      "count": 3
+    },
+    {
+      "file": "src/lib/htlc.v3.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 4
+    },
+    {
+      "file": "src/lib/htlc.v3.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 3
+    },
+    {
+      "file": "src/lib/htlc.v3.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-member-access",
+      "count": 1
+    },
+    {
+      "file": "src/lib/htlc.v3.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 3
+    },
+    {
+      "file": "src/lib/legSender.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 13
+    },
+    {
+      "file": "src/lib/legSender.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 2
+    },
+    {
+      "file": "src/lib/legSender.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-assignment",
+      "count": 1
+    },
+    {
+      "file": "src/lib/legSender.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 8
+    },
+    {
+      "file": "src/lib/legSender.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 5
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 2
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 5
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 1
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 1
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-argument",
+      "count": 1
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-assignment",
+      "count": 3
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 11
+    },
+    {
+      "file": "src/lib/mirrorBook.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 1
+    },
+    {
+      "file": "src/lib/mirrorBook.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 8
+    },
+    {
+      "file": "src/lib/mirrorBook.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 3
+    },
+    {
+      "file": "src/lib/orderbook.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 2
+    },
+    {
+      "file": "src/lib/orderbook.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderbook.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 2
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 12
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 7
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/no-this-alias",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-member-access",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderbookClient.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 15
+    },
+    {
+      "file": "src/lib/orderbookClient.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 44
+    },
+    {
+      "file": "src/lib/orderbookClient.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderbookClient.ts",
+      "rule": "no-constant-condition",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 15
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 15
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "no-control-regex",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.test.ts",
+      "rule": "no-restricted-syntax",
+      "count": 5
+    },
+    {
+      "file": "src/lib/orderSigning.ts",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/lib/orderSigning.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 12
+    },
+    {
+      "file": "src/lib/payoutCreditedTopics.test.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 4
+    },
+    {
+      "file": "src/lib/payoutCredits.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 4
+    },
+    {
+      "file": "src/lib/payoutCredits.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 4
+    },
+    {
+      "file": "src/lib/payoutCredits.test.ts",
+      "rule": "@typescript-eslint/non-nullable-type-assertion-style",
+      "count": 1
+    },
+    {
+      "file": "src/lib/payoutCredits.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 10
+    },
+    {
+      "file": "src/lib/protocol-v2-wire.ts",
+      "rule": "@typescript-eslint/consistent-type-definitions",
+      "count": 1
+    },
+    {
+      "file": "src/lib/relayReset.test.ts",
+      "rule": "@typescript-eslint/consistent-type-assertions",
+      "count": 4
+    },
+    {
+      "file": "src/lib/relayReset.test.ts",
+      "rule": "@typescript-eslint/non-nullable-type-assertion-style",
+      "count": 4
+    },
+    {
+      "file": "src/lib/relayReset.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 7
+    },
+    {
+      "file": "src/lib/relayReset.ts",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "src/lib/signedOrderRecovery.test.ts",
+      "rule": "@typescript-eslint/no-base-to-string",
+      "count": 2
+    },
+    {
+      "file": "src/lib/signedOrderRecovery.test.ts",
+      "rule": "@typescript-eslint/no-non-null-assertion",
+      "count": 5
+    },
+    {
+      "file": "src/lib/signedOrderRecovery.test.ts",
+      "rule": "@typescript-eslint/require-await",
+      "count": 2
+    },
+    {
+      "file": "src/lib/swapMachine.ts",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 19
+    },
+    {
+      "file": "src/lib/walletConnect.test.ts",
+      "rule": "@typescript-eslint/no-unsafe-assignment",
+      "count": 3
+    },
+    {
+      "file": "src/pages/SwapPage.tsx",
+      "rule": "@typescript-eslint/prefer-optional-chain",
+      "count": 1
+    },
+    {
+      "file": "src/pages/SwapStatusPage.tsx",
+      "rule": "@typescript-eslint/array-type",
+      "count": 1
+    },
+    {
+      "file": "src/pages/SwapStatusPage.tsx",
+      "rule": "@typescript-eslint/no-unnecessary-condition",
+      "count": 1
+    },
+    {
+      "file": "vite.config.ts",
+      "rule": "@typescript-eslint/dot-notation",
+      "count": 1
+    }
+  ]
+}

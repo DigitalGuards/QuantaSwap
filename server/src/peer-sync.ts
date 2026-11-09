@@ -50,8 +50,25 @@ const MAX_CONFIGURED_PEERS = 16;
 interface PeerSyncResult {
   feedId: string | null;
   reset: boolean;
+  recoveryReset: boolean;
   forcedReset: boolean;
   rejectedEvents: number;
+}
+
+interface DeferredEvent {
+  event: FederationEvent;
+  peer: string;
+  sources: Set<string>;
+  firstSeenAt: number;
+  nextAttemptAt: number;
+  attempts: number;
+}
+
+function deferredExpired(event: DeferredEvent, now: number): boolean {
+  return (
+    now - event.firstSeenAt >= MAX_DEFERRED_AGE_MS ||
+    event.attempts >= MAX_DEFERRED_ATTEMPTS
+  );
 }
 
 interface EventApplication {
@@ -355,17 +372,7 @@ export function validateFederationPageProgress(
 
 export class FederationPeerSync {
   private readonly cursors = new Map<string, string>();
-  private readonly deferred = new Map<
-    string,
-    {
-      event: FederationEvent;
-      peer: string;
-      sources: Set<string>;
-      firstSeenAt: number;
-      nextAttemptAt: number;
-      attempts: number;
-    }
-  >();
+  private readonly deferred = new Map<string, DeferredEvent>();
   private readonly forceResetPeers = new Set<string>();
   private readonly peerHealth = new Map<string, PeerHealth>();
   private readonly activePeers = new Set<string>();
@@ -487,6 +494,7 @@ export class FederationPeerSync {
     try {
       const applications = new Map<string, EventApplication>();
       const rejectedThisSync = new Map<string, number>();
+      const snapshots = new Map<string, Set<string>>();
       let nextPeerIndex = 0;
       const worker = async (): Promise<void> => {
         for (;;) {
@@ -494,7 +502,12 @@ export class FederationPeerSync {
           nextPeerIndex += 1;
           const peer = this.options.peers[peerIndex];
           if (peer === undefined) return;
-          await this.syncConfiguredPeer(peer, applications, rejectedThisSync);
+          await this.syncConfiguredPeer(
+            peer,
+            applications,
+            rejectedThisSync,
+            snapshots,
+          );
         }
       };
       const workerCount = Math.min(
@@ -502,7 +515,7 @@ export class FederationPeerSync {
         this.options.peers.length,
       );
       await Promise.all(Array.from({ length: workerCount }, () => worker()));
-      await this.retryDeferred(rejectedThisSync);
+      await this.retryDeferred(rejectedThisSync, snapshots);
     } finally {
       this.lastCompletedAt = Date.now();
       this.running = false;
@@ -513,20 +526,29 @@ export class FederationPeerSync {
     peer: string,
     applications: Map<string, EventApplication>,
     rejectedThisSync: Map<string, number>,
+    snapshots: Map<string, Set<string>>,
   ): Promise<void> {
     const health = this.healthFor(peer);
     if (health.nextSyncAt > Date.now()) return;
     health.lastAttemptAt = Date.now();
     this.activePeers.add(peer);
     try {
-      const result = await this.syncPeer(peer, applications, rejectedThisSync);
+      const result = await this.syncPeer(
+        peer,
+        applications,
+        rejectedThisSync,
+        snapshots,
+      );
       if (result.rejectedEvents === 0) health.failures = 0;
       const repeatedReset =
-        result.forcedReset || (result.reset && health.lastFeedId !== undefined);
+        result.forcedReset ||
+        (result.reset &&
+          !result.recoveryReset &&
+          health.lastFeedId !== undefined);
       if (repeatedReset) {
         health.resetStreak += 1;
         health.nextSyncAt = Date.now() + peerBackoffMs(health.resetStreak);
-      } else if (!result.reset) {
+      } else if (!result.reset || result.recoveryReset) {
         health.resetStreak = 0;
         health.nextSyncAt = 0;
       }
@@ -581,6 +603,7 @@ export class FederationPeerSync {
     peer: string,
     applications: Map<string, EventApplication>,
     rejectedThisSync: Map<string, number>,
+    snapshots: Map<string, Set<string>>,
   ): Promise<PeerSyncResult> {
     const signal = AbortSignal.timeout(this.options.timeoutMs);
     const deadlineAt = performance.now() + this.options.timeoutMs;
@@ -590,6 +613,16 @@ export class FederationPeerSync {
       }
     };
     let cursor = this.cursors.get(peer) ?? null;
+    // A bounded retry lifetime asks the source for its current retained
+    // proofs. Keep the queue until that snapshot completes: its dependencies
+    // may repair the gap, or its omissions may retire obsolete source claims.
+    const recoveryReset =
+      cursor !== null &&
+      [...this.deferred.values()].some(
+        (entry) =>
+          entry.sources.has(peer) && deferredExpired(entry, Date.now()),
+      );
+    if (recoveryReset) cursor = null;
     const peerIndex = this.options.peers.indexOf(peer);
     const peerToken = this.peerTokens[peerIndex] ?? null;
     let feedId =
@@ -667,13 +700,28 @@ export class FederationPeerSync {
       }
       if (this.forceResetPeers.delete(peer)) {
         this.cursors.delete(peer);
-        return { feedId, reset, forcedReset: true, rejectedEvents };
+        return {
+          feedId,
+          reset,
+          recoveryReset,
+          forcedReset: true,
+          rejectedEvents,
+        };
       }
       assertWithinDeadline();
       cursor = page.cursor;
       this.cursors.set(peer, cursor);
+      // Only a snapshot completed without rejections can retire a source
+      // claim. Deferred records remain subject to the same quotas.
+      if (page.reset && rejectedEvents === 0) snapshots.set(peer, seenEventIds);
       if (!page.hasMore) {
-        return { feedId, reset, forcedReset: false, rejectedEvents };
+        return {
+          feedId,
+          reset,
+          recoveryReset,
+          forcedReset: false,
+          rejectedEvents,
+        };
       }
     }
     throw new Error("federation peer exceeded the per-sync page limit");
@@ -799,25 +847,23 @@ export class FederationPeerSync {
 
   private async retryDeferred(
     rejectedThisSync: Map<string, number>,
+    snapshots: Map<string, Set<string>>,
   ): Promise<void> {
     const rejectedByPeer = new Map<string, number>();
-    const expiredByPeer = new Map<string, number>();
+    const rechecked = new Set<string>();
     for (let pass = 0; pass < MAX_DEFERRED_PASSES; pass += 1) {
       let applied = 0;
       for (const [eventId, deferred] of [...this.deferred]) {
         const now = Date.now();
-        if (
-          now - deferred.firstSeenAt >= MAX_DEFERRED_AGE_MS ||
-          deferred.attempts >= MAX_DEFERRED_ATTEMPTS
-        ) {
-          this.deferred.delete(eventId);
-          for (const peer of deferred.sources) {
-            this.cursors.delete(peer);
-            expiredByPeer.set(peer, (expiredByPeer.get(peer) ?? 0) + 1);
-          }
-          continue;
-        }
-        if (deferred.nextAttemptAt > now) continue;
+        const expired = deferredExpired(deferred, now);
+        const snapshotSources = [...deferred.sources].filter((peer) =>
+          snapshots.has(peer),
+        );
+        const recheck = snapshotSources.length > 0;
+        // A complete snapshot earns a final retry before expiry. Failed or
+        // backed-off sources remain subject to the original lifetime bound.
+        if (expired && !recheck) continue;
+        if (deferred.nextAttemptAt > now && !recheck) continue;
         const eligibleSources = [...deferred.sources].filter(
           (peer) =>
             (rejectedThisSync.get(peer) ?? 0) < MAX_REJECTED_EVENTS_PER_SYNC,
@@ -828,12 +874,14 @@ export class FederationPeerSync {
           deferred.peer = firstSource;
         }
         deferred.attempts += 1;
+        rechecked.delete(eventId);
         try {
           const result = await this.options.apply(
             deferred.event,
             deferred.peer,
           );
           if (result === "deferred") {
+            if (recheck) rechecked.add(eventId);
             const currentSource = eligibleSources.indexOf(deferred.peer);
             deferred.peer =
               eligibleSources[(currentSource + 1) % eligibleSources.length] ??
@@ -880,6 +928,36 @@ export class FederationPeerSync {
           ? "deferred events and reached its rejected-event quota"
           : "deferred events",
       );
+    }
+    this.reconcileDeferred(snapshots, rechecked);
+  }
+
+  private reconcileDeferred(
+    snapshots: Map<string, Set<string>>,
+    rechecked: Set<string>,
+  ): void {
+    const expiredByPeer = new Map<string, number>();
+    for (const [eventId, deferred] of this.deferred) {
+      const expired = deferredExpired(deferred, Date.now());
+      for (const peer of deferred.sources) {
+        const snapshot = snapshots.get(peer);
+        const omitted =
+          rechecked.has(eventId) &&
+          snapshot !== undefined &&
+          !snapshot.has(eventId);
+        if (!omitted && !expired) continue;
+        deferred.sources.delete(peer);
+        if (!omitted) {
+          this.cursors.delete(peer);
+          expiredByPeer.set(peer, (expiredByPeer.get(peer) ?? 0) + 1);
+        }
+      }
+      // Reconcile after all causal passes so a queued parent can still make
+      // a child verifiable. Omission retires only an unverified source claim;
+      // locally verified orders and evidence stay under store retention.
+      const source = deferred.sources.values().next().value;
+      if (source === undefined) this.deferred.delete(eventId);
+      else if (!deferred.sources.has(deferred.peer)) deferred.peer = source;
     }
     for (const [peer, count] of expiredByPeer) {
       this.recordPeerIssue(

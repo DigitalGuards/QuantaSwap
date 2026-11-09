@@ -62,13 +62,42 @@ jobs:
         working-directory: marketmaker
         run: npm ci
 
+      - name: Verify lint policy guards
+        working-directory: marketmaker
+        run: node --test ../scripts/lint-ratchet.test.mjs
+
+      - name: Verify lint ratchet integration
+        working-directory: marketmaker
+        run: node --test ../scripts/lint-ratchet.integration.test.mjs
+
+      - name: Lint marketmaker
+        working-directory: marketmaker
+        run: npm run lint
+
+      - name: Check lint ratchet against base
+        working-directory: marketmaker
+        env:
+          LINT_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || github.sha }}
+          LINT_INTEGRATION_REF: origin/dev
+        run: |
+          if [ "$LINT_BASE_REF" = "0000000000000000000000000000000000000000" ]; then
+            LINT_BASE_REF=HEAD
+          fi
+          npm run lint:ratchet -- --base-ref "$LINT_BASE_REF" --integration-ref "$LINT_INTEGRATION_REF"
+
+      - name: Typecheck marketmaker
+        working-directory: marketmaker
+        run: npm run typecheck
+
       - name: Run release tests
         working-directory: marketmaker
         run: npm test
 
-      - name: Audit production dependencies
+      - name: Audit dependencies
         working-directory: marketmaker
-        run: npm audit --omit=dev --audit-level=moderate
+        run: |
+          npm audit --omit=dev --audit-level=moderate
+          npm audit --audit-level=high
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0

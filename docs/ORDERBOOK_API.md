@@ -677,23 +677,42 @@ replaying the same expensive proof through a different page position in one
 sync.
 
 Transport cursors may advance while a child arrives before its prerequisite.
-The receiver keeps up to **4096 dependency-missing events** in memory, with a
-**512-event quota per peer**, retries them after all peers in as many as **8
-causal passes**, and retains them across ordinary authoritative resets because
-local state is a verified merge. A quota offender has only its source claims
-removed and its cursor forced to reset. Shared events remain queued through any
-other peer that supplied them. Encountering the global bound applies the same
-offending-source reset. Deferred retries back off to **60 seconds**. An entry
-expires after **one hour** or **512 attempts**, resetting every associated
-source cursor. Invalid proofs are rejected immediately. Fetched and deferred
-rejections share an **8-record per-peer sync budget**; reaching it degrades and
-backs off that peer. A restart discards the in-memory dependency queue and
-requests reset snapshots again.
+The receiver keeps up to **4096 deferred events** in memory, including missing
+dependencies and temporary local capacity refusals, with a **512-event quota
+per peer**. It retries them after all peers in as many as **8 causal passes**,
+with retry backoff up to **60 seconds**. A quota offender has only its source
+claims removed and its cursor forced to reset. Shared events remain queued
+through any other peer that supplied them. Encountering the global bound
+applies the same offending-source reset.
+
+After **one hour** or **512 attempts**, the follower requests a recovery
+snapshot from each associated source on its next eligible sync. It retains the
+pending claims while the request runs. A complete reset snapshot processed
+without rejections triggers fresh causal retries, including events omitted
+from that snapshot. After those passes, an unresolved event omitted by that
+source loses only that source's queue claim. This handles historical children
+whose prerequisites have left the peer's retained state. Shared claims from
+other sources survive. Locally verified orders, terminal proofs, releases, and
+conflict evidence retain their normal store lifetimes. Snapshot omission never
+authorizes applying an event or deleting verified state.
+
+An expired event still present and unresolved after the recovery snapshot
+degrades that source, clears its cursor, and backs it off. Failed, malformed,
+rejected, or incompletely processed snapshots provide no basis for early
+retirement. The original lifetime bound still expires unresolved claims when
+recovery fails or its retry budget is exhausted, with the same cursor reset
+and peer backoff. This releases queue capacity held by unavailable sources.
+Invalid proofs are rejected immediately. Fetched and deferred rejections share
+an **8-record per-peer sync budget**; reaching it degrades and backs off that
+peer. A restart discards the in-memory dependency queue and requests reset
+snapshots again. This follower behavior uses the existing V2 wire and requires
+no serving-peer upgrade or durable schema change.
 
 Peer transport failures and repeated reset churn use independent exponential
-backoff from **10 seconds** through **5 minutes**. The first bootstrap reset is
-normal and does not count as churn. Healthy peers continue through the
-two-worker pool while an affected peer waits.
+backoff from **10 seconds** through **5 minutes**. The first bootstrap reset
+and a successful follower-requested recovery reset do not count as churn.
+Healthy peers continue through the two-worker pool while an affected peer
+waits.
 
 ### `GET /orders`
 

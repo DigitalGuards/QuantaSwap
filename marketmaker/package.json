@@ -15,17 +15,18 @@
     "taker": "npm run build && node dist/taker-cli.js",
     "test": "npm run build && node --test dist/*.test.js",
     "credits": "npm run build && node dist/credits-cli.js",
-    "lint": "node lint.mjs",
-    "typecheck": "tsc --noEmit",
+    "lint": "node ../scripts/lint-ratchet.mjs --check",
+    "typecheck": "tsc --noEmit -p tsconfig.eslint.json",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,mts,cts}\" \"*.json\" \"*.mjs\"",
     "pretest": "npm run format:check && npm run lint && npm run typecheck",
-    "lint:prune": "node lint.mjs --prune"
+    "lint:ratchet": "node ../scripts/lint-ratchet.mjs --check",
+    "lint:ratchet:update": "node ../scripts/lint-ratchet.mjs"
   },
   "dependencies": {
     "@qrlwallet/connect": "5.0.0",
     "@theqrl/mldsa87": "2.2.0",
     "@theqrl/wallet.js": "6.3.0",
-    "@theqrl/web3": "1.0.3",
+    "@theqrl/web3": "2.0.0",
     "ethers": "^6.13.4"
   },
   "devDependencies": {
@@ -36,10 +37,5 @@
     "prettier": "3.9.9",
     "typescript": "~5.8.3",
     "typescript-eslint": "8.71.1"
-  },
-  "overrides": {
-    "@theqrl/mldsa87": "$@theqrl/mldsa87",
-    "@theqrl/wallet.js": "$@theqrl/wallet.js",
-    "@theqrl/qrl-cryptography": "0.3.3"
   }
 }

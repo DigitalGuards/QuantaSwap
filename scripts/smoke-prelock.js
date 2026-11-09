@@ -58,14 +58,16 @@ async function makeDriver() {
     };
   }
   const { Web3 } = require("@theqrl/web3");
+  const { normalizeQrlHexseed } = require("./qrl-seed");
   const rpc = process.env.QRL_RPC_URL;
   const hexseed = process.env.QRL_HEXSEED;
   if (!rpc || !hexseed) throw new Error("missing QRL_RPC_URL / QRL_HEXSEED");
   const web3 = new Web3(new Web3.providers.HttpProvider(rpc));
-  const acc = web3.qrl.accounts.seedToAccount(hexseed);
+  const seed = normalizeQrlHexseed(hexseed);
+  const acc = web3.qrl.accounts.seedToAccount(seed);
   assertQip55ToolingAccount(acc.address);
   assertQip55Deployment(htlcAddress);
-  web3.qrl.wallet?.add(hexseed);
+  web3.qrl.wallet?.add(seed);
   web3.qrl.transactionConfirmationBlocks = 1;
   const contract = new web3.qrl.Contract(abi, htlcAddress);
   // See smoke-qrl.js: sign locally via web3.qrl.sendTransaction, never
