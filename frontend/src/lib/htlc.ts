@@ -479,36 +479,18 @@ function scanStartBlock(leg: LegKey, notBeforeS: number, head: number): Promise<
   return search;
 }
 
-/**
- * The amount `PayoutCredited` recorded for this exact swap, in this token,
- * for this account. `creditOf` is a per-(token, account) ledger shared by
- * every swap that account ever settled, so it cannot answer "what did THIS
- * swap leave behind". The event can: its third indexed field is the
- * hashlock, which names one swap.
- *
- * Public endpoints refuse a block 0 to latest range, so the range is walked
- * in chunks of CREDIT_LOG_CHUNK_BLOCKS. It starts at the block of
- * `notBeforeS` (unix seconds, minus a day of slack) when the caller has one:
- * the browser's own record of when this swap or its escrow began. The event
- * is emitted by a claim, refund or release this swap's participants make
- * after that record exists, so nothing earlier can carry it. Without a bound
- * the walk starts at block 0, which is correct and slow. Every caller in the
- * app passes one.
- *
- * The walk runs to the head of the main RPC, and on the ETH leg only once
- * the logs endpoint has reached that head too (see creditScanHead).
- *
- * Any chunk that fails fails the whole read, and a partial sum is never
- * returned: an unknown amount must not read as zero. Returns 0 only after
- * every chunk answered, which is the normal case when the payout was
- * delivered.
- */
+/** The genesis block holds no transactions, so no log scan needs it, and the
+ *  QRL proxy refuses a scan that starts there. */
+const FIRST_LOG_BLOCK = 1;
+
 /**
  * Every log of the leg's HTLC that matches `topics`, from the block of
- * `notBeforeS` to the head, walked in chunks of CREDIT_LOG_CHUNK_BLOCKS with
- * numeric block bounds (public endpoints refuse a wide range, and the QRL
- * proxy refuses block 0 and a non-numeric bound). Without a bound the walk
- * starts at block 0, which is correct and slow.
+ * `notBeforeS` (minus a day of slack, see scanStartBlock) to the head.
+ *
+ * Public endpoints refuse a wide range, and the QRL proxy also refuses a
+ * bound that is not a number, so the range is walked in chunks of
+ * CREDIT_LOG_CHUNK_BLOCKS with numeric bounds. Without `notBeforeS` the walk
+ * covers the whole chain, which is correct and slow.
  *
  * The walk runs to the head of the main RPC, and on the ETH leg only once
  * the logs endpoint has reached that head too (see creditScanHead). Any
@@ -523,7 +505,10 @@ async function scanLogs(
   if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const cfg = legByKey(leg);
   const head = await creditScanHead(leg);
-  const start = notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head);
+  const start = Math.max(
+    FIRST_LOG_BLOCK,
+    notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head),
+  );
   const entries: Record<string, unknown>[] = [];
   for (let from = start; from <= head; from += CREDIT_LOG_CHUNK_BLOCKS) {
     const to = Math.min(head, from + CREDIT_LOG_CHUNK_BLOCKS - 1);
@@ -592,6 +577,23 @@ export async function getSwapEvents(
   return events;
 }
 
+/**
+ * The amount `PayoutCredited` recorded for this exact swap, in this token,
+ * for this account. `creditOf` is a per-(token, account) ledger shared by
+ * every swap that account ever settled, so it cannot answer "what did THIS
+ * swap leave behind". The event can: its third indexed field is the
+ * hashlock, which names one swap.
+ *
+ * The log is read with scanLogs. `notBeforeS` (unix seconds) is the browser's
+ * own record of when this swap or its escrow began. The event is emitted by a
+ * claim, refund or release this swap's participants make after that record
+ * exists, so nothing earlier can carry it. Every caller in the app passes
+ * one.
+ *
+ * A failed scan fails the read, and a partial sum is never returned: an
+ * unknown amount must not read as zero. Returns 0 only after every chunk
+ * answered, which is the normal case when the payout was delivered.
+ */
 export async function getCreditedForSwap(
   leg: LegKey,
   token: string,

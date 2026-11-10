@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 // When the explorer-link lookup runs: on a status change and after a failure,
-// never on every poll, one at a time per leg, and a failure keeps the links
-// the leg already had.
+// one at a time per leg. A poll tick that changes nothing starts none, a
+// failure keeps the links the leg already had, and a different swap starts
+// with no links.
 
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +43,23 @@ afterEach(() => {
 });
 
 describe("useSwapEvents", () => {
+  it("starts a different swap with no links", async () => {
+    getSwapEvents.mockResolvedValueOnce([link("0xaa")]);
+    const { rerender, result } = renderHook(
+      ({ hashlock, qrl }) => useSwapEvents(hashlock, { qrl, eth: none }),
+      { initialProps: { hashlock: HASHLOCK, qrl: open } },
+    );
+    await tick(0);
+    expect(result.current.qrl).toEqual([link("0xaa")]);
+    // The next swap holds no lock yet, so nothing is looked up for it, and
+    // the first swap's links must not show under it.
+    rerender({ hashlock: `0x${"34".repeat(32)}`, qrl: none });
+    expect(result.current.qrl).toEqual([]);
+    await tick(60_000);
+    expect(result.current.qrl).toEqual([]);
+    expect(getSwapEvents).toHaveBeenCalledTimes(1);
+  });
+
   it("asks nothing while no leg holds a lock", async () => {
     renderHook(() => useSwapEvents(HASHLOCK, { qrl: none, eth: undefined }));
     await tick(60_000);
@@ -57,7 +75,7 @@ describe("useSwapEvents", () => {
     await tick(0);
     expect(getSwapEvents).toHaveBeenCalledTimes(1);
     expect(result.current.qrl).toEqual([link("0xaa")]);
-    // A new snapshot object with the same status is a poll tick, not a change.
+    // A new snapshot object with the same status is only a poll tick.
     for (let i = 0; i < 5; i += 1) {
       rerender({ qrl: { ...open } });
       await tick(5_000);

@@ -192,6 +192,15 @@ describe("getSwapEvents under the endpoints' real limits", () => {
     });
   }
 
+  it("starts at block 1 for a bound older than the chain, which the QRL proxy accepts", async () => {
+    const fake = newFake([{ leg: "qrl", block: 2, kind: "Locked", txHash: "0xcc" }]);
+    stub(fake);
+    await expect(getSwapEvents("qrl", HASHLOCK, T0 - 10 * 86_400)).resolves.toEqual([
+      { kind: "locked", txHash: "0xcc" },
+    ]);
+    expect(fake.queries[0]?.from).toBe(1);
+  });
+
   it("fails the whole lookup when one chunk fails", async () => {
     const fake = newFake([{ leg: "eth", block: HEAD, kind: "Claimed", txHash: "0xbb" }]);
     fake.failAtBlock = HEAD - 7_000;

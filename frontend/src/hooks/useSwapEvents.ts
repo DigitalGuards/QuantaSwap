@@ -15,11 +15,15 @@ type LegReading = Pick<LegState, "status" | "timeout"> | null | undefined;
 
 const LEGS: readonly LegKey[] = ["qrl", "eth"];
 
+type SwapEventsByLeg = Record<LegKey, SwapEvent[]>;
+const NO_EVENTS: SwapEventsByLeg = { qrl: [], eth: [] };
+
 /**
  * The explorer-link events of one swap, looked up from the HTLCs' own logs.
  * A leg is looked up when its status changes and again after a failed
- * lookup, never on every poll tick. Lookups for one leg run one at a time,
- * and a failed lookup keeps the events that leg already had.
+ * lookup. A poll tick that changes nothing starts no lookup. Lookups for one
+ * leg run one at a time, and a failed lookup keeps the events that leg
+ * already had. Events belong to one hashlock: a different swap starts empty.
  *
  * The scan bound comes from the legs' own locks (swapEventsNotBeforeS), so no
  * local record is needed. A leg that holds no lock is not asked.
@@ -28,8 +32,11 @@ export function useSwapEvents(
   hashlock: string | null,
   legs: Partial<Record<LegKey, LegReading>>,
   enabled = true,
-): Record<LegKey, SwapEvent[]> {
-  const [events, setEvents] = useState<Record<LegKey, SwapEvent[]>>({ qrl: [], eth: [] });
+): SwapEventsByLeg {
+  const [found, setFound] = useState<{ hashlock: string | null; events: SwapEventsByLeg }>({
+    hashlock,
+    events: NO_EVENTS,
+  });
   const [retry, setRetry] = useState(0);
   const inflight = useRef<Record<LegKey, Promise<unknown>>>({
     qrl: Promise.resolve(),
@@ -53,7 +60,15 @@ export function useSwapEvents(
         if (!isAlive()) return;
         try {
           const list = await getSwapEvents(leg, hashlock, notBeforeS);
-          if (isAlive()) setEvents((previous) => ({ ...previous, [leg]: list }));
+          if (isAlive()) {
+            setFound((previous) => ({
+              hashlock,
+              events: {
+                ...(previous.hashlock === hashlock ? previous.events : NO_EVENTS),
+                [leg]: list,
+              },
+            }));
+          }
         } catch {
           if (isAlive() && timer === undefined) {
             timer = setTimeout(() => setRetry((count) => count + 1), SWAP_EVENTS_RETRY_MS);
@@ -67,5 +82,5 @@ export function useSwapEvents(
     };
   }, [enabled, hashlock, notBeforeS, qrlStatus, ethStatus, retry]);
 
-  return events;
+  return found.hashlock === hashlock ? found.events : NO_EVENTS;
 }

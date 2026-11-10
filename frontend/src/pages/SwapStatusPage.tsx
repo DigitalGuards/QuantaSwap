@@ -217,8 +217,8 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
     };
   }, [hashlock, own]);
 
-  // Looked up when a leg's status changes and after a failed lookup, not on
-  // every poll tick above.
+  // Looked up when a leg's status changes and after a failed lookup. The
+  // poll above only refreshes the leg states.
   const events = useSwapEvents(hashlock, { qrl, eth }, !own);
 
   if (hashlock === null) {

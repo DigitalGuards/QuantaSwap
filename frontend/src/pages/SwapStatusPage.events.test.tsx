@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // The public status page polls both legs every few seconds. The explorer-link
-// lookup behind it runs when a leg's status changes, not on every poll.
+// lookup behind it runs only when a leg's status changes.
 
 import { act, cleanup, render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
