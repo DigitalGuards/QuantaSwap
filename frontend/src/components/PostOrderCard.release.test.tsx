@@ -95,3 +95,46 @@ describe("PostOrderCard release of a staged escrow", () => {
     expect(call?.[4]).toBe(STAGED_AT);
   });
 });
+
+describe("PostOrderCard pre-fund default", () => {
+  it("starts with pre-funding switched on, and the maker can switch it off", async () => {
+    localStorage.clear();
+    render(
+      <PostOrderCard
+        ethAccount={ETH_ACCOUNT}
+        qrlAccount={QRL_ACCOUNT}
+        browserProvider={null}
+        ensureSepolia={vi.fn()}
+        qrlRequest={vi.fn()}
+        qrlTransport={null}
+        qrlWalletRdns={null}
+        onPosted={vi.fn()}
+      />,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: /Pre-fund/ });
+    const isOn = (): boolean => toggle instanceof HTMLInputElement && toggle.checked;
+    expect(isOn()).toBe(true);
+    expect(screen.getByText("48h escrow / 1h taker leg")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(isOn()).toBe(false);
+    expect(screen.getByText("2h your leg / 1h taker leg")).toBeTruthy();
+  });
+
+  it("starts on the classic flow while an earlier pre-funded post is unresolved", async () => {
+    // The file-level setup leaves a staged escrow in storage.
+    render(
+      <PostOrderCard
+        ethAccount={ETH_ACCOUNT}
+        qrlAccount={QRL_ACCOUNT}
+        browserProvider={null}
+        ensureSepolia={vi.fn()}
+        qrlRequest={vi.fn()}
+        qrlTransport={null}
+        qrlWalletRdns={null}
+        onPosted={vi.fn()}
+      />,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: /Pre-fund/ });
+    expect(toggle instanceof HTMLInputElement && toggle.checked).toBe(false);
+  });
+});
