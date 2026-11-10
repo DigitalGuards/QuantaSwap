@@ -119,4 +119,22 @@ describe("PostOrderCard pre-fund default", () => {
     expect(isOn()).toBe(false);
     expect(screen.getByText("2h your leg / 1h taker leg")).toBeTruthy();
   });
+
+  it("starts on the classic flow while an earlier pre-funded post is unresolved", async () => {
+    // The file-level setup leaves a staged escrow in storage.
+    render(
+      <PostOrderCard
+        ethAccount={ETH_ACCOUNT}
+        qrlAccount={QRL_ACCOUNT}
+        browserProvider={null}
+        ensureSepolia={vi.fn()}
+        qrlRequest={vi.fn()}
+        qrlTransport={null}
+        qrlWalletRdns={null}
+        onPosted={vi.fn()}
+      />,
+    );
+    const toggle = await screen.findByRole("checkbox", { name: /Pre-fund/ });
+    expect(toggle instanceof HTMLInputElement && toggle.checked).toBe(false);
+  });
 });

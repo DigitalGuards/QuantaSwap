@@ -178,7 +178,8 @@ Instead of locking at match time, a maker may escrow up front with the HTLC's
 open-recipient lock (`lockNativeOpen`/`lockTokenOpen`, recipient unset) and
 list with `prelock: { hashlock, initiatorTimeout }` (see
 [ORDERBOOK_API.md](ORDERBOOK_API.md#pre-funded-prelocked-orders)). The browser
-flow is the *Pre-fund* checkbox on the post card. What changes:
+flow is the *Pre-fund* checkbox on the post card, which is ticked by default.
+What changes:
 
 - your listing is provably funded (takers verify the escrow on-chain before
   reserving), and your only match-time transaction is a one-time
