@@ -265,8 +265,18 @@ export function SwapFlow({
 
   useEffect(() => {
     if (!creditPollActive) return undefined;
-    void refreshCredits();
-    const t = setInterval(() => void refreshCredits(), 5000);
+    // A log scan can outlast the interval. A tick that finds one still
+    // running waits for the next, so scans of the same range never stack up.
+    let running = false;
+    const tick = () => {
+      if (running) return;
+      running = true;
+      void refreshCredits().finally(() => {
+        running = false;
+      });
+    };
+    tick();
+    const t = setInterval(tick, 5000);
     return () => clearInterval(t);
   }, [creditPollActive, refreshCredits]);
 

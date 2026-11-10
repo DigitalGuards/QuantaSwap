@@ -444,6 +444,30 @@ async function firstBlockAtOrAfter(leg: LegKey, sinceS: number, head: number): P
   return high;
 }
 
+/** A bound resolves to the same block on every read, and the views that pass
+ *  one repeat the read every few seconds, so the search runs once per leg and
+ *  bound. A search that ended at the head (the bound is newer than the chain)
+ *  stays a sound start: later blocks only come after it. A failed search is
+ *  forgotten, so the next read tries again. */
+const scanStartMemo = new Map<string, Promise<number>>();
+const SCAN_START_MEMO_MAX = 64;
+
+function scanStartBlock(leg: LegKey, sinceS: number, head: number): Promise<number> {
+  const key = `${leg}|${sinceS.toString()}`;
+  const known = scanStartMemo.get(key);
+  if (known !== undefined) return known;
+  if (scanStartMemo.size >= SCAN_START_MEMO_MAX) {
+    const oldest = scanStartMemo.keys().next();
+    if (oldest.done !== true) scanStartMemo.delete(oldest.value);
+  }
+  const search = firstBlockAtOrAfter(leg, sinceS, head);
+  scanStartMemo.set(key, search);
+  void search.catch(() => {
+    if (scanStartMemo.get(key) === search) scanStartMemo.delete(key);
+  });
+  return search;
+}
+
 /**
  * The amount `PayoutCredited` recorded for this exact swap, in this token,
  * for this account. `creditOf` is a per-(token, account) ledger shared by
@@ -458,6 +482,11 @@ async function firstBlockAtOrAfter(leg: LegKey, sinceS: number, head: number): P
  * emitted by a claim, refund or release this swap's participants make after
  * that record exists, so nothing earlier can carry it. Without a bound the
  * walk starts at block 0, which is correct and slow.
+ *
+ * The head comes from the main RPC, the one the caller's own state reads
+ * use, so the last chunk reaches the block where the caller saw the escrow
+ * settle. A logs endpoint that is still behind that block answers with an
+ * error, and the read stays unknown until it has caught up.
  *
  * Any chunk that fails fails the whole read, and a partial sum is never
  * returned: an unknown amount must not read as zero. Returns 0 only after
@@ -478,7 +507,7 @@ export async function getCreditedForSwap(
   const start =
     notBeforeS === undefined
       ? 0
-      : await firstBlockAtOrAfter(leg, Math.max(0, notBeforeS - CREDIT_LOOKBACK_MARGIN_S), head);
+      : await scanStartBlock(leg, Math.max(0, notBeforeS - CREDIT_LOOKBACK_MARGIN_S), head);
   let total = 0n;
   for (let from = start; from <= head; from += CREDIT_LOG_CHUNK_BLOCKS) {
     const to = Math.min(head, from + CREDIT_LOG_CHUNK_BLOCKS - 1);
@@ -493,7 +522,8 @@ export async function getCreditedForSwap(
     const raw = await (leg === "qrl"
       ? qrlRpc("qrl_getLogs", params)
       : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
-    // A non-array answer is a malformed reply, not an empty result.
+    // A non-array answer is a malformed reply. Reading it as an empty result
+    // would turn an unknown amount into zero.
     if (!isArray(raw)) throw new InvalidInputError("Log response was not an array");
     for (const entry of raw) {
       if (!isRecord(entry)) continue;

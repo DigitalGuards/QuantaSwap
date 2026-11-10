@@ -113,6 +113,33 @@ describe("DeferredPayoutPanel log scan bound", () => {
   });
 });
 
+describe("DeferredPayoutPanel poll", () => {
+  it("lets a running read finish before it starts the next", async () => {
+    const htlc = await import("@/lib/htlc");
+    const read = vi.mocked(htlc.readSwapCredit);
+    read.mockClear();
+    let release: (reading: CreditReading) => void = () => undefined;
+    read.mockImplementationOnce(
+      () =>
+        new Promise<CreditReading>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPanel();
+      // Three more ticks pass while the first scan is still walking.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(read).toHaveBeenCalledTimes(1);
+      release({ global: ONE_ETH, credited: ONE_ETH });
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("DeferredPayoutPanel", () => {
   it("shows nothing when this escrow's payout was delivered", async () => {
     // An unrelated old credit sits on the same address and asset. Rendering

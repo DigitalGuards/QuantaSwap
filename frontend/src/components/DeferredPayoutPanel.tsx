@@ -132,8 +132,18 @@ export function DeferredPayoutPanel({
 
   useEffect(() => {
     if (targets.length === 0) return undefined;
-    void refresh();
-    const timer = setInterval(() => void refresh(), 6000);
+    // A log scan can outlast the interval. A tick that finds one still
+    // running waits for the next, so scans of the same range never stack up.
+    let running = false;
+    const tick = () => {
+      if (running) return;
+      running = true;
+      void refresh().finally(() => {
+        running = false;
+      });
+    };
+    tick();
+    const timer = setInterval(tick, 6000);
     return () => clearInterval(timer);
   }, [targets.length, refresh]);
 

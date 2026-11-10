@@ -7,7 +7,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LegState } from "@/lib/htlc";
+import type { CreditReading, LegState } from "@/lib/htlc";
 import type { ActiveSwap } from "@/lib/activeSwap";
 
 const MAKER_ETH = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -134,6 +134,37 @@ describe("credit log scan bound", () => {
     for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
       expect(call[3]).toBe(HASHLOCK);
       expect(call[4]).toBe(NOW - 60);
+    }
+  });
+});
+
+describe("credit poll", () => {
+  it("lets a running credit read finish before it starts the next", async () => {
+    const htlc = await import("@/lib/htlc");
+    const read = vi.mocked(htlc.readSwapCredit);
+    const usual = read.getMockImplementation();
+    const pending: (() => void)[] = [];
+    read.mockClear();
+    read.mockImplementation(
+      () =>
+        new Promise<CreditReading>((resolve) => {
+          pending.push(() => resolve({ global: ETH_AMOUNT, credited: ETH_AMOUNT }));
+        }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderFlow("taker");
+      await waitFor(() => expect(read).toHaveBeenCalled());
+      const firstTick = read.mock.calls.length;
+      // Three more ticks pass while the first scans are still walking.
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(read.mock.calls.length).toBe(firstTick);
+      pending.splice(0).forEach((settle) => settle());
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(read.mock.calls.length).toBe(firstTick * 2);
+    } finally {
+      vi.useRealTimers();
+      if (usual !== undefined) read.mockImplementation(usual);
     }
   });
 });

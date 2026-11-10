@@ -3,6 +3,7 @@
 // public Sepolia endpoints, so the walk is tested against the refusal itself.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ETH_LEG, ETH_LOGS_RPC } from "@/config";
 import { isArray, isRecord } from "@/utils/guards";
 import {
   CREDIT_LOG_CHUNK_BLOCKS,
@@ -34,6 +35,11 @@ interface Chain {
   refusal: string;
   failAtBlock: number | null;
   queries: { from: number; to: number }[];
+  /** Every request, by endpoint and method. */
+  calls: { url: string; method: string }[];
+  /** Block timestamp lookups answered so far. */
+  blockLookups: number;
+  failBlockLookups: boolean;
 }
 
 const word = (value: bigint): string => `0x${value.toString(16).padStart(64, "0")}`;
@@ -53,12 +59,13 @@ const isFilter = (value: unknown): value is Filter =>
 function stubChain(chain: Chain): void {
   vi.stubGlobal(
     "fetch",
-    vi.fn((_url: unknown, init: RequestInit) => {
+    vi.fn((url: unknown, init: RequestInit) => {
       const request: unknown = JSON.parse(typeof init.body === "string" ? init.body : "null");
       if (!isRecord(request) || typeof request.method !== "string" || !isArray(request.params)) {
         throw new Error("malformed test request");
       }
       const { method, params } = request;
+      chain.calls.push({ url: typeof url === "string" ? url : "", method });
       const reply = (result: unknown) =>
         Promise.resolve({ ok: true, json: () => Promise.resolve({ result }) });
       const refuse = (message: string) =>
@@ -70,6 +77,8 @@ function stubChain(chain: Chain): void {
         case "eth_blockNumber":
           return reply(`0x${chain.head.toString(16)}`);
         case "eth_getBlockByNumber": {
+          if (chain.failBlockLookups) return refuse("upstream unavailable");
+          chain.blockLookups += 1;
           const block = Number(BigInt(typeof params[0] === "string" ? params[0] : "0x0"));
           return reply({ timestamp: `0x${(T0 + block * BLOCK_TIME_S).toString(16)}` });
         }
@@ -111,6 +120,9 @@ const chainWith = (overrides: Partial<Chain> = {}): Chain => ({
   refusal: REFUSALS[0],
   failAtBlock: null,
   queries: [],
+  calls: [],
+  blockLookups: 0,
+  failBlockLookups: false,
   ...overrides,
 });
 
@@ -177,6 +189,49 @@ describe("credit attribution under a log range cap", () => {
     const future = T0 + chain.head * BLOCK_TIME_S + 10 * CREDIT_LOOKBACK_MARGIN_S;
     await expect(read(HASHLOCK, future)).resolves.toBe(0n);
     expect(chain.queries).toEqual([{ from: chain.head, to: chain.head }]);
+  });
+
+  it("resolves the start block of a bound once across reads", async () => {
+    const creditBlock = 24_000;
+    const chain = chainWith({ credits: [[HASHLOCK, creditBlock, 3n]] });
+    stubChain(chain);
+    const beganS = T0 + (creditBlock - 50) * BLOCK_TIME_S;
+    await expect(read(HASHLOCK, beganS)).resolves.toBe(3n);
+    const searched = chain.blockLookups;
+    expect(searched).toBeGreaterThan(0);
+    const firstFrom = chain.queries[0]?.from;
+    // A later poll: the chain has moved on, the bound has not.
+    chain.queries.length = 0;
+    chain.head += 10;
+    await expect(read(HASHLOCK, beganS)).resolves.toBe(3n);
+    expect(chain.blockLookups).toBe(searched);
+    expect(chain.queries[0]?.from).toBe(firstFrom);
+    expect(chain.queries.at(-1)?.to).toBe(chain.head);
+  });
+
+  it("searches again after a start block search failed", async () => {
+    const creditBlock = 26_000;
+    const chain = chainWith({ credits: [[HASHLOCK, creditBlock, 4n]], failBlockLookups: true });
+    stubChain(chain);
+    const beganS = T0 + (creditBlock - 70) * BLOCK_TIME_S;
+    await expect(read(HASHLOCK, beganS)).rejects.toThrow();
+    chain.failBlockLookups = false;
+    await expect(read(HASHLOCK, beganS)).resolves.toBe(4n);
+  });
+
+  it("takes the head and block times from the main RPC and logs from the logs endpoint", async () => {
+    const creditBlock = 28_000;
+    const chain = chainWith({ credits: [[HASHLOCK, creditBlock, 6n]] });
+    stubChain(chain);
+    await expect(read(HASHLOCK, T0 + (creditBlock - 30) * BLOCK_TIME_S)).resolves.toBe(6n);
+    const endpoints = (method: string) =>
+      new Set(chain.calls.filter((call) => call.method === method).map((call) => call.url));
+    // The head is the one the caller's own state reads use, so the last
+    // chunk has to reach the block where the caller saw the escrow settle.
+    expect([...endpoints("eth_blockNumber")]).toEqual([ETH_LEG.rpc]);
+    expect([...endpoints("eth_getBlockByNumber")]).toEqual([ETH_LEG.rpc]);
+    expect([...endpoints("eth_getLogs")]).toEqual([ETH_LOGS_RPC]);
+    expect(chain.queries.at(-1)?.to).toBe(chain.head);
   });
 
   it("returns both halves through readSwapCredit", async () => {
