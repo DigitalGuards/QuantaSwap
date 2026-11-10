@@ -142,6 +142,7 @@ async function harness(options: {
     qrlHtlc: protocolV2Config.qrlHtlc,
     confirmations: 1,
     netTimeoutMs: 5_000,
+    logChunkBlocks: 5_000,
     txTimeoutMs: 5_000,
     pollMs: 1,
     resendAfterS: 240,
@@ -346,6 +347,65 @@ describe("scripted taker end to end", () => {
     } finally {
       await h.close();
     }
+  });
+
+  void describe("on an RPC that caps the log range", () => {
+    /** Claim with a payout that cannot be delivered, on a chain tall enough
+     *  that a block 0 to latest query is refused. */
+    async function creditedClaim(h: Harness): Promise<TakerSwapRecord> {
+      h.chains.eth.maxLogRange = 1_000;
+      const ethLeg = h.legRpc.eth;
+      ethLeg.logChunkBlocks = 500;
+      let record = await begin(h);
+      ({ record } = await h.engine.step(record));
+      h.maker.selectAndFill();
+      ({ record } = await h.engine.step(record));
+      await makerLocks(h);
+      ({ record } = await h.engine.step(record));
+      await makerClaims(h);
+      h.chains.eth.advance(3_000);
+      h.chains.eth.rejectDeliveryTo(TAKER_ETH);
+      const claimed = await h.engine.step(record);
+      assert.equal(claimed.verdict.decision, "claim");
+      h.chains.eth.advance(3_000);
+      return claimed.record;
+    }
+
+    void it("collects a credited payout where it used to wait for ever", async () => {
+      const h = await harness({ direction: "eth->qrl" });
+      try {
+        let record = await creditedClaim(h);
+        const owed = BigInt(h.maker.order?.order.fromAmount ?? "0");
+        const credits = await h.engine.credits(record);
+        assert.equal(credits.length, 1);
+        assert.equal(credits[0]?.amount, owed);
+        h.chains.eth.allowDeliveryTo(TAKER_ETH);
+        const collected = await h.engine.step(record);
+        record = collected.record;
+        assert.equal(collected.verdict.decision, "withdraw");
+        assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH), 0n);
+        const done = await h.engine.step(record);
+        assert.equal(done.verdict.decision, "finish");
+      } finally {
+        await h.close();
+      }
+    });
+
+    void it("keeps waiting, and never withdraws, when one chunk fails", async () => {
+      const h = await harness({ direction: "eth->qrl" });
+      try {
+        const record = await creditedClaim(h);
+        h.chains.eth.allowDeliveryTo(TAKER_ETH);
+        h.chains.eth.failLogsAtBlock = 2_000;
+        assert.deepEqual(await h.engine.credits(record), []);
+        const stepped = await h.engine.step(record);
+        assert.equal(stepped.verdict.decision, "wait");
+        assert.equal(stepped.record.withdrawSentAt, null);
+        assert.equal(h.chains.eth.creditOf(NATIVE_TOKEN, TAKER_ETH) > 0n, true);
+      } finally {
+        await h.close();
+      }
+    });
   });
 
   it("withdraws a credit to a destination the credited account names", async () => {

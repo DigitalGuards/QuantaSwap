@@ -629,6 +629,32 @@ describe("refund and settlement", () => {
     );
   });
 
+  void it("never retires a settled swap on an unreadable credit, and pushes once it reads", () => {
+    const settled = {
+      iState: leg(SwapStatus.Claimed),
+      rState: leg(SwapStatus.Claimed),
+      nowS: T1 + 100,
+    };
+    // A credit read that failed (null) is not zero: the record stays.
+    assert.equal(
+      decide(
+        input({
+          ...settled,
+          ourResponderCredit: null,
+          ourInitiatorCredit: null,
+          takerCredit: null,
+        }),
+      ),
+      "wait",
+    );
+    // The same swap once the attribution read answers.
+    assert.equal(
+      decide(input({ ...settled, ourResponderCredit: AMOUNT })),
+      "withdraw",
+    );
+    assert.equal(decide(input({ ...settled })), "finish");
+  });
+
   it("spaces withdrawal retries like every other irreversible send", () => {
     const settled = {
       iState: leg(SwapStatus.Claimed),

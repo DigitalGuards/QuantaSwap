@@ -84,6 +84,7 @@ async function main(): Promise<void> {
     qrlHtlc: protocolV2Config.qrlHtlc,
     confirmations: 1,
     netTimeoutMs: 5_000,
+    logChunkBlocks: 5_000,
     txTimeoutMs: 5_000,
     pollMs: 50,
     resendAfterS: 240,

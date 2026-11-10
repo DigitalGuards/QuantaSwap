@@ -128,12 +128,14 @@ const legRpc: Record<LegKey, LegRpc> = {
     ns: "eth",
     htlc: cfg.ethHtlc,
     timeoutMs: cfg.netTimeoutMs,
+    logChunkBlocks: cfg.logChunkBlocks,
   },
   qrl: {
     url: cfg.qrlRpcUrl,
     ns: "qrl",
     htlc: cfg.qrlHtlc,
     timeoutMs: cfg.netTimeoutMs,
+    logChunkBlocks: cfg.logChunkBlocks,
   },
 };
 
@@ -370,10 +372,17 @@ async function creditOrNull(
   token: string,
   account: string | null,
   hashlock: string,
+  notLockedBeforeS: number,
 ): Promise<bigint | null> {
   if (account === null) return null;
   try {
-    const reading = await readSwapCredit(leg, token, account, hashlock);
+    const reading = await readSwapCredit(
+      leg,
+      token,
+      account,
+      hashlock,
+      notLockedBeforeS,
+    );
     return reading.credited < reading.global
       ? reading.credited
       : reading.global;
@@ -426,18 +435,21 @@ async function advance(managed: ManagedOrder): Promise<OrderView | null> {
           legToken(rLeg, managed.asset),
           myAddress(rLeg),
           hashlock,
+          managed.createdAt,
         ),
         creditOrNull(
           legRpc[iLeg],
           legToken(iLeg, managed.asset),
           myAddress(iLeg),
           hashlock,
+          managed.createdAt,
         ),
         creditOrNull(
           legRpc[iLeg],
           legToken(iLeg, managed.asset),
           takerOnInitiatorLeg,
           hashlock,
+          managed.createdAt,
         ),
       ])
     : [null, null, null, null, null, null];
