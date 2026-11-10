@@ -555,13 +555,15 @@ export class TakerEngine {
    * settled, so the amount is attributed through this swap's PayoutCredited
    * log and capped by what the ledger still holds. Null on a read failure,
    * which decides nothing: an unknown amount must not read as zero, and it
-   * must not authorise a send either.
+   * must not authorise a send either. The scan starts at the signing time
+   * of the order this take answers: its hashlock did not exist before.
    */
   private async creditOrNull(
     leg: LegKey,
     asset: AssetSymbol,
     account: string,
     hashlock: string,
+    notLockedBeforeS: number,
   ): Promise<bigint | null> {
     try {
       const reading = await readSwapCredit(
@@ -569,6 +571,7 @@ export class TakerEngine {
         expectedToken(leg, asset),
         account,
         hashlock,
+        notLockedBeforeS,
       );
       return reading.credited < reading.global
         ? reading.credited
@@ -619,6 +622,7 @@ export class TakerEngine {
           record.asset,
           candidate.account,
           hashlock,
+          record.orderAuth.issuedAt,
         ),
       ),
     );
@@ -779,12 +783,14 @@ export class TakerEngine {
               record.asset,
               this.ourAddress(iLeg),
               hashlock,
+              record.orderAuth.issuedAt,
             ),
             this.creditOrNull(
               rLeg,
               record.asset,
               this.ourAddress(rLeg),
               hashlock,
+              record.orderAuth.issuedAt,
             ),
           ]);
 

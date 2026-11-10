@@ -180,7 +180,19 @@ export interface LegRpc {
   htlc: string;
   /** Per-request deadline; defaults to DEFAULT_RPC_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Widest block range one log query may span; defaults to
+   *  DEFAULT_LOG_CHUNK_BLOCKS. Public endpoints refuse wide ranges. */
+  logChunkBlocks?: number;
 }
+
+/** Default log query width in blocks. Public Sepolia endpoints cap a range
+ *  (50,000 blocks on one, less on another); 5,000 is accepted by both. */
+export const DEFAULT_LOG_CHUNK_BLOCKS = 5_000;
+
+/** Margin subtracted from a caller's "not locked before" time so clock skew
+ *  between this host and the chain cannot cut a real lock out of the range.
+ *  A day is cheap: it adds one or two chunks. */
+export const CREDIT_LOOKBACK_MARGIN_S = 86_400;
 
 export async function getChainId(leg: LegRpc): Promise<string> {
   const result = await rpc(leg.url, `${leg.ns}_chainId`, [], leg.timeoutMs);
@@ -551,34 +563,107 @@ export function decodeCreditedAmount(ns: LegKey, data: unknown): bigint | null {
   return BigInt(data);
 }
 
+/** Timestamp (unix seconds) of one block. */
+async function blockTimestampS(leg: LegRpc, block: number): Promise<number> {
+  const raw = await rpc(
+    leg.url,
+    `${leg.ns}_getBlockByNumber`,
+    [`0x${block.toString(16)}`, false],
+    leg.timeoutMs,
+  );
+  const { timestamp: stamp } = isRecord(raw) ? raw : { timestamp: undefined };
+  if (typeof stamp !== "string" || !/^0x[0-9a-fA-F]+$/.test(stamp)) {
+    throw new TypeError("RPC returned a block without a timestamp");
+  }
+  const seconds = Number(BigInt(stamp));
+  if (!Number.isSafeInteger(seconds)) {
+    throw new TypeError("RPC returned an unsafe block timestamp");
+  }
+  return seconds;
+}
+
+/** The first block whose timestamp is at or after `sinceS`, or `head` when
+ *  even the head is older. Any transaction mined at or after `sinceS` sits
+ *  in this block or a later one, so it is a sound lower bound for a scan. */
+async function firstBlockAtOrAfter(
+  leg: LegRpc,
+  sinceS: number,
+  head: number,
+): Promise<number> {
+  if ((await blockTimestampS(leg, head)) < sinceS) return head;
+  let low = 0;
+  let high = head; // invariant: timestamp(high) >= sinceS
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((await blockTimestampS(leg, mid)) >= sinceS) high = mid;
+    else low = mid + 1;
+  }
+  return high;
+}
+
+/**
+ * The amount `PayoutCredited` recorded for this swap, token and account.
+ *
+ * The log range is walked in chunks of `leg.logChunkBlocks`, because public
+ * endpoints refuse a block 0 to latest query. The walk starts at the block
+ * of `notLockedBeforeS` (minus a day of slack) when the caller has one.
+ * That bound is sound because the credit is emitted by claim, refund or
+ * release, which all follow the lock, and the hashlock is the SHA-256 of a
+ * fresh secret that did not exist before the maker's order record (and so
+ * before the taker's record of it) was created: nobody could lock it
+ * earlier. Without a bound the walk starts at block 0, which is correct and
+ * slow on a long chain.
+ *
+ * Any chunk that fails fails the whole read. A partial sum is never
+ * returned, so an unknown amount cannot be read as zero.
+ */
 export async function getCreditedForSwap(
   leg: LegRpc,
   token: string,
   account: string,
   hashlock: string,
+  notLockedBeforeS?: number,
 ): Promise<bigint> {
   await assertQrlRuntime(leg);
-  const raw = await rpc(
-    leg.url,
-    `${leg.ns}_getLogs`,
-    [
-      {
-        address: leg.htlc,
-        topics: creditFilterTopics(leg.ns, token, account, hashlock),
-        fromBlock: "0x0",
-        toBlock: "latest",
-      },
-    ],
-    leg.timeoutMs,
-  );
-  if (!isArray(raw)) return 0n;
+  const chunk = leg.logChunkBlocks ?? DEFAULT_LOG_CHUNK_BLOCKS;
+  if (!Number.isSafeInteger(chunk) || chunk < 1) {
+    throw new RangeError("log chunk size must be a positive integer");
+  }
+  const head = await getBlockNumber(leg);
+  const start =
+    notLockedBeforeS === undefined
+      ? 0
+      : await firstBlockAtOrAfter(
+          leg,
+          Math.max(0, notLockedBeforeS - CREDIT_LOOKBACK_MARGIN_S),
+          head,
+        );
+  const topics = creditFilterTopics(leg.ns, token, account, hashlock);
   let total = 0n;
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const { data } = entry;
-    const amount = decodeCreditedAmount(leg.ns, data);
-    if (amount === null) continue;
-    total += amount;
+  for (let from = start; from <= head; from += chunk) {
+    const to = Math.min(head, from + chunk - 1);
+    const raw = await rpc(
+      leg.url,
+      `${leg.ns}_getLogs`,
+      [
+        {
+          address: leg.htlc,
+          topics,
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${to.toString(16)}`,
+        },
+      ],
+      leg.timeoutMs,
+    );
+    // A non-array answer is a malformed reply, not an empty result.
+    if (!isArray(raw)) throw new TypeError("RPC returned malformed logs");
+    for (const entry of raw) {
+      if (!isRecord(entry)) continue;
+      const { data } = entry;
+      const amount = decodeCreditedAmount(leg.ns, data);
+      if (amount === null) continue;
+      total += amount;
+    }
   }
   return total;
 }
@@ -602,10 +687,19 @@ export async function readSwapCredit(
   token: string,
   account: string,
   hashlock: string,
+  notLockedBeforeS?: number,
 ): Promise<CreditReading> {
   const global = await getCredit(leg, token, account);
   const credited =
-    global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+    global > 0n
+      ? await getCreditedForSwap(
+          leg,
+          token,
+          account,
+          hashlock,
+          notLockedBeforeS,
+        )
+      : 0n;
   return { global, credited };
 }
 

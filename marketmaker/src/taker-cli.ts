@@ -160,12 +160,14 @@ function legRpcFor(cfg: TakerReadConfig): Record<LegKey, LegRpc> {
       ns: "eth",
       htlc: cfg.ethHtlc,
       timeoutMs: cfg.netTimeoutMs,
+      logChunkBlocks: cfg.logChunkBlocks,
     },
     qrl: {
       url: cfg.qrlRpcUrl,
       ns: "qrl",
       htlc: cfg.qrlHtlc,
       timeoutMs: cfg.netTimeoutMs,
+      logChunkBlocks: cfg.logChunkBlocks,
     },
   };
 }
