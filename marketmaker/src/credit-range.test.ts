@@ -1,7 +1,7 @@
 // Credit attribution on endpoints that cap the log range. The fake chain
 // refuses any query wider than its cap, with the two error shapes seen on
 // the public Sepolia endpoints, so the walk is tested against the refusal
-// itself and not against a mock of the client.
+// itself.
 
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
@@ -206,7 +206,7 @@ void describe("credit attribution under a log range cap", () => {
       );
       const first = f.chain.logQueries[0];
       assert.ok(first !== undefined);
-      // Not a scan from genesis, and never later than the creation block.
+      // The scan starts above genesis and at or before the creation block.
       assert.ok(first.from > 0);
       const slackBlocks = Math.ceil(CREDIT_LOOKBACK_MARGIN_S / BLOCK_TIME_S);
       assert.ok(first.from <= creditBlock - 100);

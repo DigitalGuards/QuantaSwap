@@ -601,6 +601,33 @@ async function firstBlockAtOrAfter(
   return high;
 }
 
+/** Start blocks already resolved, per endpoint and bound. A credit is read
+ *  on every tick while it waits, by up to three readers per swap, and the
+ *  block of a past timestamp does not move, so the search runs once. */
+const scanStartMemo = new Map<string, Promise<number>>();
+const SCAN_START_MEMO_MAX = 256;
+
+function scanStartBlock(
+  leg: LegRpc,
+  sinceS: number,
+  head: number,
+): Promise<number> {
+  const key = `${leg.ns}|${leg.url}|${String(sinceS)}`;
+  const known = scanStartMemo.get(key);
+  if (known !== undefined) return known;
+  const pending = firstBlockAtOrAfter(leg, sinceS, head);
+  scanStartMemo.set(key, pending);
+  // A failed search must be retried, so it does not stay in the memo.
+  pending.catch(() => {
+    scanStartMemo.delete(key);
+  });
+  if (scanStartMemo.size > SCAN_START_MEMO_MAX) {
+    const oldest = scanStartMemo.keys().next();
+    if (oldest.done !== true) scanStartMemo.delete(oldest.value);
+  }
+  return pending;
+}
+
 /**
  * The amount `PayoutCredited` recorded for this swap, token and account.
  *
@@ -633,7 +660,7 @@ export async function getCreditedForSwap(
   const start =
     notLockedBeforeS === undefined
       ? 0
-      : await firstBlockAtOrAfter(
+      : await scanStartBlock(
           leg,
           Math.max(0, notLockedBeforeS - CREDIT_LOOKBACK_MARGIN_S),
           head,
@@ -655,7 +682,8 @@ export async function getCreditedForSwap(
       ],
       leg.timeoutMs,
     );
-    // A non-array answer is a malformed reply, not an empty result.
+    // An empty match is an empty array. Any other shape is a malformed
+    // reply and fails the read.
     if (!isArray(raw)) throw new TypeError("RPC returned malformed logs");
     for (const entry of raw) {
       if (!isRecord(entry)) continue;
