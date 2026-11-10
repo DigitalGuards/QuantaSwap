@@ -150,7 +150,7 @@ describe("swap progress line", () => {
     state.leakPreimage = true;
     renderFlow("taker");
     const button = await screen.findByRole("button", { name: /^Claim/ });
-    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(button.hasAttribute("disabled")).toBe(false);
     expect(screen.queryAllByTestId("step-later")).toHaveLength(0);
     expect(screen.getByTestId("swap-now").textContent).toMatch(/^Your turn: Claim/);
   });
