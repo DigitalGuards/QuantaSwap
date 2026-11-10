@@ -179,7 +179,9 @@ export function PostOrderCard({
   const [fromAmount, setFromAmount] = useState("");
   const [toAmount, setToAmount] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
-  const [prefund, setPrefund] = useState(false);
+  // Pre-funding is the default: a funded listing is provable to takers. The
+  // switch below turns it off.
+  const [prefund, setPrefund] = useState(true);
   const [allowedEth, setAllowedEth] = useState("");
   const [allowedQrl, setAllowedQrl] = useState("");
   const [error, setError] = useState<string | null>(null);
