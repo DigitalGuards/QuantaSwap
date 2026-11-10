@@ -17,8 +17,13 @@ const NOW = Math.floor(Date.now() / 1000);
 const ETH_AMOUNT = 10n ** 18n;
 const QRL_AMOUNT = 5n * 10n ** 18n;
 
-/** Per-leg on-chain status: 0 none, 1 open, 2 claimed. */
+/** Per-leg on-chain status: 0 none, 1 open, 2 claimed, 3 refunded. */
 const legStatus: Record<"eth" | "qrl", LegState["status"]> = { eth: 0, qrl: 0 };
+
+/** Seconds from now until each leg's on-chain timeout. */
+const legTimeoutIn: Record<"eth" | "qrl", number> = { eth: 7200, qrl: 3600 };
+/** When true an Open responder leg already carries the preimage. */
+const state = { leakPreimage: false };
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/htlc")>();
@@ -31,8 +36,11 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
       recipient: eth ? TAKER_ETH : `0x${MAKER_QRL.slice(1)}`,
       token: eth ? actual.NATIVE_TOKEN : actual.QRL_NATIVE_TOKEN,
       amount: eth ? ETH_AMOUNT : QRL_AMOUNT,
-      timeout: NOW + (eth ? 7200 : 3600),
-      preimage: status === actual.SwapStatus.Claimed ? PREIMAGE : `0x${"0".repeat(64)}`,
+      timeout: NOW + legTimeoutIn[leg],
+      preimage:
+        status === actual.SwapStatus.Claimed || (state.leakPreimage && !eth && status === 1)
+          ? PREIMAGE
+          : `0x${"0".repeat(64)}`,
     };
   };
   return {
@@ -91,6 +99,9 @@ function renderFlow(role: ActiveSwap["role"]) {
 beforeEach(() => {
   legStatus.eth = 0;
   legStatus.qrl = 0;
+  legTimeoutIn.eth = 7200;
+  legTimeoutIn.qrl = 3600;
+  state.leakPreimage = false;
 });
 afterEach(cleanup);
 
@@ -130,6 +141,34 @@ describe("swap progress line", () => {
     legStatus.qrl = 2;
     renderFlow("taker");
     await waitFor(() => expect(screen.getByText(/Atomic swap complete/)).toBeTruthy());
+    expect(screen.queryByTestId("swap-now")).toBeNull();
+  });
+
+  it("keeps a working claim button when the responder leg still reads Open", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 1;
+    state.leakPreimage = true;
+    renderFlow("taker");
+    const button = await screen.findByRole("button", { name: /^Claim/ });
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryAllByTestId("step-later")).toHaveLength(0);
+    expect(screen.getByTestId("swap-now").textContent).toMatch(/^Your turn: Claim/);
+  });
+
+  it("asks for the refund when an own leg is past its timeout", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 1;
+    legTimeoutIn.qrl = -10;
+    renderFlow("taker");
+    const line = await screen.findByTestId("swap-now");
+    expect(line.textContent).toMatch(/^Your turn: refund your .+ leg below\.$/);
+  });
+
+  it("shows no waiting line when a leg was refunded and nothing is refundable", async () => {
+    legStatus.eth = 3;
+    legStatus.qrl = 0;
+    renderFlow("taker");
+    await waitFor(() => expect(screen.getAllByText("refunded").length).toBeGreaterThan(0));
     expect(screen.queryByTestId("swap-now")).toBeNull();
   });
 });

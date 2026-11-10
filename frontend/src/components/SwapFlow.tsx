@@ -653,7 +653,15 @@ export function SwapFlow({
 
   // The live step is the first one not yet done. The status line and the
   // step list both read from it so the page always says what happens next.
-  const liveIdx = steps.findIndex((step) => !step.done);
+  const firstOpenIdx = steps.findIndex((step) => !step.done);
+  // A refunded leg or a walked-away taker means the swap cannot proceed as
+  // laid out, so no step is highlighted and no waiting line is shown.
+  const aborted =
+    iState?.status === SwapStatus.Refunded ||
+    rState?.status === SwapStatus.Refunded ||
+    takerWalkedAway;
+  const refundDue = refundableLegs.length > 0 && !complete;
+  const liveIdx = aborted || refundDue ? -1 : firstOpenIdx;
   const liveStep = liveIdx >= 0 ? steps[liveIdx] : undefined;
   /** What the non-signing party is waiting for on a counterparty step. */
   const counterpartyWaitText = (step: StepModel): string =>
@@ -661,17 +669,28 @@ export function SwapFlow({
       ? presentation["assign-initiator"].waitingText
       : presentation[step.key].waitingText;
   const nowLine = ((): { text: string; tone: "turn" | "wait" } | null => {
-    if (complete || liveStep === undefined) return null;
-    const view = presentation[liveStep.key];
-    const chain = legByKey(liveStep.leg).name;
-    if (liveStep.own) {
-      if (busy === actionKey(liveStep.key, liveStep.leg)) {
+    if (complete) return null;
+    if (refundDue) {
+      const symbols = refundableLegs.map((leg) => (leg === iLeg ? iPlan.symbol : rPlan.symbol));
+      return { text: `Your turn: refund your ${symbols.join(" and ")} leg below.`, tone: "turn" };
+    }
+    if (aborted) return null;
+    // An own step that can run is always the next action, whichever step is live.
+    const runnable = steps.find(
+      (step) => !step.done && step.own && (step.canRun || busy === actionKey(step.key, step.leg)),
+    );
+    if (runnable !== undefined) {
+      if (busy === actionKey(runnable.key, runnable.leg)) {
         return {
-          text: `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on ${chain}.`,
+          text: `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on ${legByKey(runnable.leg).name}.`,
           tone: "wait",
         };
       }
-      if (liveStep.canRun) return { text: `Your turn: ${view.label}`, tone: "turn" };
+      return { text: `Your turn: ${presentation[runnable.key].label}`, tone: "turn" };
+    }
+    if (liveStep === undefined) return null;
+    const view = presentation[liveStep.key];
+    if (liveStep.own) {
       if (liveStep.awaitingDepth && view.pendingText !== null) {
         return { text: view.pendingText, tone: "wait" };
       }
@@ -861,9 +880,9 @@ export function SwapFlow({
                   </p>
                 ) : null}
                 {!step.done &&
-                  (step.own && i !== liveIdx ? (
+                  (step.own && i !== firstOpenIdx && !step.canRun ? (
                     <p className="text-xs text-muted-foreground" data-testid="step-later">
-                      Available after step {liveIdx + 1}.
+                      Available after step {firstOpenIdx + 1}.
                     </p>
                   ) : step.own ? (
                     <div className="space-y-1">
