@@ -14,6 +14,7 @@ import {
   clearMyOrder,
   loadActiveSwap,
   loadMyOrder,
+  prelockStageS,
   saveActiveSwap,
   saveMyOrder,
   type ActiveSwap,
@@ -687,16 +688,25 @@ export function MyOrderCard({
       }
       // The escrow left the lock, which under HTLCv3 does not mean it reached
       // the wallet. Keep this handle until the payout is confirmed.
-      const target = prelockCreditTarget(pre, myOrder.asset, {
-        eth: ethAccount,
-        qrl: qrlAccount,
-      });
+      // The escrow's own stage time bounds the credit log scan. Every
+      // pre-funded handle carries it through T1, with or without an order
+      // proof.
+      const target = prelockCreditTarget(
+        pre,
+        myOrder.asset,
+        {
+          eth: ethAccount,
+          qrl: qrlAccount,
+        },
+        prelockStageS(pre),
+      );
       if (target !== null) {
         const reading = await readSwapCredit(
           target.leg,
           target.token,
           target.account,
           target.hashlock,
+          target.notBeforeS,
         ).catch(() => null);
         if (reading === null) {
           setDeferredRelease(target);

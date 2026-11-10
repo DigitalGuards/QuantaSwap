@@ -5,7 +5,12 @@ import { isActiveSwap, isMyOrderRef, isSignedOrderStage, isPrelockStage } from "
 // refund path, so it stays in localStorage until the swap reaches a
 // terminal state on both legs. The taker never holds the preimage.
 
-import { DEPLOYMENT_STORAGE_PREFIX, PRIMARY_ORDERBOOK_ID, type LegKey } from "../config";
+import {
+  DEPLOYMENT_STORAGE_PREFIX,
+  PRELOCK_INITIATOR_TIMEOUT_S,
+  PRIMARY_ORDERBOOK_ID,
+  type LegKey,
+} from "../config";
 import type { EthAssetSymbol } from "./assetRegistry";
 import type { CreateOrderBody, MakerOrderAuthV1 } from "./orderbook";
 import type { FillIntentView } from "./orderbookClient";
@@ -154,6 +159,34 @@ export interface PrelockRef {
   /** The leg the escrow sits on (the order's initiator leg). */
   leg: LegKey;
 }
+
+/**
+ * When a pre-funded escrow's stage was written (unix seconds). The stage
+ * fixes T1 as its own time plus PRELOCK_INITIATOR_TIMEOUT_S before the
+ * escrow transaction, and T1 travels with every later handle, so every
+ * handle can name that time, with or without an order proof. Nothing can
+ * credit the escrow earlier, which makes it the bound for a credit log scan.
+ *
+ * PRELOCK_INITIATOR_TIMEOUT_S has been 48 hours for as long as pre-funded
+ * orders have existed. Raising it would move this time later, by the
+ * difference, for handles written before the change.
+ */
+export const prelockStageS = (ref: { initiatorTimeout: number }): number =>
+  ref.initiatorTimeout - PRELOCK_INITIATOR_TIMEOUT_S;
+
+/**
+ * The earliest time anything could have credited this swap (unix seconds),
+ * which bounds its credit log scan. A credit comes from a claim, refund or
+ * release made after the swap's record exists. A pre-funded maker record is
+ * the exception: it is written at match time, after the escrow, so the
+ * escrow's own stage time is used when that is earlier.
+ */
+export const swapCreditScanSinceS = (
+  swap: Pick<ActiveSwap, "createdAt" | "prelocked" | "initiatorTimeout">,
+): number =>
+  swap.prelocked === true && swap.initiatorTimeout !== null
+    ? Math.min(swap.createdAt, prelockStageS({ initiatorTimeout: swap.initiatorTimeout }))
+    : swap.createdAt;
 
 /** The maker's open-order handle; the token authorizes cancel + hashlock.
  *  The asset AND both amounts are anchored locally at post time (like the

@@ -42,6 +42,7 @@ import {
   hasCurrentTermBinding,
   initiatorLeg,
   responderLeg,
+  swapCreditScanSinceS,
   type ActiveSwap,
 } from "@/lib/activeSwap";
 import { getOrder, type OrderView } from "@/lib/orderbook";
@@ -197,6 +198,7 @@ export function SwapFlow({
             .join("|"),
     [machine],
   );
+  const creditSinceS = swapCreditScanSinceS(swap);
   const refreshCredits = useCallback(async () => {
     const current = machineRef.current;
     if (current === null || !hashlock) return;
@@ -206,7 +208,9 @@ export function SwapFlow({
     const candidates = creditCandidates(current);
     const results = await Promise.allSettled(
       candidates.map((candidate) =>
-        readSwapCredit(candidate.leg, candidate.token, candidate.account, hashlock),
+        // Nothing could have credited this swap before `creditSinceS`, so
+        // it bounds the log scan.
+        readSwapCredit(candidate.leg, candidate.token, candidate.account, hashlock, creditSinceS),
       ),
     );
     setCredits((previous) => {
@@ -232,7 +236,7 @@ export function SwapFlow({
     if (results.every((result) => result.status === "fulfilled")) {
       setCreditReadStatuses(readStatuses);
     }
-  }, [candidateKey, hashlock]);
+  }, [candidateKey, hashlock, creditSinceS]);
 
   // Only poll once a leg is terminal. Before that there is nothing to
   // credit, so this would be 4 reads every 5 seconds for the whole swap.
@@ -263,8 +267,18 @@ export function SwapFlow({
 
   useEffect(() => {
     if (!creditPollActive) return undefined;
-    void refreshCredits();
-    const t = setInterval(() => void refreshCredits(), 5000);
+    // A log scan can outlast the interval. A tick that finds one still
+    // running waits for the next, so scans of the same range never stack up.
+    let running = false;
+    const tick = () => {
+      if (running) return;
+      running = true;
+      void refreshCredits().finally(() => {
+        running = false;
+      });
+    };
+    tick();
+    const t = setInterval(tick, 5000);
     return () => clearInterval(t);
   }, [creditPollActive, refreshCredits]);
 

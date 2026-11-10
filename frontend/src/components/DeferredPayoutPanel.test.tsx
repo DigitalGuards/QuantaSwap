@@ -85,6 +85,61 @@ describe("attributedCredit", () => {
   });
 });
 
+describe("DeferredPayoutPanel log scan bound", () => {
+  it("hands the target's own start time to the credit read", async () => {
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    render(
+      <DeferredPayoutPanel
+        targets={[{ ...target, notBeforeS: 1_700_000_123 }]}
+        ethAccount={ACCOUNT}
+        qrlAccount={null}
+        browserProvider={null}
+        ensureSepolia={vi.fn()}
+        qrlRequest={vi.fn()}
+        qrlTransport={null}
+      />,
+    );
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    expect(vi.mocked(htlc.readSwapCredit).mock.calls[0]?.[4]).toBe(1_700_000_123);
+  });
+
+  it("scans from block 0 when the target carries no start time", async () => {
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    renderPanel();
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    expect(vi.mocked(htlc.readSwapCredit).mock.calls[0]?.[4]).toBeUndefined();
+  });
+});
+
+describe("DeferredPayoutPanel poll", () => {
+  it("lets a running read finish before it starts the next", async () => {
+    const htlc = await import("@/lib/htlc");
+    const read = vi.mocked(htlc.readSwapCredit);
+    read.mockClear();
+    let release: (reading: CreditReading) => void = () => undefined;
+    read.mockImplementationOnce(
+      () =>
+        new Promise<CreditReading>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderPanel();
+      // Three more ticks pass while the first scan is still walking.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(read).toHaveBeenCalledTimes(1);
+      release({ global: ONE_ETH, credited: ONE_ETH });
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("DeferredPayoutPanel", () => {
   it("shows nothing when this escrow's payout was delivered", async () => {
     // An unrelated old credit sits on the same address and asset. Rendering

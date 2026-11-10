@@ -7,7 +7,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LegState } from "@/lib/htlc";
+import { PRELOCK_INITIATOR_TIMEOUT_S } from "@/config";
+import type { CreditReading, LegState } from "@/lib/htlc";
 import type { ActiveSwap } from "@/lib/activeSwap";
 
 const MAKER_ETH = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -98,11 +99,11 @@ const swap = (role: ActiveSwap["role"]): ActiveSwap => ({
   createdAt: NOW - 60,
 });
 
-function renderFlow(role: ActiveSwap["role"]) {
+function renderFlow(role: ActiveSwap["role"], overrides: Partial<ActiveSwap> = {}) {
   return render(
     <MemoryRouter>
       <SwapFlow
-        swap={swap(role)}
+        swap={{ ...swap(role), ...overrides }}
         ethAccount={role === "taker" ? TAKER_ETH : MAKER_ETH}
         qrlAccount={role === "taker" ? TAKER_QRL : MAKER_QRL}
         browserProvider={null}
@@ -123,6 +124,70 @@ beforeEach(() => {
   legStatus.qrl = 2;
 });
 afterEach(cleanup);
+
+describe("credit log scan bound", () => {
+  it("hands the swap's own creation time to every credit read", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    renderFlow("taker");
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
+      expect(call[3]).toBe(HASHLOCK);
+      expect(call[4]).toBe(NOW - 60);
+    }
+  });
+});
+
+describe("credit log scan bound of a pre-funded maker swap", () => {
+  it("uses the escrow's stage time, which is earlier than the match", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    // Escrowed an hour before the match; T1 is the stage time plus 48 hours.
+    const stageAt = NOW - 3600;
+    renderFlow("maker", {
+      prelocked: true,
+      initiatorTimeout: stageAt + PRELOCK_INITIATOR_TIMEOUT_S,
+      createdAt: NOW - 60,
+    });
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
+      expect(call[4]).toBe(stageAt);
+    }
+  });
+});
+
+describe("credit poll", () => {
+  it("lets a running credit read finish before it starts the next", async () => {
+    const htlc = await import("@/lib/htlc");
+    const read = vi.mocked(htlc.readSwapCredit);
+    const usual = read.getMockImplementation();
+    const pending: (() => void)[] = [];
+    read.mockClear();
+    read.mockImplementation(
+      () =>
+        new Promise<CreditReading>((resolve) => {
+          pending.push(() => resolve({ global: ETH_AMOUNT, credited: ETH_AMOUNT }));
+        }),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderFlow("taker");
+      await waitFor(() => expect(read).toHaveBeenCalled());
+      const firstTick = read.mock.calls.length;
+      // Three more ticks pass while the first scans are still walking.
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(read.mock.calls.length).toBe(firstTick);
+      pending.splice(0).forEach((settle) => settle());
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(read.mock.calls.length).toBe(firstTick * 2);
+    } finally {
+      vi.useRealTimers();
+      if (usual !== undefined) read.mockImplementation(usual);
+    }
+  });
+});
 
 describe("deferred payout panel", () => {
   it("stays hidden while every payout was delivered", async () => {

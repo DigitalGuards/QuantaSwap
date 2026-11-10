@@ -32,6 +32,15 @@ describe("prelockCreditTarget", () => {
     });
   });
 
+  it("carries the caller's start time only when it has one", () => {
+    const stage = { leg: "eth" as const, hashlock: HASHLOCK };
+    const accounts = { eth: ETH_ACCOUNT, qrl: QRL_ACCOUNT };
+    expect(prelockCreditTarget(stage, "ETH", accounts, 1_700_000_000)?.notBeforeS).toBe(
+      1_700_000_000,
+    );
+    expect(prelockCreditTarget(stage, "ETH", accounts)).not.toHaveProperty("notBeforeS");
+  });
+
   it("keys a token escrow on that token, because credits are per asset", () => {
     const target = prelockCreditTarget({ leg: "eth", hashlock: HASHLOCK }, "USDC", {
       eth: ETH_ACCOUNT,

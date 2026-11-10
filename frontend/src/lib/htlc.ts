@@ -408,6 +408,103 @@ export function decodeCreditedAmount(leg: LegKey, data: unknown): bigint | null 
   return BigInt(data);
 }
 
+/** Widest block range one log query may span. Public endpoints refuse a
+ *  wide range (50,000 blocks on one, less on another); 5,000 is accepted by
+ *  both. */
+export const CREDIT_LOG_CHUNK_BLOCKS = 5_000;
+
+/** Subtracted from a caller's "began no earlier than" time so clock skew
+ *  between the browser and the chain cannot cut a real event out of the
+ *  range. A day adds one or two chunks. */
+export const CREDIT_LOOKBACK_MARGIN_S = 86_400;
+
+/** How long a credit scan waits for the logs endpoint to reach the head of
+ *  the main RPC before it gives up. The two are a block apart now and then. */
+const LOGS_HEAD_ATTEMPTS = 5;
+const LOGS_HEAD_RETRY_MS = 3_000;
+
+const chainRpc = (leg: LegKey, method: string, params: unknown[]): Promise<unknown> =>
+  leg === "qrl" ? qrlRpc(method, params) : ethRpc(method, params);
+
+async function blockTimestampS(leg: LegKey, block: number): Promise<number> {
+  const raw = await chainRpc(leg, `${leg}_getBlockByNumber`, [`0x${block.toString(16)}`, false]);
+  if (!isRecord(raw)) throw new InvalidInputError("Block response was not an object");
+  const seconds = Number(BigInt(requireHex(raw.timestamp)));
+  if (!Number.isSafeInteger(seconds)) throw new InvalidInputError("Unsafe block timestamp");
+  return seconds;
+}
+
+/**
+ * The block a credit scan runs to. It is the head of the main RPC, the one
+ * the caller's own state reads use, so the scan reaches the block where the
+ * caller saw the escrow settle.
+ *
+ * On the ETH leg the logs come from a second endpoint. One that is still
+ * behind that block could answer the last chunk with an empty list, which
+ * would read as nothing credited. So its own head has to have reached the
+ * main one first. It gets a few seconds to catch up, then the scan fails.
+ */
+async function creditScanHead(leg: LegKey): Promise<number> {
+  const head = await getBlockNumber(leg);
+  if (leg === "qrl") return head;
+  for (let attempt = 1; ; attempt += 1) {
+    const logsHead = Number(BigInt(requireHex(await rpc(ETH_LOGS_RPC, "eth_blockNumber", []))));
+    if (Number.isSafeInteger(logsHead) && logsHead >= head) return head;
+    if (attempt >= LOGS_HEAD_ATTEMPTS) {
+      throw new Error("The logs endpoint has not reached the chain head yet");
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, LOGS_HEAD_RETRY_MS);
+    });
+  }
+}
+
+/**
+ * The block a scan bounded by `notBeforeS` starts at: the first block at or
+ * after that time minus CREDIT_LOOKBACK_MARGIN_S. Anything mined from that
+ * time on sits in this block or a later one.
+ *
+ * A record time ahead of the chain's own clock cannot be right (a browser
+ * clock that runs fast), so the head's timestamp caps it before the slack is
+ * taken. The scan then covers at least the last day.
+ */
+async function resolveScanStart(leg: LegKey, notBeforeS: number, head: number): Promise<number> {
+  const headS = await blockTimestampS(leg, head);
+  const sinceS = Math.min(notBeforeS, headS) - CREDIT_LOOKBACK_MARGIN_S;
+  let low = 0;
+  let high = head; // invariant: timestamp(high) >= sinceS, which holds at the head
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((await blockTimestampS(leg, mid)) >= sinceS) high = mid;
+    else low = mid + 1;
+  }
+  return high;
+}
+
+/** A bound resolves to the same block on every read, and the views that pass
+ *  one repeat the read every few seconds, so the search runs once per leg and
+ *  bound. A start resolved against an older head stays sound, because a
+ *  fresh one could only be later. A failed search is forgotten, so the next
+ *  read tries again. */
+const scanStartMemo = new Map<string, Promise<number>>();
+const SCAN_START_MEMO_MAX = 64;
+
+function scanStartBlock(leg: LegKey, notBeforeS: number, head: number): Promise<number> {
+  const key = `${leg}|${notBeforeS.toString()}`;
+  const known = scanStartMemo.get(key);
+  if (known !== undefined) return known;
+  if (scanStartMemo.size >= SCAN_START_MEMO_MAX) {
+    const oldest = scanStartMemo.keys().next();
+    if (oldest.done !== true) scanStartMemo.delete(oldest.value);
+  }
+  const search = resolveScanStart(leg, notBeforeS, head);
+  scanStartMemo.set(key, search);
+  void search.catch(() => {
+    if (scanStartMemo.get(key) === search) scanStartMemo.delete(key);
+  });
+  return search;
+}
+
 /**
  * The amount `PayoutCredited` recorded for this exact swap, in this token,
  * for this account. `creditOf` is a per-(token, account) ledger shared by
@@ -415,38 +512,59 @@ export function decodeCreditedAmount(leg: LegKey, data: unknown): bigint | null 
  * swap leave behind". The event can: its third indexed field is the
  * hashlock, which names one swap.
  *
- * The filter pins all four topics, so the query is selective even scanning
- * from genesis, which is what the existing hashlock event lookup already
- * does on both legs. Returns 0 when the payout was delivered, which is the
- * normal case.
+ * Public endpoints refuse a block 0 to latest range, so the range is walked
+ * in chunks of CREDIT_LOG_CHUNK_BLOCKS. It starts at the block of
+ * `notBeforeS` (unix seconds, minus a day of slack) when the caller has one:
+ * the browser's own record of when this swap or its escrow began. The event
+ * is emitted by a claim, refund or release this swap's participants make
+ * after that record exists, so nothing earlier can carry it. Without a bound
+ * the walk starts at block 0, which is correct and slow. Every caller in the
+ * app passes one.
+ *
+ * The walk runs to the head of the main RPC, and on the ETH leg only once
+ * the logs endpoint has reached that head too (see creditScanHead).
+ *
+ * Any chunk that fails fails the whole read, and a partial sum is never
+ * returned: an unknown amount must not read as zero. Returns 0 only after
+ * every chunk answered, which is the normal case when the payout was
+ * delivered.
  */
 export async function getCreditedForSwap(
   leg: LegKey,
   token: string,
   account: string,
   hashlock: string,
+  notBeforeS?: number,
 ): Promise<bigint> {
   if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const cfg = legByKey(leg);
-  const params = [
-    {
-      address: cfg.htlc,
-      topics: creditFilterTopics(leg, token, account, hashlock),
-      fromBlock: "0x0",
-      toBlock: "latest",
-    },
-  ];
-  const raw = await (leg === "qrl"
-    ? qrlRpc("qrl_getLogs", params)
-    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
-  if (!isArray(raw)) return 0n;
+  const topics = creditFilterTopics(leg, token, account, hashlock);
+  const head = await creditScanHead(leg);
+  const start = notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head);
   let total = 0n;
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const { data } = entry;
-    const amount = decodeCreditedAmount(leg, data);
-    if (amount === null) continue;
-    total += amount;
+  for (let from = start; from <= head; from += CREDIT_LOG_CHUNK_BLOCKS) {
+    const to = Math.min(head, from + CREDIT_LOG_CHUNK_BLOCKS - 1);
+    const params = [
+      {
+        address: cfg.htlc,
+        topics,
+        fromBlock: `0x${from.toString(16)}`,
+        toBlock: `0x${to.toString(16)}`,
+      },
+    ];
+    const raw = await (leg === "qrl"
+      ? qrlRpc("qrl_getLogs", params)
+      : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
+    // A non-array answer is a malformed reply. Reading it as an empty result
+    // would turn an unknown amount into zero.
+    if (!isArray(raw)) throw new InvalidInputError("Log response was not an array");
+    for (const entry of raw) {
+      if (!isRecord(entry)) continue;
+      const { data } = entry;
+      const amount = decodeCreditedAmount(leg, data);
+      if (amount === null) continue;
+      total += amount;
+    }
   }
   return total;
 }
@@ -470,10 +588,12 @@ export async function readSwapCredit(
   token: string,
   account: string,
   hashlock: string,
+  notBeforeS?: number,
 ): Promise<CreditReading> {
   const global = await getCredit(leg, token, account);
   // The log query only earns its cost once something is actually there.
-  const credited = global > 0n ? await getCreditedForSwap(leg, token, account, hashlock) : 0n;
+  const credited =
+    global > 0n ? await getCreditedForSwap(leg, token, account, hashlock, notBeforeS) : 0n;
   return { global, credited };
 }
 
