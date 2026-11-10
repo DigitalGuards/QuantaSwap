@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { protocolV2Config } from "./protocol-v2-config.js";
 import { DEFAULT_ORDER_LIFETIME_S } from "./admission.js";
+import { DEFAULT_LOG_CHUNK_BLOCKS } from "./htlc.js";
 import {
   assetInfo,
   isAssetSymbol,
@@ -77,6 +78,9 @@ export interface Config {
    *  price fetch). Bounds a stalling or hostile endpoint so it can never
    *  wedge the single-threaded tick. */
   netTimeoutMs: number;
+  /** Widest block range of one log query. Public endpoints refuse a wide
+   *  range, so credit attribution walks the chain in chunks this size. */
+  logChunkBlocks: number;
   /** Deadline on waiting for one of our own transactions to confirm.
    *  Larger than netTimeoutMs since mining legitimately takes blocks; a
    *  genuinely stuck tx throws and is reconciled from chain state next tick. */
@@ -320,6 +324,7 @@ export function loadConfig(): Config {
     confirmations: envInt("MM_CONFIRMATIONS", 3),
     tickMs: envInt("MM_TICK_MS", 15_000),
     netTimeoutMs: envInt("MM_NET_TIMEOUT_MS", 20_000),
+    logChunkBlocks: envInt("MM_LOG_CHUNK_BLOCKS", DEFAULT_LOG_CHUNK_BLOCKS),
     txTimeoutMs: envInt("MM_TX_TIMEOUT_MS", 180_000),
     resendAfterS: envInt("MM_RESEND_AFTER_S", 240),
     claimSafetyS: envInt("MM_CLAIM_SAFETY_S", 600),

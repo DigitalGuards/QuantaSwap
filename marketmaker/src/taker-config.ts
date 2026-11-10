@@ -12,6 +12,7 @@ import {
   readRequiredSecret,
 } from "./config.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
+import { DEFAULT_LOG_CHUNK_BLOCKS } from "./htlc.js";
 
 /** Everything the read-only commands need. `list` and `quote` run on this
  *  alone, so they never touch key material. */
@@ -27,6 +28,8 @@ export interface TakerReadConfig {
   confirmations: number;
   /** Deadline on any single network request (RPC, book). */
   netTimeoutMs: number;
+  /** Widest block range of one log query; see TAKER_LOG_CHUNK_BLOCKS. */
+  logChunkBlocks: number;
   /** Deadline on waiting for one of our own transactions to confirm. */
   txTimeoutMs: number;
   /** Poll period while a take is in flight. */
@@ -75,6 +78,7 @@ export function loadTakerReadConfig(): TakerReadConfig {
     qrlHtlc: env("TAKER_QRL_HTLC", protocolV2Config.qrlHtlc),
     confirmations: envInt("TAKER_CONFIRMATIONS", 3),
     netTimeoutMs: envInt("TAKER_NET_TIMEOUT_MS", 20_000),
+    logChunkBlocks: envInt("TAKER_LOG_CHUNK_BLOCKS", DEFAULT_LOG_CHUNK_BLOCKS),
     txTimeoutMs: envInt("TAKER_TX_TIMEOUT_MS", 180_000),
     pollMs: envInt("TAKER_POLL_MS", 5_000),
     resendAfterS: envInt("TAKER_RESEND_AFTER_S", 240),

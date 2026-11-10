@@ -112,7 +112,31 @@ export class FakeHtlcChain {
     account: string;
     hashlock: string;
     amount: bigint;
+    /** Height of the block that carried the log. */
+    block: number;
   }[] = [];
+  /** Log queries wider than this many blocks are refused, as public
+   *  endpoints do. Null accepts any range. */
+  maxLogRange: number | null = null;
+  /** The refusal body: a JSON-RPC error code and message. */
+  logRangeError = {
+    code: -32701,
+    message: "exceed maximum block range: 50000",
+  };
+  /** A log query whose range holds this block fails. */
+  failLogsAtBlock: number | null = null;
+  /** Every log query served or refused, for assertions. */
+  readonly logQueries: { from: number; to: number }[] = [];
+  /** Block n carries the clock reading taken when it was mined. */
+  private readonly blockTimes: number[] = [];
+  blockTimestamp(block: number): number {
+    const last = this.blockTimes.length - 1;
+    return this.blockTimes[Math.min(Math.max(block, 0), last)] ?? 0;
+  }
+  /** Mine empty blocks. */
+  advance(blocks: number): void {
+    for (let i = 0; i < blocks; i += 1) this.snapshot();
+  }
   /**
    * When set, a settlement credits unless the sender supplied the published
    * gas buffer. That is what the real contract does: the payout attempt runs
@@ -155,7 +179,13 @@ export class FakeHtlcChain {
       this.deliveryFails(payee) ||
       (this.deferWithoutGasBuffer && !this.suppliedGasBuffer)
     ) {
-      this.creditedLogs.push({ token, account: payee, hashlock, amount });
+      this.creditedLogs.push({
+        token,
+        account: payee,
+        hashlock,
+        amount,
+        block: this.history.length,
+      });
       this.credits.set(
         creditKey(token, payee),
         this.creditOf(token, payee) + amount,
@@ -229,6 +259,7 @@ export class FakeHtlcChain {
 
   /** Commit the current state as a new block. */
   snapshot(): void {
+    this.blockTimes.push(this.clock());
     this.history.push(new Map([...this.swaps].map(([k, v]) => [k, { ...v }])));
   }
 
@@ -344,6 +375,8 @@ export class FakeHtlcChain {
     token?: string,
     account?: string,
     hashlock?: string,
+    fromBlock = 0,
+    toBlock = Number.MAX_SAFE_INTEGER,
   ): { data: string; topics: string[] }[] {
     const word = (value: bigint): string =>
       this.leg === "qrl"
@@ -354,6 +387,7 @@ export class FakeHtlcChain {
         ? `${value.toLowerCase()}${"0".repeat(64)}`
         : value.toLowerCase();
     return this.creditedLogs
+      .filter((entry) => entry.block >= fromBlock && entry.block <= toBlock)
       .map((entry) => ({
         data: `0x${word(entry.amount)}`,
         topics: [
@@ -472,11 +506,11 @@ export async function startFakeChainRpc(
         });
         res.end(body);
       };
-      const fail = (message: string): void => {
+      const fail = (message: string, code = -32000): void => {
         const body = JSON.stringify({
           jsonrpc: "2.0",
           id: request.id ?? 1,
-          error: { code: -32000, message },
+          error: { code, message },
         });
         res.writeHead(200, {
           "Content-Type": "application/json",
@@ -493,8 +527,14 @@ export async function startFakeChainRpc(
         reply(`0x${BigInt(id).toString(16)}`);
         return;
       }
-      if (method === "qrl_getBlockByNumber") {
-        reply({ hash: protocolV2Config.qrlGenesisHash });
+      if (method === `${ns}_getBlockByNumber`) {
+        const tagParam = request.params?.[0];
+        const tag = typeof tagParam === "string" ? tagParam : "0x0";
+        const number = tag === "latest" ? chain.height : Number(BigInt(tag));
+        reply({
+          hash: protocolV2Config.qrlGenesisHash,
+          timestamp: `0x${chain.blockTimestamp(number).toString(16)}`,
+        });
         return;
       }
       if (method === `${ns}_blockNumber`) {
@@ -502,7 +542,33 @@ export async function startFakeChainRpc(
         return;
       }
       if (method === `${ns}_getLogs`) {
-        const filter = (request.params?.[0] ?? {}) as { topics?: unknown };
+        const filter = (request.params?.[0] ?? {}) as {
+          topics?: unknown;
+          fromBlock?: unknown;
+          toBlock?: unknown;
+        };
+        const blockOf = (tag: unknown, latest: number): number =>
+          tag === undefined || tag === "latest"
+            ? latest
+            : Number(BigInt(typeof tag === "string" ? tag : "0x0"));
+        const fromBlock = blockOf(filter.fromBlock, chain.height);
+        const toBlock = blockOf(filter.toBlock, chain.height);
+        chain.logQueries.push({ from: fromBlock, to: toBlock });
+        if (
+          chain.maxLogRange !== null &&
+          toBlock - fromBlock + 1 > chain.maxLogRange
+        ) {
+          fail(chain.logRangeError.message, chain.logRangeError.code);
+          return;
+        }
+        if (
+          chain.failLogsAtBlock !== null &&
+          fromBlock <= chain.failLogsAtBlock &&
+          chain.failLogsAtBlock <= toBlock
+        ) {
+          fail("upstream unavailable");
+          return;
+        }
         const topics = Array.isArray(filter.topics) ? filter.topics : [];
         const wanted = (index: number): string | undefined =>
           typeof topics[index] === "string" ? topics[index] : undefined;
@@ -512,7 +578,15 @@ export async function startFakeChainRpc(
           reply([]);
           return;
         }
-        reply(chain.creditedLogsByTopic(wanted(1), wanted(2), wanted(3)));
+        reply(
+          chain.creditedLogsByTopic(
+            wanted(1),
+            wanted(2),
+            wanted(3),
+            fromBlock,
+            toBlock,
+          ),
+        );
         return;
       }
       if (method === `${ns}_call`) {

@@ -276,6 +276,19 @@ function priceString(pay: LegView, receive: LegView): string {
   return formatUnits(scaled, 8);
 }
 
+/**
+ * Earliest time the hashlock of this take can have been locked: the signing
+ * time of the order it answers, or this take's own start when the signed
+ * time is later. The maker controls the signed time, so a future-dated proof
+ * must not be able to move the credit scan past the lock.
+ */
+export function creditScanSinceS(record: {
+  orderAuth: { issuedAt: number };
+  createdAt: number;
+}): number {
+  return Math.min(record.orderAuth.issuedAt, record.createdAt);
+}
+
 export class TakerEngine {
   private readonly nowS: () => number;
   private readonly log: (...args: unknown[]) => void;
@@ -555,13 +568,15 @@ export class TakerEngine {
    * settled, so the amount is attributed through this swap's PayoutCredited
    * log and capped by what the ledger still holds. Null on a read failure,
    * which decides nothing: an unknown amount must not read as zero, and it
-   * must not authorise a send either.
+   * must not authorise a send either. The scan starts at the signing time
+   * of the order this take answers: its hashlock did not exist before.
    */
   private async creditOrNull(
     leg: LegKey,
     asset: AssetSymbol,
     account: string,
     hashlock: string,
+    notLockedBeforeS: number,
   ): Promise<bigint | null> {
     try {
       const reading = await readSwapCredit(
@@ -569,6 +584,7 @@ export class TakerEngine {
         expectedToken(leg, asset),
         account,
         hashlock,
+        notLockedBeforeS,
       );
       return reading.credited < reading.global
         ? reading.credited
@@ -619,6 +635,7 @@ export class TakerEngine {
           record.asset,
           candidate.account,
           hashlock,
+          creditScanSinceS(record),
         ),
       ),
     );
@@ -779,12 +796,14 @@ export class TakerEngine {
               record.asset,
               this.ourAddress(iLeg),
               hashlock,
+              creditScanSinceS(record),
             ),
             this.creditOrNull(
               rLeg,
               record.asset,
               this.ourAddress(rLeg),
               hashlock,
+              creditScanSinceS(record),
             ),
           ]);
 
