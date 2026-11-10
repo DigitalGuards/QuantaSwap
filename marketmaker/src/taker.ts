@@ -276,6 +276,19 @@ function priceString(pay: LegView, receive: LegView): string {
   return formatUnits(scaled, 8);
 }
 
+/**
+ * Earliest time the hashlock of this take can have been locked: the signing
+ * time of the order it answers, or this take's own start when the signed
+ * time is later. The maker controls the signed time, so a future-dated proof
+ * must not be able to move the credit scan past the lock.
+ */
+export function creditScanSinceS(record: {
+  orderAuth: { issuedAt: number };
+  createdAt: number;
+}): number {
+  return Math.min(record.orderAuth.issuedAt, record.createdAt);
+}
+
 export class TakerEngine {
   private readonly nowS: () => number;
   private readonly log: (...args: unknown[]) => void;
@@ -622,7 +635,7 @@ export class TakerEngine {
           record.asset,
           candidate.account,
           hashlock,
-          record.orderAuth.issuedAt,
+          creditScanSinceS(record),
         ),
       ),
     );
@@ -783,14 +796,14 @@ export class TakerEngine {
               record.asset,
               this.ourAddress(iLeg),
               hashlock,
-              record.orderAuth.issuedAt,
+              creditScanSinceS(record),
             ),
             this.creditOrNull(
               rLeg,
               record.asset,
               this.ourAddress(rLeg),
               hashlock,
-              record.orderAuth.issuedAt,
+              creditScanSinceS(record),
             ),
           ]);
 

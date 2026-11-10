@@ -15,6 +15,7 @@ import {
   type LegRpc,
 } from "./htlc.js";
 import { protocolV2Config } from "./protocol-v2-config.js";
+import { creditScanSinceS } from "./taker.js";
 import {
   FakeHtlcChain,
   sha256Hex,
@@ -264,5 +265,27 @@ void describe("credit attribution under a log range cap", () => {
     } finally {
       await f.endpoint.close();
     }
+  });
+});
+
+void describe("taker credit scan bound", () => {
+  void it("uses the order's signing time when it precedes the take", () => {
+    assert.equal(
+      creditScanSinceS({
+        orderAuth: { issuedAt: T0 },
+        createdAt: T0 + 40,
+      }),
+      T0,
+    );
+  });
+
+  void it("falls back to the take's own start for a future-dated order proof", () => {
+    assert.equal(
+      creditScanSinceS({
+        orderAuth: { issuedAt: T0 + 7 * 86_400 },
+        createdAt: T0 + 40,
+      }),
+      T0 + 40,
+    );
   });
 });
