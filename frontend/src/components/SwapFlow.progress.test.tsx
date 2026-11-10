@@ -164,11 +164,13 @@ describe("swap progress line", () => {
     expect(line.textContent).toMatch(/^Your turn: refund your .+ leg below\.$/);
   });
 
-  it("shows no waiting line when a leg was refunded and nothing is refundable", async () => {
+  it("says the swap will not complete when a leg was refunded and nothing is refundable", async () => {
     legStatus.eth = 3;
     legStatus.qrl = 0;
     renderFlow("taker");
     await waitFor(() => expect(screen.getAllByText("refunded").length).toBeGreaterThan(0));
-    expect(screen.queryByTestId("swap-now")).toBeNull();
+    expect(screen.getByTestId("swap-now").textContent).toMatch(
+      /^A leg of this swap was refunded, so the swap will not complete\./,
+    );
   });
 });

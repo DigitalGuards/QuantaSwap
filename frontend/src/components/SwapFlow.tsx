@@ -56,6 +56,7 @@ import {
   type StepModel,
 } from "@/lib/swapMachine";
 import { CLAIM_MARGIN_S } from "@/config";
+import { nowLine as deriveNowLine } from "@/lib/swapNowLine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
@@ -373,7 +374,6 @@ export function SwapFlow({
     revealedPreimage,
     refundableLegs,
     releasableLegs,
-    awaitingAssign,
     ownLockedLegs,
     ownEth,
     ownQrl,
@@ -651,66 +651,47 @@ export function SwapFlow({
     creditsRead && [iLeg, rLeg].every((leg) => creditReadOk.get(leg) === true);
   const connectedOn = (leg: LegKey): string | null => (leg === "eth" ? ethAccount : qrlAccount);
 
-  // The live step is the first one not yet done. The status line and the
-  // step list both read from it so the page always says what happens next.
-  const firstOpenIdx = steps.findIndex((step) => !step.done);
-  // A refunded leg or a walked-away taker means the swap cannot proceed as
-  // laid out, so no step is highlighted and no waiting line is shown.
-  const aborted =
-    iState?.status === SwapStatus.Refunded ||
-    rState?.status === SwapStatus.Refunded ||
-    takerWalkedAway;
-  const refundDue = refundableLegs.length > 0 && !complete;
-  const liveIdx = aborted || refundDue ? -1 : firstOpenIdx;
-  const liveStep = liveIdx >= 0 ? steps[liveIdx] : undefined;
-  /** What the non-signing party is waiting for on a counterparty step. */
-  const counterpartyWaitText = (step: StepModel): string =>
-    step.key === "lock-responder" && awaitingAssign
-      ? presentation["assign-initiator"].waitingText
-      : presentation[step.key].waitingText;
-  const nowLine = ((): { text: string; tone: "turn" | "wait" } | null => {
-    if (complete) return null;
-    if (refundDue) {
-      const symbols = refundableLegs.map((leg) => (leg === iLeg ? iPlan.symbol : rPlan.symbol));
-      return { text: `Your turn: refund your ${symbols.join(" and ")} leg below.`, tone: "turn" };
-    }
-    if (aborted) return null;
-    // An own step that can run is always the next action, whichever step is live.
-    const runnable = steps.find(
-      (step) => !step.done && step.own && (step.canRun || busy === actionKey(step.key, step.leg)),
-    );
-    if (runnable !== undefined) {
-      if (busy === actionKey(runnable.key, runnable.leg)) {
-        return {
-          text: `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on ${legByKey(runnable.leg).name}.`,
-          tone: "wait",
-        };
-      }
-      return { text: `Your turn: ${presentation[runnable.key].label}`, tone: "turn" };
-    }
-    if (liveStep === undefined) return null;
-    const view = presentation[liveStep.key];
-    if (liveStep.own) {
-      if (liveStep.awaitingDepth && view.pendingText !== null) {
-        return { text: view.pendingText, tone: "wait" };
-      }
-      if (liveStep.key === "lock-responder" && awaitingAssign) {
-        return { text: presentation["assign-initiator"].waitingText, tone: "wait" };
-      }
-      return {
-        text: `Step ${liveIdx + 1} is yours, but it is not ready yet. See the note on that step below.`,
-        tone: "wait",
-      };
-    }
-    const waitFor =
-      liveStep.awaitingDepth && view.pendingText !== null
-        ? view.pendingText
-        : counterpartyWaitText(liveStep);
-    return {
-      text: `Nothing to do right now. ${waitFor} This page updates by itself, and you can reopen this swap link later to check progress.`,
-      tone: "wait",
-    };
-  })();
+  // Own-step gate shared by the action button and the status line: every
+  // disabled term of the button except canRun and busy.
+  const stepGated = (step: Pick<StepModel, "key">): boolean =>
+    (!termsBound &&
+      !(swap.role === "taker" && step.key === "claim-initiator" && revealedPreimage !== null)) ||
+    (step.key === "lock-responder" && swap.role === "taker" && signedFillIssue !== null) ||
+    ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
+      swap.role === "maker" &&
+      signedFillIssue !== null) ||
+    ((step.key === "lock-initiator" || step.key === "assign-initiator") && takerWalkedAway);
+
+  const ownLegs: LegKey[] =
+    swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
+  const legTimeout: Partial<Record<LegKey, number>> = {};
+  for (const leg of [iLeg, rLeg]) {
+    const state = legs[leg];
+    if (state !== undefined) legTimeout[leg] = state.timeout;
+  }
+  const openIdx = steps.findIndex((step) => !step.done);
+  const { line: nowLine, highlightIdx } = deriveNowLine({
+    steps,
+    complete,
+    busy,
+    actionKey: (step) => actionKey(step.key, step.leg),
+    stepGated,
+    copy: presentation,
+    chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
+    symbol:
+      iLeg === "eth"
+        ? { eth: iPlan.symbol, qrl: rPlan.symbol }
+        : { eth: rPlan.symbol, qrl: iPlan.symbol },
+    refundableLegs,
+    releasableLegs,
+    ownLockedLegs,
+    ownLegsKnown: ownLegs.every((leg) => legs[leg] !== undefined),
+    legTimeout,
+    takerWalkedAway,
+    legRefunded: iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded,
+    nowS,
+    responderTimeout: swap.responderTimeout ?? undefined,
+  });
 
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
@@ -842,7 +823,7 @@ export function SwapFlow({
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
                   step.done
                     ? "border-success/60 bg-success/10 text-success"
-                    : i === liveIdx
+                    : i === highlightIdx
                       ? "border-identity-accent text-identity-accent ring-2 ring-identity-accent/40 motion-safe:animate-pulse"
                       : step.own && step.canRun
                         ? "border-identity-accent/60 text-identity-accent"
@@ -880,10 +861,12 @@ export function SwapFlow({
                   </p>
                 ) : null}
                 {!step.done &&
-                  (step.own && i !== firstOpenIdx && !step.canRun ? (
-                    <p className="text-xs text-muted-foreground" data-testid="step-later">
-                      Available after step {firstOpenIdx + 1}.
-                    </p>
+                  (step.own && i !== openIdx && !step.canRun ? (
+                    highlightIdx >= 0 ? (
+                      <p className="text-xs text-muted-foreground" data-testid="step-later">
+                        Available after step {openIdx + 1}.
+                      </p>
+                    ) : null
                   ) : step.own ? (
                     <div className="space-y-1">
                       {(step.key === "lock-initiator" || step.key === "assign-initiator") &&
@@ -897,24 +880,7 @@ export function SwapFlow({
                       <Button
                         size="sm"
                         className="mt-1"
-                        disabled={
-                          (!termsBound &&
-                            !(
-                              swap.role === "taker" &&
-                              step.key === "claim-initiator" &&
-                              revealedPreimage !== null
-                            )) ||
-                          !step.canRun ||
-                          busy !== null ||
-                          (step.key === "lock-responder" &&
-                            swap.role === "taker" &&
-                            signedFillIssue !== null) ||
-                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
-                            swap.role === "maker" &&
-                            signedFillIssue !== null) ||
-                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
-                            takerWalkedAway)
-                        }
+                        disabled={stepGated(step) || !step.canRun || busy !== null}
                         onClick={view.action}
                       >
                         {busy === actionKey(step.key, step.leg)
@@ -924,9 +890,9 @@ export function SwapFlow({
                           : view.label}
                       </Button>
                     </div>
-                  ) : (step.canRun || i === liveIdx) &&
+                  ) : (step.canRun || i === highlightIdx) &&
                     !(step.awaitingDepth && view.pendingText !== null) ? (
-                    <p className="text-xs text-identity-accent">{counterpartyWaitText(step)}</p>
+                    <p className="text-xs text-identity-accent">{view.waitingText}</p>
                   ) : null)}
               </div>
             </div>
