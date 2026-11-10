@@ -687,16 +687,24 @@ export function MyOrderCard({
       }
       // The escrow left the lock, which under HTLCv3 does not mean it reached
       // the wallet. Keep this handle until the payout is confirmed.
-      const target = prelockCreditTarget(pre, myOrder.asset, {
-        eth: ethAccount,
-        qrl: qrlAccount,
-      });
+      // The signed order proof is the earliest local time a listed order
+      // has. Handles without one scan from block 0.
+      const target = prelockCreditTarget(
+        pre,
+        myOrder.asset,
+        {
+          eth: ethAccount,
+          qrl: qrlAccount,
+        },
+        myOrder.orderAuth?.issuedAt,
+      );
       if (target !== null) {
         const reading = await readSwapCredit(
           target.leg,
           target.token,
           target.account,
           target.hashlock,
+          target.notBeforeS,
         ).catch(() => null);
         if (reading === null) {
           setDeferredRelease(target);

@@ -49,6 +49,9 @@ export interface DeferredPayoutTarget {
   account: string;
   symbol: string;
   decimals: number;
+  /** When this browser's record of the escrow began (unix seconds). It
+   *  bounds the credit log scan; absent means scan from block 0. */
+  notBeforeS?: number;
 }
 
 interface Props {
@@ -94,7 +97,13 @@ export function DeferredPayoutPanel({
   const refresh = useCallback(async () => {
     const results = await Promise.allSettled(
       targets.map((target) =>
-        readSwapCredit(target.leg, target.token, target.account, target.hashlock),
+        readSwapCredit(
+          target.leg,
+          target.token,
+          target.account,
+          target.hashlock,
+          target.notBeforeS,
+        ),
       ),
     );
     setReadings((previous) => {

@@ -124,6 +124,20 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+describe("credit log scan bound", () => {
+  it("hands the swap's own creation time to every credit read", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    renderFlow("taker");
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
+      expect(call[3]).toBe(HASHLOCK);
+      expect(call[4]).toBe(NOW - 60);
+    }
+  });
+});
+
 describe("deferred payout panel", () => {
   it("stays hidden while every payout was delivered", async () => {
     renderFlow("taker");

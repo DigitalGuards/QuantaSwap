@@ -146,6 +146,7 @@ export function prelockCreditTarget(
   stage: { leg: LegKey; hashlock: string },
   asset: EthAssetSymbol,
   initiator: { eth: string | null; qrl: string | null },
+  notBeforeS?: number,
 ): DeferredPayoutTarget | null {
   const account = stage.leg === "eth" ? initiator.eth : initiator.qrl;
   if (account === null) return null;
@@ -158,6 +159,7 @@ export function prelockCreditTarget(
     account,
     symbol: stage.leg === "eth" ? info.symbol : QRL_LEG.display,
     decimals: stage.leg === "eth" ? info.decimals : 18,
+    ...(notBeforeS === undefined ? {} : { notBeforeS }),
   };
 }
 
@@ -651,10 +653,17 @@ export function PostOrderCard({
         // The escrow left the lock, and under HTLCv3 that does not mean it
         // reached the wallet. Confirm the payout before retiring the only
         // local handle on it, and surface the credit when it deferred.
-        const target = prelockCreditTarget(staged, staged.asset, {
-          eth: ethAccount,
-          qrl: qrlAccount,
-        });
+        // The stage was written before the escrow transaction, so its time
+        // bounds the credit log scan.
+        const target = prelockCreditTarget(
+          staged,
+          staged.asset,
+          {
+            eth: ethAccount,
+            qrl: qrlAccount,
+          },
+          staged.createdAt,
+        );
         if (target === null) {
           clearPrelockStage();
           setStaged(null);
@@ -665,6 +674,7 @@ export function PostOrderCard({
           target.token,
           target.account,
           target.hashlock,
+          target.notBeforeS,
         ).catch(() => null);
         if (reading === null) {
           setDeferredRelease(target);

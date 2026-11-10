@@ -206,7 +206,9 @@ export function SwapFlow({
     const candidates = creditCandidates(current);
     const results = await Promise.allSettled(
       candidates.map((candidate) =>
-        readSwapCredit(candidate.leg, candidate.token, candidate.account, hashlock),
+        // This browser's record of the swap predates every claim, refund or
+        // release that could credit it, so it bounds the log scan.
+        readSwapCredit(candidate.leg, candidate.token, candidate.account, hashlock, swap.createdAt),
       ),
     );
     setCredits((previous) => {
@@ -232,7 +234,7 @@ export function SwapFlow({
     if (results.every((result) => result.status === "fulfilled")) {
       setCreditReadStatuses(readStatuses);
     }
-  }, [candidateKey, hashlock]);
+  }, [candidateKey, hashlock, swap.createdAt]);
 
   // Only poll once a leg is terminal. Before that there is nothing to
   // credit, so this would be 4 reads every 5 seconds for the whole swap.
