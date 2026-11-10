@@ -163,7 +163,8 @@ describe("credit attribution under a log range cap", () => {
     const chain = chainWith();
     stubChain(chain);
     await expect(read()).resolves.toBe(0n);
-    expect(chain.queries[0]?.from).toBe(0);
+    // The genesis block holds no transactions, so the walk starts after it.
+    expect(chain.queries[0]?.from).toBe(1);
     expect(chain.queries.at(-1)?.to).toBe(chain.head);
     chain.queries.slice(1).forEach((q, i) => {
       expect(q.from).toBe((chain.queries[i]?.to ?? 0) + 1);

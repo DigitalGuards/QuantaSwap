@@ -62,12 +62,14 @@ the maker then walks away.
    still inside the contract. `status` lists any credit and `withdraw` moves
    it.
 
-   On Sepolia a USDC payout arrives this way: the contract gives the token
-   transfer a fixed gas budget that a USDC transfer exceeds, so the claim
-   credits the amount and the client collects it by itself. Finding which
-   swap left a credit means walking `eth_getLogs` in chunks of
-   `TAKER_LOG_CHUNK_BLOCKS` blocks (default 5000), so the Ethereum RPC must
-   answer log queries of at least that many blocks.
+   On Sepolia the first USDC payout to an address arrives this way. The
+   contract gives the token transfer a gas budget of 100,000. A USDC transfer
+   to an address that has never held USDC needs about 132,000, so the claim
+   credits the amount and the client collects it by itself. Once the address
+   holds USDC a transfer needs about 33,000 and the payout is delivered inside
+   the claim. Finding which swap left a credit means walking `eth_getLogs` in
+   chunks of `TAKER_LOG_CHUNK_BLOCKS` blocks (default 5000), so the Ethereum
+   RPC must answer log queries of at least that many blocks.
 
 Every irreversible step runs through one pure decision function
 (`marketmaker/src/taker-policy.ts`) and every piece of recovery material is

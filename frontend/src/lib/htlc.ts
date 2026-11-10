@@ -4,7 +4,14 @@ import { isArray, isRecord, requireHex, InvalidInputError } from "@/utils/guards
 // writes are encoded here and signed by the user's wallets.
 
 import { Interface } from "ethers";
-import { ETH_LEG, ETH_LOGS_RPC, QRL_LEG, legByKey, type LegKey } from "../config";
+import {
+  ETH_LEG,
+  ETH_LOGS_RPC,
+  PRELOCK_INITIATOR_TIMEOUT_S,
+  QRL_LEG,
+  legByKey,
+  type LegKey,
+} from "../config";
 import { formatQrlAddressFingerprint, isQrlAddress, qToHex } from "./qrlAddress";
 import { decodeQrvmSwap, decodeQrvmUints, encodeQrvmHtlc } from "./qrvmHtlc";
 import { assertQrlNetwork } from "./qrlNetwork";
@@ -329,39 +336,6 @@ export function swapEventKindFromTopic(leg: LegKey, topic: string): SwapEventKin
   return (leg === "qrl" ? QRL_TOPIC_KIND : TOPIC_KIND).get(topic.toLowerCase());
 }
 
-/** Every HTLC action (both parties') indexed by the shared hashlock, with
- *  its transaction hash for explorer links. Chain-derived, so it works
- *  for any visitor with no order-book record and no wallet. Both legs
- *  scan from genesis: the QRL node is ours, and the ETH side uses the
- *  logs-capable proxy (the main Sepolia RPC refuses log scans). */
-export async function getSwapEvents(leg: LegKey, hashlock: string): Promise<SwapEvent[]> {
-  // Only the qualified full-width deployment accepts QRL reads.
-  if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
-  const cfg = legByKey(leg);
-  const params = [
-    {
-      address: cfg.htlc,
-      topics: [null, leg === "qrl" ? qrvm64Topic(hashlock) : hashlock],
-      fromBlock: "0x0",
-      toBlock: "latest",
-    },
-  ];
-  const raw = await (leg === "qrl"
-    ? qrlRpc("qrl_getLogs", params)
-    : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
-  if (!isArray(raw)) return [];
-  const events: SwapEvent[] = [];
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const log = entry;
-    const topic0 = isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
-    const kind = topic0 === null ? undefined : swapEventKindFromTopic(leg, topic0);
-    if (kind === undefined || typeof log.transactionHash !== "string") continue;
-    events.push({ kind, txHash: log.transactionHash });
-  }
-  return events;
-}
-
 /** An indexed `address` topic word: 32 bytes left-padded on Ethereum, the
  *  64-byte address itself on QRVM-512. */
 function addressTopic(leg: LegKey, address: string): string {
@@ -505,43 +479,37 @@ function scanStartBlock(leg: LegKey, notBeforeS: number, head: number): Promise<
   return search;
 }
 
+/** The genesis block holds no transactions, so no log scan needs it, and the
+ *  QRL proxy refuses a scan that starts there. */
+const FIRST_LOG_BLOCK = 1;
+
 /**
- * The amount `PayoutCredited` recorded for this exact swap, in this token,
- * for this account. `creditOf` is a per-(token, account) ledger shared by
- * every swap that account ever settled, so it cannot answer "what did THIS
- * swap leave behind". The event can: its third indexed field is the
- * hashlock, which names one swap.
+ * Every log of the leg's HTLC that matches `topics`, from the block of
+ * `notBeforeS` (minus a day of slack, see scanStartBlock) to the head.
  *
- * Public endpoints refuse a block 0 to latest range, so the range is walked
- * in chunks of CREDIT_LOG_CHUNK_BLOCKS. It starts at the block of
- * `notBeforeS` (unix seconds, minus a day of slack) when the caller has one:
- * the browser's own record of when this swap or its escrow began. The event
- * is emitted by a claim, refund or release this swap's participants make
- * after that record exists, so nothing earlier can carry it. Without a bound
- * the walk starts at block 0, which is correct and slow. Every caller in the
- * app passes one.
+ * Public endpoints refuse a wide range, and the QRL proxy also refuses a
+ * bound that is not a number, so the range is walked in chunks of
+ * CREDIT_LOG_CHUNK_BLOCKS with numeric bounds. Without `notBeforeS` the walk
+ * covers the whole chain, which is correct and slow.
  *
  * The walk runs to the head of the main RPC, and on the ETH leg only once
- * the logs endpoint has reached that head too (see creditScanHead).
- *
- * Any chunk that fails fails the whole read, and a partial sum is never
- * returned: an unknown amount must not read as zero. Returns 0 only after
- * every chunk answered, which is the normal case when the payout was
- * delivered.
+ * the logs endpoint has reached that head too (see creditScanHead). Any
+ * chunk that fails, or answers with something other than an array, fails the
+ * whole scan: a partial list is never returned.
  */
-export async function getCreditedForSwap(
+async function scanLogs(
   leg: LegKey,
-  token: string,
-  account: string,
-  hashlock: string,
+  topics: (string | null)[],
   notBeforeS?: number,
-): Promise<bigint> {
+): Promise<Record<string, unknown>[]> {
   if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const cfg = legByKey(leg);
-  const topics = creditFilterTopics(leg, token, account, hashlock);
   const head = await creditScanHead(leg);
-  const start = notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head);
-  let total = 0n;
+  const start = Math.max(
+    FIRST_LOG_BLOCK,
+    notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head),
+  );
+  const entries: Record<string, unknown>[] = [];
   for (let from = start; from <= head; from += CREDIT_LOG_CHUNK_BLOCKS) {
     const to = Math.min(head, from + CREDIT_LOG_CHUNK_BLOCKS - 1);
     const params = [
@@ -556,15 +524,96 @@ export async function getCreditedForSwap(
       ? qrlRpc("qrl_getLogs", params)
       : rpc(ETH_LOGS_RPC, "eth_getLogs", params));
     // A non-array answer is a malformed reply. Reading it as an empty result
-    // would turn an unknown amount into zero.
+    // would turn an unknown answer into "nothing there".
     if (!isArray(raw)) throw new InvalidInputError("Log response was not an array");
     for (const entry of raw) {
-      if (!isRecord(entry)) continue;
-      const { data } = entry;
-      const amount = decodeCreditedAmount(leg, data);
-      if (amount === null) continue;
-      total += amount;
+      if (isRecord(entry)) entries.push(entry);
     }
+  }
+  return entries;
+}
+
+/**
+ * The earliest block time the events of the given legs can carry, from the
+ * chain's own state: the earliest `timeout` among those that hold a lock,
+ * minus the longest timeout window this app sets
+ * (PRELOCK_INITIATOR_TIMEOUT_S). The events of a leg come after its own
+ * lock, so a caller that scans one leg passes that leg alone. Null when none
+ * of them holds a lock, which means there is nothing to find. A lock made by
+ * other tooling with a longer window would lose only its explorer link.
+ */
+export function swapEventsNotBeforeS(
+  states: readonly (Pick<LegState, "status" | "timeout"> | null | undefined)[],
+): number | null {
+  let earliest: number | null = null;
+  for (const state of states) {
+    if (state === null || state === undefined || state.status === SwapStatus.None) continue;
+    if (earliest === null || state.timeout < earliest) earliest = state.timeout;
+  }
+  return earliest === null ? null : earliest - PRELOCK_INITIATOR_TIMEOUT_S;
+}
+
+/** Every HTLC action (both parties') indexed by the shared hashlock, with
+ *  its transaction hash for explorer links. Chain-derived, so it works for
+ *  any visitor with no order-book record and no wallet. `notBeforeS` comes
+ *  from swapEventsNotBeforeS; null means no leg holds a lock, so there is
+ *  nothing to look up and no request is made. */
+export async function getSwapEvents(
+  leg: LegKey,
+  hashlock: string,
+  notBeforeS: number | null,
+): Promise<SwapEvent[]> {
+  if (notBeforeS === null) return [];
+  const entries = await scanLogs(
+    leg,
+    [null, leg === "qrl" ? qrvm64Topic(hashlock) : hashlock],
+    notBeforeS,
+  );
+  const events: SwapEvent[] = [];
+  for (const log of entries) {
+    const topic0 = isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
+    const kind = topic0 === null ? undefined : swapEventKindFromTopic(leg, topic0);
+    if (kind === undefined || typeof log.transactionHash !== "string") continue;
+    events.push({ kind, txHash: log.transactionHash });
+  }
+  return events;
+}
+
+/**
+ * The amount `PayoutCredited` recorded for this exact swap, in this token,
+ * for this account. `creditOf` is a per-(token, account) ledger shared by
+ * every swap that account ever settled, so it cannot answer "what did THIS
+ * swap leave behind". The event can: its third indexed field is the
+ * hashlock, which names one swap.
+ *
+ * The log is read with scanLogs. `notBeforeS` (unix seconds) is the browser's
+ * own record of when this swap or its escrow began. The event is emitted by a
+ * claim, refund or release this swap's participants make after that record
+ * exists, so nothing earlier can carry it. Every caller in the app passes
+ * one.
+ *
+ * A failed scan fails the read, and a partial sum is never returned: an
+ * unknown amount must not read as zero. Returns 0 only after every chunk
+ * answered, which is the normal case when the payout was delivered.
+ */
+export async function getCreditedForSwap(
+  leg: LegKey,
+  token: string,
+  account: string,
+  hashlock: string,
+  notBeforeS?: number,
+): Promise<bigint> {
+  const entries = await scanLogs(
+    leg,
+    creditFilterTopics(leg, token, account, hashlock),
+    notBeforeS,
+  );
+  let total = 0n;
+  for (const entry of entries) {
+    const { data } = entry;
+    const amount = decodeCreditedAmount(leg, data);
+    if (amount === null) continue;
+    total += amount;
   }
   return total;
 }

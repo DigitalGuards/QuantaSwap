@@ -6,6 +6,7 @@ import { cn } from "@/utils/cn";
 import { ethAssetByAddress, legByKey, type LegKey } from "@/config";
 import type { useEthWallet } from "@/hooks/useEthWallet";
 import type { useQrlWallet } from "@/hooks/useQrlWallet";
+import { useSwapEvents } from "@/hooks/useSwapEvents";
 import { useAnnounceReconcile } from "@/hooks/useAnnounceReconcile";
 import type { ActiveSwap } from "@/lib/activeSwap";
 import { releaseTake } from "@/lib/orderbook";
@@ -13,7 +14,6 @@ import { SwapFlow } from "@/components/SwapFlow";
 import { NetworkPanel } from "@/components/NetworkPanel";
 import {
   getLegState,
-  getSwapEvents,
   hexToQ,
   nativeTokenForLeg,
   SwapStatus,
@@ -191,7 +191,6 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
 
   const [qrl, setQrl] = useState<LegSnapshot | undefined>(undefined);
   const [eth, setEth] = useState<LegSnapshot | undefined>(undefined);
-  const [events, setEvents] = useState<Record<LegKey, SwapEvent[]>>({ qrl: [], eth: [] });
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -206,17 +205,9 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
         .catch(() => {
           if (alive) set(null);
         });
-    const readEvents = (leg: LegKey) =>
-      getSwapEvents(leg, hashlock)
-        .then((list) => {
-          if (alive) setEvents((prev) => ({ ...prev, [leg]: list }));
-        })
-        .catch(() => undefined);
     const poll = () => {
       void read("qrl", setQrl);
       void read("eth", setEth);
-      void readEvents("qrl");
-      void readEvents("eth");
     };
     poll();
     const t = setInterval(poll, POLL_MS);
@@ -225,6 +216,10 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
       clearInterval(t);
     };
   }, [hashlock, own]);
+
+  // Looked up when a leg's status changes and after a failed lookup. The
+  // poll above only refreshes the leg states.
+  const events = useSwapEvents(hashlock, { qrl, eth }, !own);
 
   if (hashlock === null) {
     return (
