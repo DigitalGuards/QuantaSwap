@@ -139,16 +139,11 @@
     {
       "file": "src/lib/htlc.v3.test.ts",
       "rule": "@typescript-eslint/consistent-type-assertions",
-      "count": 4
-    },
-    {
-      "file": "src/lib/htlc.v3.test.ts",
-      "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 3
     },
     {
       "file": "src/lib/htlc.v3.test.ts",
-      "rule": "@typescript-eslint/no-unsafe-member-access",
+      "rule": "@typescript-eslint/no-non-null-assertion",
       "count": 1
     },
     {

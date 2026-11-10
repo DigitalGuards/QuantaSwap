@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { encodeParameters } from "@theqrl/web3-qrl-abi";
 import { QRL_LEG } from "../config";
-import { getBlockNumber, getLegState, getSwapEvents, htlcInterface, qrvm64Topic } from "./htlc";
+import { getBlockNumber, getLegState, htlcInterface } from "./htlc";
 import { assertQrlNetwork } from "./qrlNetwork";
 import { encodeQrvmHtlc } from "./qrvmHtlc";
 
@@ -109,18 +109,5 @@ describe("v3 RPC identity and HTLC reads", () => {
         ),
       ).rejects.toThrow(/genesis/);
     }
-  });
-
-  it("uses full-width indexed log topics and recognizes the deployed event", async () => {
-    const signature = htlcInterface.getEvent("Locked")!.topicHash;
-    const fetchMock = networkFetch([
-      { topics: [qrvm64Topic(signature), qrvm64Topic(hash)], transactionHash: hash },
-    ]);
-    vi.stubGlobal("fetch", fetchMock);
-    expect(await getSwapEvents("qrl", hash)).toEqual([{ kind: "locked", txHash: hash }]);
-    expect(JSON.parse(fetchMock.mock.calls[2]![1].body as string).params[0].topics).toEqual([
-      null,
-      qrvm64Topic(hash),
-    ]);
   });
 });

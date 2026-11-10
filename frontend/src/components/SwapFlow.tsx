@@ -5,6 +5,7 @@ import type { BrowserProvider } from "ethers";
 import { Check } from "lucide-react";
 import { ETH_ASSETS, legByKey } from "@/config";
 import type { LegKey } from "@/config";
+import { useSwapEvents } from "@/hooks/useSwapEvents";
 import {
   SwapStatus,
   buildAssignData,
@@ -17,12 +18,10 @@ import {
   buildWithdrawAllData,
   getConfirmedLegState,
   getLegState,
-  getSwapEvents,
   readSwapCredit,
   unverifiedDeliveryPolicyLegs,
   type CreditReading,
   type LegState,
-  type SwapEvent,
 } from "@/lib/htlc";
 import {
   makeLegSender,
@@ -294,22 +293,7 @@ export function SwapFlow({
   // Explorer links for every step, recovered from the HTLCs' own events
   // (indexed by hashlock), so the counterparty's transactions get links
   // too, not just our own. Refetched when a leg's status changes.
-  const [legEvents, setLegEvents] = useState<Record<LegKey, SwapEvent[]>>({ qrl: [], eth: [] });
-  const iStatus = legs[iLeg]?.status;
-  const rStatus = legs[rLeg]?.status;
-  useEffect(() => {
-    if (!hashlock) return undefined;
-    let alive = true;
-    void Promise.all([
-      getSwapEvents("qrl", hashlock).catch((): SwapEvent[] => []),
-      getSwapEvents("eth", hashlock).catch((): SwapEvent[] => []),
-    ]).then(([qrl, eth]) => {
-      if (alive) setLegEvents({ qrl, eth });
-    });
-    return () => {
-      alive = false;
-    };
-  }, [hashlock, iStatus, rStatus]);
+  const legEvents = useSwapEvents(hashlock === "" ? null : hashlock, legs);
 
   // Poll the order-book view so a maker sees a taker's walk-away (released)
   // before committing funds. Best-effort: chain state remains authoritative.
