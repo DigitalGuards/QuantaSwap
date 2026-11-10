@@ -9,6 +9,7 @@ import {
   CREDIT_LOG_CHUNK_BLOCKS,
   SwapStatus,
   getSwapEvents,
+  type LegState,
   htlcInterface,
   qrvm64Topic,
   swapEventsNotBeforeS,
@@ -58,7 +59,7 @@ function stub(fake: Fake): void {
   });
   vi.stubGlobal(
     "fetch",
-    vi.fn((url: unknown, init: RequestInit) => {
+    vi.fn((_url: unknown, init: RequestInit) => {
       const request: unknown = JSON.parse(typeof init.body === "string" ? init.body : "null");
       if (!isRecord(request) || typeof request.method !== "string" || !isArray(request.params)) {
         throw new Error("malformed test request");
@@ -136,7 +137,7 @@ function stub(fake: Fake): void {
 }
 
 describe("swapEventsNotBeforeS", () => {
-  const state = (status: number, timeout: number) => ({ status, timeout });
+  const state = (status: LegState["status"], timeout: number) => ({ status, timeout });
   it("is the earliest timeout among the legs that hold a lock, minus 48 hours", () => {
     expect(
       swapEventsNotBeforeS([

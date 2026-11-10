@@ -30,23 +30,27 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
 });
 
 const { SwapStatusPage } = await import("./SwapStatusPage");
+const { useEthWallet } = await import("@/hooks/useEthWallet");
+const { useQrlWallet } = await import("@/hooks/useQrlWallet");
 const { getSwapEvents } = await import("@/lib/htlc");
-
-const wallet = new Proxy({}, { get: () => null });
 
 const tick = (ms: number) =>
   act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
 
+/** The page takes the two wallet hooks as props, as App does. */
+function Page() {
+  const eth = useEthWallet();
+  const qrl = useQrlWallet();
+  return <SwapStatusPage eth={eth} qrl={qrl} swap={null} setSwap={vi.fn()} />;
+}
+
 function mount() {
   return render(
     <MemoryRouter initialEntries={[`/swap/${HASHLOCK}`]}>
       <Routes>
-        <Route
-          path="/swap/:hashlock"
-          element={<SwapStatusPage eth={wallet} qrl={wallet} swap={null} setSwap={vi.fn()} />}
-        />
+        <Route path="/swap/:hashlock" element={<Page />} />
       </Routes>
     </MemoryRouter>,
   );

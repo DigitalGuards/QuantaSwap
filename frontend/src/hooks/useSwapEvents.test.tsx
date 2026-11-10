@@ -5,7 +5,9 @@
 
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SwapEvent } from "@/lib/htlc";
+import type { LegState, SwapEvent } from "@/lib/htlc";
+
+type Reading = Pick<LegState, "status" | "timeout">;
 
 const getSwapEvents =
   vi.fn<(leg: string, hashlock: string, notBeforeS: number | null) => Promise<SwapEvent[]>>();
@@ -21,9 +23,9 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
 const { useSwapEvents, SWAP_EVENTS_RETRY_MS } = await import("./useSwapEvents");
 
 const HASHLOCK = `0x${"12".repeat(32)}`;
-const open = { status: 1, timeout: 1_900_000_000 } as const;
-const claimed = { status: 2, timeout: 1_900_000_000 } as const;
-const none = { status: 0, timeout: 0 } as const;
+const open: Reading = { status: 1, timeout: 1_900_000_000 };
+const claimed: Reading = { status: 2, timeout: 1_900_000_000 };
+const none: Reading = { status: 0, timeout: 0 };
 const tick = (ms: number) =>
   act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
