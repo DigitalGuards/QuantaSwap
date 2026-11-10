@@ -7,6 +7,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PRELOCK_INITIATOR_TIMEOUT_S } from "@/config";
 import type { CreditReading, LegState } from "@/lib/htlc";
 import type { ActiveSwap } from "@/lib/activeSwap";
 
@@ -98,11 +99,11 @@ const swap = (role: ActiveSwap["role"]): ActiveSwap => ({
   createdAt: NOW - 60,
 });
 
-function renderFlow(role: ActiveSwap["role"]) {
+function renderFlow(role: ActiveSwap["role"], overrides: Partial<ActiveSwap> = {}) {
   return render(
     <MemoryRouter>
       <SwapFlow
-        swap={swap(role)}
+        swap={{ ...swap(role), ...overrides }}
         ethAccount={role === "taker" ? TAKER_ETH : MAKER_ETH}
         qrlAccount={role === "taker" ? TAKER_QRL : MAKER_QRL}
         browserProvider={null}
@@ -134,6 +135,25 @@ describe("credit log scan bound", () => {
     for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
       expect(call[3]).toBe(HASHLOCK);
       expect(call[4]).toBe(NOW - 60);
+    }
+  });
+});
+
+describe("credit log scan bound of a pre-funded maker swap", () => {
+  it("uses the escrow's stage time, which is earlier than the match", async () => {
+    credits.set(`eth:${NATIVE_TOKEN.toLowerCase()}:${TAKER_ETH.toLowerCase()}`, ETH_AMOUNT);
+    const htlc = await import("@/lib/htlc");
+    vi.mocked(htlc.readSwapCredit).mockClear();
+    // Escrowed an hour before the match; T1 is the stage time plus 48 hours.
+    const stageAt = NOW - 3600;
+    renderFlow("maker", {
+      prelocked: true,
+      initiatorTimeout: stageAt + PRELOCK_INITIATOR_TIMEOUT_S,
+      createdAt: NOW - 60,
+    });
+    await waitFor(() => expect(htlc.readSwapCredit).toHaveBeenCalled());
+    for (const call of vi.mocked(htlc.readSwapCredit).mock.calls) {
+      expect(call[4]).toBe(stageAt);
     }
   });
 });

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 // Releasing the pre-funded escrow of a listing that left the book confirms
 // the payout from chain before the handle is cleared. The credit log scan
-// for that read starts at the signed order proof's time, and from block 0
-// for a legacy handle that has none.
+// for that read starts at the escrow's own stage time, which every handle
+// carries through T1, including a legacy handle with no order proof.
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PRELOCK_INITIATOR_TIMEOUT_S } from "@/config";
 import type { MyOrderRef } from "@/lib/activeSwap";
 import type { MakerOrderAuthV1 } from "@/lib/orderbook";
 
@@ -13,6 +14,9 @@ const ETH_ACCOUNT = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const QRL_ACCOUNT = `Q${"c".repeat(128)}`;
 const HASHLOCK = `0x${"12".repeat(32)}`;
 const ISSUED_AT = 1_700_000_000;
+// The stage is written a little before the order is signed, and fixes T1.
+const STAGE_AT = ISSUED_AT - 90;
+const T1 = STAGE_AT + PRELOCK_INITIATOR_TIMEOUT_S;
 
 const chain = { status: 1 };
 
@@ -27,7 +31,7 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
         recipient: actual.NATIVE_TOKEN,
         token: actual.NATIVE_TOKEN,
         amount: 10n ** 18n,
-        timeout: ISSUED_AT + 7200,
+        timeout: T1,
         preimage: `0x${"0".repeat(64)}`,
       }),
     ),
@@ -83,7 +87,7 @@ const handle = (withAuth: boolean): MyOrderRef => ({
   prelock: {
     hashlock: HASHLOCK,
     preimage: `0x${"34".repeat(32)}`,
-    initiatorTimeout: ISSUED_AT + 7200,
+    initiatorTimeout: T1,
     leg: "eth",
   },
   ...(withAuth ? { orderAuth: auth } : {}),
@@ -116,15 +120,15 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("MyOrderCard release of an orphaned pre-funded escrow", () => {
-  it("bounds the credit log scan by the signed order proof's time", async () => {
+  it("bounds the credit log scan by the escrow's stage time", async () => {
     const call = await release(handle(true));
     expect(call?.[3]).toBe(HASHLOCK);
-    expect(call?.[4]).toBe(ISSUED_AT);
+    expect(call?.[4]).toBe(STAGE_AT);
   });
 
-  it("scans from block 0 for a handle with no order proof", async () => {
+  it("gives a legacy handle with no order proof the same bound", async () => {
     const call = await release(handle(false));
     expect(call?.[3]).toBe(HASHLOCK);
-    expect(call?.[4]).toBeUndefined();
+    expect(call?.[4]).toBe(STAGE_AT);
   });
 });

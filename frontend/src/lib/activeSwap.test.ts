@@ -3,6 +3,7 @@
 // roundtrips and preserved legacy-chain records are pinned here.
 
 import { beforeEach, describe, expect, it } from "vitest";
+import { PRELOCK_INITIATOR_TIMEOUT_S } from "../config";
 import {
   clearActiveSwap,
   clearPrelockStage,
@@ -16,10 +17,12 @@ import {
   loadMyOrder,
   loadPrelockStage,
   loadSignedOrderStage,
+  prelockStageS,
   saveActiveSwap,
   saveMyOrder,
   savePrelockStage,
   saveSignedOrderStage,
+  swapCreditScanSinceS,
   type ActiveSwap,
   type PrelockStage,
 } from "./activeSwap";
@@ -354,5 +357,40 @@ describe("signed order publication staging", () => {
       }),
     ).toThrow(/earlier signed order/);
     expect(loadSignedOrderStage()).toEqual(stage);
+  });
+});
+
+describe("credit log scan bounds", () => {
+  const STAGE_AT = 1_700_000_000;
+  const T1 = STAGE_AT + PRELOCK_INITIATOR_TIMEOUT_S;
+
+  it("names the stage time of a pre-funded escrow from its T1", () => {
+    expect(prelockStageS({ initiatorTimeout: T1 })).toBe(STAGE_AT);
+  });
+
+  it("bounds a classic swap by its own record time", () => {
+    expect(swapCreditScanSinceS({ createdAt: STAGE_AT + 500, initiatorTimeout: T1 })).toBe(
+      STAGE_AT + 500,
+    );
+    expect(swapCreditScanSinceS({ createdAt: STAGE_AT + 500, initiatorTimeout: null })).toBe(
+      STAGE_AT + 500,
+    );
+  });
+
+  it("bounds a pre-funded maker swap by the escrow's stage, which precedes the match", () => {
+    expect(
+      swapCreditScanSinceS({ createdAt: STAGE_AT + 3600, prelocked: true, initiatorTimeout: T1 }),
+    ).toBe(STAGE_AT);
+  });
+
+  it("never moves a pre-funded bound later than the record time", () => {
+    // A T1 that would place the stage after the record is ignored.
+    expect(
+      swapCreditScanSinceS({
+        createdAt: STAGE_AT - 10,
+        prelocked: true,
+        initiatorTimeout: T1,
+      }),
+    ).toBe(STAGE_AT - 10);
   });
 });

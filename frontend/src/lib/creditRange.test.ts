@@ -40,6 +40,8 @@ interface Chain {
   /** Block timestamp lookups answered so far. */
   blockLookups: number;
   failBlockLookups: boolean;
+  /** How many more head requests the logs endpoint answers a block behind. */
+  logsBehindAnswers: number;
 }
 
 const word = (value: bigint): string => `0x${value.toString(16).padStart(64, "0")}`;
@@ -75,6 +77,10 @@ function stubChain(chain: Chain): void {
         });
       switch (method) {
         case "eth_blockNumber":
+          if (url === ETH_LOGS_RPC && chain.logsBehindAnswers > 0) {
+            chain.logsBehindAnswers -= 1;
+            return reply(`0x${(chain.head - 1).toString(16)}`);
+          }
           return reply(`0x${chain.head.toString(16)}`);
         case "eth_getBlockByNumber": {
           if (chain.failBlockLookups) return refuse("upstream unavailable");
@@ -123,6 +129,7 @@ const chainWith = (overrides: Partial<Chain> = {}): Chain => ({
   calls: [],
   blockLookups: 0,
   failBlockLookups: false,
+  logsBehindAnswers: 0,
   ...overrides,
 });
 
@@ -183,12 +190,16 @@ describe("credit attribution under a log range cap", () => {
     expect(first?.from).toBeGreaterThanOrEqual(creditBlock - 100 - slackBlocks - 1);
   });
 
-  it("reads only the head block for a bound newer than the head", async () => {
-    const chain = chainWith({ credits: [[HASHLOCK, 3, 5n]] });
+  it("caps a record time ahead of the chain's clock at the chain's clock", async () => {
+    // A browser clock that runs days fast stamps the record in the chain's
+    // future. The scan still has to cover the settlement that just happened.
+    const chain = chainWith({ credits: [[HASHLOCK, 29_990, 5n]] });
     stubChain(chain);
     const future = T0 + chain.head * BLOCK_TIME_S + 10 * CREDIT_LOOKBACK_MARGIN_S;
-    await expect(read(HASHLOCK, future)).resolves.toBe(0n);
-    expect(chain.queries).toEqual([{ from: chain.head, to: chain.head }]);
+    await expect(read(HASHLOCK, future)).resolves.toBe(5n);
+    const slackBlocks = CREDIT_LOOKBACK_MARGIN_S / BLOCK_TIME_S;
+    expect(chain.queries[0]?.from).toBe(chain.head - slackBlocks);
+    expect(chain.queries.at(-1)?.to).toBe(chain.head);
   });
 
   it("resolves the start block of a bound once across reads", async () => {
@@ -219,19 +230,53 @@ describe("credit attribution under a log range cap", () => {
     await expect(read(HASHLOCK, beganS)).resolves.toBe(4n);
   });
 
-  it("takes the head and block times from the main RPC and logs from the logs endpoint", async () => {
+  it("scans to the main RPC's head, with block times from it and logs from the logs endpoint", async () => {
     const creditBlock = 28_000;
     const chain = chainWith({ credits: [[HASHLOCK, creditBlock, 6n]] });
     stubChain(chain);
     await expect(read(HASHLOCK, T0 + (creditBlock - 30) * BLOCK_TIME_S)).resolves.toBe(6n);
-    const endpoints = (method: string) =>
-      new Set(chain.calls.filter((call) => call.method === method).map((call) => call.url));
+    const endpoints = (method: string) => [
+      ...new Set(chain.calls.filter((call) => call.method === method).map((call) => call.url)),
+    ];
     // The head is the one the caller's own state reads use, so the last
     // chunk has to reach the block where the caller saw the escrow settle.
-    expect([...endpoints("eth_blockNumber")]).toEqual([ETH_LEG.rpc]);
-    expect([...endpoints("eth_getBlockByNumber")]).toEqual([ETH_LEG.rpc]);
-    expect([...endpoints("eth_getLogs")]).toEqual([ETH_LOGS_RPC]);
+    // The logs endpoint is asked for its own head only to prove it got there.
+    expect(endpoints("eth_blockNumber")).toEqual([ETH_LEG.rpc, ETH_LOGS_RPC]);
+    expect(endpoints("eth_getBlockByNumber")).toEqual([ETH_LEG.rpc]);
+    expect(endpoints("eth_getLogs")).toEqual([ETH_LOGS_RPC]);
     expect(chain.queries.at(-1)?.to).toBe(chain.head);
+  });
+
+  it("waits for a logs endpoint that is a block behind the main RPC", async () => {
+    const creditBlock = 29_000;
+    const chain = chainWith({ credits: [[HASHLOCK, creditBlock, 8n]], logsBehindAnswers: 2 });
+    stubChain(chain);
+    vi.useFakeTimers();
+    try {
+      const reading = read(HASHLOCK, T0 + (creditBlock - 20) * BLOCK_TIME_S);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await expect(reading).resolves.toBe(8n);
+      expect(chain.logsBehindAnswers).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails without a log query while the logs endpoint stays behind", async () => {
+    // An endpoint that has not reached the settlement block could answer the
+    // last chunk with an empty list, which would read as nothing credited.
+    const chain = chainWith({ credits: [[HASHLOCK, 30_000, 9n]], logsBehindAnswers: 1_000 });
+    stubChain(chain);
+    vi.useFakeTimers();
+    try {
+      const reading = read(HASHLOCK, T0 + 29_900 * BLOCK_TIME_S);
+      const failed = expect(reading).rejects.toThrow(/logs endpoint/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await failed;
+      expect(chain.queries).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns both halves through readSwapCredit", async () => {

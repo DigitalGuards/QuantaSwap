@@ -418,6 +418,11 @@ export const CREDIT_LOG_CHUNK_BLOCKS = 5_000;
  *  range. A day adds one or two chunks. */
 export const CREDIT_LOOKBACK_MARGIN_S = 86_400;
 
+/** How long a credit scan waits for the logs endpoint to reach the head of
+ *  the main RPC before it gives up. The two are a block apart now and then. */
+const LOGS_HEAD_ATTEMPTS = 5;
+const LOGS_HEAD_RETRY_MS = 3_000;
+
 const chainRpc = (leg: LegKey, method: string, params: unknown[]): Promise<unknown> =>
   leg === "qrl" ? qrlRpc(method, params) : ethRpc(method, params);
 
@@ -429,13 +434,45 @@ async function blockTimestampS(leg: LegKey, block: number): Promise<number> {
   return seconds;
 }
 
-/** The first block whose timestamp is at or after `sinceS`, or `head` when
- *  even the head is older. Anything mined at or after `sinceS` sits in this
- *  block or a later one, so it is a sound lower bound for a log scan. */
-async function firstBlockAtOrAfter(leg: LegKey, sinceS: number, head: number): Promise<number> {
-  if ((await blockTimestampS(leg, head)) < sinceS) return head;
+/**
+ * The block a credit scan runs to. It is the head of the main RPC, the one
+ * the caller's own state reads use, so the scan reaches the block where the
+ * caller saw the escrow settle.
+ *
+ * On the ETH leg the logs come from a second endpoint. One that is still
+ * behind that block could answer the last chunk with an empty list, which
+ * would read as nothing credited. So its own head has to have reached the
+ * main one first. It gets a few seconds to catch up, then the scan fails.
+ */
+async function creditScanHead(leg: LegKey): Promise<number> {
+  const head = await getBlockNumber(leg);
+  if (leg === "qrl") return head;
+  for (let attempt = 1; ; attempt += 1) {
+    const logsHead = Number(BigInt(requireHex(await rpc(ETH_LOGS_RPC, "eth_blockNumber", []))));
+    if (Number.isSafeInteger(logsHead) && logsHead >= head) return head;
+    if (attempt >= LOGS_HEAD_ATTEMPTS) {
+      throw new Error("The logs endpoint has not reached the chain head yet");
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, LOGS_HEAD_RETRY_MS);
+    });
+  }
+}
+
+/**
+ * The block a scan bounded by `notBeforeS` starts at: the first block at or
+ * after that time minus CREDIT_LOOKBACK_MARGIN_S. Anything mined from that
+ * time on sits in this block or a later one.
+ *
+ * A record time ahead of the chain's own clock cannot be right (a browser
+ * clock that runs fast), so the head's timestamp caps it before the slack is
+ * taken. The scan then covers at least the last day.
+ */
+async function resolveScanStart(leg: LegKey, notBeforeS: number, head: number): Promise<number> {
+  const headS = await blockTimestampS(leg, head);
+  const sinceS = Math.min(notBeforeS, headS) - CREDIT_LOOKBACK_MARGIN_S;
   let low = 0;
-  let high = head; // invariant: timestamp(high) >= sinceS
+  let high = head; // invariant: timestamp(high) >= sinceS, which holds at the head
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
     if ((await blockTimestampS(leg, mid)) >= sinceS) high = mid;
@@ -446,21 +483,21 @@ async function firstBlockAtOrAfter(leg: LegKey, sinceS: number, head: number): P
 
 /** A bound resolves to the same block on every read, and the views that pass
  *  one repeat the read every few seconds, so the search runs once per leg and
- *  bound. A search that ended at the head (the bound is newer than the chain)
- *  stays a sound start: later blocks only come after it. A failed search is
- *  forgotten, so the next read tries again. */
+ *  bound. A start resolved against an older head stays sound, because a
+ *  fresh one could only be later. A failed search is forgotten, so the next
+ *  read tries again. */
 const scanStartMemo = new Map<string, Promise<number>>();
 const SCAN_START_MEMO_MAX = 64;
 
-function scanStartBlock(leg: LegKey, sinceS: number, head: number): Promise<number> {
-  const key = `${leg}|${sinceS.toString()}`;
+function scanStartBlock(leg: LegKey, notBeforeS: number, head: number): Promise<number> {
+  const key = `${leg}|${notBeforeS.toString()}`;
   const known = scanStartMemo.get(key);
   if (known !== undefined) return known;
   if (scanStartMemo.size >= SCAN_START_MEMO_MAX) {
     const oldest = scanStartMemo.keys().next();
     if (oldest.done !== true) scanStartMemo.delete(oldest.value);
   }
-  const search = firstBlockAtOrAfter(leg, sinceS, head);
+  const search = resolveScanStart(leg, notBeforeS, head);
   scanStartMemo.set(key, search);
   void search.catch(() => {
     if (scanStartMemo.get(key) === search) scanStartMemo.delete(key);
@@ -478,15 +515,14 @@ function scanStartBlock(leg: LegKey, sinceS: number, head: number): Promise<numb
  * Public endpoints refuse a block 0 to latest range, so the range is walked
  * in chunks of CREDIT_LOG_CHUNK_BLOCKS. It starts at the block of
  * `notBeforeS` (unix seconds, minus a day of slack) when the caller has one:
- * the browser's own record of when this swap or order began. The event is
- * emitted by a claim, refund or release this swap's participants make after
- * that record exists, so nothing earlier can carry it. Without a bound the
- * walk starts at block 0, which is correct and slow.
+ * the browser's own record of when this swap or its escrow began. The event
+ * is emitted by a claim, refund or release this swap's participants make
+ * after that record exists, so nothing earlier can carry it. Without a bound
+ * the walk starts at block 0, which is correct and slow. Every caller in the
+ * app passes one.
  *
- * The head comes from the main RPC, the one the caller's own state reads
- * use, so the last chunk reaches the block where the caller saw the escrow
- * settle. A logs endpoint that is still behind that block answers with an
- * error, and the read stays unknown until it has caught up.
+ * The walk runs to the head of the main RPC, and on the ETH leg only once
+ * the logs endpoint has reached that head too (see creditScanHead).
  *
  * Any chunk that fails fails the whole read, and a partial sum is never
  * returned: an unknown amount must not read as zero. Returns 0 only after
@@ -503,11 +539,8 @@ export async function getCreditedForSwap(
   if (leg === "qrl") assertQip55ReadReady(QRL_LEG.htlc);
   const cfg = legByKey(leg);
   const topics = creditFilterTopics(leg, token, account, hashlock);
-  const head = await getBlockNumber(leg);
-  const start =
-    notBeforeS === undefined
-      ? 0
-      : await scanStartBlock(leg, Math.max(0, notBeforeS - CREDIT_LOOKBACK_MARGIN_S), head);
+  const head = await creditScanHead(leg);
+  const start = notBeforeS === undefined ? 0 : await scanStartBlock(leg, notBeforeS, head);
   let total = 0n;
   for (let from = start; from <= head; from += CREDIT_LOG_CHUNK_BLOCKS) {
     const to = Math.min(head, from + CREDIT_LOG_CHUNK_BLOCKS - 1);
