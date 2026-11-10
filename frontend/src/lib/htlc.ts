@@ -534,11 +534,13 @@ async function scanLogs(
 }
 
 /**
- * The earliest block time a swap's events can carry, from the chain's own
- * state: the earliest `timeout` among the legs that hold a lock, minus the
- * longest timeout window this app sets (PRELOCK_INITIATOR_TIMEOUT_S). Null
- * when no leg holds a lock, which means there is nothing to find. A lock made
- * by other tooling with a longer window would lose only its explorer link.
+ * The earliest block time the events of the given legs can carry, from the
+ * chain's own state: the earliest `timeout` among those that hold a lock,
+ * minus the longest timeout window this app sets
+ * (PRELOCK_INITIATOR_TIMEOUT_S). The events of a leg come after its own
+ * lock, so a caller that scans one leg passes that leg alone. Null when none
+ * of them holds a lock, which means there is nothing to find. A lock made by
+ * other tooling with a longer window would lose only its explorer link.
  */
 export function swapEventsNotBeforeS(
   states: readonly (Pick<LegState, "status" | "timeout"> | null | undefined)[],
