@@ -173,4 +173,12 @@ describe("swap progress line", () => {
       /^A leg of this swap was refunded, so the swap will not complete\./,
     );
   });
+
+  it("shows no later-step note while the swap is stalled", async () => {
+    legStatus.eth = 3;
+    legStatus.qrl = 0;
+    renderFlow("taker");
+    await screen.findByTestId("swap-now");
+    expect(screen.queryAllByTestId("step-later")).toHaveLength(0);
+  });
 });

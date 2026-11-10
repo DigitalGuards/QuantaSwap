@@ -130,9 +130,12 @@ export function nowLine(input: NowLineInput): NowLineResult {
   }
 
   if (input.takerWalkedAway) {
-    return releasableLegs.length > 0
-      ? make("The taker left before you assigned them. Release your escrow below.", "turn")
-      : make("The taker left before you locked. You can discard this swap below.", "wait");
+    if (releasableLegs.length > 0) {
+      return make("The taker left before you assigned them. Release your escrow below.", "turn");
+    }
+    return input.ownLegsKnown
+      ? make("The taker left before you locked. You can discard this swap below.", "wait")
+      : make("The taker left. Waiting to read the chain state of your leg.", "wait");
   }
 
   if (input.legRefunded) {

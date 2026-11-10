@@ -146,6 +146,15 @@ describe("nowLine", () => {
     );
   });
 
+  it("waits for the chain read when the taker left and the own leg state is unread", () => {
+    expect(
+      nowLine(base({ steps: makerSteps(), takerWalkedAway: true, ownLegsKnown: false })).line,
+    ).toEqual({
+      text: "The taker left. Waiting to read the chain state of your leg.",
+      tone: "wait",
+    });
+  });
+
   it("says when to refund after a leg was refunded and ours is still locked", () => {
     const line = text({
       steps: makerSteps({ "lock-initiator": { done: true } }),
