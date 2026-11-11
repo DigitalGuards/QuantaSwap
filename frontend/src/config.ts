@@ -23,8 +23,8 @@ export const QRL_LEG = {
   htlc: deployment.qrlHtlc,
   rpc: "/rpc/qrl",
   confirmations: 0,
-  explorerTx: "https://zondscan.com/tx/",
-  explorerAddress: "https://zondscan.com/address/",
+  explorerTx: "https://shorscan.com/tx/",
+  explorerAddress: "https://shorscan.com/address/",
 };
 
 export const ETH_LEG = {

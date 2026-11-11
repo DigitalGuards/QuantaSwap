@@ -27,7 +27,7 @@ describe("Header connected-wallet identities", () => {
     );
 
     const qrlLink = screen.getByRole("link", {
-      name: `View QRL wallet ${QRL_ADDRESS} on Zondscan`,
+      name: `View QRL wallet ${QRL_ADDRESS} on ShorScan`,
     });
     expect(qrlLink.getAttribute("href")).toBe(`${QRL_LEG.explorerAddress}${QRL_ADDRESS}`);
     expect(qrlLink.textContent).toContain("QRL");

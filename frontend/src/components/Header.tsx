@@ -117,7 +117,7 @@ export function Header(props: Props) {
             label="QRL wallet"
             account={props.qrlAccount}
             explorerBase={QRL_LEG.explorerAddress}
-            explorerName="Zondscan"
+            explorerName="ShorScan"
             pending={props.qrlStatus === "pairing"}
             onConnect={props.onConnectQrl}
             onDisconnect={props.qrlAccount ? props.onDisconnectQrl : undefined}

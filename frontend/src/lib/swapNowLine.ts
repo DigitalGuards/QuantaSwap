@@ -28,6 +28,8 @@ export interface NowLineInput {
   actionKey: (step: NowLineStep) => string;
   /** True when the step's action is blocked by a gate other than canRun and busy. */
   stepGated: (step: NowLineStep) => boolean;
+  /** Index of an own step whose reported transaction is still awaited, or -1. */
+  pendingOwnStepIdx: number;
   copy: Record<StepModel["key"], StepCopy>;
   chainName: Record<LegKey, string>;
   symbol: Record<LegKey, string>;
@@ -53,6 +55,9 @@ export interface NowLineResult {
   line: NowLine | null;
   /** Step index that gets the live ring, or -1. */
   highlightIdx: number;
+  /** Step index whose pending or waiting text the line already carries, or -1.
+   *  The step list skips that text so it is not shown twice. */
+  carriedIdx: number;
 }
 
 const TAIL =
@@ -102,11 +107,12 @@ export function nowLine(input: NowLineInput): NowLineResult {
   const join = (head: string): string =>
     ownLockedLegs.length > 0 && ownRefund !== "" ? `${head} ${ownRefund}` : `${head}${discardHint}`;
 
-  const make = (text: string, tone: NowLine["tone"]): NowLineResult => ({
+  const make = (text: string, tone: NowLine["tone"], carriedIdx = -1): NowLineResult => ({
     line: { text, tone },
     highlightIdx,
+    carriedIdx,
   });
-  const none: NowLineResult = { line: null, highlightIdx };
+  const none: NowLineResult = { line: null, highlightIdx, carriedIdx: -1 };
 
   if (input.complete) return none;
 
@@ -142,6 +148,14 @@ export function nowLine(input: NowLineInput): NowLineResult {
     return make(join("A leg of this swap was refunded, so the swap will not complete."), "wait");
   }
 
+  const sentStep = input.pendingOwnStepIdx >= 0 ? steps[input.pendingOwnStepIdx] : undefined;
+  if (sentStep !== undefined) {
+    return make(
+      `Transaction sent. Waiting for it to confirm on ${input.chainName[sentStep.leg]}.`,
+      "wait",
+    );
+  }
+
   const runnableIdx = steps.findIndex(
     (step) => !step.done && step.own && step.canRun && !input.stepGated(step),
   );
@@ -174,10 +188,10 @@ export function nowLine(input: NowLineInput): NowLineResult {
   }
 
   if (open.awaitingDepth && view.pendingText !== null) {
-    return make(`Nothing to do right now. ${sentence(view.pendingText)} ${TAIL}`, "wait");
+    return make(`Nothing to do right now. ${sentence(view.pendingText)} ${TAIL}`, "wait", openIdx);
   }
   if (windowClosed) {
     return make(join("The other side did not act in time, so the swap will not complete."), "wait");
   }
-  return make(`Nothing to do right now. ${sentence(view.waitingText)} ${TAIL}`, "wait");
+  return make(`Nothing to do right now. ${sentence(view.waitingText)} ${TAIL}`, "wait", openIdx);
 }
