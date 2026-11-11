@@ -182,7 +182,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     }
     if (open.canRun && input.stepGated(open)) return none;
     if (open.awaitingDepth && view.pendingText !== null) {
-      return make(view.pendingText, "wait");
+      return make(sentence(view.pendingText), "wait");
     }
     if (windowClosed) {
       if (releasableLegs.length > 0) {
