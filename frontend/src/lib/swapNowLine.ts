@@ -28,6 +28,8 @@ export interface NowLineInput {
   actionKey: (step: NowLineStep) => string;
   /** True when the step's action is blocked by a gate other than canRun and busy. */
   stepGated: (step: NowLineStep) => boolean;
+  /** Index of an own step whose reported transaction is still awaited, or -1. */
+  pendingOwnStepIdx: number;
   copy: Record<StepModel["key"], StepCopy>;
   chainName: Record<LegKey, string>;
   symbol: Record<LegKey, string>;
@@ -146,6 +148,14 @@ export function nowLine(input: NowLineInput): NowLineResult {
     return make(join("A leg of this swap was refunded, so the swap will not complete."), "wait");
   }
 
+  const sentStep = input.pendingOwnStepIdx >= 0 ? steps[input.pendingOwnStepIdx] : undefined;
+  if (sentStep !== undefined) {
+    return make(
+      `Transaction sent. Waiting for it to confirm on ${input.chainName[sentStep.leg]}.`,
+      "wait",
+    );
+  }
+
   const runnableIdx = steps.findIndex(
     (step) => !step.done && step.own && step.canRun && !input.stepGated(step),
   );
@@ -163,7 +173,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     }
     if (open.canRun && input.stepGated(open)) return none;
     if (open.awaitingDepth && view.pendingText !== null) {
-      return make(view.pendingText, "wait", openIdx);
+      return make(view.pendingText, "wait");
     }
     if (windowClosed) {
       if (releasableLegs.length > 0) {

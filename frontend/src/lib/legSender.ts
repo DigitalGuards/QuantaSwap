@@ -35,7 +35,12 @@ const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 /** Reports a hash only when it has the shape of one; wallets differ in what
  *  qrl_sendTransaction returns, and an unusable value shows no link. */
 const reportSent = (onSent: SentHashHandler | undefined, hash: unknown): void => {
-  if (onSent !== undefined && typeof hash === "string" && TX_HASH.test(hash)) onSent(hash);
+  if (onSent === undefined || typeof hash !== "string" || !TX_HASH.test(hash)) return;
+  try {
+    onSent(hash);
+  } catch {
+    // A display callback must never turn a sent transaction into a failure.
+  }
 };
 
 export type LegSender = (

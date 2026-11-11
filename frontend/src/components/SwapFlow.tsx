@@ -83,6 +83,9 @@ const pillStyles: Record<string, string> = {
   refunded: "bg-amber-400/10 text-amber-400",
 };
 
+/** How long an own reported transaction holds its step's button. */
+const PENDING_TX_WAIT_S = 180;
+
 const statusName = ["none", "open", "claimed", "refunded"] as const;
 
 // With confirmations 0 (testnet speed, see config.ts) there is no depth
@@ -124,7 +127,11 @@ export function SwapFlow({
   // Hash of this user's own lock, assign or claim as soon as the wallet
   // returns it, keyed like the busy state (`lock-eth`). It feeds the pending
   // explorer link until the mined event takes over. Not persisted.
-  const [sentTx, setSentTx] = useState<Readonly<Record<string, string>>>({});
+  // `atS` is when the hash was reported; it bounds how long the step waits on it.
+  const [sentTx, setSentTx] = useState<Readonly<Record<string, { hash: string; atS: number }>>>({});
+  useEffect(() => {
+    setSentTx({});
+  }, [swap.hashlock]);
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
@@ -353,17 +360,21 @@ export function SwapFlow({
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
-  const runAction = (key: string, fn: () => Promise<void>) => {
+  const runAction = (key: string, fn: (onSent: (hash: string) => void) => Promise<void>) => {
     setError(null);
-    setSentTx(({ [key]: _dropped, ...rest }) => rest);
     setBusy(key);
-    void fn()
+    let reported = false;
+    const onSent = (hash: string) => {
+      reported = true;
+      setSentTx((m) => ({ ...m, [key]: { hash, atS: Math.floor(Date.now() / 1000) } }));
+    };
+    void fn(onSent)
       .then(async () => {
         await refresh();
         await refreshCredits();
       })
       .catch((err: unknown) => {
-        setSentTx(({ [key]: _dropped, ...rest }) => rest);
+        if (!reported) setSentTx(({ [key]: _dropped, ...rest }) => rest);
         setError(errorMessage(err));
       })
       .finally(() => {
@@ -458,7 +469,7 @@ export function SwapFlow({
   };
 
   const lockLeg = (leg: LegKey) =>
-    runAction(`lock-${leg}`, async () => {
+    runAction(`lock-${leg}`, async (onSent) => {
       requireBoundTerms();
       if (
         swap.intent !== undefined &&
@@ -486,7 +497,7 @@ export function SwapFlow({
             timeout,
           ),
           onStage: setLockStage,
-          onSent: (hash) => setSentTx((m) => ({ ...m, [`lock-${leg}`]: hash })),
+          onSent,
         });
       } else {
         await sendOnLeg(
@@ -494,13 +505,13 @@ export function SwapFlow({
           buildLockNativeData(leg, hashlock, plan.recipient, timeout),
           plan.amount,
           undefined,
-          (hash) => setSentTx((m) => ({ ...m, [`lock-${leg}`]: hash })),
+          onSent,
         );
       }
     });
 
   const claimLeg = (leg: LegKey, preimage: string) =>
-    runAction(`claim-${leg}`, async () => {
+    runAction(`claim-${leg}`, async (onSent) => {
       // An unmarked taker may recover the initiator payout only after the
       // maker's responder-chain claim made the secret public. This reveals
       // nothing new and is the only safe advancement for a legacy record.
@@ -526,9 +537,7 @@ export function SwapFlow({
         }
       };
       try {
-        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard, (hash) =>
-          setSentTx((m) => ({ ...m, [`claim-${leg}`]: hash })),
-        );
+        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard, onSent);
       } catch (err) {
         // Anyone may submit a claim once the secret is public, and it can
         // only pay the recipient fixed at lock time; market makers do this
@@ -573,7 +582,7 @@ export function SwapFlow({
   // pre-funded escrow, and the on-demand escrow reclaim (the abort path
   // while unassigned).
   const assignLeg = (leg: LegKey) =>
-    runAction(`assign-${leg}`, async () => {
+    runAction(`assign-${leg}`, async (onSent) => {
       requireBoundTerms();
       if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
         throw new Error(signedFillIssue);
@@ -583,7 +592,7 @@ export function SwapFlow({
         buildAssignData(leg, hashlock, legPlan[leg].recipient),
         0n,
         undefined,
-        (hash) => setSentTx((m) => ({ ...m, [`assign-${leg}`]: hash })),
+        onSent,
       );
     });
 
@@ -681,8 +690,9 @@ export function SwapFlow({
       signedFillIssue !== null) ||
     ((step.key === "lock-initiator" || step.key === "assign-initiator") && takerWalkedAway);
 
-  // The fill banner explains a gate on one step, so it shows only while that
-  // step for this role is still open.
+  // The fill banner explains a gate on one step, so it shows while that step
+  // for this role is open. A released fill stays visible after the step: it
+  // is how a maker who already locked learns the taker left.
   const fillGatedKeys: readonly StepModel["key"][] =
     swap.role === "taker"
       ? ["lock-responder"]
@@ -692,7 +702,16 @@ export function SwapFlow({
   const showFillIssue =
     signedFillIssue !== null &&
     !complete &&
-    steps.some((step) => fillGatedKeys.includes(step.key) && !step.done);
+    (steps.some((step) => fillGatedKeys.includes(step.key) && !step.done) ||
+      order?.released === true);
+
+  // An own transaction the wallet has reported and that has not mined yet.
+  // For PENDING_TX_WAIT_S the step waits on it; after that a dropped
+  // transaction can be retried.
+  const awaitingOwnTx = (step: Pick<StepModel, "key" | "leg" | "done">): boolean => {
+    const sent = sentTx[actionKey(step.key, step.leg)];
+    return sent !== undefined && !step.done && nowS - sent.atS < PENDING_TX_WAIT_S;
+  };
 
   const ownLegs: LegKey[] =
     swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
@@ -712,6 +731,7 @@ export function SwapFlow({
     busy,
     actionKey: (step) => actionKey(step.key, step.leg),
     stepGated,
+    pendingOwnStepIdx: steps.findIndex((step) => step.own && awaitingOwnTx(step)),
     copy: presentation,
     chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
     symbol:
@@ -853,7 +873,10 @@ export function SwapFlow({
                     ? "assigned"
                     : "claimed"),
             )?.txHash ?? null;
-          const pendingHash = step.own ? (sentTx[actionKey(step.key, step.leg)] ?? null) : null;
+          const pendingHash = step.own
+            ? (sentTx[actionKey(step.key, step.leg)]?.hash ?? null)
+            : null;
+          const linkHash = stepTxHash ?? (step.done ? null : pendingHash);
           return (
             <div
               key={step.key}
@@ -893,26 +916,17 @@ export function SwapFlow({
                 i !== carriedIdx ? (
                   <p className="text-xs text-amber-400">{view.pendingText}</p>
                 ) : null}
-                {stepTxHash ? (
+                {linkHash !== null ? (
                   <p>
                     <a
                       className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-                      href={`${legByKey(step.leg).explorerTx}${stepTxHash}`}
+                      href={`${legByKey(step.leg).explorerTx}${linkHash}`}
                       target="_blank"
                       rel="noreferrer"
                     >
-                      view transaction on explorer
-                    </a>
-                  </p>
-                ) : pendingHash ? (
-                  <p>
-                    <a
-                      className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-                      href={`${legByKey(step.leg).explorerTx}${pendingHash}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      view pending transaction on explorer
+                      {stepTxHash !== null
+                        ? "view transaction on explorer"
+                        : "view pending transaction on explorer"}
                     </a>
                   </p>
                 ) : null}
@@ -936,7 +950,9 @@ export function SwapFlow({
                       <Button
                         size="sm"
                         className="mt-1"
-                        disabled={stepGated(step) || !step.canRun || busy !== null}
+                        disabled={
+                          stepGated(step) || !step.canRun || busy !== null || awaitingOwnTx(step)
+                        }
                         onClick={view.action}
                       >
                         {busy === actionKey(step.key, step.leg)

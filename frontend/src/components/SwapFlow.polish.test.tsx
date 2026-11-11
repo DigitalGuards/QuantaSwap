@@ -7,7 +7,8 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LegState } from "@/lib/htlc";
 import type { ActiveSwap } from "@/lib/activeSwap";
-import type { SignedFillIntentV1 } from "@/lib/orderSigning";
+import type { OrderView } from "@/lib/orderbook";
+import type { SignedFillIntentV1, SignedFillV1 } from "@/lib/orderSigning";
 
 const MAKER_ETH = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TAKER_ETH = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -30,6 +31,8 @@ const state = { leakPreimage: false };
 const events: Record<"eth" | "qrl", { kind: string; txHash: string }[]> = { eth: [], qrl: [] };
 const SENT_HASH = `0x${"ab".repeat(32)}`;
 const MINED_HASH = `0x${"cd".repeat(32)}`;
+const orderState: { order: OrderView | null } = { order: null };
+const nowOffsetMs = { value: 0 };
 const sender: { release: (() => void) | null } = { release: null };
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
@@ -57,7 +60,14 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
 
 vi.mock("@/lib/orderbook", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/orderbook")>();
-  return { ...actual, getOrder: vi.fn().mockRejectedValue(new Error("offline test")) };
+  return {
+    ...actual,
+    getOrder: vi.fn(() =>
+      orderState.order === null
+        ? Promise.reject(new Error("offline test"))
+        : Promise.resolve(orderState.order),
+    ),
+  };
 });
 
 // The wallet send: reports the hash right away, then confirms when released.
@@ -123,11 +133,53 @@ const SIGNED_INTENT: SignedFillIntentV1 = {
   },
 };
 
+const SIGNED_FILL: SignedFillV1 = {
+  fill: {
+    orderDigest: SIGNED_INTENT.intent.orderDigest,
+    intentDigest: `0x${"88".repeat(32)}`,
+    takerEthAccount: TAKER_ETH,
+    takerQrlAccount: TAKER_QRL,
+    releaseCommitment: SIGNED_INTENT.intent.releaseCommitment,
+    hashlock: HASHLOCK,
+    initiatorTimeout: NOW + 7200,
+    responderTimeout: NOW + 3600,
+  },
+  auth: SIGNED_INTENT.auth,
+};
+
+const RELEASED_ORDER: OrderView = {
+  id: "order-1",
+  direction: "eth->qrl",
+  asset: "ETH",
+  fromAmount: ETH_AMOUNT.toString(),
+  toAmount: QRL_AMOUNT.toString(),
+  makerEthAccount: MAKER_ETH,
+  makerQrlAccount: MAKER_QRL,
+  status: "accepted",
+  takerEthAccount: TAKER_ETH,
+  takerQrlAccount: TAKER_QRL,
+  hashlock: HASHLOCK,
+  initiatorTimeout: NOW + 7200,
+  responderTimeout: NOW + 3600,
+  released: true,
+  createdAt: 1,
+  updatedAt: 1,
+};
+
 function renderFlow(role: ActiveSwap["role"], withIntent = false) {
   const base = swap(role);
   // A signed-fill swap whose order cannot be read keeps signedFillIssue set,
   // which is the banner condition under test.
-  const active: ActiveSwap = withIntent ? { ...base, intent: SIGNED_INTENT } : base;
+  const active: ActiveSwap = withIntent
+    ? {
+        ...base,
+        intent: SIGNED_INTENT,
+        orderDigest: SIGNED_INTENT.intent.orderDigest,
+        intentDigest: SIGNED_FILL.fill.intentDigest,
+        fill: SIGNED_FILL,
+        fillDigest: `0x${"ee".repeat(32)}`,
+      }
+    : base;
   return render(
     <MemoryRouter>
       <SwapFlow
@@ -153,8 +205,15 @@ beforeEach(() => {
   events.eth = [];
   events.qrl = [];
   sender.release = null;
+  orderState.order = null;
+  nowOffsetMs.value = 0;
+  const realNow = Date.now.bind(Date);
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + nowOffsetMs.value);
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("swap screen polish", () => {
   it("shows a waiting sentence once when the status line carries it", async () => {
@@ -229,5 +288,86 @@ describe("swap screen polish", () => {
     renderFlow("taker", true);
     await waitFor(() => expect(screen.getByText(/Atomic swap complete/)).toBeTruthy());
     expect(screen.queryByText(BANNER)).toBeNull();
+  });
+
+  it("hides the stale deadline banner after the step but keeps a released fill visible", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 1;
+    orderState.order = RELEASED_ORDER;
+    renderFlow("taker", true);
+    expect(await screen.findByText(/This signed fill was released/)).toBeTruthy();
+  });
+
+  it("shows no pending link on a done step without a mined event", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 0;
+    renderFlow("taker");
+    fireEvent.click(await screen.findByRole("button", { name: /^Lock/ }));
+    await screen.findByText("view pending transaction on explorer");
+    legStatus.qrl = 1;
+    sender.release?.();
+    await waitFor(() => expect(screen.getByTestId("swap-now").textContent).not.toMatch(/sent/), {
+      timeout: 12_000,
+    });
+    await waitFor(() => expect(screen.queryByText(/view pending transaction/)).toBeNull(), {
+      timeout: 12_000,
+    });
+  }, 30_000);
+
+  it("disables the button and changes the line while a fresh own hash is awaited", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 0;
+    renderFlow("taker");
+    fireEvent.click(await screen.findByRole("button", { name: /^Lock/ }));
+    await screen.findByText("view pending transaction on explorer");
+    sender.release?.();
+    await waitFor(() => expect(screen.queryByText("Waiting for wallet…")).toBeNull());
+    const button = screen.getByRole("button", { name: /^Lock/ });
+    expect(button.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByTestId("swap-now").textContent).toMatch(
+      /^Transaction sent\. Waiting for it to confirm on /,
+    );
+  });
+
+  it("returns the button after 180 seconds and keeps the link", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 0;
+    renderFlow("taker");
+    fireEvent.click(await screen.findByRole("button", { name: /^Lock/ }));
+    await screen.findByText("view pending transaction on explorer");
+    sender.release?.();
+    await waitFor(() => expect(screen.queryByText("Waiting for wallet…")).toBeNull());
+    nowOffsetMs.value = 181_000;
+    await waitFor(
+      () =>
+        expect(screen.getByRole("button", { name: /^Lock/ }).hasAttribute("disabled")).toBe(false),
+      { timeout: 5_000 },
+    );
+    expect(screen.getByTestId("swap-now").textContent).toMatch(/^Your turn:/);
+    expect(screen.getByText("view pending transaction on explorer")).toBeTruthy();
+  }, 15_000);
+
+  it("drops the pending link when the swap changes", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 0;
+    const view = renderFlow("taker");
+    fireEvent.click(await screen.findByRole("button", { name: /^Lock/ }));
+    await screen.findByText("view pending transaction on explorer");
+    const other = { ...swap("taker"), hashlock: `0x${"56".repeat(32)}` };
+    view.rerender(
+      <MemoryRouter>
+        <SwapFlow
+          swap={other}
+          ethAccount={TAKER_ETH}
+          qrlAccount={TAKER_QRL}
+          browserProvider={null}
+          ensureSepolia={vi.fn()}
+          qrlRequest={vi.fn()}
+          qrlTransport={null}
+          onDiscard={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.queryByText(/view pending transaction/)).toBeNull());
   });
 });

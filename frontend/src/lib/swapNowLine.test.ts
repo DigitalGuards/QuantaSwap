@@ -41,6 +41,7 @@ const base = (over: Partial<NowLineInput> = {}): NowLineInput => ({
   busy: null,
   actionKey: (s) => `${s.key.startsWith("lock") ? "lock" : "claim"}-${s.leg}`,
   stepGated: () => false,
+  pendingOwnStepIdx: -1,
   copy: {
     "lock-initiator": {
       label: "Lock ETH",
@@ -260,7 +261,24 @@ describe("nowLine", () => {
     );
     expect(pending.carriedIdx).toBe(2);
     const own = nowLine(base({ steps: takerSteps({ "lock-responder": { awaitingDepth: true } }) }));
-    expect(own.carriedIdx).toBe(1);
+    // The amber depth notice under the user's own step stays.
+    expect(own.carriedIdx).toBe(-1);
+  });
+
+  it("replaces 'Your turn' with a sent notice while the own transaction is awaited", () => {
+    const result = nowLine(
+      base({
+        steps: takerSteps({ "lock-responder": { canRun: true } }),
+        pendingOwnStepIdx: 1,
+      }),
+    );
+    expect(result.line).toEqual({
+      text: "Transaction sent. Waiting for it to confirm on QRL.",
+      tone: "wait",
+    });
+    expect(
+      nowLine(base({ steps: takerSteps({ "lock-responder": { canRun: true } }) })).line?.text,
+    ).toMatch(/^Your turn:/);
   });
 
   it("carries no step text when the line says something else", () => {
