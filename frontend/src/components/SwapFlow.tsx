@@ -62,6 +62,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
 import { AutoStartSteps, type AutoStartCandidate } from "@/components/AutoStartSteps";
+import { forgetFreshSwap, isFreshSwap } from "@/lib/freshSwaps";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
 
@@ -83,6 +84,9 @@ const pillStyles: Record<string, string> = {
   claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
+
+/** Seconds the taker's claim waits for the maker's sponsored claim. */
+const CLAIM_HOLD_S = 90;
 
 /** How long an own reported transaction holds its step's button. */
 const PENDING_TX_WAIT_S = 180;
@@ -133,6 +137,13 @@ export function SwapFlow({
   useEffect(() => {
     setSentTx({});
   }, [swap.hashlock]);
+  // A swap created in this page session: its first own step opens the wallet.
+  const [freshSwap] = useState(() => swap.hashlock !== null && isFreshSwap(swap.hashlock));
+  useEffect(() => {
+    if (swap.hashlock !== null) forgetFreshSwap(swap.hashlock);
+  }, [swap.hashlock]);
+  // Steps inside their hold window before an automatic start.
+  const [holdingKeys, setHoldingKeys] = useState<readonly string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
@@ -714,6 +725,22 @@ export function SwapFlow({
     return sent !== undefined && !step.done && nowS - sent.atS < PENDING_TX_WAIT_S;
   };
 
+  const legRefunded =
+    iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded;
+  // The button's own terms: gate and canRun. The automatic start adds the
+  // swap-level stops below and is never looser than the button.
+  const stepRunnable = (step: Pick<StepModel, "key" | "canRun">): boolean =>
+    step.canRun && !stepGated(step);
+  const ownStepActionable = (step: StepModel): boolean =>
+    step.own &&
+    !step.done &&
+    stepRunnable(step) &&
+    step.issue === null &&
+    !complete &&
+    refundableLegs.length === 0 &&
+    !takerWalkedAway &&
+    !legRefunded;
+
   const ownLegs: LegKey[] =
     swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
   const legTimeout: Partial<Record<LegKey, number>> = {};
@@ -733,6 +760,7 @@ export function SwapFlow({
     actionKey: (step) => actionKey(step.key, step.leg),
     stepGated,
     pendingOwnStepIdx: steps.findIndex((step) => step.own && awaitingOwnTx(step)),
+    holdingOwnStepIdx: steps.findIndex((step) => step.own && holdingKeys.includes(step.key)),
     copy: presentation,
     chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
     symbol:
@@ -745,40 +773,52 @@ export function SwapFlow({
     ownLegsKnown: ownLegs.every((leg) => legs[leg] !== undefined),
     legTimeout,
     takerWalkedAway,
-    legRefunded: iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded,
+    legRefunded,
     nowS,
     responderTimeout: swap.responderTimeout ?? undefined,
   });
 
   // Own lock, assign and claim steps that open the wallet by themselves once
   // they turn actionable. Refund, release, discard and credit stay manual.
-  const legRefunded =
-    iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded;
-  const autoStart: AutoStartCandidate[] =
-    complete || refundableLegs.length > 0 || takerWalkedAway || legRefunded
-      ? []
-      : steps.flatMap((step) =>
-          step.own && !step.done && step.canRun && !stepGated(step) && step.issue === null
-            ? [
-                {
-                  key: step.key,
-                  busyKey: actionKey(step.key, step.leg),
-                  run: presentation[step.key].action,
-                  blocked: awaitingOwnTx(step),
-                },
-              ]
-            : [],
-        );
-  const chainLoaded = [iLeg, rLeg].every(
-    (leg) => legs[leg] !== undefined && confirmedLegs[leg] !== undefined,
+  // A missing wallet or an account mismatch holds a step back without
+  // spending its one automatic start.
+  const autoStart: AutoStartCandidate[] = steps.flatMap((step) =>
+    ownStepActionable(step)
+      ? [
+          {
+            key: step.key,
+            busyKey: actionKey(step.key, step.leg),
+            run: presentation[step.key].action,
+            blocked:
+              awaitingOwnTx(step) || connectedOn(step.leg) === null || Boolean(accountMismatch),
+            // The house makers claim for the taker right after their own
+            // claim, so the taker's claim gets a grace period first.
+            holdS: swap.role === "taker" && step.key === "claim-initiator" ? CLAIM_HOLD_S : 0,
+          },
+        ]
+      : [],
   );
+  // The signed-fill gate reads the order, so a swap with a signed intent has
+  // no trustworthy baseline before the order was read once.
+  const autoStartReady =
+    bothLegsLoaded &&
+    [iLeg, rLeg].every((leg) => confirmedLegs[leg] !== undefined) &&
+    (swap.intent === undefined || order !== null);
 
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
 
   return (
     <Card className="surface-ember">
-      <AutoStartSteps key={hashlock} candidates={autoStart} ready={chainLoaded} busy={busy} />
+      <AutoStartSteps
+        key={hashlock}
+        candidates={autoStart}
+        ready={autoStartReady}
+        busy={busy}
+        nowS={nowS}
+        fresh={freshSwap}
+        onHolding={setHoldingKeys}
+      />
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">Swap in progress</CardTitle>
@@ -975,9 +1015,7 @@ export function SwapFlow({
                       <Button
                         size="sm"
                         className="mt-1"
-                        disabled={
-                          stepGated(step) || !step.canRun || busy !== null || awaitingOwnTx(step)
-                        }
+                        disabled={!stepRunnable(step) || busy !== null || awaitingOwnTx(step)}
                         onClick={view.action}
                       >
                         {busy === actionKey(step.key, step.leg)

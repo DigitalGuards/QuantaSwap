@@ -240,6 +240,7 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
     return (
       <div className="page-enter mx-auto max-w-md space-y-4 pt-10 pb-16">
         <SwapFlow
+          key={swap.hashlock ?? swap.orderId}
           swap={swap}
           ethAccount={ethWallet.account}
           qrlAccount={qrlWallet.account}

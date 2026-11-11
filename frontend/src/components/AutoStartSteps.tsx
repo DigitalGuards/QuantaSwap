@@ -7,18 +7,32 @@ export interface AutoStartCandidate {
   busyKey: string;
   /** The step's existing action, the same function its button calls. */
   run: () => void;
-  /** An own transaction for this step is already awaited. */
+  /** Cannot start now (own transaction awaited, wallet missing, account
+   *  mismatch). The step keeps its place and starts once this clears. */
   blocked: boolean;
+  /** Seconds the step must have been actionable before it starts by itself. */
+  holdS: number;
 }
 
 interface Props {
-  /** Own steps that are actionable apart from busy and a pending own
-   *  transaction. Refund, release, discard and credit actions never go here. */
+  /** Own steps that are actionable apart from `blocked` and busy. Refund,
+   *  release, discard and credit actions never go here. */
   candidates: readonly AutoStartCandidate[];
-  /** Chain state has loaded, so the first reading is a trustworthy baseline. */
+  /** Chain state and the signed-fill check have settled, so the first
+   *  reading is a trustworthy baseline. */
   ready: boolean;
   busy: string | null;
+  /** The component's clock, in seconds. */
+  nowS: number;
+  /** A swap created in this page session: its first reading counts as a
+   *  transition, so its first own step opens the wallet. */
+  fresh: boolean;
+  /** Keys of steps that are inside their hold window. */
+  onHolding: (keys: readonly string[]) => void;
 }
+
+/** A step that has waited this long without starting is left to the button. */
+export const AUTO_START_EXPIRY_S = 600;
 
 const foreground = (): boolean => document.visibilityState === "visible" && document.hasFocus();
 
@@ -27,19 +41,23 @@ const foreground = (): boolean => document.visibilityState === "visible" && docu
  * step turn actionable, so the wallet opens without a button press. The
  * button stays the retry: a step is never auto-started twice, and a step
  * that was already actionable on the first loaded reading is only a baseline
- * (opening a swap link must not pop a wallet). Mount it with `key={hashlock}`
- * so a different swap starts fresh. Renders nothing.
+ * (opening a swap link must not pop a wallet). Renders nothing.
  */
-export function AutoStartSteps({ candidates, ready, busy }: Props) {
-  const latest = useRef({ candidates, busy });
+export function AutoStartSteps({ candidates, ready, busy, nowS, fresh, onHolding }: Props) {
+  const latest = useRef({ candidates, busy, nowS });
   const previous = useRef<ReadonlySet<string> | null>(null);
   const started = useRef(new Set<string>());
-  const waiting = useRef(new Set<string>());
+  /** Step key to the second it started waiting. */
+  const waiting = useRef(new Map<string, number>());
+  const reported = useRef("");
 
   const fire = () => {
-    const { candidates: now, busy: busyNow } = latest.current;
+    const { candidates: now, busy: busyNow, nowS: clock } = latest.current;
     if (busyNow !== null || !foreground()) return;
-    const next = now.find((c) => waiting.current.has(c.key) && !c.blocked);
+    const next = now.find((c) => {
+      const since = waiting.current.get(c.key);
+      return since !== undefined && !c.blocked && clock - since >= c.holdS;
+    });
     if (next === undefined) return;
     waiting.current.delete(next.key);
     started.current.add(next.key);
@@ -47,7 +65,7 @@ export function AutoStartSteps({ candidates, ready, busy }: Props) {
   };
 
   useEffect(() => {
-    latest.current = { candidates, busy };
+    latest.current = { candidates, busy, nowS };
     // A step the user started by hand is never auto-started afterwards.
     for (const c of candidates) {
       if (busy === c.busyKey) {
@@ -55,16 +73,33 @@ export function AutoStartSteps({ candidates, ready, busy }: Props) {
         waiting.current.delete(c.key);
       }
     }
-    if (!ready) return;
-    const current = new Set(candidates.map((c) => c.key));
-    const before = previous.current;
-    previous.current = current;
-    if (before === null) return;
-    for (const key of waiting.current) if (!current.has(key)) waiting.current.delete(key);
-    for (const key of current) {
-      if (!before.has(key) && !started.current.has(key)) waiting.current.add(key);
+    if (ready) {
+      const current = new Set(candidates.map((c) => c.key));
+      const before = previous.current ?? (fresh ? new Set<string>() : null);
+      previous.current = current;
+      if (before !== null) {
+        for (const [key, since] of waiting.current) {
+          if (!current.has(key) || nowS - since > AUTO_START_EXPIRY_S) waiting.current.delete(key);
+        }
+        for (const key of current) {
+          if (!before.has(key) && !started.current.has(key) && !waiting.current.has(key)) {
+            waiting.current.set(key, nowS);
+          }
+        }
+        fire();
+      }
     }
-    fire();
+    const holding = candidates
+      .filter((c) => {
+        const since = waiting.current.get(c.key);
+        return since !== undefined && c.holdS > 0 && nowS - since < c.holdS;
+      })
+      .map((c) => c.key);
+    const signature = holding.join(",");
+    if (signature !== reported.current) {
+      reported.current = signature;
+      onHolding(holding);
+    }
   });
 
   useEffect(() => {

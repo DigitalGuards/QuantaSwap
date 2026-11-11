@@ -42,6 +42,7 @@ const base = (over: Partial<NowLineInput> = {}): NowLineInput => ({
   actionKey: (s) => `${s.key.startsWith("lock") ? "lock" : "claim"}-${s.leg}`,
   stepGated: () => false,
   pendingOwnStepIdx: -1,
+  holdingOwnStepIdx: -1,
   copy: {
     "lock-initiator": {
       label: "Lock ETH",
@@ -117,13 +118,13 @@ describe("nowLine", () => {
   it("shows a generic in-progress line when a refund is the busy action", () => {
     const line = text({ busy: "refund-qrl", refundableLegs: ["qrl"] });
     expect(line).toBe(
-      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms. If no wallet window opened, open your wallet from the browser toolbar.",
+      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms. If nothing opened, open your wallet to approve it.",
     );
   });
 
   it("names the chain when the busy action is a step", () => {
     expect(text({ busy: "lock-qrl" })).toBe(
-      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on QRL. If no wallet window opened, open your wallet from the browser toolbar.",
+      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on QRL. If nothing opened, open your wallet to approve it.",
     );
   });
 
@@ -284,5 +285,22 @@ describe("nowLine", () => {
   it("carries no step text when the line says something else", () => {
     expect(nowLine(base({ busy: "lock-qrl" })).carriedIdx).toBe(-1);
     expect(nowLine(base({ complete: true })).carriedIdx).toBe(-1);
+  });
+
+  it("tells the taker the maker may claim during the hold window", () => {
+    const result = nowLine(
+      base({
+        steps: takerSteps({
+          "lock-responder": { done: true },
+          "claim-responder": { done: true },
+          "claim-initiator": { canRun: true },
+        }),
+        holdingOwnStepIdx: 3,
+      }),
+    );
+    expect(result.line).toEqual({
+      text: "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
+      tone: "wait",
+    });
   });
 });
