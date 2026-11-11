@@ -197,10 +197,10 @@ export function nowLine(input: NowLineInput): NowLineResult {
   }
 
   if (open.awaitingDepth && view.pendingText !== null) {
-    return make(`Nothing to do right now. ${sentence(view.pendingText)} ${TAIL}`, "wait", openIdx);
+    return make(`${sentence(view.pendingText)} ${TAIL}`, "wait", openIdx);
   }
   if (windowClosed) {
     return make(join("The other side did not act in time, so the swap will not complete."), "wait");
   }
-  return make(`Nothing to do right now. ${sentence(view.waitingText)} ${TAIL}`, "wait", openIdx);
+  return make(`${sentence(view.waitingText)} ${TAIL}`, "wait", openIdx);
 }

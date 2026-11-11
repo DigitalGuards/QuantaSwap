@@ -113,7 +113,6 @@ describe("swap progress line", () => {
     const line = await screen.findByTestId("swap-now");
     expect(line.getAttribute("role")).toBe("status");
     expect(line.getAttribute("aria-live")).toBe("polite");
-    expect(line.textContent).toContain("Nothing to do right now.");
     expect(line.textContent).toContain("Waiting for the maker to claim and reveal the secret");
     expect(line.textContent).toContain("reopen this swap link later");
   });

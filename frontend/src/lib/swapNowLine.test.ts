@@ -227,7 +227,7 @@ describe("nowLine", () => {
     const steps = takerSteps({ "lock-responder": { done: true } });
     const line = text({ steps });
     expect(line).toBe(
-      "Nothing to do right now. Waiting for the maker to claim and reveal the secret. This page updates by itself, and you can reopen this swap link later to check progress.",
+      "Waiting for the maker to claim and reveal the secret. This page updates by itself, and you can reopen this swap link later to check progress.",
     );
     expect(line).not.toMatch(/…|\.\./);
   });
@@ -237,7 +237,7 @@ describe("nowLine", () => {
       "lock-responder": { done: true },
       "claim-responder": { awaitingDepth: true },
     });
-    expect(text({ steps })).toContain("Nothing to do right now. Responder lock detected on QRL;");
+    expect(text({ steps })).toContain("Responder lock detected on QRL;");
   });
 
   it("highlights the open step while the swap moves forward", () => {
