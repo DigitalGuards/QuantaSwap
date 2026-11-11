@@ -198,12 +198,12 @@ export function HowItWorksPage() {
           </a>
           , or explore the chain on{" "}
           <a
-            href="https://zondscan.com"
+            href="https://shorscan.com"
             target="_blank"
             rel="noreferrer"
             className="text-identity-accent hover:underline"
           >
-            ZondScan
+            ShorScan
           </a>
           .
         </p>

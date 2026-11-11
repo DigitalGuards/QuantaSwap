@@ -242,4 +242,29 @@ describe("nowLine", () => {
     const steps = takerSteps({ "lock-responder": { done: true } });
     expect(nowLine(base({ steps })).highlightIdx).toBe(2);
   });
+
+  it("reports the step whose text the line carries", () => {
+    const waiting = nowLine(
+      base({
+        steps: takerSteps({ "lock-responder": { done: true } }),
+      }),
+    );
+    expect(waiting.carriedIdx).toBe(2);
+    const pending = nowLine(
+      base({
+        steps: takerSteps({
+          "lock-responder": { done: true },
+          "claim-responder": { awaitingDepth: true },
+        }),
+      }),
+    );
+    expect(pending.carriedIdx).toBe(2);
+    const own = nowLine(base({ steps: takerSteps({ "lock-responder": { awaitingDepth: true } }) }));
+    expect(own.carriedIdx).toBe(1);
+  });
+
+  it("carries no step text when the line says something else", () => {
+    expect(nowLine(base({ busy: "lock-qrl" })).carriedIdx).toBe(-1);
+    expect(nowLine(base({ complete: true })).carriedIdx).toBe(-1);
+  });
 });

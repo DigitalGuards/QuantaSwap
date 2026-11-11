@@ -121,6 +121,10 @@ export function SwapFlow({
   // approve, sometimes an approvalRace reset first, then lockToken); shown
   // on the busy button so the user knows which wallet prompt this is.
   const [lockStage, setLockStage] = useState<string | null>(null);
+  // Hash of this user's own lock, assign or claim as soon as the wallet
+  // returns it, keyed like the busy state (`lock-eth`). It feeds the pending
+  // explorer link until the mined event takes over. Not persisted.
+  const [sentTx, setSentTx] = useState<Readonly<Record<string, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
@@ -351,13 +355,17 @@ export function SwapFlow({
 
   const runAction = (key: string, fn: () => Promise<void>) => {
     setError(null);
+    setSentTx(({ [key]: _dropped, ...rest }) => rest);
     setBusy(key);
     void fn()
       .then(async () => {
         await refresh();
         await refreshCredits();
       })
-      .catch((err: unknown) => setError(errorMessage(err)))
+      .catch((err: unknown) => {
+        setSentTx(({ [key]: _dropped, ...rest }) => rest);
+        setError(errorMessage(err));
+      })
       .finally(() => {
         setBusy(null);
         setLockStage(null);
@@ -478,12 +486,15 @@ export function SwapFlow({
             timeout,
           ),
           onStage: setLockStage,
+          onSent: (hash) => setSentTx((m) => ({ ...m, [`lock-${leg}`]: hash })),
         });
       } else {
         await sendOnLeg(
           leg,
           buildLockNativeData(leg, hashlock, plan.recipient, timeout),
           plan.amount,
+          undefined,
+          (hash) => setSentTx((m) => ({ ...m, [`lock-${leg}`]: hash })),
         );
       }
     });
@@ -515,7 +526,9 @@ export function SwapFlow({
         }
       };
       try {
-        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard);
+        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard, (hash) =>
+          setSentTx((m) => ({ ...m, [`claim-${leg}`]: hash })),
+        );
       } catch (err) {
         // Anyone may submit a claim once the secret is public, and it can
         // only pay the recipient fixed at lock time; market makers do this
@@ -565,7 +578,13 @@ export function SwapFlow({
       if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
         throw new Error(signedFillIssue);
       }
-      await sendOnLeg(leg, buildAssignData(leg, hashlock, legPlan[leg].recipient), 0n);
+      await sendOnLeg(
+        leg,
+        buildAssignData(leg, hashlock, legPlan[leg].recipient),
+        0n,
+        undefined,
+        (hash) => setSentTx((m) => ({ ...m, [`assign-${leg}`]: hash })),
+      );
     });
 
   const releaseLeg = (leg: LegKey) =>
@@ -662,6 +681,19 @@ export function SwapFlow({
       signedFillIssue !== null) ||
     ((step.key === "lock-initiator" || step.key === "assign-initiator") && takerWalkedAway);
 
+  // The fill banner explains a gate on one step, so it shows only while that
+  // step for this role is still open.
+  const fillGatedKeys: readonly StepModel["key"][] =
+    swap.role === "taker"
+      ? ["lock-responder"]
+      : swap.role === "maker"
+        ? ["lock-initiator", "assign-initiator"]
+        : [];
+  const showFillIssue =
+    signedFillIssue !== null &&
+    !complete &&
+    steps.some((step) => fillGatedKeys.includes(step.key) && !step.done);
+
   const ownLegs: LegKey[] =
     swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
   const legTimeout: Partial<Record<LegKey, number>> = {};
@@ -670,7 +702,11 @@ export function SwapFlow({
     if (state !== undefined) legTimeout[leg] = state.timeout;
   }
   const openIdx = steps.findIndex((step) => !step.done);
-  const { line: nowLine, highlightIdx } = deriveNowLine({
+  const {
+    line: nowLine,
+    highlightIdx,
+    carriedIdx,
+  } = deriveNowLine({
     steps,
     complete,
     busy,
@@ -712,11 +748,15 @@ export function SwapFlow({
             </Link>
           </span>
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span>{iCfg.name} leg</span>
-          <StatusPill state={iState} />
-          <span>· {rCfg.name} leg</span>
-          <StatusPill state={rState} />
+        <div className="space-y-1.5 text-sm text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span>{iCfg.name} leg</span>
+            <StatusPill state={iState} />
+          </div>
+          <div className="flex items-center gap-2">
+            <span>{rCfg.name} leg</span>
+            <StatusPill state={rState} />
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-1">
@@ -727,7 +767,7 @@ export function SwapFlow({
             public-secret claim recovery.
           </p>
         ) : null}
-        {signedFillIssue !== null ? (
+        {showFillIssue ? (
           <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
             {signedFillIssue}
           </p>
@@ -813,6 +853,7 @@ export function SwapFlow({
                     ? "assigned"
                     : "claimed"),
             )?.txHash ?? null;
+          const pendingHash = step.own ? (sentTx[actionKey(step.key, step.leg)] ?? null) : null;
           return (
             <div
               key={step.key}
@@ -845,7 +886,11 @@ export function SwapFlow({
                       : `Not safe to proceed: the counterparty lock failed verification, ${step.issue}.`}
                   </p>
                 ) : null}
-                {!step.done && !step.issue && step.awaitingDepth && view.pendingText ? (
+                {!step.done &&
+                !step.issue &&
+                step.awaitingDepth &&
+                view.pendingText &&
+                i !== carriedIdx ? (
                   <p className="text-xs text-amber-400">{view.pendingText}</p>
                 ) : null}
                 {stepTxHash ? (
@@ -857,6 +902,17 @@ export function SwapFlow({
                       rel="noreferrer"
                     >
                       view transaction on explorer
+                    </a>
+                  </p>
+                ) : pendingHash ? (
+                  <p>
+                    <a
+                      className="text-xs text-muted-foreground underline-offset-4 hover:underline"
+                      href={`${legByKey(step.leg).explorerTx}${pendingHash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      view pending transaction on explorer
                     </a>
                   </p>
                 ) : null}
@@ -891,7 +947,8 @@ export function SwapFlow({
                       </Button>
                     </div>
                   ) : (step.canRun || i === highlightIdx) &&
-                    !(step.awaitingDepth && view.pendingText !== null) ? (
+                    !(step.awaitingDepth && view.pendingText !== null) &&
+                    i !== carriedIdx ? (
                     <p className="text-xs text-identity-accent">{view.waitingText}</p>
                   ) : null)}
               </div>

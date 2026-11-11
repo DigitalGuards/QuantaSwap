@@ -53,6 +53,9 @@ export interface NowLineResult {
   line: NowLine | null;
   /** Step index that gets the live ring, or -1. */
   highlightIdx: number;
+  /** Step index whose pending or waiting text the line already carries, or -1.
+   *  The step list skips that text so it is not shown twice. */
+  carriedIdx: number;
 }
 
 const TAIL =
@@ -102,11 +105,12 @@ export function nowLine(input: NowLineInput): NowLineResult {
   const join = (head: string): string =>
     ownLockedLegs.length > 0 && ownRefund !== "" ? `${head} ${ownRefund}` : `${head}${discardHint}`;
 
-  const make = (text: string, tone: NowLine["tone"]): NowLineResult => ({
+  const make = (text: string, tone: NowLine["tone"], carriedIdx = -1): NowLineResult => ({
     line: { text, tone },
     highlightIdx,
+    carriedIdx,
   });
-  const none: NowLineResult = { line: null, highlightIdx };
+  const none: NowLineResult = { line: null, highlightIdx, carriedIdx: -1 };
 
   if (input.complete) return none;
 
@@ -159,7 +163,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     }
     if (open.canRun && input.stepGated(open)) return none;
     if (open.awaitingDepth && view.pendingText !== null) {
-      return make(view.pendingText, "wait");
+      return make(view.pendingText, "wait", openIdx);
     }
     if (windowClosed) {
       if (releasableLegs.length > 0) {
@@ -174,10 +178,10 @@ export function nowLine(input: NowLineInput): NowLineResult {
   }
 
   if (open.awaitingDepth && view.pendingText !== null) {
-    return make(`Nothing to do right now. ${sentence(view.pendingText)} ${TAIL}`, "wait");
+    return make(`Nothing to do right now. ${sentence(view.pendingText)} ${TAIL}`, "wait", openIdx);
   }
   if (windowClosed) {
     return make(join("The other side did not act in time, so the swap will not complete."), "wait");
   }
-  return make(`Nothing to do right now. ${sentence(view.waitingText)} ${TAIL}`, "wait");
+  return make(`Nothing to do right now. ${sentence(view.waitingText)} ${TAIL}`, "wait", openIdx);
 }

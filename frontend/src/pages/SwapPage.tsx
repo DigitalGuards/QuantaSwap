@@ -78,7 +78,6 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 }}
               />
             ) : null}
-            <NetworkPanel />
           </div>
         ) : (
           <div className="space-y-4 lg:grid lg:grid-cols-2 lg:items-start lg:gap-6 lg:space-y-0">

@@ -26,11 +26,24 @@ export interface LegSenderHandles {
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
 }
 
+/** Called with the transaction hash as soon as the wallet returns it, before
+ *  the transaction confirms. Presentation only. */
+export type SentHashHandler = (hash: string) => void;
+
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+/** Reports a hash only when it has the shape of one; wallets differ in what
+ *  qrl_sendTransaction returns, and an unusable value shows no link. */
+const reportSent = (onSent: SentHashHandler | undefined, hash: unknown): void => {
+  if (onSent !== undefined && typeof hash === "string" && TX_HASH.test(hash)) onSent(hash);
+};
+
 export type LegSender = (
   leg: LegKey,
   data: string,
   valueWei: bigint,
   ethTo?: string,
+  onSent?: SentHashHandler,
 ) => Promise<void>;
 
 /** A settlement re-checks its own safety immediately before broadcast and
@@ -43,6 +56,7 @@ export type ClaimSender = (
   data: string,
   valueWei: bigint,
   guard?: BroadcastGuard,
+  onSent?: SentHashHandler,
 ) => Promise<void>;
 
 /** Settlement calldata (claim, refund, release) goes out with
@@ -102,12 +116,13 @@ function qrlSettlementTx(
 // without revert (tx.wait throws on a reverted receipt).
 export const makeLegSender =
   (h: LegSenderHandles): LegSender =>
-  async (leg, data, valueWei, ethTo = ETH_LEG.htlc) => {
+  async (leg, data, valueWei, ethTo = ETH_LEG.htlc, onSent) => {
     if (leg === "eth") {
       if (!h.browserProvider) throw new Error("Ethereum wallet not connected");
       await h.ensureSepolia();
       const signer = await h.browserProvider.getSigner();
       const tx = await signer.sendTransaction({ to: ethTo, data, value: valueWei });
+      reportSent(onSent, tx.hash);
       await tx.wait();
     } else {
       if (!h.qrlAccount) throw new Error("QRL wallet not connected");
@@ -144,7 +159,7 @@ export const makeLegSender =
         };
       }
       await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
-      await h.qrlRequest({ method: "qrl_sendTransaction", params: [tx] });
+      reportSent(onSent, await h.qrlRequest({ method: "qrl_sendTransaction", params: [tx] }));
     }
   };
 
@@ -202,7 +217,7 @@ export const makeSettlementSender =
  *  and throwing from it abandons the claim without publishing anything. */
 export const makePreflightedClaimSender =
   (h: LegSenderHandles): ClaimSender =>
-  async (leg, data, valueWei, guard) => {
+  async (leg, data, valueWei, guard, onSent) => {
     if (leg === "eth") {
       if (!h.browserProvider) throw new Error("Ethereum wallet not connected");
       await h.ensureSepolia();
@@ -242,6 +257,7 @@ export const makePreflightedClaimSender =
           value: valueWei,
           gasLimit: settlementGasLimit(estimate),
         });
+        reportSent(onSent, sent.hash);
         await sent.wait();
       } catch {
         throw new Error("Ethereum claim submission failed; check chain state before retrying");
@@ -286,7 +302,7 @@ export const makePreflightedClaimSender =
     await assertQrlNetwork((method, params) => h.qrlRequest({ method, params }));
     await guard?.();
     try {
-      await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] });
+      reportSent(onSent, await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] }));
     } catch {
       throw new Error("QRL claim submission failed; check chain state before retrying");
     }
@@ -315,8 +331,10 @@ export async function sendEthTokenLock(opts: {
   approvalRace: boolean;
   lockData: string;
   onStage: (label: string) => void;
+  /** Receives the hash of the lock transaction only; approvals report nothing. */
+  onSent?: SentHashHandler;
 }): Promise<void> {
-  const { send, ethAccount, token, symbol, amount, approvalRace, lockData, onStage } = opts;
+  const { send, ethAccount, token, symbol, amount, approvalRace, lockData, onStage, onSent } = opts;
   if (!ethAccount) throw new Error("Ethereum wallet not connected");
   const allowance = await allowanceOf(token, ethAccount, ETH_LEG.htlc);
   const needsApprove = allowance !== amount;
@@ -336,5 +354,5 @@ export async function sendEthTokenLock(opts: {
     await send("eth", buildApproveData(ETH_LEG.htlc, amount), 0n, token);
   }
   stage(`Lock ${symbol}`);
-  await send("eth", lockData, 0n);
+  await send("eth", lockData, 0n, undefined, onSent);
 }

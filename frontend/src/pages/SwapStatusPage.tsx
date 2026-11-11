@@ -11,7 +11,6 @@ import { useAnnounceReconcile } from "@/hooks/useAnnounceReconcile";
 import type { ActiveSwap } from "@/lib/activeSwap";
 import { releaseTake } from "@/lib/orderbook";
 import { SwapFlow } from "@/components/SwapFlow";
-import { NetworkPanel } from "@/components/NetworkPanel";
 import {
   getLegState,
   hexToQ,
@@ -254,7 +253,6 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
             void navigate("/");
           }}
         />
-        <NetworkPanel />
       </div>
     );
   }

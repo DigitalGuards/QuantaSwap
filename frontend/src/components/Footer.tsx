@@ -24,7 +24,7 @@ export function Footer() {
             QuantaPool
           </a>
           <a
-            href="https://zondscan.com"
+            href="https://shorscan.com"
             target="_blank"
             rel="noreferrer"
             className="hover:text-foreground"
