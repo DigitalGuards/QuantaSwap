@@ -389,6 +389,7 @@ describe("automatic wallet prompt", () => {
     legStatus.qrl = 2;
     await tick(6_000);
     expect(line()).toContain("Your maker may submit this claim for you.");
+    expect(line()).toContain("within about 2 minutes");
     expect(screen.getByRole("button", { name: /^Claim/ }).hasAttribute("disabled")).toBe(false);
     await tick(60_000);
     expect(sends).toHaveLength(0);
@@ -405,6 +406,7 @@ describe("automatic wallet prompt", () => {
     legStatus.eth = 2;
     await tick(6_000);
     expect(line()).toContain("Your maker may submit this claim for you.");
+    expect(line()).toContain("within about 3 minutes");
     await tick(150_000);
     expect(sends).toHaveLength(0);
     await tick(30_000);

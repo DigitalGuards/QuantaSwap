@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserProvider } from "ethers";
 import { ETH_LEG, QRL_LEG } from "../config";
+import { errorMessage } from "../utils/errorMessage";
 import {
   DELIVERY_GAS_LIMIT,
   DELIVERY_GAS_RESERVE,
@@ -218,15 +219,29 @@ describe("secret-bearing claim preflight", () => {
   });
 
   describe("wallet send failures", () => {
-    const REJECTED = /did not approve the request\. Nothing was sent/;
     const FAILED = /submission failed; check chain state before retrying/;
+    const HASH = `0x${"ab".repeat(32)}`;
 
-    const ethSender = (sendError: unknown) => {
+    // A decline leaves the sender as a bare code-4001 error: none of the
+    // wallet's own error, which can embed the claim calldata, travels on.
+    const expectDecline = async (send: Promise<void>) => {
+      const thrown: unknown = await send.then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown).toMatchObject({ code: 4001 });
+      expect(JSON.stringify(thrown)).not.toContain(DATA.slice(2));
+      expect(thrown instanceof Error ? thrown.message : "").not.toContain(DATA.slice(2));
+      expect(errorMessage(thrown)).toBe("Transaction rejected in your wallet.");
+    };
+
+    const ethSender = (sendTransaction: ReturnType<typeof vi.fn>) => {
       vi.stubGlobal("fetch", settlementFetch());
       const provider = Object.assign(new BrowserProvider({ request: vi.fn() }), {
         getSigner: vi.fn().mockResolvedValue({
           getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT),
-          sendTransaction: vi.fn().mockRejectedValue(sendError),
+          sendTransaction,
         }),
         send: vi.fn().mockResolvedValue("0x"),
         estimateGas: vi.fn().mockResolvedValue(70_000n),
@@ -239,6 +254,11 @@ describe("secret-bearing claim preflight", () => {
         qrlRequest: vi.fn(),
       });
     };
+    const ethSendFails = (sendError: unknown) => ethSender(vi.fn().mockRejectedValue(sendError));
+    const ethWaitFails = (waitError: unknown) =>
+      ethSender(
+        vi.fn().mockResolvedValue({ hash: HASH, wait: vi.fn().mockRejectedValue(waitError) }),
+      );
 
     const qrlSender = (sendError: unknown) => {
       vi.stubGlobal("fetch", settlementFetch());
@@ -261,28 +281,44 @@ describe("secret-bearing claim preflight", () => {
       });
     };
 
-    it("says nothing was sent when the Ethereum wallet declines", async () => {
-      const ethers = Object.assign(new Error("user rejected action"), {
+    it("reports a decline in the Ethereum wallet as a decline, without the wallet's error", async () => {
+      const ethers = Object.assign(new Error(`user rejected action (data="${DATA}")`), {
         code: "ACTION_REJECTED",
+        transaction: { data: DATA },
       });
-      await expect(ethSender(ethers)("eth", DATA, 0n)).rejects.toThrow(REJECTED);
+      await expectDecline(ethSendFails(ethers)("eth", DATA, 0n));
       const nested = Object.assign(new Error("wrapped"), { info: { error: { code: 4001 } } });
-      await expect(ethSender(nested)("eth", DATA, 0n)).rejects.toThrow(REJECTED);
-      await expect(ethSender({ code: 4001 })("eth", DATA, 0n)).rejects.toThrow(REJECTED);
+      await expectDecline(ethSendFails(nested)("eth", DATA, 0n));
+      await expectDecline(ethSendFails({ code: 4001, data: DATA })("eth", DATA, 0n));
     });
 
-    it("says nothing was sent when the QRL wallet declines", async () => {
-      await expect(qrlSender({ code: 4001 })("qrl", DATA, 0n)).rejects.toThrow(REJECTED);
-      await expect(qrlSender({ error: { code: 4001 } })("qrl", DATA, 0n)).rejects.toThrow(REJECTED);
+    it("reports a decline in the QRL wallet as a decline, without the wallet's error", async () => {
+      await expectDecline(qrlSender({ code: 4001, data: DATA })("qrl", DATA, 0n));
+      await expectDecline(qrlSender({ cause: { code: 4001 } })("qrl", DATA, 0n));
     });
 
     it("keeps the chain-state message for any other send failure", async () => {
       await expect(
-        ethSender(new Error("replacement underpriced"))("eth", DATA, 0n),
+        ethSendFails(new Error("replacement underpriced"))("eth", DATA, 0n),
       ).rejects.toThrow(FAILED);
-      await expect(ethSender({ code: -32000 })("eth", DATA, 0n)).rejects.toThrow(FAILED);
+      await expect(ethSendFails({ code: -32000 })("eth", DATA, 0n)).rejects.toThrow(FAILED);
       await expect(qrlSender(new Error("relay timeout"))("qrl", DATA, 0n)).rejects.toThrow(FAILED);
       await expect(qrlSender("nope")("qrl", DATA, 0n)).rejects.toThrow(FAILED);
+    });
+
+    it("keeps the chain-state message for a failure after the broadcast, whatever its code", async () => {
+      const onSent = vi.fn();
+      await expect(
+        ethWaitFails({ code: 4001 })("eth", DATA, 0n, undefined, onSent),
+      ).rejects.toThrow(FAILED);
+      expect(onSent).toHaveBeenCalledWith(HASH);
+      await expect(
+        ethWaitFails(Object.assign(new Error("replaced"), { code: "ACTION_REJECTED" }))(
+          "eth",
+          DATA,
+          0n,
+        ),
+      ).rejects.toThrow(FAILED);
     });
   });
 

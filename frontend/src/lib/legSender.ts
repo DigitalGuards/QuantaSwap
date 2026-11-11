@@ -1,3 +1,4 @@
+import { isUserRejection } from "@/utils/errorMessage";
 import { requireHex } from "@/utils/guards";
 // Wallet transaction sender for both legs, shared by the swap flow and
 // the prelock post flow (which escrows before an order even exists, so it
@@ -213,26 +214,14 @@ export const makeSettlementSender =
     });
   };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null;
-
-/** True when the wallet reports that the user declined the request: EIP-1193
- *  code 4001, or ethers v6 code "ACTION_REJECTED", which also carries the
- *  provider error under `info.error`. */
-export const isUserRejection = (err: unknown): boolean => {
-  if (!isRecord(err)) return false;
-  if (err.code === 4001 || err.code === "ACTION_REJECTED") return true;
-  const info = err.info;
-  if (isRecord(info) && isRecord(info.error) && info.error.code === 4001) return true;
-  return isRecord(err.error) && err.error.code === 4001;
-};
-
-const REJECTED_MESSAGE =
-  "The wallet did not approve the request. Nothing was sent; use the button to try again.";
-
-/** Claim submission failure text; a declined request sent nothing. */
-const claimSubmitError = (err: unknown, fallback: string): Error =>
-  new Error(isUserRejection(err) ? REJECTED_MESSAGE : fallback);
+/** What a failed claim send throws. Nothing of the wallet's own error travels
+ *  on, because it can embed the claim calldata, and with it the secret. A
+ *  decline before the broadcast keeps code 4001, so errorMessage() words it
+ *  like a decline on any other step; only then is it certain nothing was sent. */
+const claimSendFailure = (err: unknown, broadcast: boolean, fallback: string): Error =>
+  !broadcast && isUserRejection(err)
+    ? Object.assign(new Error("User rejected the request"), { code: 4001 })
+    : new Error(fallback);
 
 /** Send secret-bearing claim calldata only after an exact call from the
  *  actual sender succeeds against the same HTLC. The simulation and send
@@ -276,6 +265,7 @@ export const makePreflightedClaimSender =
         throw new Error("Ethereum claim gas estimation failed; the secret was not submitted");
       }
       await guard?.();
+      let broadcast = false;
       try {
         const sent = await signer.sendTransaction({
           to: ETH_LEG.htlc,
@@ -283,11 +273,13 @@ export const makePreflightedClaimSender =
           value: valueWei,
           gasLimit: settlementGasLimit(estimate),
         });
+        broadcast = true;
         reportSent(onSent, sent.hash);
         await sent.wait();
       } catch (err) {
-        throw claimSubmitError(
+        throw claimSendFailure(
           err,
+          broadcast,
           "Ethereum claim submission failed; check chain state before retrying",
         );
       }
@@ -333,7 +325,11 @@ export const makePreflightedClaimSender =
     try {
       reportSent(onSent, await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] }));
     } catch (err) {
-      throw claimSubmitError(err, "QRL claim submission failed; check chain state before retrying");
+      throw claimSendFailure(
+        err,
+        false,
+        "QRL claim submission failed; check chain state before retrying",
+      );
     }
   };
 

@@ -89,8 +89,7 @@ const pillStyles: Record<string, string> = {
  *  A sponsored claim needs the maker's own claim to confirm and then a
  *  60-second QRL slot or two, so the QRL leg waits longer: 108 s observed on
  *  11 Nov 2026. */
-const CLAIM_HOLD_QRL_S = 180;
-const CLAIM_HOLD_ETH_S = 90;
+const CLAIM_HOLD_S: Record<LegKey, number> = { qrl: 180, eth: 90 };
 
 /** How long an own reported transaction holds its step's button. */
 const PENDING_TX_WAIT_S = 180;
@@ -753,6 +752,8 @@ export function SwapFlow({
     if (state !== undefined) legTimeout[leg] = state.timeout;
   }
   const openIdx = steps.findIndex((step) => !step.done);
+  const heldStepIdx = steps.findIndex((step) => step.own && holdingKeys.includes(step.key));
+  const heldStep = heldStepIdx >= 0 ? steps[heldStepIdx] : undefined;
   const {
     line: nowLine,
     highlightIdx,
@@ -764,7 +765,8 @@ export function SwapFlow({
     actionKey: (step) => actionKey(step.key, step.leg),
     stepGated,
     pendingOwnStepIdx: steps.findIndex((step) => step.own && awaitingOwnTx(step)),
-    holdingOwnStepIdx: steps.findIndex((step) => step.own && holdingKeys.includes(step.key)),
+    holdingOwnStepIdx: heldStepIdx,
+    holdS: heldStep === undefined ? 0 : CLAIM_HOLD_S[heldStep.leg],
     copy: presentation,
     chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
     symbol:
@@ -798,11 +800,7 @@ export function SwapFlow({
             // The house makers claim for the taker right after their own
             // claim, so the taker's claim gets a grace period first.
             holdS:
-              swap.role === "taker" && step.key === "claim-initiator"
-                ? step.leg === "qrl"
-                  ? CLAIM_HOLD_QRL_S
-                  : CLAIM_HOLD_ETH_S
-                : 0,
+              swap.role === "taker" && step.key === "claim-initiator" ? CLAIM_HOLD_S[step.leg] : 0,
           },
         ]
       : [],
@@ -818,13 +816,12 @@ export function SwapFlow({
   // belongs to is done, or the swap completed. Refund, release and credit
   // errors stay until the next action, because a completed swap can still
   // hold a payout credit to withdraw.
-  const stepErrorKey =
-    errorState !== null && steps.some((step) => actionKey(step.key, step.leg) === errorState.key);
+  const erroredStep =
+    errorState === null
+      ? undefined
+      : steps.find((step) => actionKey(step.key, step.leg) === errorState.key);
   const error =
-    errorState === null ||
-    (stepErrorKey &&
-      (complete ||
-        steps.some((step) => step.done && actionKey(step.key, step.leg) === errorState.key)))
+    errorState === null || (erroredStep !== undefined && (complete || erroredStep.done))
       ? null
       : errorState.message;
 
