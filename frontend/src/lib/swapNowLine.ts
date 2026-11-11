@@ -120,7 +120,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     const busyStep = steps.find((step) => input.actionKey(step) === input.busy);
     const where = busyStep ? ` on ${input.chainName[busyStep.leg]}` : "";
     return make(
-      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}.`,
+      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}. If no wallet window opened, open your wallet from the browser toolbar.`,
       "wait",
     );
   }

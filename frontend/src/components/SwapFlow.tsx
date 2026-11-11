@@ -61,6 +61,7 @@ import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
+import { AutoStartSteps, type AutoStartCandidate } from "@/components/AutoStartSteps";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
 
@@ -749,11 +750,35 @@ export function SwapFlow({
     responderTimeout: swap.responderTimeout ?? undefined,
   });
 
+  // Own lock, assign and claim steps that open the wallet by themselves once
+  // they turn actionable. Refund, release, discard and credit stay manual.
+  const legRefunded =
+    iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded;
+  const autoStart: AutoStartCandidate[] =
+    complete || refundableLegs.length > 0 || takerWalkedAway || legRefunded
+      ? []
+      : steps.flatMap((step) =>
+          step.own && !step.done && step.canRun && !stepGated(step) && step.issue === null
+            ? [
+                {
+                  key: step.key,
+                  busyKey: actionKey(step.key, step.leg),
+                  run: presentation[step.key].action,
+                  blocked: awaitingOwnTx(step),
+                },
+              ]
+            : [],
+        );
+  const chainLoaded = [iLeg, rLeg].every(
+    (leg) => legs[leg] !== undefined && confirmedLegs[leg] !== undefined,
+  );
+
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
 
   return (
     <Card className="surface-ember">
+      <AutoStartSteps key={hashlock} candidates={autoStart} ready={chainLoaded} busy={busy} />
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">Swap in progress</CardTitle>
