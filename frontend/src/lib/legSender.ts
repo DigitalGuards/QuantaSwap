@@ -213,6 +213,27 @@ export const makeSettlementSender =
     });
   };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+/** True when the wallet reports that the user declined the request: EIP-1193
+ *  code 4001, or ethers v6 code "ACTION_REJECTED", which also carries the
+ *  provider error under `info.error`. */
+export const isUserRejection = (err: unknown): boolean => {
+  if (!isRecord(err)) return false;
+  if (err.code === 4001 || err.code === "ACTION_REJECTED") return true;
+  const info = err.info;
+  if (isRecord(info) && isRecord(info.error) && info.error.code === 4001) return true;
+  return isRecord(err.error) && err.error.code === 4001;
+};
+
+const REJECTED_MESSAGE =
+  "The wallet did not approve the request. Nothing was sent; use the button to try again.";
+
+/** Claim submission failure text; a declined request sent nothing. */
+const claimSubmitError = (err: unknown, fallback: string): Error =>
+  new Error(isUserRejection(err) ? REJECTED_MESSAGE : fallback);
+
 /** Send secret-bearing claim calldata only after an exact call from the
  *  actual sender succeeds against the same HTLC. The simulation and send
  *  share one signer/account within this operation. It prevents publishing
@@ -264,8 +285,11 @@ export const makePreflightedClaimSender =
         });
         reportSent(onSent, sent.hash);
         await sent.wait();
-      } catch {
-        throw new Error("Ethereum claim submission failed; check chain state before retrying");
+      } catch (err) {
+        throw claimSubmitError(
+          err,
+          "Ethereum claim submission failed; check chain state before retrying",
+        );
       }
       return;
     }
@@ -308,8 +332,8 @@ export const makePreflightedClaimSender =
     await guard?.();
     try {
       reportSent(onSent, await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] }));
-    } catch {
-      throw new Error("QRL claim submission failed; check chain state before retrying");
+    } catch (err) {
+      throw claimSubmitError(err, "QRL claim submission failed; check chain state before retrying");
     }
   };
 

@@ -160,7 +160,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
 
   if (input.holdingOwnStepIdx >= 0) {
     return make(
-      "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
+      "Your maker may submit this claim for you. If it has not arrived shortly, your wallet opens for it.",
       "wait",
     );
   }

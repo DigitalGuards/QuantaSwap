@@ -299,7 +299,7 @@ describe("nowLine", () => {
       }),
     );
     expect(result.line).toEqual({
-      text: "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
+      text: "Your maker may submit this claim for you. If it has not arrived shortly, your wallet opens for it.",
       tone: "wait",
     });
   });

@@ -85,8 +85,12 @@ const pillStyles: Record<string, string> = {
   refunded: "bg-amber-400/10 text-amber-400",
 };
 
-/** Seconds the taker's claim waits for the maker's sponsored claim. */
-const CLAIM_HOLD_S = 90;
+/** Seconds the taker's claim waits for the maker's sponsored claim, per leg.
+ *  A sponsored claim needs the maker's own claim to confirm and then a
+ *  60-second QRL slot or two, so the QRL leg waits longer: 108 s observed on
+ *  11 Nov 2026. */
+const CLAIM_HOLD_QRL_S = 180;
+const CLAIM_HOLD_ETH_S = 90;
 
 /** How long an own reported transaction holds its step's button. */
 const PENDING_TX_WAIT_S = 180;
@@ -144,7 +148,7 @@ export function SwapFlow({
   }, [swap.hashlock]);
   // Steps inside their hold window before an automatic start.
   const [holdingKeys, setHoldingKeys] = useState<readonly string[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<{ key: string; message: string } | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   // The order-book view of this swap, polled alongside chain state. Used to
@@ -373,7 +377,7 @@ export function SwapFlow({
   );
 
   const runAction = (key: string, fn: (onSent: (hash: string) => void) => Promise<void>) => {
-    setError(null);
+    setErrorState(null);
     setBusy(key);
     let reported = false;
     const onSent = (hash: string) => {
@@ -387,7 +391,7 @@ export function SwapFlow({
       })
       .catch((err: unknown) => {
         if (!reported) setSentTx(({ [key]: _dropped, ...rest }) => rest);
-        setError(errorMessage(err));
+        setErrorState({ key, message: errorMessage(err) });
       })
       .finally(() => {
         setBusy(null);
@@ -793,7 +797,12 @@ export function SwapFlow({
               awaitingOwnTx(step) || connectedOn(step.leg) === null || Boolean(accountMismatch),
             // The house makers claim for the taker right after their own
             // claim, so the taker's claim gets a grace period first.
-            holdS: swap.role === "taker" && step.key === "claim-initiator" ? CLAIM_HOLD_S : 0,
+            holdS:
+              swap.role === "taker" && step.key === "claim-initiator"
+                ? step.leg === "qrl"
+                  ? CLAIM_HOLD_QRL_S
+                  : CLAIM_HOLD_ETH_S
+                : 0,
           },
         ]
       : [],
@@ -804,6 +813,20 @@ export function SwapFlow({
     bothLegsLoaded &&
     [iLeg, rLeg].every((leg) => confirmedLegs[leg] !== undefined) &&
     (swap.intent === undefined || order !== null);
+
+  // A step error stops showing once it can no longer be true: the step it
+  // belongs to is done, or the swap completed. Refund, release and credit
+  // errors stay until the next action, because a completed swap can still
+  // hold a payout credit to withdraw.
+  const stepErrorKey =
+    errorState !== null && steps.some((step) => actionKey(step.key, step.leg) === errorState.key);
+  const error =
+    errorState === null ||
+    (stepErrorKey &&
+      (complete ||
+        steps.some((step) => step.done && actionKey(step.key, step.leg) === errorState.key)))
+      ? null
+      : errorState.message;
 
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
@@ -1197,7 +1220,9 @@ export function SwapFlow({
           </div>
         ) : null}
 
-        {error ? <p className="pt-2 text-sm break-words text-destructive">{error}</p> : null}
+        {error !== null ? (
+          <p className="pt-2 text-sm break-words text-destructive">{error}</p>
+        ) : null}
 
         <div className="flex items-center justify-between pt-4">
           {swap.preimage ? (
