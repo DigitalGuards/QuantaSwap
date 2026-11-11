@@ -1,3 +1,4 @@
+import { isUserRejection } from "@/utils/errorMessage";
 import { requireHex } from "@/utils/guards";
 // Wallet transaction sender for both legs, shared by the swap flow and
 // the prelock post flow (which escrows before an order even exists, so it
@@ -213,6 +214,15 @@ export const makeSettlementSender =
     });
   };
 
+/** What a failed claim send throws. Nothing of the wallet's own error travels
+ *  on, because it can embed the claim calldata, and with it the secret. A
+ *  decline before the broadcast keeps code 4001, so errorMessage() words it
+ *  like a decline on any other step; only then is it certain nothing was sent. */
+const claimSendFailure = (err: unknown, broadcast: boolean, fallback: string): Error =>
+  !broadcast && isUserRejection(err)
+    ? Object.assign(new Error("User rejected the request"), { code: 4001 })
+    : new Error(fallback);
+
 /** Send secret-bearing claim calldata only after an exact call from the
  *  actual sender succeeds against the same HTLC. The simulation and send
  *  share one signer/account within this operation. It prevents publishing
@@ -255,6 +265,7 @@ export const makePreflightedClaimSender =
         throw new Error("Ethereum claim gas estimation failed; the secret was not submitted");
       }
       await guard?.();
+      let broadcast = false;
       try {
         const sent = await signer.sendTransaction({
           to: ETH_LEG.htlc,
@@ -262,10 +273,15 @@ export const makePreflightedClaimSender =
           value: valueWei,
           gasLimit: settlementGasLimit(estimate),
         });
+        broadcast = true;
         reportSent(onSent, sent.hash);
         await sent.wait();
-      } catch {
-        throw new Error("Ethereum claim submission failed; check chain state before retrying");
+      } catch (err) {
+        throw claimSendFailure(
+          err,
+          broadcast,
+          "Ethereum claim submission failed; check chain state before retrying",
+        );
       }
       return;
     }
@@ -308,8 +324,12 @@ export const makePreflightedClaimSender =
     await guard?.();
     try {
       reportSent(onSent, await h.qrlRequest({ method: "qrl_sendTransaction", params: [sendTx] }));
-    } catch {
-      throw new Error("QRL claim submission failed; check chain state before retrying");
+    } catch (err) {
+      throw claimSendFailure(
+        err,
+        false,
+        "QRL claim submission failed; check chain state before retrying",
+      );
     }
   };
 

@@ -32,6 +32,8 @@ export interface NowLineInput {
   pendingOwnStepIdx: number;
   /** Index of an own step held back so the maker can claim for the taker, or -1. */
   holdingOwnStepIdx: number;
+  /** Seconds that held step waits before the wallet opens for it. */
+  holdS: number;
   copy: Record<StepModel["key"], StepCopy>;
   chainName: Record<LegKey, string>;
   symbol: Record<LegKey, string>;
@@ -159,8 +161,9 @@ export function nowLine(input: NowLineInput): NowLineResult {
   }
 
   if (input.holdingOwnStepIdx >= 0) {
+    const minutes = Math.max(1, Math.ceil(input.holdS / 60));
     return make(
-      "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
+      `Your maker may submit this claim for you. If it has not arrived within about ${minutes === 1 ? "a minute" : `${minutes} minutes`}, your wallet opens for it.`,
       "wait",
     );
   }

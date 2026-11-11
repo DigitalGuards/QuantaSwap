@@ -43,6 +43,7 @@ const base = (over: Partial<NowLineInput> = {}): NowLineInput => ({
   stepGated: () => false,
   pendingOwnStepIdx: -1,
   holdingOwnStepIdx: -1,
+  holdS: 0,
   copy: {
     "lock-initiator": {
       label: "Lock ETH",
@@ -292,20 +293,24 @@ describe("nowLine", () => {
     expect(nowLine(base({ complete: true })).carriedIdx).toBe(-1);
   });
 
-  it("tells the taker the maker may claim during the hold window", () => {
-    const result = nowLine(
-      base({
-        steps: takerSteps({
-          "lock-responder": { done: true },
-          "claim-responder": { done: true },
-          "claim-initiator": { canRun: true },
+  it("tells the taker the maker may claim during the hold window, with its length", () => {
+    const held = (holdS: number) =>
+      nowLine(
+        base({
+          steps: takerSteps({
+            "lock-responder": { done: true },
+            "claim-responder": { done: true },
+            "claim-initiator": { canRun: true },
+          }),
+          holdingOwnStepIdx: 3,
+          holdS,
         }),
-        holdingOwnStepIdx: 3,
-      }),
-    );
-    expect(result.line).toEqual({
-      text: "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
+      ).line;
+    expect(held(180)).toEqual({
+      text: "Your maker may submit this claim for you. If it has not arrived within about 3 minutes, your wallet opens for it.",
       tone: "wait",
     });
+    expect(held(90)?.text).toContain("within about 2 minutes,");
+    expect(held(45)?.text).toContain("within about a minute,");
   });
 });

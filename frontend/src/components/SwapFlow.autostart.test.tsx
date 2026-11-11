@@ -29,6 +29,7 @@ const legTimeoutIn: Record<"eth" | "qrl", number> = { eth: 7200, qrl: 3600 };
 const orderState: { order: OrderView | null } = { order: null };
 const sender: { mode: "pending" | "reject" } = { mode: "pending" };
 const sends: string[] = [];
+const dir: { v: "eth->qrl" | "qrl->eth" } = { v: "eth->qrl" };
 const focus = { visible: true, focused: true };
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
@@ -36,10 +37,24 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
   const stateFor = (leg: "eth" | "qrl"): LegState => {
     const eth = leg === "eth";
     const status = legStatus[leg];
+    const flipped = dir.v === "qrl->eth";
+    const makerFunds = eth !== flipped;
     return {
       status,
-      initiator: eth ? MAKER_ETH : `0x${TAKER_QRL.slice(1)}`,
-      recipient: eth ? TAKER_ETH : `0x${MAKER_QRL.slice(1)}`,
+      initiator: eth
+        ? makerFunds
+          ? MAKER_ETH
+          : TAKER_ETH
+        : makerFunds
+          ? `0x${MAKER_QRL.slice(1)}`
+          : `0x${TAKER_QRL.slice(1)}`,
+      recipient: eth
+        ? makerFunds
+          ? TAKER_ETH
+          : MAKER_ETH
+        : makerFunds
+          ? `0x${TAKER_QRL.slice(1)}`
+          : `0x${MAKER_QRL.slice(1)}`,
       token: eth ? actual.NATIVE_TOKEN : actual.QRL_NATIVE_TOKEN,
       amount: eth ? ETH_AMOUNT : QRL_AMOUNT,
       timeout: NOW + legTimeoutIn[leg],
@@ -106,10 +121,10 @@ const swap = (role: ActiveSwap["role"], hashlock = HASHLOCK): ActiveSwap => ({
   termsBindingVersion: 1,
   orderId: "order-1",
   takerToken: null,
-  direction: "eth->qrl",
+  direction: dir.v,
   ethAsset: "ETH",
-  fromAmount: ETH_AMOUNT.toString(),
-  toAmount: QRL_AMOUNT.toString(),
+  fromAmount: (dir.v === "eth->qrl" ? ETH_AMOUNT : QRL_AMOUNT).toString(),
+  toAmount: (dir.v === "eth->qrl" ? QRL_AMOUNT : ETH_AMOUNT).toString(),
   makerEthAccount: MAKER_ETH,
   makerQrlAccount: MAKER_QRL,
   takerEthAccount: TAKER_ETH,
@@ -229,6 +244,7 @@ beforeEach(() => {
   legTimeoutIn.eth = 7200;
   legTimeoutIn.qrl = 3600;
   sender.mode = "pending";
+  dir.v = "eth->qrl";
   sends.length = 0;
   focus.visible = true;
   focus.focused = true;
@@ -373,11 +389,59 @@ describe("automatic wallet prompt", () => {
     legStatus.qrl = 2;
     await tick(6_000);
     expect(line()).toContain("Your maker may submit this claim for you.");
+    expect(line()).toContain("within about 2 minutes");
     expect(screen.getByRole("button", { name: /^Claim/ }).hasAttribute("disabled")).toBe(false);
     await tick(60_000);
     expect(sends).toHaveLength(0);
     await tick(30_000);
     expect(sends).toEqual(["claim-eth"]);
+  });
+
+  it("holds the taker's QRL claim for 180 seconds", async () => {
+    dir.v = "qrl->eth";
+    legStatus.qrl = 1;
+    legStatus.eth = 1;
+    render(ui("taker"));
+    await tick(100);
+    legStatus.eth = 2;
+    await tick(6_000);
+    expect(line()).toContain("Your maker may submit this claim for you.");
+    expect(line()).toContain("within about 3 minutes");
+    await tick(150_000);
+    expect(sends).toHaveLength(0);
+    await tick(30_000);
+    expect(sends).toEqual(["claim-qrl"]);
+  });
+
+  it("clears a step error once that step is done, and keeps it while open", async () => {
+    sender.mode = "reject";
+    render(ui("taker"));
+    await tick(100);
+    legStatus.eth = 1;
+    await tick(6_000);
+    expect(sends).toEqual(["qrl"]);
+    expect(screen.getByText("Transaction rejected in your wallet.")).toBeTruthy();
+    await tick(10_000);
+    expect(screen.getByText("Transaction rejected in your wallet.")).toBeTruthy();
+    legStatus.qrl = 1;
+    await tick(10_000);
+    expect(screen.queryByText("Transaction rejected in your wallet.")).toBeNull();
+  });
+
+  it("clears a claim error when the sponsored claim completes the swap", async () => {
+    sender.mode = "reject";
+    legStatus.eth = 1;
+    legStatus.qrl = 1;
+    render(ui("taker"));
+    await tick(100);
+    legStatus.qrl = 2;
+    await tick(6_000);
+    await tick(95_000);
+    expect(sends).toEqual(["claim-eth"]);
+    expect(screen.getByText("Transaction rejected in your wallet.")).toBeTruthy();
+    legStatus.eth = 2;
+    await tick(10_000);
+    expect(screen.queryByText("Transaction rejected in your wallet.")).toBeNull();
   });
 
   it("starts the first step of a swap created in this session at once", async () => {
