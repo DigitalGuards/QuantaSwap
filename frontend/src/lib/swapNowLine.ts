@@ -30,6 +30,8 @@ export interface NowLineInput {
   stepGated: (step: NowLineStep) => boolean;
   /** Index of an own step whose reported transaction is still awaited, or -1. */
   pendingOwnStepIdx: number;
+  /** Index of an own step held back so the maker can claim for the taker, or -1. */
+  holdingOwnStepIdx: number;
   copy: Record<StepModel["key"], StepCopy>;
   chainName: Record<LegKey, string>;
   symbol: Record<LegKey, string>;
@@ -120,7 +122,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     const busyStep = steps.find((step) => input.actionKey(step) === input.busy);
     const where = busyStep ? ` on ${input.chainName[busyStep.leg]}` : "";
     return make(
-      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}.`,
+      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}. If nothing opened, open your wallet to approve it.`,
       "wait",
     );
   }
@@ -152,6 +154,13 @@ export function nowLine(input: NowLineInput): NowLineResult {
   if (sentStep !== undefined) {
     return make(
       `Transaction sent. Waiting for it to confirm on ${input.chainName[sentStep.leg]}.`,
+      "wait",
+    );
+  }
+
+  if (input.holdingOwnStepIdx >= 0) {
+    return make(
+      "Your maker may submit this claim for you. If it has not arrived in about a minute, your wallet opens for it.",
       "wait",
     );
   }
