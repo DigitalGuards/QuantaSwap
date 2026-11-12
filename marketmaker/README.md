@@ -227,21 +227,29 @@ workflow reruns the locked tests and dependency audit before publishing. It
 attaches an SBOM and maximum-mode build provenance, creates a GitHub artifact
 attestation, and signs the immutable image digest with Sigstore keyless signing.
 
-For production-like testing, pin the digest printed in the successful release
-workflow. Releases are signed with cosign 3 and carry OCI 1.1 referrer
-bundles: cosign 2.x reports `no signatures found`, and `gh attestation` needs
-GitHub CLI 2.49 or newer.
+Each release tag `marketmaker-vX.Y.Z` is also published as the image tag
+`X.Y.Z`. Resolve it to a digest once, then verify that digest against the exact
+release tag you chose. Pinning the full tag identity rejects a validly signed
+older release presented under a newer name. Releases are signed with cosign 3
+and carry OCI 1.1 referrer bundles: cosign 2.x reports `no signatures found`,
+and `gh attestation` needs GitHub CLI 2.49 or newer.
 
 ```bash
-docker pull ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
-cosign verify \
-  --certificate-identity-regexp '^https://github\.com/DigitalGuards/QuantaSwap/\.github/workflows/marketmaker-release\.yml@refs/tags/marketmaker-v[0-9]+\.[0-9]+\.[0-9]+$' \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>
-gh attestation verify \
-  oci://ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest> \
-  --repo DigitalGuards/QuantaSwap
+release=0.4.1
+image=ghcr.io/digitalguards/quantaswap-marketmaker
+identity="https://github.com/DigitalGuards/QuantaSwap/.github/workflows/marketmaker-release.yml@refs/tags/marketmaker-v${release}"
+issuer=https://token.actions.githubusercontent.com
+docker pull "$image:$release"
+digest=$(docker image inspect "$image:$release" \
+  --format '{{index .RepoDigests 0}}' | cut -d@ -f2)
+cosign verify --certificate-identity "$identity" \
+  --certificate-oidc-issuer "$issuer" "$image@$digest" >/dev/null
+gh attestation verify "oci://$image@$digest" --repo DigitalGuards/QuantaSwap
+echo "$image@$digest"
 ```
+
+Use the printed `ghcr.io/digitalguards/quantaswap-marketmaker@sha256:<digest>`
+reference wherever this guide asks for the digest.
 
 The local Compose file builds from source by default. After reviewing the
 release digest, signature identity, attestation, SBOM, and migration notes,
