@@ -192,7 +192,7 @@ file; both Node packages require the sibling `config/protocol-v2.json` at runtim
 ## Prerequisites
 
 - Docker Engine with Compose 2.24 or newer;
-- Node.js 20 or newer for the one-time key bootstrap;
+- Node.js 22.23.5 or newer for the one-time key bootstrap;
 - reachable order-book, Ethereum RPC, and QRL RPC endpoints;
 - independent testnet capital for both legs and gas (see "Funding" below);
 - for release verification: cosign 3.0 or newer and GitHub CLI 2.49 or newer.
