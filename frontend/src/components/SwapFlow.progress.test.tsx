@@ -23,7 +23,7 @@ const legStatus: Record<"eth" | "qrl", LegState["status"]> = { eth: 0, qrl: 0 };
 /** Seconds from now until each leg's on-chain timeout. */
 const legTimeoutIn: Record<"eth" | "qrl", number> = { eth: 7200, qrl: 3600 };
 /** When true an Open responder leg already carries the preimage. */
-const state = { leakPreimage: false };
+const state = { leakPreimage: false, reveal: false };
 
 vi.mock("@/lib/htlc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/htlc")>();
@@ -47,7 +47,17 @@ vi.mock("@/lib/htlc", async (importOriginal) => {
     ...actual,
     getLegState: vi.fn((leg: "eth" | "qrl") => Promise.resolve(stateFor(leg))),
     getConfirmedLegState: vi.fn((leg: "eth" | "qrl") => Promise.resolve(stateFor(leg))),
-    getSwapEvents: vi.fn(() => Promise.resolve([])),
+    // A dated reveal long ago: the claim hold is over and the button shows.
+    getSwapEvents: vi.fn((leg: "eth" | "qrl") =>
+      Promise.resolve(
+        state.reveal && leg === "qrl"
+          ? [{ kind: "claimed" as const, txHash: `0x${"cd".repeat(32)}`, blockNumber: 5 }]
+          : [],
+      ),
+    ),
+    getChainClockReading: vi.fn(() =>
+      Promise.resolve({ ageS: 1000, claimHeadS: Math.floor(Date.now() / 1000) }),
+    ),
     readSwapCredit: vi.fn(() => Promise.resolve({ global: 0n, credited: 0n })),
   };
 });
@@ -102,6 +112,7 @@ beforeEach(() => {
   legTimeoutIn.eth = 7200;
   legTimeoutIn.qrl = 3600;
   state.leakPreimage = false;
+  state.reveal = false;
 });
 afterEach(cleanup);
 
@@ -121,6 +132,7 @@ describe("swap progress line", () => {
   it("tells the taker it is their turn once the secret is revealed", async () => {
     legStatus.eth = 1;
     legStatus.qrl = 2;
+    state.reveal = true;
     renderFlow("taker");
     await waitFor(() =>
       expect(screen.getByTestId("swap-now").textContent).toMatch(/^Your turn: Claim/),
@@ -148,6 +160,7 @@ describe("swap progress line", () => {
     legStatus.eth = 1;
     legStatus.qrl = 1;
     state.leakPreimage = true;
+    state.reveal = true;
     renderFlow("taker");
     const button = await screen.findByRole("button", { name: /^Claim/ });
     expect(button.hasAttribute("disabled")).toBe(false);

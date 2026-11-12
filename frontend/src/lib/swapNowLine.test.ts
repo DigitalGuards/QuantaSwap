@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { nowLine, type NowLineInput, type NowLineStep } from "./swapNowLine";
+import {
+  HOLD_CHECK_S,
+  HOLD_SAFETY_S,
+  claimHoldWindow,
+  claimedByOther,
+  payoutStillOpen,
+  clock,
+  nowLine,
+  type NowLineInput,
+  type NowLineStep,
+} from "./swapNowLine";
 
 const NOW = 1_800_000_000;
 type Key = "lock-initiator" | "lock-responder" | "claim-responder" | "claim-initiator";
@@ -39,11 +49,13 @@ const base = (over: Partial<NowLineInput> = {}): NowLineInput => ({
   steps: takerSteps(),
   complete: false,
   busy: null,
+  busySent: false,
   actionKey: (s) => `${s.key.startsWith("lock") ? "lock" : "claim"}-${s.leg}`,
   stepGated: () => false,
   pendingOwnStepIdx: -1,
   holdingOwnStepIdx: -1,
-  holdS: 0,
+  holdKind: "auto",
+  holdLeftS: 0,
   copy: {
     "lock-initiator": {
       label: "Lock ETH",
@@ -126,6 +138,15 @@ describe("nowLine", () => {
   it("names the chain when the busy action is a step", () => {
     expect(text({ busy: "lock-qrl" })).toBe(
       "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on QRL. If nothing opened, open your wallet to approve it.",
+    );
+  });
+
+  it("says the transaction was sent once the busy step has a reported hash", () => {
+    expect(text({ busy: "lock-qrl", busySent: true })).toBe(
+      "Transaction sent. Waiting for it to confirm on QRL.",
+    );
+    expect(text({ busy: "unknown-key", busySent: true })).toBe(
+      "Transaction sent. Waiting for it to confirm.",
     );
   });
 
@@ -294,7 +315,7 @@ describe("nowLine", () => {
   });
 
   it("tells the taker the maker may claim during the hold window, with its length", () => {
-    const held = (holdS: number) =>
+    const held = (holdLeftS: number) =>
       nowLine(
         base({
           steps: takerSteps({
@@ -303,14 +324,143 @@ describe("nowLine", () => {
             "claim-initiator": { canRun: true },
           }),
           holdingOwnStepIdx: 3,
-          holdS,
+          holdLeftS,
         }),
       ).line;
     expect(held(180)).toEqual({
-      text: "Your maker may submit this claim for you. If it has not arrived within about 3 minutes, your wallet opens for it.",
+      text: "Your maker may submit this claim for you. If it has not arrived within about 3 minutes, the Claim button appears and your wallet opens for it.",
       tone: "wait",
     });
     expect(held(90)?.text).toContain("within about 2 minutes,");
+    expect(held(150)?.text).toContain("within about 3 minutes,");
+    expect(held(120)?.text).toContain("within about 2 minutes,");
+    expect(held(20)?.text).toContain("within about a minute,");
+    const manual = nowLine(
+      base({
+        steps: takerSteps({
+          "lock-responder": { done: true },
+          "claim-responder": { done: true },
+          "claim-initiator": { canRun: true },
+        }),
+        holdingOwnStepIdx: 3,
+        holdKind: "button",
+        holdLeftS: 180,
+      }),
+    ).line;
+    expect(manual?.text).toBe(
+      "Your maker may submit this claim for you. If it has not arrived within about 3 minutes, the Claim button appears.",
+    );
+    const checking = nowLine(
+      base({
+        steps: takerSteps({
+          "lock-responder": { done: true },
+          "claim-responder": { done: true },
+          "claim-initiator": { canRun: true },
+        }),
+        holdingOwnStepIdx: 3,
+        holdKind: "checking",
+        holdLeftS: 180,
+      }),
+    ).line;
+    expect(checking?.text).toBe("Checking whether your maker's claim is still on its way.");
     expect(held(45)?.text).toContain("within about a minute,");
+  });
+});
+
+describe("claimHoldWindow", () => {
+  const MARGIN = 1800;
+  const far = 100_000;
+  const win = (over: Partial<Parameters<typeof claimHoldWindow>[0]> = {}) =>
+    claimHoldWindow({
+      holdS: 180,
+      claimMarginS: MARGIN,
+      nowS: NOW,
+      firstSeenS: NOW,
+      live: true,
+      age: undefined,
+      timeLeftS: far,
+      ...over,
+    });
+
+  it("runs in page time from the age of the reveal", () => {
+    expect(win({ age: { ageS: 60, readAtS: NOW } })).toEqual({
+      startS: NOW - 60,
+      endS: NOW + 120,
+      checking: false,
+    });
+  });
+
+  it("does not move with the device clock: the same age gives the same window", () => {
+    // Page time is all the window uses, so a skewed device clock has no input.
+    const reload = { firstSeenS: NOW + 5_000, nowS: NOW + 5_000 };
+    expect(win({ ...reload, age: { ageS: 60, readAtS: NOW + 5_000 }, live: false })).toEqual({
+      startS: NOW + 4_940,
+      endS: NOW + 5_120,
+      checking: false,
+    });
+  });
+
+  it("never ends later than first seen plus the hold", () => {
+    // A reading that finished late, or an age that is implausibly small.
+    const late = win({ firstSeenS: NOW, age: { ageS: 0, readAtS: NOW + 90 } });
+    expect(late?.endS).toBe(NOW + 180);
+    const old = win({ firstSeenS: NOW, age: { ageS: 400, readAtS: NOW } });
+    expect(old?.endS).toBe(NOW - 220);
+  });
+
+  it("holds a live step for the whole hold while the age is unknown", () => {
+    expect(win()).toEqual({ startS: NOW, endS: NOW + 180, checking: false });
+  });
+
+  it("gives a step found on the first reading a short checking window", () => {
+    expect(win({ live: false })).toEqual({
+      startS: NOW,
+      endS: NOW + HOLD_CHECK_S,
+      checking: true,
+    });
+  });
+
+  it("has no window without a first sighting, a hold length or a known time left", () => {
+    expect(win({ firstSeenS: undefined })).toBeNull();
+    expect(win({ holdS: 0 })).toBeNull();
+    expect(win({ timeLeftS: undefined })).toBeNull();
+  });
+
+  it("never ends closer to the claim cutoff than the safety span", () => {
+    const edge = 180 + MARGIN + HOLD_SAFETY_S;
+    expect(win({ timeLeftS: edge })).not.toBeNull();
+    expect(win({ timeLeftS: edge - 1 })).toBeNull();
+    // Later in the window the same window stays allowed or refused.
+    expect(win({ timeLeftS: edge - 100, nowS: NOW + 100 })).not.toBeNull();
+  });
+});
+
+describe("payoutStillOpen", () => {
+  it("is open while the initiator leg is open or not loaded", () => {
+    expect(payoutStillOpen(1)).toBe(true);
+    expect(payoutStillOpen(undefined)).toBe(true);
+    expect(payoutStillOpen(0)).toBe(false);
+    expect(payoutStillOpen(2)).toBe(false);
+    expect(payoutStillOpen(3)).toBe(false);
+  });
+});
+
+describe("claimedByOther and clock", () => {
+  it("needs a reported own claim and a known sender that is not the own address", () => {
+    expect(claimedByOther(["0x01"], "0xcd", true, false)).toBe(true);
+    expect(claimedByOther(["0x01"], "0xcd", true, true)).toBe(false);
+    expect(claimedByOther(["0x01"], "0xcd", false, false)).toBe(false);
+    expect(claimedByOther([], "0xcd", true, false)).toBe(false);
+    expect(claimedByOther(["0x01"], null, true, false)).toBe(false);
+  });
+
+  it("counts a claiming transaction whose hash the wallet reported as own", () => {
+    expect(claimedByOther(["0x01", "0xCD"], "0xcd", true, false)).toBe(false);
+  });
+
+  it("formats elapsed seconds as m:ss", () => {
+    expect(clock(0)).toBe("0:00");
+    expect(clock(65.9)).toBe("1:05");
+    expect(clock(-3)).toBe("0:00");
   });
 });

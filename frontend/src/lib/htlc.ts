@@ -301,6 +301,8 @@ export type SwapEventKind = "locked" | "assigned" | "claimed" | "refunded";
 export interface SwapEvent {
   kind: SwapEventKind;
   txHash: string;
+  /** Block that holds the event, when the log reports it. */
+  blockNumber?: number;
 }
 
 function eventTopic(name: string): string {
@@ -406,6 +408,55 @@ async function blockTimestampS(leg: LegKey, block: number): Promise<number> {
   const seconds = Number(BigInt(requireHex(raw.timestamp)));
   if (!Number.isSafeInteger(seconds)) throw new InvalidInputError("Unsafe block timestamp");
   return seconds;
+}
+
+/** Chain time (unix seconds) of the newest block of a leg. */
+async function headTimestampS(leg: LegKey): Promise<number> {
+  return blockTimestampS(leg, await getBlockNumber(leg));
+}
+
+export interface ChainClockReading {
+  /** How long before the newest block of the reveal leg the reveal block was
+   *  mined, on that chain's own clock. Never negative. */
+  ageS: number;
+  /** Chain time of the newest block of the claim leg. */
+  claimHeadS: number;
+}
+
+/**
+ * What the chains say about timing, free of the device clock: the age of the
+ * block that revealed the secret (newest block timestamp minus the reveal
+ * block timestamp, both from the reveal leg's RPC) and the newest block time
+ * of the leg the claim pays out from.
+ */
+export async function getChainClockReading(
+  revealLeg: LegKey,
+  revealBlock: number,
+  claimLeg: LegKey,
+): Promise<ChainClockReading> {
+  const [head, revealed, claimHeadS] = await Promise.all([
+    headTimestampS(revealLeg),
+    blockTimestampS(revealLeg, revealBlock),
+    headTimestampS(claimLeg),
+  ]);
+  return { ageS: Math.max(0, head - revealed), claimHeadS };
+}
+
+/** The sender of a transaction, or null when the node does not know the
+ *  transaction or reports a sender in a form this page cannot read. */
+export async function getTxSender(leg: LegKey, txHash: string): Promise<string | null> {
+  const raw = await chainRpc(
+    leg,
+    leg === "qrl" ? "qrl_getTransactionByHash" : "eth_getTransactionByHash",
+    [txHash],
+  );
+  if (!isRecord(raw) || typeof raw.from !== "string") return null;
+  try {
+    qToHex(raw.from);
+  } catch {
+    return null;
+  }
+  return raw.from;
 }
 
 /**
@@ -574,7 +625,15 @@ export async function getSwapEvents(
     const topic0 = isArray(log.topics) && typeof log.topics[0] === "string" ? log.topics[0] : null;
     const kind = topic0 === null ? undefined : swapEventKindFromTopic(leg, topic0);
     if (kind === undefined || typeof log.transactionHash !== "string") continue;
-    events.push({ kind, txHash: log.transactionHash });
+    const block =
+      typeof log.blockNumber === "string" && /^0x[0-9a-fA-F]+$/.test(log.blockNumber)
+        ? Number(BigInt(log.blockNumber))
+        : null;
+    events.push(
+      block !== null && Number.isSafeInteger(block)
+        ? { kind, txHash: log.transactionHash, blockNumber: block }
+        : { kind, txHash: log.transactionHash },
+    );
   }
   return events;
 }

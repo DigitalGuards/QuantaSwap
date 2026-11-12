@@ -390,15 +390,21 @@ describe("automatic wallet prompt", () => {
     await tick(6_000);
     expect(line()).toContain("Your maker may submit this claim for you.");
     expect(line()).toContain("within about 2 minutes");
-    expect(screen.getByRole("button", { name: /^Claim/ }).hasAttribute("disabled")).toBe(false);
+    // Inside the hold the step shows progress and no button.
+    expect(screen.queryByRole("button", { name: /^Claim/ })).toBeNull();
+    expect(screen.getByTestId("claim-hold")).toBeTruthy();
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuemax")).toBe("90");
     await tick(60_000);
     expect(sends).toHaveLength(0);
     await tick(30_000);
     expect(sends).toEqual(["claim-eth"]);
+    expect(screen.queryByTestId("claim-hold")).toBeNull();
+    expect(screen.getByRole("button", { name: "Waiting for wallet…" })).toBeTruthy();
   });
 
   it("holds the taker's QRL claim for 180 seconds", async () => {
     dir.v = "qrl->eth";
+    legTimeoutIn.qrl = 7200;
     legStatus.qrl = 1;
     legStatus.eth = 1;
     render(ui("taker"));
