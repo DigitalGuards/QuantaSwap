@@ -1,12 +1,12 @@
 {
   "name": "quantaswap-orderbook",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "QuantaSwap order book: coordination-only matching service for protocol-mode HTLC swaps",
   "license": "GPL-3.0",
   "type": "module",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.22.0"
   },
   "scripts": {
     "build": "tsc",
