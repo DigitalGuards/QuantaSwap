@@ -179,7 +179,11 @@ export function PostOrderCard({
   const [fromAmount, setFromAmount] = useState("");
   const [toAmount, setToAmount] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
-  const [prefund, setPrefund] = useState(false);
+  // Pre-funding is the default: a funded listing is provable to takers. The
+  // switch below turns it off. While an earlier pre-funded post is still
+  // unresolved a second one is refused, so the form then starts on the
+  // classic flow, which can still post.
+  const [prefund, setPrefund] = useState(() => loadPrelockStage() === null);
   const [allowedEth, setAllowedEth] = useState("");
   const [allowedQrl, setAllowedQrl] = useState("");
   const [error, setError] = useState<string | null>(null);
