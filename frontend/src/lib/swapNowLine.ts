@@ -37,8 +37,8 @@ export interface NowLineInput {
   /** What follows the hold: the wallet opens by itself, the Claim button
    *  appears, or the hold only covers a lookup of the reveal. */
   holdKind: "auto" | "button" | "checking";
-  /** Seconds that held step waits before the wallet opens for it. */
-  holdS: number;
+  /** Seconds of the hold that are left for that step. */
+  holdLeftS: number;
   copy: Record<StepModel["key"], StepCopy>;
   chainName: Record<LegKey, string>;
   symbol: Record<LegKey, string>;
@@ -122,6 +122,7 @@ export function claimHoldWindow(input: ClaimHoldInput): ClaimHold | null {
   let checking = false;
   if (age !== undefined) {
     startS = Math.min(age.readAtS - age.ageS, firstSeenS);
+    // The min is a guard: the end can never pass firstSeen + holdS.
     endS = Math.min(startS + holdS, firstSeenS + holdS);
   } else if (live) {
     startS = firstSeenS;
@@ -273,7 +274,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
     if (input.holdKind === "checking") {
       return make("Checking whether your maker's claim is still on its way.", "wait");
     }
-    const minutes = Math.max(1, Math.ceil(input.holdS / 60));
+    const minutes = Math.max(1, Math.ceil(input.holdLeftS / 60));
     const within = `within about ${minutes === 1 ? "a minute" : `${minutes} minutes`}`;
     return make(
       `Your maker may submit this claim for you. If it has not arrived ${within}, the Claim button appears${input.holdKind === "auto" ? " and your wallet opens for it" : ""}.`,

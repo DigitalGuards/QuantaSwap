@@ -711,6 +711,18 @@ describe("crossed claims", () => {
     expect(screen.queryByTestId("crossed-claim-note")).toBeNull();
   });
 
+  it("shows the note once the node knows the claiming transaction", async () => {
+    await crossedSetup();
+    claimer.addr = null;
+    legStatus.qrl = 2;
+    events.qrl = [{ kind: "claimed", txHash: MAKER_HASH }];
+    await tick(12_000);
+    expect(screen.queryByTestId("crossed-claim-note")).toBeNull();
+    claimer.addr = MAKER_QRL_HEX;
+    await tick(16_000);
+    expect(screen.getByTestId("crossed-claim-note")).toBeTruthy();
+  });
+
   it("shows no note when no own claim was reported in this session", async () => {
     revealedLongAgo();
     legStatus.qrl = 2;

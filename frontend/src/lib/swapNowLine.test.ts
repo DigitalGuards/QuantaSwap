@@ -55,7 +55,7 @@ const base = (over: Partial<NowLineInput> = {}): NowLineInput => ({
   pendingOwnStepIdx: -1,
   holdingOwnStepIdx: -1,
   holdKind: "auto",
-  holdS: 0,
+  holdLeftS: 0,
   copy: {
     "lock-initiator": {
       label: "Lock ETH",
@@ -315,7 +315,7 @@ describe("nowLine", () => {
   });
 
   it("tells the taker the maker may claim during the hold window, with its length", () => {
-    const held = (holdS: number) =>
+    const held = (holdLeftS: number) =>
       nowLine(
         base({
           steps: takerSteps({
@@ -324,7 +324,7 @@ describe("nowLine", () => {
             "claim-initiator": { canRun: true },
           }),
           holdingOwnStepIdx: 3,
-          holdS,
+          holdLeftS,
         }),
       ).line;
     expect(held(180)).toEqual({
@@ -332,6 +332,9 @@ describe("nowLine", () => {
       tone: "wait",
     });
     expect(held(90)?.text).toContain("within about 2 minutes,");
+    expect(held(150)?.text).toContain("within about 3 minutes,");
+    expect(held(120)?.text).toContain("within about 2 minutes,");
+    expect(held(20)?.text).toContain("within about a minute,");
     const manual = nowLine(
       base({
         steps: takerSteps({
@@ -341,7 +344,7 @@ describe("nowLine", () => {
         }),
         holdingOwnStepIdx: 3,
         holdKind: "button",
-        holdS: 180,
+        holdLeftS: 180,
       }),
     ).line;
     expect(manual?.text).toBe(
@@ -356,7 +359,7 @@ describe("nowLine", () => {
         }),
         holdingOwnStepIdx: 3,
         holdKind: "checking",
-        holdS: 180,
+        holdLeftS: 180,
       }),
     ).line;
     expect(checking?.text).toBe("Checking whether your maker's claim is still on its way.");

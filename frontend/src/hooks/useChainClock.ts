@@ -16,32 +16,35 @@ export interface ClockReading {
 }
 
 /**
- * Runs one chain lookup per key, retried a few times on failure. A failed
- * lookup leaves the caller with its fallback and never with a stale answer.
+ * Runs one chain lookup per key, retried a few times on failure. A lookup
+ * that answers null counts as a failed attempt too (a node can lag the logs
+ * endpoint by a block). Retries are counted per key. A failed lookup leaves
+ * the caller with its fallback and never with a stale answer.
  */
-function useLookup<T>(key: string | null, run: () => Promise<T>): T | undefined {
+function useLookup<T>(key: string | null, run: () => Promise<T | null>): T | undefined {
   const [found, setFound] = useState<{ key: string; value: T } | null>(null);
-  const [retry, setRetry] = useState(0);
+  const [retry, setRetry] = useState<{ key: string; count: number }>({ key: "", count: 0 });
+  const attempts = retry.key === key ? retry.count : 0;
 
   useEffect(() => {
     if (key === null || found?.key === key) return undefined;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    run().then(
-      (value) => {
-        if (alive) setFound({ key, value });
-      },
-      () => {
-        if (alive && retry + 1 < CHAIN_READ_ATTEMPTS) {
-          timer = setTimeout(() => setRetry((n) => n + 1), CHAIN_READ_RETRY_MS);
-        }
-      },
-    );
+    const again = () => {
+      if (alive && attempts + 1 < CHAIN_READ_ATTEMPTS) {
+        timer = setTimeout(() => setRetry({ key, count: attempts + 1 }), CHAIN_READ_RETRY_MS);
+      }
+    };
+    run().then((value) => {
+      if (!alive) return;
+      if (value === null) again();
+      else setFound({ key, value });
+    }, again);
     return () => {
       alive = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [key, found, retry]);
+  }, [key, found, attempts]);
 
   return key !== null && found?.key === key ? found.value : undefined;
 }
@@ -64,7 +67,7 @@ export function useChainClock(
 }
 
 /** The sender of one transaction, or undefined while unknown. */
-export function useTxSender(leg: LegKey, txHash: string | null): string | null | undefined {
+export function useTxSender(leg: LegKey, txHash: string | null): string | undefined {
   return useLookup(txHash === null ? null : `${leg}:${txHash}`, () =>
     getTxSender(leg, txHash ?? ""),
   );

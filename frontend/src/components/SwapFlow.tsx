@@ -350,7 +350,10 @@ export function SwapFlow({
   // nor skips the window and the device clock cannot move it.
   const clock = useChainClock(
     rLeg,
-    legEvents[rLeg].find((e) => e.kind === "claimed")?.blockNumber ?? null,
+    // Only a taker's claim hold uses it.
+    swap.role === "taker"
+      ? (legEvents[rLeg].find((e) => e.kind === "claimed")?.blockNumber ?? null)
+      : null,
     iLeg,
   );
   // The sender of the transaction that claimed the initiator leg, read only
@@ -830,7 +833,7 @@ export function SwapFlow({
         : heldWindow?.auto === true && heldStep !== undefined && !autoBlocked(heldStep)
           ? "auto"
           : "button",
-    holdS: heldStep === undefined ? 0 : CLAIM_HOLD_S[heldStep.leg],
+    holdLeftS: heldWindow === undefined ? 0 : Math.max(0, heldWindow.endS - nowS),
     copy: presentation,
     chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
     symbol:
@@ -1144,7 +1147,9 @@ export function SwapFlow({
                             : "The taker walked away before you locked. Do not lock; discard this swap below."}
                         </p>
                       ) : null}
-                      {holdWin !== undefined && busy === null && !awaitingOwnTx(step) ? (
+                      {holdWin !== undefined &&
+                      busy !== actionKey(step.key, step.leg) &&
+                      !awaitingOwnTx(step) ? (
                         holdWin.checking ? (
                           <WaitMeter
                             testId="claim-hold"
