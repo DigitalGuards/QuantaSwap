@@ -1,4 +1,4 @@
-FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS build
+FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS build
 
 WORKDIR /app/marketmaker
 COPY marketmaker/package.json marketmaker/package-lock.json ./
@@ -10,7 +10,7 @@ COPY config/protocol-v2-vectors.json /app/config/protocol-v2-vectors.json
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS runtime
+FROM node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS runtime
 
 ENV NODE_ENV=production \
     MM_STATE_FILE=/var/lib/quantaswap-marketmaker/state.json \
