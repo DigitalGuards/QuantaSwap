@@ -5,7 +5,7 @@
   "description": "QuantaSwap HTLC contracts (Hyperion) and deploy/test tooling",
   "license": "GPL-3.0",
   "engines": {
-    "node": ">=22.23.5"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "compile": "node scripts/compile.js",
