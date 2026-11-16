@@ -2,6 +2,7 @@ import { isArray, requireHex } from "@/utils/guards";
 import { isEip1193Provider, isProviderDetail } from "@/lib/providerGuards";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrowserProvider } from "ethers";
+import { approvalWalletFor, type ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
 import { ETH_LEG } from "@/config";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
 import {
@@ -439,6 +440,15 @@ export function useEthWallet() {
     [selected, account],
   );
 
+  // The wallet an open request waits for. A WalletConnect session lives on
+  // another device and announces no wallet of its own.
+  const approvalWallet = useMemo((): ApprovalWallet | null => {
+    if (selected === null) return null;
+    return selected.info.uuid === "walletconnect"
+      ? { name: "", icon: null, kind: "paired" }
+      : approvalWalletFor(selected.info);
+  }, [selected]);
+
   return {
     providers,
     account,
@@ -450,6 +460,7 @@ export function useEthWallet() {
     ensureSepolia,
     browserProvider,
     walletName: selected?.info.name ?? null,
+    approvalWallet,
     error,
     pickerOpen,
     openPicker,

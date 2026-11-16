@@ -9,7 +9,7 @@ import { isProviderDetail } from "@/lib/providerGuards";
 // qrlconnect:// deep link, QR auto-regeneration on wallet-initiated
 // disconnect. Picker pattern ported from QuantaPool.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   QRLConnect,
   QRL_CONNECT_PROVIDER_INFO,
@@ -19,7 +19,12 @@ import {
 } from "@qrlwallet/connect";
 // The dependency-free subpath: the package index also pulls in the DOM
 // pairing modal, which this hook never needs.
-import { groupMyQrlWallet } from "@qrlwallet/connect-ui/wallets";
+import {
+  approvalWalletFor,
+  groupMyQrlWallet,
+  type ApprovalWallet,
+  type Eip6963ProviderInfo,
+} from "@qrlwallet/connect-ui/wallets";
 import {
   bindAuthorizedMessageSigner,
   getAuthorizedQrlAccount,
@@ -96,6 +101,7 @@ export function useQrlWallet() {
   const relayResetGuardRef = useRef(new RelayResetGuard());
   const connectionAttemptGuardRef = useRef(new ConnectionAttemptGuard());
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
+  const [announced, setAnnounced] = useState<Eip6963ProviderInfo[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kind, setKind] = useState<QrlTransport | null>(null);
   const [rdns, setRdns] = useState<string | null>(null);
@@ -215,6 +221,7 @@ export function useQrlWallet() {
       if (info.rdns !== QRL_CONNECT_RDNS && !QRL_EXTENSION_RDNS.has(info.rdns)) return;
       if (detailMapRef.current.has(info.uuid)) return;
       detailMapRef.current.set(info.uuid, detail);
+      setAnnounced([...detailMapRef.current.values()].map((entry) => entry.info));
       setWallets(
         groupMyQrlWallet(detailMapRef.current.values()).map((entry): DiscoveredQrlWallet =>
           entry.kind === "myqrlwallet"
@@ -584,6 +591,17 @@ export function useQrlWallet() {
     [sdk, account],
   );
 
+  // The wallet an open request waits for: the announcement behind the
+  // active transport, or a nameless stand-in until it is known.
+  const approvalWallet = useMemo((): ApprovalWallet | null => {
+    if (kind === null) return null;
+    const info = announced.find((entry) => entry.rdns === rdns);
+    if (info) return approvalWalletFor(info);
+    return kind === "relay"
+      ? { name: "MyQRLWallet", icon: null, kind: "paired" }
+      : { name: "", icon: null, kind: "extension" };
+  }, [announced, kind, rdns]);
+
   return {
     status,
     statusDetail,
@@ -594,6 +612,7 @@ export function useQrlWallet() {
     pickerOpen,
     kind,
     rdns,
+    approvalWallet,
     connect,
     closePicker,
     connectWallet,

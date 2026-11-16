@@ -42,6 +42,8 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
               ensureSepolia={eth.ensureSepolia}
               qrlRequest={qrl.request}
               qrlTransport={qrl.kind}
+              ethApprovalWallet={eth.approvalWallet}
+              qrlApprovalWallet={qrl.approvalWallet}
               onDiscard={() => setSwap(null)}
             />
           ) : (

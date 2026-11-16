@@ -74,6 +74,8 @@ import {
   type HoldingWindow,
 } from "@/components/AutoStartSteps";
 import { WaitMeter } from "@/components/WaitMeter";
+import { ApprovalHint } from "@/components/ApprovalHint";
+import type { ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
 import { useChainClock, useTxSender } from "@/hooks/useChainClock";
 import { forgetFreshSwap, isFreshSwap } from "@/lib/freshSwaps";
 import { cn } from "@/utils/cn";
@@ -88,6 +90,9 @@ interface Props {
   qrlRequest: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
   /** Active QRL transport; the extension needs an explicit gas limit. */
   qrlTransport: QrlTransport | null;
+  /** The wallets behind the two legs, for the hint that names the one to open. */
+  ethApprovalWallet?: ApprovalWallet | null;
+  qrlApprovalWallet?: ApprovalWallet | null;
   onDiscard: () => void;
 }
 
@@ -134,6 +139,8 @@ export function SwapFlow({
   ensureSepolia,
   qrlRequest,
   qrlTransport,
+  ethApprovalWallet = null,
+  qrlApprovalWallet = null,
   onDiscard,
 }: Props) {
   const [legs, setLegs] = useState<LegStates>({});
@@ -813,6 +820,18 @@ export function SwapFlow({
   const heldStep = heldStepIdx >= 0 ? steps[heldStepIdx] : undefined;
   const heldWindow =
     heldStep === undefined ? undefined : holdingWindows.find((w) => w.key === heldStep.key);
+  // The leg whose wallet holds an open request: an action is running and the
+  // wallet has not handed back a transaction yet. Every action key names its
+  // leg right after the verb ("lock-eth", "credit-qrl:...").
+  const busyTarget = busy === null ? "" : busy.slice(busy.indexOf("-") + 1);
+  const approvalLeg: LegKey | null =
+    busy === null || reportedNow
+      ? null
+      : busyTarget.startsWith("eth")
+        ? "eth"
+        : busyTarget.startsWith("qrl")
+          ? "qrl"
+          : null;
   const {
     line: nowLine,
     highlightIdx,
@@ -1033,6 +1052,11 @@ export function SwapFlow({
             {nowLine.text}
           </p>
         ) : null}
+        <ApprovalHint
+          wallet={approvalLeg === "eth" ? ethApprovalWallet : qrlApprovalWallet}
+          pending={approvalLeg !== null}
+          className="[&:has([shown])]:mb-3"
+        />
 
         {accountMismatch ? (
           <div className="mb-2 rounded-md border border-amber-400/40 bg-amber-400/10 p-2 text-xs text-amber-400">

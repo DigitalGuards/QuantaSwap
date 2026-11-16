@@ -248,6 +248,8 @@ export function SwapStatusPage({ eth: ethWallet, qrl: qrlWallet, swap, setSwap }
           ensureSepolia={ethWallet.ensureSepolia}
           qrlRequest={qrlWallet.request}
           qrlTransport={qrlWallet.kind}
+          ethApprovalWallet={ethWallet.approvalWallet}
+          qrlApprovalWallet={qrlWallet.approvalWallet}
           onDiscard={() => {
             releaseTake(swap);
             setSwap(null);
