@@ -59,3 +59,11 @@ describe("order book mirror configuration", () => {
     ).toThrow(/unexpected fields/);
   });
 });
+
+describe("explorer links", () => {
+  it("sends QRL transaction and address links to ShorScan", async () => {
+    const { QRL_LEG } = await import("./config");
+    expect(QRL_LEG.explorerTx).toBe("https://shorscan.com/tx/");
+    expect(QRL_LEG.explorerAddress).toBe("https://shorscan.com/address/");
+  });
+});

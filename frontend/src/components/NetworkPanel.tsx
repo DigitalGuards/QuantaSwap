@@ -74,7 +74,7 @@ export function NetworkPanel() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2">
-          {cell(QRL_LEG, heights.qrl, `https://zondscan.com/address/${QRL_LEG.htlc}`)}
+          {cell(QRL_LEG, heights.qrl, `https://shorscan.com/address/${QRL_LEG.htlc}`)}
           {cell(ETH_LEG, heights.eth, `https://sepolia.etherscan.io/address/${ETH_LEG.htlc}`)}
         </div>
         <p className="text-xs leading-relaxed text-muted-foreground">

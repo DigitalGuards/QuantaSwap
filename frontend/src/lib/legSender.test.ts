@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserProvider } from "ethers";
+import { BrowserProvider } from "ethers";
 import { ETH_LEG, QRL_LEG } from "../config";
+import { errorMessage } from "../utils/errorMessage";
 import {
   DELIVERY_GAS_LIMIT,
   DELIVERY_GAS_RESERVE,
@@ -215,6 +216,110 @@ describe("secret-bearing claim preflight", () => {
 
     await expect(send("eth", DATA, 0n)).rejects.toThrow(/preflight rejected/);
     expect(sendTransaction).not.toHaveBeenCalled();
+  });
+
+  describe("wallet send failures", () => {
+    const FAILED = /submission failed; check chain state before retrying/;
+    const HASH = `0x${"ab".repeat(32)}`;
+
+    // A decline leaves the sender as a bare code-4001 error: none of the
+    // wallet's own error, which can embed the claim calldata, travels on.
+    const expectDecline = async (send: Promise<void>) => {
+      const thrown: unknown = await send.then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown).toMatchObject({ code: 4001 });
+      expect(JSON.stringify(thrown)).not.toContain(DATA.slice(2));
+      expect(thrown instanceof Error ? thrown.message : "").not.toContain(DATA.slice(2));
+      expect(errorMessage(thrown)).toBe("Transaction rejected in your wallet.");
+    };
+
+    const ethSender = (sendTransaction: ReturnType<typeof vi.fn>) => {
+      vi.stubGlobal("fetch", settlementFetch());
+      const provider = Object.assign(new BrowserProvider({ request: vi.fn() }), {
+        getSigner: vi.fn().mockResolvedValue({
+          getAddress: vi.fn().mockResolvedValue(ETH_ACCOUNT),
+          sendTransaction,
+        }),
+        send: vi.fn().mockResolvedValue("0x"),
+        estimateGas: vi.fn().mockResolvedValue(70_000n),
+      });
+      return makePreflightedClaimSender({
+        browserProvider: provider,
+        ensureSepolia: vi.fn().mockResolvedValue(undefined),
+        qrlAccount: null,
+        qrlTransport: null,
+        qrlRequest: vi.fn(),
+      });
+    };
+    const ethSendFails = (sendError: unknown) => ethSender(vi.fn().mockRejectedValue(sendError));
+    const ethWaitFails = (waitError: unknown) =>
+      ethSender(
+        vi.fn().mockResolvedValue({ hash: HASH, wait: vi.fn().mockRejectedValue(waitError) }),
+      );
+
+    const qrlSender = (sendError: unknown) => {
+      vi.stubGlobal("fetch", settlementFetch());
+      const rejectSend = vi.fn<() => Promise<never>>().mockRejectedValue(sendError);
+      const qrlRequest = vi.fn(
+        ({ method }: { method: string; params?: unknown[] }): Promise<unknown> => {
+          if (method === "qrl_chainId") return Promise.resolve(QRL_LEG.chainIdHex);
+          if (method === "qrl_getBlockByNumber")
+            return Promise.resolve({ number: "0x0", hash: QRL_LEG.genesisHash });
+          if (method === "qrl_sendTransaction") return rejectSend();
+          return Promise.reject(new Error("Unexpected wallet request"));
+        },
+      );
+      return makePreflightedClaimSender({
+        browserProvider: null,
+        ensureSepolia: vi.fn(),
+        qrlAccount: QRL_ACCOUNT,
+        qrlTransport: "extension",
+        qrlRequest,
+      });
+    };
+
+    it("reports a decline in the Ethereum wallet as a decline, without the wallet's error", async () => {
+      const ethers = Object.assign(new Error(`user rejected action (data="${DATA}")`), {
+        code: "ACTION_REJECTED",
+        transaction: { data: DATA },
+      });
+      await expectDecline(ethSendFails(ethers)("eth", DATA, 0n));
+      const nested = Object.assign(new Error("wrapped"), { info: { error: { code: 4001 } } });
+      await expectDecline(ethSendFails(nested)("eth", DATA, 0n));
+      await expectDecline(ethSendFails({ code: 4001, data: DATA })("eth", DATA, 0n));
+    });
+
+    it("reports a decline in the QRL wallet as a decline, without the wallet's error", async () => {
+      await expectDecline(qrlSender({ code: 4001, data: DATA })("qrl", DATA, 0n));
+      await expectDecline(qrlSender({ cause: { code: 4001 } })("qrl", DATA, 0n));
+    });
+
+    it("keeps the chain-state message for any other send failure", async () => {
+      await expect(
+        ethSendFails(new Error("replacement underpriced"))("eth", DATA, 0n),
+      ).rejects.toThrow(FAILED);
+      await expect(ethSendFails({ code: -32000 })("eth", DATA, 0n)).rejects.toThrow(FAILED);
+      await expect(qrlSender(new Error("relay timeout"))("qrl", DATA, 0n)).rejects.toThrow(FAILED);
+      await expect(qrlSender("nope")("qrl", DATA, 0n)).rejects.toThrow(FAILED);
+    });
+
+    it("keeps the chain-state message for a failure after the broadcast, whatever its code", async () => {
+      const onSent = vi.fn();
+      await expect(
+        ethWaitFails({ code: 4001 })("eth", DATA, 0n, undefined, onSent),
+      ).rejects.toThrow(FAILED);
+      expect(onSent).toHaveBeenCalledWith(HASH);
+      await expect(
+        ethWaitFails(Object.assign(new Error("replaced"), { code: "ACTION_REJECTED" }))(
+          "eth",
+          DATA,
+          0n,
+        ),
+      ).rejects.toThrow(FAILED);
+    });
   });
 
   it("blocks legacy Q40 accounts before claim simulation or signing", async () => {

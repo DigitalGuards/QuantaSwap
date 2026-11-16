@@ -24,7 +24,7 @@ describe("NetworkPanel", () => {
       screen
         .getByRole("link", { name: `View ${QRL_LEG.name} HTLC ${QRL_LEG.htlc} on explorer` })
         .getAttribute("href"),
-    ).toBe(`https://zondscan.com/address/${QRL_LEG.htlc}`);
+    ).toBe(`https://shorscan.com/address/${QRL_LEG.htlc}`);
     expect(
       screen
         .getByRole("link", { name: `View ${ETH_LEG.name} HTLC ${ETH_LEG.htlc} on explorer` })

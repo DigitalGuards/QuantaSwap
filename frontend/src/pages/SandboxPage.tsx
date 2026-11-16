@@ -4,6 +4,7 @@ import type { useQrlWallet } from "@/hooks/useQrlWallet";
 import type { ActiveSwap } from "@/lib/activeSwap";
 import { SwapCard } from "@/components/SwapCard";
 import { SwapFlow } from "@/components/SwapFlow";
+import { markFreshSwap } from "@/lib/freshSwaps";
 import { NetworkPanel } from "@/components/NetworkPanel";
 
 interface Props {
@@ -33,6 +34,7 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
         {swap ? (
           swap.role === "sandbox" ? (
             <SwapFlow
+              key={swap.hashlock ?? swap.orderId}
               swap={swap}
               ethAccount={eth.account}
               qrlAccount={qrl.account}
@@ -52,7 +54,14 @@ export function SandboxPage({ eth, qrl, swap, setSwap }: Props) {
             </p>
           )
         ) : (
-          <SwapCard ethAccount={eth.account} qrlAccount={qrl.account} onStart={setSwap} />
+          <SwapCard
+            ethAccount={eth.account}
+            qrlAccount={qrl.account}
+            onStart={(started) => {
+              markFreshSwap(started.hashlock);
+              setSwap(started);
+            }}
+          />
         )}
 
         <NetworkPanel />

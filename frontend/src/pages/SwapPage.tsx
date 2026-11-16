@@ -8,6 +8,7 @@ import { PostOrderCard, type OrderDraft } from "@/components/PostOrderCard";
 import { MyOrderCard } from "@/components/MyOrderCard";
 import { OrderBookPanel } from "@/components/OrderBookPanel";
 import { AwaitHashlock } from "@/components/AwaitHashlock";
+import { markFreshSwap } from "@/lib/freshSwaps";
 import { NetworkPanel } from "@/components/NetworkPanel";
 
 interface Props {
@@ -68,6 +69,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 swap={swap}
                 onReady={(updated) => {
                   setNotice(null);
+                  markFreshSwap(updated.hashlock);
                   setSwap(updated);
                   if (updated.hashlock) void navigate(`/swap/${updated.hashlock}`);
                 }}
@@ -78,7 +80,6 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 }}
               />
             ) : null}
-            <NetworkPanel />
           </div>
         ) : (
           <div className="space-y-4 lg:grid lg:grid-cols-2 lg:items-start lg:gap-6 lg:space-y-0">
@@ -94,6 +95,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 qrlWalletRdns={qrl.rdns}
                 onMatched={(matched) => {
                   setMyOrder(null);
+                  markFreshSwap(matched.hashlock);
                   setSwap(matched);
                   if (matched.hashlock) void navigate(`/swap/${matched.hashlock}`);
                 }}
@@ -122,6 +124,7 @@ export function SwapPage({ eth, qrl, swap, setSwap }: Props) {
                 takeDisabled={Boolean(myOrder)}
                 onTaken={(taken) => {
                   setNotice(null);
+                  markFreshSwap(taken.hashlock);
                   setSwap(taken);
                 }}
                 onPrefill={setPrefill}

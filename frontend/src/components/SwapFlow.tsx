@@ -56,10 +56,26 @@ import {
   type StepModel,
 } from "@/lib/swapMachine";
 import { CLAIM_MARGIN_S } from "@/config";
+import {
+  CROSSED_CLAIM_NOTE,
+  HOLD_END_NOTE,
+  QRL_BLOCK_NOTE,
+  claimedByOther,
+  payoutStillOpen,
+  nowLine as deriveNowLine,
+} from "@/lib/swapNowLine";
 import type { QrlTransport } from "@/hooks/useQrlWallet";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/UI/Card";
 import { AddressFingerprint } from "@/components/AddressFingerprint";
 import { Button } from "@/components/UI/Button";
+import {
+  AutoStartSteps,
+  type AutoStartCandidate,
+  type HoldingWindow,
+} from "@/components/AutoStartSteps";
+import { WaitMeter } from "@/components/WaitMeter";
+import { useChainClock, useTxSender } from "@/hooks/useChainClock";
+import { forgetFreshSwap, isFreshSwap } from "@/lib/freshSwaps";
 import { cn } from "@/utils/cn";
 import { errorMessage } from "@/utils/errorMessage";
 
@@ -81,6 +97,15 @@ const pillStyles: Record<string, string> = {
   claimed: "bg-success/10 text-success",
   refunded: "bg-amber-400/10 text-amber-400",
 };
+
+/** Seconds the taker's claim waits for the maker's sponsored claim, per leg.
+ *  A sponsored claim needs the maker's own claim to confirm and then a
+ *  60-second QRL slot or two, so the QRL leg waits longer: 108 s observed on
+ *  11 Nov 2026. */
+const CLAIM_HOLD_S: Record<LegKey, number> = { qrl: 180, eth: 90 };
+
+/** How long an own reported transaction holds its step's button. */
+const PENDING_TX_WAIT_S = 180;
 
 const statusName = ["none", "open", "claimed", "refunded"] as const;
 
@@ -120,7 +145,32 @@ export function SwapFlow({
   // approve, sometimes an approvalRace reset first, then lockToken); shown
   // on the busy button so the user knows which wallet prompt this is.
   const [lockStage, setLockStage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Hash of this user's own lock, assign or claim as soon as the wallet
+  // returns it, keyed like the busy state (`lock-eth`). It feeds the pending
+  // explorer link until the mined event takes over. Not persisted.
+  // `atS` is when the hash was reported; it bounds how long the step waits on it.
+  const [sentTx, setSentTx] = useState<Readonly<Record<string, { hash: string; atS: number }>>>({});
+  // Claims the wallet reported in this session, by step key. Kept apart from
+  // sentTx because a failed retry that reported nothing drops its sentTx entry.
+  const [ownClaimReported, setOwnClaimReported] = useState<
+    Readonly<Record<string, readonly string[]>>
+  >({});
+  useEffect(() => {
+    setSentTx({});
+    setOwnClaimReported({});
+  }, [swap.hashlock]);
+  // A swap created in this page session: its first own step opens the wallet.
+  const [freshSwap] = useState(() => swap.hashlock !== null && isFreshSwap(swap.hashlock));
+  useEffect(() => {
+    if (swap.hashlock !== null) forgetFreshSwap(swap.hashlock);
+  }, [swap.hashlock]);
+  // Steps inside their hold window before an automatic start.
+  const [holdingWindows, setHoldingWindows] = useState<readonly HoldingWindow[]>([]);
+  // The wallet reported a hash for the action that is running now. Unlike
+  // sentTx it belongs to the current attempt only, so a retry does not read
+  // as sent before the wallet has shown anything.
+  const [reportedNow, setReportedNow] = useState(false);
+  const [errorState, setErrorState] = useState<{ key: string; message: string } | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
   // The order-book view of this swap, polled alongside chain state. Used to
@@ -294,6 +344,27 @@ export function SwapFlow({
   // (indexed by hashlock), so the counterparty's transactions get links
   // too, not just our own. Refetched when a leg's status changes.
   const legEvents = useSwapEvents(hashlock === "" ? null : hashlock, legs);
+  // How old the counterparty's claim on the responder leg is (the moment the
+  // secret became public), on the chains' own clocks. A taker's claim hold
+  // runs in page time from it, so a reload during the hold neither restarts
+  // nor skips the window and the device clock cannot move it.
+  const clock = useChainClock(
+    rLeg,
+    // Only a taker's claim hold uses it.
+    swap.role === "taker"
+      ? (legEvents[rLeg].find((e) => e.kind === "claimed")?.blockNumber ?? null)
+      : null,
+    iLeg,
+  );
+  // The sender of the transaction that claimed the initiator leg, read only
+  // when this session reported an own claim (it decides the crossed note).
+  const claimTxHash = legEvents[iLeg].find((e) => e.kind === "claimed")?.txHash ?? null;
+  const claimSender = useTxSender(
+    iLeg,
+    swap.role === "taker" && (ownClaimReported[`claim-${iLeg}`]?.length ?? 0) > 0
+      ? claimTxHash
+      : null,
+  );
 
   // Poll the order-book view so a maker sees a taker's walk-away (released)
   // before committing funds. Best-effort: chain state remains authoritative.
@@ -348,17 +419,32 @@ export function SwapFlow({
     [browserProvider, ensureSepolia, qrlRequest, qrlAccount, qrlTransport],
   );
 
-  const runAction = (key: string, fn: () => Promise<void>) => {
-    setError(null);
+  const runAction = (key: string, fn: (onSent: (hash: string) => void) => Promise<void>) => {
+    setErrorState(null);
     setBusy(key);
-    void fn()
+    setReportedNow(false);
+    let reported = false;
+    const onSent = (hash: string) => {
+      reported = true;
+      setReportedNow(true);
+      setSentTx((m) => ({ ...m, [key]: { hash, atS: Math.floor(Date.now() / 1000) } }));
+      // Every reported own claim hash is kept: any of them can be the claim
+      // that lands, and a failed retry that reported nothing drops none.
+      if (key.startsWith("claim"))
+        setOwnClaimReported((m) => ({ ...m, [key]: [...(m[key] ?? []), hash] }));
+    };
+    void fn(onSent)
       .then(async () => {
         await refresh();
         await refreshCredits();
       })
-      .catch((err: unknown) => setError(errorMessage(err)))
+      .catch((err: unknown) => {
+        if (!reported) setSentTx(({ [key]: _dropped, ...rest }) => rest);
+        setErrorState({ key, message: errorMessage(err) });
+      })
       .finally(() => {
         setBusy(null);
+        setReportedNow(false);
         setLockStage(null);
       });
   };
@@ -373,7 +459,6 @@ export function SwapFlow({
     revealedPreimage,
     refundableLegs,
     releasableLegs,
-    awaitingAssign,
     ownLockedLegs,
     ownEth,
     ownQrl,
@@ -450,7 +535,7 @@ export function SwapFlow({
   };
 
   const lockLeg = (leg: LegKey) =>
-    runAction(`lock-${leg}`, async () => {
+    runAction(`lock-${leg}`, async (onSent) => {
       requireBoundTerms();
       if (
         swap.intent !== undefined &&
@@ -478,18 +563,21 @@ export function SwapFlow({
             timeout,
           ),
           onStage: setLockStage,
+          onSent,
         });
       } else {
         await sendOnLeg(
           leg,
           buildLockNativeData(leg, hashlock, plan.recipient, timeout),
           plan.amount,
+          undefined,
+          onSent,
         );
       }
     });
 
   const claimLeg = (leg: LegKey, preimage: string) =>
-    runAction(`claim-${leg}`, async () => {
+    runAction(`claim-${leg}`, async (onSent) => {
       // An unmarked taker may recover the initiator payout only after the
       // maker's responder-chain claim made the secret public. This reveals
       // nothing new and is the only safe advancement for a legacy record.
@@ -515,7 +603,7 @@ export function SwapFlow({
         }
       };
       try {
-        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard);
+        await sendClaimOnLeg(leg, buildClaimData(leg, hashlock, preimage), 0n, guard, onSent);
       } catch (err) {
         // Anyone may submit a claim once the secret is public, and it can
         // only pay the recipient fixed at lock time; market makers do this
@@ -560,12 +648,18 @@ export function SwapFlow({
   // pre-funded escrow, and the on-demand escrow reclaim (the abort path
   // while unassigned).
   const assignLeg = (leg: LegKey) =>
-    runAction(`assign-${leg}`, async () => {
+    runAction(`assign-${leg}`, async (onSent) => {
       requireBoundTerms();
       if (swap.role === "maker" && swap.intent !== undefined && signedFillIssue !== null) {
         throw new Error(signedFillIssue);
       }
-      await sendOnLeg(leg, buildAssignData(leg, hashlock, legPlan[leg].recipient), 0n);
+      await sendOnLeg(
+        leg,
+        buildAssignData(leg, hashlock, legPlan[leg].recipient),
+        0n,
+        undefined,
+        onSent,
+      );
     });
 
   const releaseLeg = (leg: LegKey) =>
@@ -651,14 +745,217 @@ export function SwapFlow({
     creditsRead && [iLeg, rLeg].every((leg) => creditReadOk.get(leg) === true);
   const connectedOn = (leg: LegKey): string | null => (leg === "eth" ? ethAccount : qrlAccount);
 
+  // Own-step gate shared by the action button and the status line: every
+  // disabled term of the button except canRun and busy.
+  const stepGated = (step: Pick<StepModel, "key">): boolean =>
+    (!termsBound &&
+      !(swap.role === "taker" && step.key === "claim-initiator" && revealedPreimage !== null)) ||
+    (step.key === "lock-responder" && swap.role === "taker" && signedFillIssue !== null) ||
+    ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
+      swap.role === "maker" &&
+      signedFillIssue !== null) ||
+    ((step.key === "lock-initiator" || step.key === "assign-initiator") && takerWalkedAway);
+
+  // The fill banner explains a gate on one step, so it shows while that step
+  // for this role is open. A released fill stays visible after the step: it
+  // is how a maker who already locked learns the taker left.
+  const fillGatedKeys: readonly StepModel["key"][] =
+    swap.role === "taker"
+      ? ["lock-responder"]
+      : swap.role === "maker"
+        ? ["lock-initiator", "assign-initiator"]
+        : [];
+  const showFillIssue =
+    signedFillIssue !== null &&
+    !complete &&
+    (steps.some((step) => fillGatedKeys.includes(step.key) && !step.done) ||
+      order?.released === true);
+
+  // An own transaction the wallet has reported and that has not mined yet.
+  // For PENDING_TX_WAIT_S the step waits on it; after that a dropped
+  // transaction can be retried.
+  const awaitingOwnTx = (step: Pick<StepModel, "key" | "leg" | "done">): boolean => {
+    const sent = sentTx[actionKey(step.key, step.leg)];
+    return sent !== undefined && !step.done && nowS - sent.atS < PENDING_TX_WAIT_S;
+  };
+
+  const legRefunded =
+    iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded;
+  // The button's own terms: gate and canRun. The automatic start adds the
+  // swap-level stops below and is never looser than the button.
+  const stepRunnable = (step: Pick<StepModel, "key" | "canRun">): boolean =>
+    step.canRun && !stepGated(step);
+  const ownStepActionable = (step: StepModel): boolean =>
+    step.own &&
+    !step.done &&
+    stepRunnable(step) &&
+    step.issue === null &&
+    !complete &&
+    refundableLegs.length === 0 &&
+    !takerWalkedAway &&
+    !legRefunded;
+
+  const ownLegs: LegKey[] =
+    swap.role === "maker" ? [iLeg] : swap.role === "taker" ? [rLeg] : [iLeg, rLeg];
+  const legTimeout: Partial<Record<LegKey, number>> = {};
+  for (const leg of [iLeg, rLeg]) {
+    const state = legs[leg];
+    if (state !== undefined) legTimeout[leg] = state.timeout;
+  }
+  const openIdx = steps.findIndex((step) => !step.done);
+  // An automatic start waits while the own transaction is awaited, the wallet
+  // of the leg is missing or the connected account differs from the swap's.
+  const autoBlocked = (step: Pick<StepModel, "key" | "leg" | "done">): boolean =>
+    awaitingOwnTx(step) || connectedOn(step.leg) === null || Boolean(accountMismatch);
+  const heldStepIdx = steps.findIndex(
+    (step) => step.own && holdingWindows.some((w) => w.key === step.key),
+  );
+  const heldStep = heldStepIdx >= 0 ? steps[heldStepIdx] : undefined;
+  const heldWindow =
+    heldStep === undefined ? undefined : holdingWindows.find((w) => w.key === heldStep.key);
+  const {
+    line: nowLine,
+    highlightIdx,
+    carriedIdx,
+    stalled,
+  } = deriveNowLine({
+    steps,
+    complete,
+    busy,
+    busySent: busy !== null && reportedNow,
+    actionKey: (step) => actionKey(step.key, step.leg),
+    stepGated,
+    pendingOwnStepIdx: steps.findIndex((step) => step.own && awaitingOwnTx(step)),
+    holdingOwnStepIdx: heldStepIdx,
+    // The wallet clause only where an automatic start can really follow.
+    holdKind:
+      heldWindow?.checking === true
+        ? "checking"
+        : heldWindow?.auto === true && heldStep !== undefined && !autoBlocked(heldStep)
+          ? "auto"
+          : "button",
+    holdLeftS: heldWindow === undefined ? 0 : Math.max(0, heldWindow.endS - nowS),
+    copy: presentation,
+    chainName: { eth: legByKey("eth").name, qrl: legByKey("qrl").name },
+    symbol:
+      iLeg === "eth"
+        ? { eth: iPlan.symbol, qrl: rPlan.symbol }
+        : { eth: rPlan.symbol, qrl: iPlan.symbol },
+    refundableLegs,
+    releasableLegs,
+    ownLockedLegs,
+    ownLegsKnown: ownLegs.every((leg) => legs[leg] !== undefined),
+    legTimeout,
+    takerWalkedAway,
+    legRefunded,
+    nowS,
+    responderTimeout: swap.responderTimeout ?? undefined,
+  });
+
+  // One decision for the outcome banner and the card's heading, so the two
+  // cannot disagree. "unread": both legs are claimed and the payout reads
+  // are still out. "stalled" is the status line's own notion of a swap that
+  // cannot go on to completion.
+  const outcome: "credit" | "confirmed" | "unread" | "stalled" | "running" = complete
+    ? creditList.length > 0
+      ? "credit"
+      : payoutsConfirmed
+        ? "confirmed"
+        : "unread"
+    : stalled
+      ? "stalled"
+      : "running";
+  const swapTitle = {
+    credit: "Swap complete",
+    confirmed: "Swap complete",
+    unread: "Swap settled",
+    stalled: "Swap stopped",
+    running: "Swap in progress",
+  }[outcome];
+
+  // Own lock, assign and claim steps that open the wallet by themselves once
+  // they turn actionable. Refund, release, discard and credit stay manual.
+  // A missing wallet or an account mismatch holds a step back without
+  // spending its one automatic start.
+  const autoStart: AutoStartCandidate[] = steps.flatMap((step) =>
+    ownStepActionable(step)
+      ? [
+          {
+            key: step.key,
+            busyKey: actionKey(step.key, step.leg),
+            run: presentation[step.key].action,
+            blocked: autoBlocked(step),
+            // The house makers claim for the taker right after their own
+            // claim, so the taker's claim gets a grace period first.
+            holdS:
+              swap.role === "taker" && step.key === "claim-initiator" ? CLAIM_HOLD_S[step.leg] : 0,
+            holdAge: clock === undefined ? undefined : { ageS: clock.ageS, readAtS: clock.readAtS },
+            // Time left on the claim leg: the smaller of the page-clock and the
+            // chain-clock reading, so a stale chain head cannot add time.
+            holdTimeLeftS:
+              legs[step.leg] === undefined
+                ? undefined
+                : Math.min(
+                    (legs[step.leg]?.timeout ?? 0) - nowS,
+                    (legs[step.leg]?.timeout ?? 0) -
+                      (clock === undefined ? nowS : clock.claimHeadS + (nowS - clock.readAtS)),
+                  ),
+          },
+        ]
+      : [],
+  );
+  // The signed-fill gate reads the order, so a swap with a signed intent has
+  // no trustworthy baseline before the order was read once.
+  const autoStartReady =
+    bothLegsLoaded &&
+    [iLeg, rLeg].every((leg) => confirmedLegs[leg] !== undefined) &&
+    (swap.intent === undefined || order !== null);
+
+  // A step error stops showing once it can no longer be true: the step it
+  // belongs to is done, or the swap completed. Refund, release and credit
+  // errors stay until the next action, because a completed swap can still
+  // hold a payout credit to withdraw.
+  const erroredStep =
+    errorState === null
+      ? undefined
+      : steps.find((step) => actionKey(step.key, step.leg) === errorState.key);
+  const error =
+    errorState === null || (erroredStep !== undefined && (complete || erroredStep.done))
+      ? null
+      : errorState.message;
+
+  // A taker whose payout claim is still open after the secret went public:
+  // discarding would delete the preimage-free record this page claims from.
+  const claimStepIdx = steps.findIndex((step) => step.key === "claim-initiator");
+  const takerPayoutOpen =
+    swap.role === "taker" &&
+    revealedPreimage !== null &&
+    payoutStillOpen(iState?.status) &&
+    // After the leg's timeout the claim is closed and only a refund can follow.
+    (iState === undefined || nowS < iState.timeout) &&
+    claimStepIdx >= 0 &&
+    steps[claimStepIdx]?.done === false;
+  const ownAccountOn = (leg: LegKey): string => (leg === "eth" ? ownEth : ownQrl);
+
   const roleLabel =
     swap.role === "maker" ? "your order" : swap.role === "taker" ? "taken order" : "sandbox";
 
   return (
     <Card className="surface-ember">
+      <AutoStartSteps
+        key={hashlock}
+        candidates={autoStart}
+        ready={autoStartReady}
+        busy={busy}
+        nowS={nowS}
+        fresh={freshSwap}
+        onHolding={setHoldingWindows}
+      />
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">Swap in progress</CardTitle>
+          <CardTitle className="text-xl" data-testid="swap-title">
+            {swapTitle}
+          </CardTitle>
           <span className="text-xs text-muted-foreground">
             {roleLabel} ·{" "}
             <Link
@@ -670,11 +967,15 @@ export function SwapFlow({
             </Link>
           </span>
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <span>{iCfg.name} leg</span>
-          <StatusPill state={iState} />
-          <span>· {rCfg.name} leg</span>
-          <StatusPill state={rState} />
+        <div className="space-y-1.5 text-sm text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span>{iCfg.name} leg</span>
+            <StatusPill state={iState} />
+          </div>
+          <div className="flex items-center gap-2">
+            <span>{rCfg.name} leg</span>
+            <StatusPill state={rState} />
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-1">
@@ -685,40 +986,52 @@ export function SwapFlow({
             public-secret claim recovery.
           </p>
         ) : null}
-        {signedFillIssue !== null ? (
+        {showFillIssue ? (
           <p className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-amber-400">
             {signedFillIssue}
           </p>
         ) : null}
-        {complete ? (
-          creditList.length > 0 ? (
-            // Both legs are terminal, so the swap is complete, but one payout
-            // is still sitting in the contract as a credit. Saying "complete"
-            // on its own here would read as "funds received", which is the
-            // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
-            <div
-              className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400"
-              data-testid="swap-outcome"
-            >
-              Atomic swap complete on both chains, with a payout still to collect below
-            </div>
-          ) : payoutsConfirmed ? (
-            <div
-              className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success"
-              data-testid="swap-outcome"
-            >
-              Atomic swap complete on both chains
-            </div>
-          ) : (
-            // Terminal on chain, payout still unread. Under HTLCv3 that is a
-            // real open question, so it gets its own state.
-            <div
-              className="mb-3 rounded-md border border-border bg-muted/30 p-3 text-center text-sm font-medium text-muted-foreground"
-              data-testid="swap-outcome"
-            >
-              Both legs are settled on chain. Confirming the payouts actually landed…
-            </div>
-          )
+        {outcome === "credit" ? (
+          // Both legs are terminal, so the swap is complete, but one payout
+          // is still sitting in the contract as a credit. Saying "complete"
+          // on its own here would read as "funds received", which is the
+          // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
+          <div
+            className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400"
+            data-testid="swap-outcome"
+          >
+            Atomic swap complete on both chains, with a payout still to collect below
+          </div>
+        ) : outcome === "confirmed" ? (
+          <div
+            className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success"
+            data-testid="swap-outcome"
+          >
+            Atomic swap complete on both chains
+          </div>
+        ) : outcome === "unread" ? (
+          // Terminal on chain, payout still unread. Under HTLCv3 that is a
+          // real open question, so it gets its own state.
+          <div
+            className="mb-3 rounded-md border border-border bg-muted/30 p-3 text-center text-sm font-medium text-muted-foreground"
+            data-testid="swap-outcome"
+          >
+            Both legs are settled on chain. Confirming the payouts actually landed…
+          </div>
+        ) : null}
+
+        {nowLine !== null ? (
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="swap-now"
+            className={cn(
+              "mb-3 text-sm leading-relaxed",
+              nowLine.tone === "turn" ? "font-medium text-identity-accent" : "text-foreground",
+            )}
+          >
+            {nowLine.text}
+          </p>
         ) : null}
 
         {accountMismatch ? (
@@ -757,6 +1070,27 @@ export function SwapFlow({
                     ? "assigned"
                     : "claimed"),
             )?.txHash ?? null;
+          const pendingHash = step.own
+            ? (sentTx[actionKey(step.key, step.leg)]?.hash ?? null)
+            : null;
+          const linkHash = stepTxHash ?? (step.done ? null : pendingHash);
+          const holdWin = step.own ? holdingWindows.find((w) => w.key === step.key) : undefined;
+          const crossed =
+            step.done &&
+            step.own &&
+            swap.role === "taker" &&
+            step.key === "claim-initiator" &&
+            claimedByOther(
+              ownClaimReported[actionKey(step.key, step.leg)] ?? [],
+              stepTxHash,
+              typeof claimSender === "string",
+              typeof claimSender === "string" && sameAddr(claimSender, ownAccountOn(step.leg)),
+            );
+          const stepError =
+            errorState !== null &&
+            error !== null &&
+            errorState.key === actionKey(step.key, step.leg);
+          const sentEntry = step.own ? sentTx[actionKey(step.key, step.leg)] : undefined;
           return (
             <div
               key={step.key}
@@ -767,9 +1101,11 @@ export function SwapFlow({
                   "flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold",
                   step.done
                     ? "border-success/60 bg-success/10 text-success"
-                    : step.own && step.canRun
-                      ? "border-identity-accent/60 text-identity-accent"
-                      : "border-border text-muted-foreground",
+                    : i === highlightIdx
+                      ? "border-identity-accent text-identity-accent ring-2 ring-identity-accent/40 motion-safe:animate-pulse"
+                      : step.own && step.canRun
+                        ? "border-identity-accent/60 text-identity-accent"
+                        : "border-border text-muted-foreground",
                 )}
               >
                 {step.done ? <Check className="h-3.5 w-3.5" /> : i + 1}
@@ -787,23 +1123,43 @@ export function SwapFlow({
                       : `Not safe to proceed: the counterparty lock failed verification, ${step.issue}.`}
                   </p>
                 ) : null}
-                {!step.done && !step.issue && step.awaitingDepth && view.pendingText ? (
+                {!step.done &&
+                !step.issue &&
+                step.awaitingDepth &&
+                view.pendingText &&
+                i !== carriedIdx ? (
                   <p className="text-xs text-amber-400">{view.pendingText}</p>
                 ) : null}
-                {stepTxHash ? (
+                {linkHash !== null ? (
                   <p>
                     <a
                       className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-                      href={`${legByKey(step.leg).explorerTx}${stepTxHash}`}
+                      href={`${legByKey(step.leg).explorerTx}${linkHash}`}
                       target="_blank"
                       rel="noreferrer"
                     >
-                      view transaction on explorer
+                      {stepTxHash !== null
+                        ? "view transaction on explorer"
+                        : "view pending transaction on explorer"}
                     </a>
                   </p>
                 ) : null}
+                {crossed ? (
+                  <p
+                    className="text-xs leading-relaxed text-muted-foreground"
+                    data-testid="crossed-claim-note"
+                  >
+                    {CROSSED_CLAIM_NOTE}
+                  </p>
+                ) : null}
                 {!step.done &&
-                  (step.own ? (
+                  (step.own && i !== openIdx && !step.canRun ? (
+                    highlightIdx >= 0 ? (
+                      <p className="text-xs text-muted-foreground" data-testid="step-later">
+                        Available after step {openIdx + 1}.
+                      </p>
+                    ) : null
+                  ) : step.own ? (
                     <div className="space-y-1">
                       {(step.key === "lock-initiator" || step.key === "assign-initiator") &&
                       takerWalkedAway ? (
@@ -813,42 +1169,62 @@ export function SwapFlow({
                             : "The taker walked away before you locked. Do not lock; discard this swap below."}
                         </p>
                       ) : null}
-                      <Button
-                        size="sm"
-                        className="mt-1"
-                        disabled={
-                          (!termsBound &&
-                            !(
-                              swap.role === "taker" &&
-                              step.key === "claim-initiator" &&
-                              revealedPreimage !== null
-                            )) ||
-                          !step.canRun ||
-                          busy !== null ||
-                          (step.key === "lock-responder" &&
-                            swap.role === "taker" &&
-                            signedFillIssue !== null) ||
-                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
-                            swap.role === "maker" &&
-                            signedFillIssue !== null) ||
-                          ((step.key === "lock-initiator" || step.key === "assign-initiator") &&
-                            takerWalkedAway)
-                        }
-                        onClick={view.action}
-                      >
-                        {busy === actionKey(step.key, step.leg)
-                          ? lockStage !== null
-                            ? `${lockStage}…`
-                            : "Waiting for wallet…"
-                          : view.label}
-                      </Button>
+                      {holdWin !== undefined &&
+                      busy !== actionKey(step.key, step.leg) &&
+                      !awaitingOwnTx(step) ? (
+                        holdWin.checking ? (
+                          <WaitMeter
+                            testId="claim-hold"
+                            label="Checking for your maker's claim"
+                            elapsedS={nowS - holdWin.startS}
+                          />
+                        ) : (
+                          <WaitMeter
+                            testId="claim-hold"
+                            label="Waiting for your maker's claim"
+                            elapsedS={Math.max(
+                              0,
+                              Math.min(holdWin.endS - holdWin.startS, nowS - holdWin.startS),
+                            )}
+                            totalS={holdWin.endS - holdWin.startS}
+                            note={
+                              step.leg === "qrl"
+                                ? `${QRL_BLOCK_NOTE} ${HOLD_END_NOTE}`
+                                : HOLD_END_NOTE
+                            }
+                          />
+                        )
+                      ) : (
+                        <>
+                          {sentEntry !== undefined && awaitingOwnTx(step) && !stepError ? (
+                            <WaitMeter
+                              testId="own-tx-wait"
+                              label="Waiting for the transaction to confirm."
+                              elapsedS={nowS - sentEntry.atS}
+                              note={step.leg === "qrl" ? QRL_BLOCK_NOTE : undefined}
+                            />
+                          ) : null}
+                          <Button
+                            size="sm"
+                            className="mt-1"
+                            disabled={!stepRunnable(step) || busy !== null || awaitingOwnTx(step)}
+                            onClick={view.action}
+                          >
+                            {busy === actionKey(step.key, step.leg)
+                              ? lockStage !== null
+                                ? `${lockStage}…`
+                                : reportedNow
+                                  ? "Waiting for confirmation…"
+                                  : "Waiting for wallet…"
+                              : view.label}
+                          </Button>
+                        </>
+                      )}
                     </div>
-                  ) : step.canRun ? (
+                  ) : (step.canRun || i === highlightIdx) &&
+                    !(step.awaitingDepth && view.pendingText !== null) &&
+                    i !== carriedIdx ? (
                     <p className="text-xs text-identity-accent">{view.waitingText}</p>
-                  ) : step.key === "lock-responder" && awaitingAssign ? (
-                    <p className="text-xs text-identity-accent">
-                      {presentation["assign-initiator"].waitingText}
-                    </p>
                   ) : null)}
               </div>
             </div>
@@ -1017,7 +1393,9 @@ export function SwapFlow({
           </div>
         ) : null}
 
-        {error ? <p className="pt-2 text-sm break-words text-destructive">{error}</p> : null}
+        {error !== null ? (
+          <p className="pt-2 text-sm break-words text-destructive">{error}</p>
+        ) : null}
 
         <div className="flex items-center justify-between pt-4">
           {swap.preimage ? (
@@ -1048,6 +1426,10 @@ export function SwapFlow({
             <span className="max-w-[60%] text-right text-xs text-amber-400">
               Checking your pre-funded escrow on-chain before allowing discard. If your funds are
               still locked, a Release button appears here.
+            </span>
+          ) : takerPayoutOpen ? (
+            <span className="max-w-[60%] text-right text-xs text-muted-foreground">
+              Your payout is still open, so this swap cannot be discarded yet.
             </span>
           ) : (
             <Button

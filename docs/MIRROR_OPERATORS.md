@@ -44,7 +44,7 @@ tag you chose. Pinning the full tag identity rejects a validly signed older
 release presented under a newer name:
 
 ```bash
-release=0.4.0
+release=0.4.2
 image=ghcr.io/digitalguards/quantaswap-orderbook
 identity="https://github.com/DigitalGuards/QuantaSwap/.github/workflows/orderbook-release.yml@refs/tags/orderbook-v${release}"
 issuer=https://token.actions.githubusercontent.com
