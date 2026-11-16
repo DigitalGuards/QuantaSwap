@@ -1,5 +1,9 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { defineQrlApprovalHint, QrlApprovalHint } from "@qrlwallet/connect-ui/approval";
+import {
+  defineQrlApprovalHint,
+  QrlApprovalHint,
+  QRL_APPROVAL_HINT_TAG,
+} from "@qrlwallet/connect-ui/approval";
 import type { ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
 
 interface Props {
@@ -23,7 +27,10 @@ export function ApprovalHint({ wallet, pending, className }: Props) {
 
   useLayoutEffect(() => {
     defineQrlApprovalHint();
-    const el = new QrlApprovalHint();
+    // createElement works with whichever copy of the element class holds the
+    // tag; a constructor call only with this one.
+    const el = document.createElement(QRL_APPROVAL_HINT_TAG);
+    if (!(el instanceof QrlApprovalHint)) return undefined;
     hostRef.current?.append(el);
     elRef.current = el;
     return () => {

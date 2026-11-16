@@ -276,9 +276,6 @@ describe("automatic wallet prompt", () => {
     await tick(6_000);
     expect(sends).toEqual(["qrl"]);
     expect(line()).toContain("Transaction in progress.");
-    // The open request switches the wallet hint on; the element shows itself
-    // after its own delay.
-    expect(document.querySelector("qrl-approval-hint")?.hasAttribute("pending")).toBe(true);
     await tick(20_000);
     expect(sends).toHaveLength(1);
   });

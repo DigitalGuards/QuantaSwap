@@ -16,6 +16,7 @@ import { HowItWorksPage } from "@/pages/HowItWorksPage";
 import { LegalPage } from "@/pages/LegalPage";
 import { SwapStatusPage } from "@/pages/SwapStatusPage";
 import { PrivateOrderPage } from "@/pages/PrivateOrderPage";
+import { ApprovalHint } from "@/components/ApprovalHint";
 
 export default function App() {
   const eth = useEthWallet();
@@ -45,6 +46,22 @@ export default function App() {
         onConnectQrl={qrl.connect}
         onDisconnectQrl={() => void qrl.disconnect()}
       />
+
+      {/* The wallet a request is waiting for, named where the user is
+          looking. One place for every wallet request on the site: a prompt
+          can sit unseen behind the wallet's toolbar icon. */}
+      <div className="pointer-events-none fixed right-4 top-20 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2">
+        <ApprovalHint
+          wallet={eth.approvalWallet}
+          pending={eth.approvalPending}
+          className="pointer-events-auto rounded-xl bg-background [&:has([shown])]:shadow-xl"
+        />
+        <ApprovalHint
+          wallet={qrl.approvalWallet}
+          pending={qrl.approvalPending}
+          className="pointer-events-auto rounded-xl bg-background [&:has([shown])]:shadow-xl"
+        />
+      </div>
 
       {developmentDeployment ? (
         <div

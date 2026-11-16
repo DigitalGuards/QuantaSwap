@@ -9,7 +9,7 @@ import { isProviderDetail } from "@/lib/providerGuards";
 // qrlconnect:// deep link, QR auto-regeneration on wallet-initiated
 // disconnect. Picker pattern ported from QuantaPool.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   QRLConnect,
   QRL_CONNECT_PROVIDER_INFO,
@@ -25,6 +25,7 @@ import {
   type ApprovalWallet,
   type Eip6963ProviderInfo,
 } from "@qrlwallet/connect-ui/wallets";
+import { createApprovalRequests, isApprovalMethod } from "@/lib/approvalRequests";
 import {
   bindAuthorizedMessageSigner,
   getAuthorizedQrlAccount,
@@ -102,6 +103,7 @@ export function useQrlWallet() {
   const connectionAttemptGuardRef = useRef(new ConnectionAttemptGuard());
   const [wallets, setWallets] = useState<DiscoveredQrlWallet[]>([]);
   const [announced, setAnnounced] = useState<Eip6963ProviderInfo[]>([]);
+  const [approvals] = useState(createApprovalRequests);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [kind, setKind] = useState<QrlTransport | null>(null);
   const [rdns, setRdns] = useState<string | null>(null);
@@ -581,26 +583,36 @@ export function useQrlWallet() {
   const request = useCallback(
     (args: { method: string; params?: unknown[] }) => {
       const authorizedRequest = bindAuthorizedMessageSigner(args, account);
-      if (kindRef.current === "extension") {
-        const provider = extensionRef.current;
-        if (!provider) throw new Error("QRL extension not connected");
-        return provider.request(authorizedRequest);
-      }
-      return sdk().request(authorizedRequest);
+      const send = (): Promise<unknown> => {
+        if (kindRef.current === "extension") {
+          const provider = extensionRef.current;
+          if (!provider) throw new Error("QRL extension not connected");
+          return provider.request(authorizedRequest);
+        }
+        return sdk().request(authorizedRequest);
+      };
+      // Every signature and transaction of the QRL leg goes through here, so
+      // its prompts are counted in one place.
+      return isApprovalMethod(args.method) ? approvals.track(send) : send();
     },
-    [sdk, account],
+    [sdk, account, approvals],
   );
 
-  // The wallet an open request waits for: the announcement behind the
-  // active transport, or a nameless stand-in until it is known.
+  // The wallet an open request waits for: the newest announcement behind
+  // the active transport. Until the relay has announced itself, its own
+  // provider info stands in.
   const approvalWallet = useMemo((): ApprovalWallet | null => {
     if (kind === null) return null;
-    const info = announced.find((entry) => entry.rdns === rdns);
+    const info = announced.filter((entry) => entry.rdns === rdns).at(-1);
     if (info) return approvalWalletFor(info);
     return kind === "relay"
-      ? { name: "MyQRLWallet", icon: null, kind: "paired" }
+      ? approvalWalletFor({ ...QRL_CONNECT_PROVIDER_INFO, uuid: "" })
       : { name: "", icon: null, kind: "extension" };
   }, [announced, kind, rdns]);
+  const approvalPending = useSyncExternalStore(
+    (listener) => approvals.subscribe(listener),
+    () => approvals.pending(),
+  );
 
   return {
     status,
@@ -613,6 +625,7 @@ export function useQrlWallet() {
     kind,
     rdns,
     approvalWallet,
+    approvalPending,
     connect,
     closePicker,
     connectWallet,
