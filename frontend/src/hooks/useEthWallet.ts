@@ -3,7 +3,7 @@ import { isEip1193Provider, isProviderDetail } from "@/lib/providerGuards";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { BrowserProvider } from "ethers";
 import { approvalWalletFor, type ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
-import { createApprovalRequests, trackedProvider } from "@/lib/approvalRequests";
+import { createApprovalRequests, trackedProvider } from "@qrlwallet/connect-ui/flow";
 import { ETH_LEG } from "@/config";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
 import {
@@ -458,6 +458,11 @@ export function useEthWallet() {
     if (uuid === "window.ethereum") return { name: "", icon: null, kind: "extension" };
     return approvalWalletFor(selected.info);
   }, [selected]);
+  // The count belongs to one wallet connection. A request that was lost
+  // with the connection never settles, so it is forgotten with it.
+  useEffect(() => {
+    approvals.reset();
+  }, [selected, approvals]);
   const approvalPending = useSyncExternalStore(
     (listener) => approvals.subscribe(listener),
     () => approvals.pending(),

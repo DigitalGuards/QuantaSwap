@@ -8,8 +8,9 @@ import { ApprovalHint } from "./ApprovalHint";
 import {
   createApprovalRequests,
   trackedProvider,
+  type ApprovalRequestProvider,
   type ApprovalRequests,
-} from "@/lib/approvalRequests";
+} from "@qrlwallet/connect-ui/flow";
 
 let approvals: ApprovalRequests;
 
@@ -43,15 +44,13 @@ describe("a wallet request and the page's hint", () => {
 
   it("shows the hint for a prompt left unanswered and clears it with the answer", async () => {
     let answer: (hash: string) => void = () => undefined;
-    const provider = trackedProvider(
-      {
-        request: () =>
-          new Promise((resolve) => {
-            answer = resolve;
-          }),
-      },
-      approvals,
-    );
+    const wallet: ApprovalRequestProvider = {
+      request: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    };
+    const provider = trackedProvider(wallet, approvals);
     render(<Page />);
     expect(hint().hasAttribute("pending")).toBe(false);
 
@@ -76,7 +75,8 @@ describe("a wallet request and the page's hint", () => {
   });
 
   it("stays out of the way for a read", async () => {
-    const provider = trackedProvider({ request: () => Promise.resolve("0x1") }, approvals);
+    const wallet: ApprovalRequestProvider = { request: () => Promise.resolve("0x1") };
+    const provider = trackedProvider(wallet, approvals);
     render(<Page />);
     await act(async () => {
       await provider.request({ method: "eth_chainId" });
