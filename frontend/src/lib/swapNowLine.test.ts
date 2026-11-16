@@ -463,4 +463,13 @@ describe("claimedByOther and clock", () => {
     expect(clock(65.9)).toBe("1:05");
     expect(clock(-3)).toBe("0:00");
   });
+
+  it("reports a swap that cannot go on to completion", () => {
+    expect(nowLine(base()).stalled).toBe(false);
+    expect(nowLine(base({ refundableLegs: ["qrl"] })).stalled).toBe(true);
+    expect(nowLine(base({ legRefunded: true })).stalled).toBe(true);
+    expect(nowLine(base({ steps: makerSteps(), takerWalkedAway: true })).stalled).toBe(true);
+    // A refund in flight is still a stalled swap.
+    expect(nowLine(base({ refundableLegs: ["qrl"], busy: "refund-qrl" })).stalled).toBe(true);
+  });
 });

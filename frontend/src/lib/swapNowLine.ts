@@ -67,6 +67,9 @@ export interface NowLineResult {
   /** Step index whose pending or waiting text the line already carries, or -1.
    *  The step list skips that text so it is not shown twice. */
   carriedIdx: number;
+  /** The swap cannot go on to completion: a leg is refundable or refunded,
+   *  the taker left, a time window closed or the open step has an issue. */
+  stalled: boolean;
 }
 
 /** A claim hold never runs closer to the claim cutoff than this. The cutoff
@@ -222,8 +225,9 @@ export function nowLine(input: NowLineInput): NowLineResult {
     line: { text, tone },
     highlightIdx,
     carriedIdx,
+    stalled,
   });
-  const none: NowLineResult = { line: null, highlightIdx, carriedIdx: -1 };
+  const none: NowLineResult = { line: null, highlightIdx, carriedIdx: -1, stalled };
 
   if (input.complete) return none;
 

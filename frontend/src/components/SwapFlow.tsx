@@ -817,6 +817,7 @@ export function SwapFlow({
     line: nowLine,
     highlightIdx,
     carriedIdx,
+    stalled,
   } = deriveNowLine({
     steps,
     complete,
@@ -850,6 +851,27 @@ export function SwapFlow({
     nowS,
     responderTimeout: swap.responderTimeout ?? undefined,
   });
+
+  // One decision for the outcome banner and the card's heading, so the two
+  // cannot disagree. "unread": both legs are claimed and the payout reads
+  // are still out. "stalled" is the status line's own notion of a swap that
+  // cannot go on to completion.
+  const outcome: "credit" | "confirmed" | "unread" | "stalled" | "running" = complete
+    ? creditList.length > 0
+      ? "credit"
+      : payoutsConfirmed
+        ? "confirmed"
+        : "unread"
+    : stalled
+      ? "stalled"
+      : "running";
+  const swapTitle = {
+    credit: "Swap complete",
+    confirmed: "Swap complete",
+    unread: "Swap settled",
+    stalled: "Swap stopped",
+    running: "Swap in progress",
+  }[outcome];
 
   // Own lock, assign and claim steps that open the wallet by themselves once
   // they turn actionable. Refund, release, discard and credit stay manual.
@@ -931,7 +953,9 @@ export function SwapFlow({
       />
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">Swap in progress</CardTitle>
+          <CardTitle className="text-xl" data-testid="swap-title">
+            {swapTitle}
+          </CardTitle>
           <span className="text-xs text-muted-foreground">
             {roleLabel} ·{" "}
             <Link
@@ -967,35 +991,33 @@ export function SwapFlow({
             {signedFillIssue}
           </p>
         ) : null}
-        {complete ? (
-          creditList.length > 0 ? (
-            // Both legs are terminal, so the swap is complete, but one payout
-            // is still sitting in the contract as a credit. Saying "complete"
-            // on its own here would read as "funds received", which is the
-            // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
-            <div
-              className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400"
-              data-testid="swap-outcome"
-            >
-              Atomic swap complete on both chains, with a payout still to collect below
-            </div>
-          ) : payoutsConfirmed ? (
-            <div
-              className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success"
-              data-testid="swap-outcome"
-            >
-              Atomic swap complete on both chains
-            </div>
-          ) : (
-            // Terminal on chain, payout still unread. Under HTLCv3 that is a
-            // real open question, so it gets its own state.
-            <div
-              className="mb-3 rounded-md border border-border bg-muted/30 p-3 text-center text-sm font-medium text-muted-foreground"
-              data-testid="swap-outcome"
-            >
-              Both legs are settled on chain. Confirming the payouts actually landed…
-            </div>
-          )
+        {outcome === "credit" ? (
+          // Both legs are terminal, so the swap is complete, but one payout
+          // is still sitting in the contract as a credit. Saying "complete"
+          // on its own here would read as "funds received", which is the
+          // exact mis-accounting HTLCV3_SCOPE.md A13 warns about.
+          <div
+            className="mb-3 rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-center text-sm font-semibold text-amber-400"
+            data-testid="swap-outcome"
+          >
+            Atomic swap complete on both chains, with a payout still to collect below
+          </div>
+        ) : outcome === "confirmed" ? (
+          <div
+            className="mb-3 rounded-md border border-success/40 bg-success/10 p-3 text-center text-sm font-semibold text-success"
+            data-testid="swap-outcome"
+          >
+            Atomic swap complete on both chains
+          </div>
+        ) : outcome === "unread" ? (
+          // Terminal on chain, payout still unread. Under HTLCv3 that is a
+          // real open question, so it gets its own state.
+          <div
+            className="mb-3 rounded-md border border-border bg-muted/30 p-3 text-center text-sm font-medium text-muted-foreground"
+            data-testid="swap-outcome"
+          >
+            Both legs are settled on chain. Confirming the payouts actually landed…
+          </div>
         ) : null}
 
         {nowLine !== null ? (

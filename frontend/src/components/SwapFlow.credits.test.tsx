@@ -271,6 +271,7 @@ describe("deferred payout panel", () => {
     renderFlow("taker");
     await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
     expect(screen.getByText(/with a payout still to collect below/)).toBeTruthy();
+    expect(screen.getByTestId("swap-title").textContent).toBe("Swap complete");
   });
 
   it("withholds the completion banner until the payout read lands", async () => {
@@ -285,6 +286,7 @@ describe("deferred payout panel", () => {
     );
     expect(screen.queryByText("Atomic swap complete on both chains")).toBeNull();
     expect(screen.queryByTestId("payout-credits")).toBeNull();
+    expect(screen.getByTestId("swap-title").textContent).toBe("Swap settled");
   });
 
   it("hides a ledger balance this swap did not credit", async () => {
@@ -296,6 +298,7 @@ describe("deferred payout panel", () => {
       expect(screen.getByText("Atomic swap complete on both chains")).toBeTruthy(),
     );
     expect(screen.queryByTestId("payout-credits")).toBeNull();
+    expect(screen.getByTestId("swap-title").textContent).toBe("Swap complete");
   });
 
   it("labels the rest of the ledger balance when this swap owns part of it", async () => {
