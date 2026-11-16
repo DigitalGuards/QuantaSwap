@@ -609,11 +609,6 @@ export function useQrlWallet() {
       ? approvalWalletFor({ ...QRL_CONNECT_PROVIDER_INFO, uuid: "" })
       : { name: "", icon: null, kind: "extension" };
   }, [announced, kind, rdns]);
-  // The count belongs to one wallet connection. A request that was lost
-  // with the connection never settles, so it is forgotten with it.
-  useEffect(() => {
-    approvals.reset();
-  }, [kind, rdns, approvals]);
   const approvalPending = useSyncExternalStore(
     (listener) => approvals.subscribe(listener),
     () => approvals.pending(),

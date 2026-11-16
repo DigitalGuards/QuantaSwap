@@ -3,7 +3,7 @@ import { isEip1193Provider, isProviderDetail } from "@/lib/providerGuards";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { BrowserProvider } from "ethers";
 import { approvalWalletFor, type ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
-import { createApprovalRequests, trackedProvider } from "@qrlwallet/connect-ui/flow";
+import { createApprovalRequests, isApprovalMethod } from "@qrlwallet/connect-ui/flow";
 import { ETH_LEG } from "@/config";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
 import {
@@ -416,14 +416,29 @@ export function useEthWallet() {
     }
   }, [detach, selected]);
 
+  // The one sender for every signature, transaction and chain switch of the
+  // ETH leg, so its prompts are counted in one place. A plain object with
+  // `request` is all ethers needs, and it works for any provider, also one
+  // whose own properties cannot be wrapped.
+  const counted = useMemo((): Eip1193Provider | null => {
+    if (selected === null) return null;
+    const { provider } = selected;
+    return {
+      request: (args) =>
+        isApprovalMethod(args.method)
+          ? approvals.track(() => provider.request(args))
+          : provider.request(args),
+    };
+  }, [selected, approvals]);
+
   const ensureSepolia = useCallback(async (): Promise<void> => {
-    if (!selected || !account) throw new Error("Ethereum wallet not connected");
+    if (!selected || !account || !counted) throw new Error("Ethereum wallet not connected");
     const wrongChain = new Error(
       `Switch your wallet to ${ETH_LEG.name} (chain ${ETH_LEG.chainIdHex}) and retry.`,
     );
     if (onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) return;
     try {
-      await trackedProvider(selected.provider, approvals).request({
+      await counted.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: ETH_LEG.chainIdHex }],
       });
@@ -435,16 +450,11 @@ export function useEthWallet() {
     if (!onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) {
       throw wrongChain;
     }
-  }, [selected, account, approvals]);
+  }, [selected, account, counted]);
 
-  // Every signature and transaction of the ETH leg goes through this
-  // provider, so its prompts are counted in one place.
   const browserProvider = useMemo(
-    () =>
-      selected && account
-        ? new BrowserProvider(trackedProvider(selected.provider, approvals))
-        : null,
-    [selected, account, approvals],
+    () => (counted && account ? new BrowserProvider(counted) : null),
+    [counted, account],
   );
 
   // The wallet an open request waits for. WalletConnect and MetaMask Mobile
@@ -458,11 +468,6 @@ export function useEthWallet() {
     if (uuid === "window.ethereum") return { name: "", icon: null, kind: "extension" };
     return approvalWalletFor(selected.info);
   }, [selected]);
-  // The count belongs to one wallet connection. A request that was lost
-  // with the connection never settles, so it is forgotten with it.
-  useEffect(() => {
-    approvals.reset();
-  }, [selected, approvals]);
   const approvalPending = useSyncExternalStore(
     (listener) => approvals.subscribe(listener),
     () => approvals.pending(),
