@@ -271,7 +271,7 @@ describe("deferred payout panel", () => {
     renderFlow("taker");
     await waitFor(() => expect(screen.getByTestId("payout-credits")).toBeTruthy());
     expect(screen.getByText(/with a payout still to collect below/)).toBeTruthy();
-    expect(screen.getByTestId("swap-title").textContent).toBe("Swap settled");
+    expect(screen.getByTestId("swap-title").textContent).toBe("Swap complete");
   });
 
   it("withholds the completion banner until the payout read lands", async () => {

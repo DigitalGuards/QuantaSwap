@@ -263,13 +263,22 @@ describe("swap screen polish", () => {
     expect(screen.getByTestId("swap-title").textContent).toBe("Swap in progress");
     unmount();
 
-    // A refunded leg ends the swap without completing it.
-    legStatus.eth = 3;
-    legStatus.qrl = 1;
-    renderFlow("taker");
-    await waitFor(() =>
-      expect(screen.getByTestId("swap-title").textContent).toBe("Swap not completed"),
-    );
+    // A refunded leg stops the swap, for either role and beside a claimed leg.
+    const stopped: [ActiveSwap["role"], LegState["status"], LegState["status"]][] = [
+      ["taker", 3, 1],
+      ["maker", 1, 3],
+      ["taker", 3, 3],
+      ["maker", 3, 2],
+    ];
+    for (const [role, eth, qrl] of stopped) {
+      legStatus.eth = eth;
+      legStatus.qrl = qrl;
+      const view = renderFlow(role);
+      await waitFor(() =>
+        expect(screen.getByTestId("swap-title").textContent).toBe("Swap stopped"),
+      );
+      view.unmount();
+    }
   });
 
   it("lays the leg header out as one row per leg", async () => {
