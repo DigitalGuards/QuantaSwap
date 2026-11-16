@@ -49,17 +49,18 @@ export default function App() {
 
       {/* The wallet a request is waiting for, named where the user is
           looking. One place for every wallet request on the site: a prompt
-          can sit unseen behind the wallet's toolbar icon. */}
+          can sit unseen behind the wallet's toolbar icon. It only informs,
+          so clicks and taps pass through to the page below. */}
       <div className="pointer-events-none fixed right-4 top-20 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2">
         <ApprovalHint
           wallet={eth.approvalWallet}
           pending={eth.approvalPending}
-          className="pointer-events-auto rounded-xl bg-background [&:has([shown])]:shadow-xl"
+          className="rounded-xl bg-background [&:has([shown])]:shadow-xl"
         />
         <ApprovalHint
           wallet={qrl.approvalWallet}
           pending={qrl.approvalPending}
-          className="pointer-events-auto rounded-xl bg-background [&:has([shown])]:shadow-xl"
+          className="rounded-xl bg-background [&:has([shown])]:shadow-xl"
         />
       </div>
 

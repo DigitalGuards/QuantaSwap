@@ -24,7 +24,7 @@
     "@metamask/connect-evm": "2.1.1",
     "@noble/hashes": "2.2.0",
     "@qrlwallet/connect": "5.0.2",
-    "@qrlwallet/connect-ui": "0.5.0",
+    "@qrlwallet/connect-ui": "0.6.0",
     "@radix-ui/react-slot": "^1.1.2",
     "@theqrl/mldsa87": "2.2.0",
     "@walletconnect/ethereum-provider": "2.24.0",
