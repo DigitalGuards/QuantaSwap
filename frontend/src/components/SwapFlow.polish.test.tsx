@@ -255,6 +255,23 @@ describe("swap screen polish", () => {
     expect(screen.queryByText(/view pending transaction on explorer/)).toBeNull();
   });
 
+  it("titles the card by the outcome", async () => {
+    legStatus.eth = 1;
+    legStatus.qrl = 1;
+    const { unmount } = renderFlow("taker");
+    await screen.findByTestId("swap-now");
+    expect(screen.getByTestId("swap-title").textContent).toBe("Swap in progress");
+    unmount();
+
+    // A refunded leg ends the swap without completing it.
+    legStatus.eth = 3;
+    legStatus.qrl = 1;
+    renderFlow("taker");
+    await waitFor(() =>
+      expect(screen.getByTestId("swap-title").textContent).toBe("Swap not completed"),
+    );
+  });
+
   it("lays the leg header out as one row per leg", async () => {
     renderFlow("taker");
     await screen.findByText("Swap in progress");

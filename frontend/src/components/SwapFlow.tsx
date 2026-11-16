@@ -781,6 +781,15 @@ export function SwapFlow({
 
   const legRefunded =
     iState?.status === SwapStatus.Refunded || rState?.status === SwapStatus.Refunded;
+  // The card's heading follows the outcome. It says "complete" only together
+  // with the green banner, once the payout reads confirm the funds arrived.
+  const swapTitle = complete
+    ? creditList.length === 0 && payoutsConfirmed
+      ? "Swap complete"
+      : "Swap settled"
+    : legRefunded
+      ? "Swap not completed"
+      : "Swap in progress";
   // The button's own terms: gate and canRun. The automatic start adds the
   // swap-level stops below and is never looser than the button.
   const stepRunnable = (step: Pick<StepModel, "key" | "canRun">): boolean =>
@@ -931,7 +940,9 @@ export function SwapFlow({
       />
       <CardHeader className="pb-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">Swap in progress</CardTitle>
+          <CardTitle className="text-xl" data-testid="swap-title">
+            {swapTitle}
+          </CardTitle>
           <span className="text-xs text-muted-foreground">
             {roleLabel} ·{" "}
             <Link
