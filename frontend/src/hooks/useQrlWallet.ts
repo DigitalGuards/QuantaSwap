@@ -25,7 +25,7 @@ import {
   type ApprovalWallet,
   type Eip6963ProviderInfo,
 } from "@qrlwallet/connect-ui/wallets";
-import { createApprovalRequests, isApprovalMethod } from "@/lib/approvalRequests";
+import { createApprovalRequests, isApprovalMethod } from "@qrlwallet/connect-ui/flow";
 import {
   bindAuthorizedMessageSigner,
   getAuthorizedQrlAccount,
