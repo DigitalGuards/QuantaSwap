@@ -1,7 +1,9 @@
 import { isArray, requireHex } from "@/utils/guards";
 import { isEip1193Provider, isProviderDetail } from "@/lib/providerGuards";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { BrowserProvider } from "ethers";
+import { approvalWalletFor, type ApprovalWallet } from "@qrlwallet/connect-ui/wallets";
+import { createApprovalRequests, trackedProvider } from "@/lib/approvalRequests";
 import { ETH_LEG } from "@/config";
 import { getMetaMaskClient, type MetaMaskClient } from "@/lib/metaMask";
 import {
@@ -72,6 +74,7 @@ export function useEthWallet() {
   const [announced, setAnnounced] = useState<ProviderDetail[]>([]);
   const [legacy, setLegacy] = useState<ProviderDetail | null>(null);
   const [selected, setSelected] = useState<ProviderDetail | null>(null);
+  const [approvals] = useState(createApprovalRequests);
   const [account, setAccount] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -420,7 +423,7 @@ export function useEthWallet() {
     );
     if (onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) return;
     try {
-      await selected.provider.request({
+      await trackedProvider(selected.provider, approvals).request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: ETH_LEG.chainIdHex }],
       });
@@ -432,11 +435,32 @@ export function useEthWallet() {
     if (!onEthLegChain(await selected.provider.request({ method: "eth_chainId" }))) {
       throw wrongChain;
     }
-  }, [selected, account]);
+  }, [selected, account, approvals]);
 
+  // Every signature and transaction of the ETH leg goes through this
+  // provider, so its prompts are counted in one place.
   const browserProvider = useMemo(
-    () => (selected && account ? new BrowserProvider(selected.provider) : null),
-    [selected, account],
+    () =>
+      selected && account
+        ? new BrowserProvider(trackedProvider(selected.provider, approvals))
+        : null,
+    [selected, account, approvals],
+  );
+
+  // The wallet an open request waits for. WalletConnect and MetaMask Mobile
+  // sessions live on another device; the plain window.ethereum fallback has
+  // no name of its own.
+  const approvalWallet = useMemo((): ApprovalWallet | null => {
+    if (selected === null) return null;
+    const { uuid } = selected.info;
+    if (uuid === "walletconnect") return { name: "", icon: null, kind: "paired" };
+    if (uuid === "metamask-mobile") return { name: "MetaMask", icon: null, kind: "paired" };
+    if (uuid === "window.ethereum") return { name: "", icon: null, kind: "extension" };
+    return approvalWalletFor(selected.info);
+  }, [selected]);
+  const approvalPending = useSyncExternalStore(
+    (listener) => approvals.subscribe(listener),
+    () => approvals.pending(),
   );
 
   return {
@@ -450,6 +474,8 @@ export function useEthWallet() {
     ensureSepolia,
     browserProvider,
     walletName: selected?.info.name ?? null,
+    approvalWallet,
+    approvalPending,
     error,
     pickerOpen,
     openPicker,

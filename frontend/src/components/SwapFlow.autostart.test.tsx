@@ -276,7 +276,6 @@ describe("automatic wallet prompt", () => {
     await tick(6_000);
     expect(sends).toEqual(["qrl"]);
     expect(line()).toContain("Transaction in progress.");
-    expect(line()).toContain("If nothing opened, open your wallet to approve it.");
     await tick(20_000);
     expect(sends).toHaveLength(1);
   });

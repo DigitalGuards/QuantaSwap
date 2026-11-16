@@ -131,13 +131,13 @@ describe("nowLine", () => {
   it("shows a generic in-progress line when a refund is the busy action", () => {
     const line = text({ busy: "refund-qrl", refundableLegs: ["qrl"] });
     expect(line).toBe(
-      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms. If nothing opened, open your wallet to approve it.",
+      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms.",
     );
   });
 
   it("names the chain when the busy action is a step", () => {
     expect(text({ busy: "lock-qrl" })).toBe(
-      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on QRL. If nothing opened, open your wallet to approve it.",
+      "Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms on QRL.",
     );
   });
 

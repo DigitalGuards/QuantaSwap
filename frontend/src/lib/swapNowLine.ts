@@ -238,7 +238,7 @@ export function nowLine(input: NowLineInput): NowLineResult {
       return make(`Transaction sent. Waiting for it to confirm${where}.`, "wait");
     }
     return make(
-      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}. If nothing opened, open your wallet to approve it.`,
+      `Transaction in progress. Approve it in your wallet if asked, then keep this page open while it confirms${where}.`,
       "wait",
     );
   }
